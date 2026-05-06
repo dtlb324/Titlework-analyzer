@@ -8,214 +8,253 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: 'Georgia', 'Times New Roman', serif;
-    background: #1a1208;
+    background: #f5efe4;
     background-image:
-      radial-gradient(ellipse at 20% 20%, #2a1e0a 0%, transparent 60%),
-      radial-gradient(ellipse at 80% 80%, #0f1a10 0%, transparent 60%);
+      radial-gradient(ellipse at 15% 10%, #f9f1de 0%, transparent 55%),
+      radial-gradient(ellipse at 85% 90%, #ede2cc 0%, transparent 55%);
     min-height: 100vh;
-    color: #c4b99a;
+    color: #4a3c28;
     padding-bottom: 3rem;
   }
   .header {
-    border-bottom: 1px solid #3a2e1a;
-    background: linear-gradient(180deg, #0e0b05 0%, #1a1208 100%);
-    padding: 2rem 1.5rem 1.5rem;
+    border-bottom: 2px solid #c8a96e;
+    background: linear-gradient(180deg, #ffffff 0%, #faf3e3 100%);
+    padding: 2.2rem 1.5rem 1.7rem;
     text-align: center;
+    box-shadow: 0 1px 0 rgba(74, 60, 40, 0.05);
   }
   .eyebrow {
-    font-size: 0.65rem;
+    font-size: 0.7rem;
     letter-spacing: 0.3em;
-    color: #6b5a3a;
+    color: #b8915e;
     text-transform: uppercase;
     margin-bottom: 0.5rem;
+    font-weight: bold;
   }
   h1 {
-    font-size: 2rem;
+    font-size: 2.2rem;
     font-weight: normal;
-    color: #c8a96e;
+    color: #6b3410;
     letter-spacing: 0.02em;
     margin-bottom: 0.3rem;
   }
   .tagline {
-    color: #5a4a2a;
-    font-size: 0.85rem;
+    color: #8a6f4a;
+    font-size: 0.9rem;
     font-style: italic;
   }
   .container {
     max-width: 860px;
     margin: 0 auto;
-    padding: 1.5rem;
+    padding: 1.8rem 1.5rem;
   }
   .card {
-    background: rgba(255,255,255,0.02);
-    border: 1px solid #3a2e1a;
-    border-radius: 4px;
-    padding: 1.5rem;
+    background: #ffffff;
+    border: 1px solid #d9c9a8;
+    border-radius: 6px;
+    padding: 1.8rem;
     margin-bottom: 1.5rem;
+    box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06);
   }
   label {
     display: block;
-    font-size: 0.7rem;
+    font-size: 0.72rem;
     letter-spacing: 0.15em;
     text-transform: uppercase;
-    color: #6b5a3a;
+    color: #8a6f4a;
     margin-bottom: 0.5rem;
+    font-weight: bold;
   }
   input[type="text"], input[type="password"], textarea {
     width: 100%;
-    background: #0e0b05;
-    border: 1px solid #3a2e1a;
-    border-radius: 3px;
-    color: #c4b99a;
-    padding: 0.65rem 0.85rem;
-    font-size: 0.92rem;
+    background: #faf6ee;
+    border: 1px solid #d9c9a8;
+    border-radius: 4px;
+    color: #4a3c28;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.95rem;
     font-family: Georgia, serif;
     outline: none;
+    transition: border-color 0.15s, background 0.15s;
   }
-  input:focus, textarea:focus { border-color: #c8a96e; }
+  input:focus, textarea:focus {
+    border-color: #b8631e;
+    background: #ffffff;
+  }
   textarea { resize: vertical; min-height: 60px; }
   .field { margin-bottom: 1.2rem; }
   .upload-zone {
-    border: 2px dashed #3a2e1a;
-    border-radius: 4px;
-    padding: 1.5rem;
+    border: 2px dashed #c8a96e;
+    border-radius: 6px;
+    padding: 1.8rem;
     text-align: center;
-    background: #0e0b05;
-    transition: border-color 0.2s;
+    background: #faf6ee;
+    transition: all 0.2s;
   }
-  .upload-zone.drag { border-color: #c8a96e; background: #1a1208; }
+  .upload-zone:hover { border-color: #b8631e; background: #fff8eb; }
+  .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
   .upload-zone label {
     cursor: pointer;
-    color: #c8a96e;
-    font-size: 0.95rem;
-    letter-spacing: 0.05em;
+    color: #b8631e;
+    font-size: 1rem;
+    letter-spacing: 0.03em;
     text-transform: none;
     margin-bottom: 0;
+    font-weight: normal;
   }
   .upload-zone .hint {
-    color: #5a4a2a;
-    font-size: 0.75rem;
-    margin-top: 0.5rem;
+    color: #a08a6a;
+    font-size: 0.78rem;
+    margin-top: 0.6rem;
   }
   .file-list { margin-top: 1rem; }
   .file-item {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.5rem 0.75rem;
-    background: #0e0b05;
-    border: 1px solid #2a2010;
-    border-radius: 3px;
-    margin-bottom: 0.3rem;
-    font-size: 0.85rem;
+    padding: 0.6rem 0.85rem;
+    background: #faf6ee;
+    border: 1px solid #d9c9a8;
+    border-radius: 4px;
+    margin-bottom: 0.35rem;
+    font-size: 0.9rem;
   }
-  .file-item span { color: #c4b99a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%; }
+  .file-item span { color: #4a3c28; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%; }
   .file-item button {
-    background: none; border: none; color: #6b5a3a;
-    cursor: pointer; font-size: 1.2rem;
+    background: none; border: none; color: #b8915e;
+    cursor: pointer; font-size: 1.3rem;
+    padding: 0 0.4rem;
   }
+  .file-item button:hover { color: #b8631e; }
   .btn-primary {
     width: 100%;
-    background: linear-gradient(135deg, #3a2a0a, #2a1e06);
-    border: 1px solid #c8a96e;
-    color: #c8a96e;
-    padding: 0.85rem;
-    font-size: 0.9rem;
-    letter-spacing: 0.08em;
-    border-radius: 3px;
+    background: linear-gradient(135deg, #b8631e 0%, #8a4510 100%);
+    border: none;
+    color: #ffffff;
+    padding: 0.95rem;
+    font-size: 0.95rem;
+    letter-spacing: 0.06em;
+    border-radius: 4px;
     font-family: Georgia, serif;
     cursor: pointer;
+    box-shadow: 0 2px 4px rgba(184, 99, 30, 0.2);
+    transition: all 0.15s;
   }
-  .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #4a3510, #3a2810); }
-  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #d07628 0%, #9a4f12 100%);
+    box-shadow: 0 3px 6px rgba(184, 99, 30, 0.3);
+  }
+  .btn-primary:disabled {
+    background: #d9c9a8;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
   .btn-secondary {
     background: transparent;
-    border: 1px solid #3a2e1a;
-    color: #6b5a3a;
-    padding: 0.55rem 1.2rem;
-    cursor: pointer;
-    border-radius: 3px;
-    font-family: Georgia, serif;
-    font-size: 0.82rem;
-  }
-  .btn-send {
-    background: #2a1e06;
     border: 1px solid #c8a96e;
-    color: #c8a96e;
-    padding: 0.65rem 1.2rem;
+    color: #8a6f4a;
+    padding: 0.6rem 1.3rem;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 4px;
     font-family: Georgia, serif;
     font-size: 0.85rem;
-    white-space: nowrap;
+    transition: all 0.15s;
   }
-  .analysis-card {
-    background: rgba(255,255,255,0.02);
-    border: 1px solid #3a2e1a;
+  .btn-secondary:hover { background: #faf3e3; border-color: #b8631e; color: #b8631e; }
+  .btn-send {
+    background: #b8631e;
+    border: none;
+    color: #ffffff;
+    padding: 0.7rem 1.4rem;
+    cursor: pointer;
     border-radius: 4px;
-    padding: 1.5rem;
-    margin-bottom: 1.2rem;
+    font-family: Georgia, serif;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .btn-send:hover { background: #d07628; }
+  .analysis-card {
+    background: #ffffff;
+    border: 1px solid #d9c9a8;
+    border-left: 4px solid #b8631e;
+    border-radius: 6px;
+    padding: 1.8rem;
+    margin-bottom: 1.3rem;
+    box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06);
   }
   .analysis-eyebrow {
-    font-size: 0.65rem;
+    font-size: 0.7rem;
     letter-spacing: 0.25em;
-    color: #4a3a1a;
+    color: #b8915e;
     text-transform: uppercase;
     margin-bottom: 1rem;
+    font-weight: bold;
   }
   .analysis-content h2 {
-    color: #e8d5b0;
-    font-size: 1.1rem;
-    margin-top: 1.2rem;
+    color: #6b3410;
+    font-size: 1.15rem;
+    margin-top: 1.3rem;
     margin-bottom: 0.5rem;
     font-weight: normal;
   }
   .analysis-content h3 {
-    color: #c8a96e;
+    color: #b8631e;
     margin-top: 1.5rem;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.6rem;
     font-size: 0.95rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    border-bottom: 1px solid #3a2e1a;
-    padding-bottom: 0.3rem;
-    font-weight: normal;
+    border-bottom: 2px solid #f0e3c8;
+    padding-bottom: 0.4rem;
+    font-weight: bold;
   }
-  .analysis-content p { color: #c4b99a; margin-bottom: 0.4rem; line-height: 1.6; }
-  .analysis-content strong { color: #e8d5b0; }
-  .analysis-content ul { padding-left: 1.5rem; margin-bottom: 0.5rem; }
-  .analysis-content li { color: #c4b99a; margin-bottom: 0.2rem; line-height: 1.55; list-style: none; position: relative; }
-  .analysis-content li::before { content: "›"; color: #c8a96e; position: absolute; left: -1rem; }
+  .analysis-content p { color: #4a3c28; margin-bottom: 0.5rem; line-height: 1.65; }
+  .analysis-content strong { color: #6b3410; }
+  .analysis-content ul { padding-left: 1.5rem; margin-bottom: 0.6rem; }
+  .analysis-content li { color: #4a3c28; margin-bottom: 0.25rem; line-height: 1.6; list-style: none; position: relative; }
+  .analysis-content li::before { content: "›"; color: #b8631e; position: absolute; left: -1rem; font-weight: bold; }
   .analysis-content table {
     border-collapse: collapse;
     width: 100%;
-    margin: 1rem 0;
-    font-size: 0.88rem;
+    margin: 1.2rem 0;
+    font-size: 0.9rem;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(74, 60, 40, 0.08);
   }
   .analysis-content th, .analysis-content td {
-    border: 1px solid #3a2e1a;
-    padding: 0.5rem 0.7rem;
+    border: 1px solid #e8d8b8;
+    padding: 0.6rem 0.8rem;
     text-align: left;
   }
-  .analysis-content th { background: #2a1e06; color: #c8a96e; font-weight: normal; letter-spacing: 0.05em; }
-  .analysis-content td { color: #c4b99a; }
+  .analysis-content th {
+    background: #b8631e;
+    color: #ffffff;
+    font-weight: normal;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-size: 0.78rem;
+  }
+  .analysis-content tr:nth-child(even) td { background: #faf6ee; }
+  .analysis-content td { color: #4a3c28; }
   .question-card {
-    background: #0e0b05;
-    border: 1px solid #2a2010;
+    background: #faf3e3;
+    border-left: 3px solid #c8a96e;
     border-radius: 4px;
-    padding: 0.8rem 1rem;
+    padding: 0.85rem 1.1rem;
     margin-bottom: 1.2rem;
-    font-size: 0.9rem;
-    color: #a89a78;
+    font-size: 0.92rem;
+    color: #6b5840;
     font-style: italic;
   }
-  .followup-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .followup-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
   .followup-row input { flex: 1; min-width: 200px; }
   .loading {
     text-align: center;
-    color: #6b5a3a;
+    color: #b8915e;
     padding: 2rem;
     font-style: italic;
+    font-size: 0.95rem;
   }
   .loading::after {
     content: '...';
@@ -227,32 +266,37 @@
     60%, 100% { content: '...'; }
   }
   .error-msg {
-    background: #3a1010;
-    border: 1px solid #a04040;
-    color: #f0c4b0;
-    padding: 0.8rem 1rem;
-    border-radius: 3px;
+    background: #fce8e0;
+    border: 1px solid #d97755;
+    border-left: 4px solid #b8631e;
+    color: #6b3410;
+    padding: 0.9rem 1.1rem;
+    border-radius: 4px;
     margin-bottom: 1rem;
-    font-size: 0.88rem;
+    font-size: 0.9rem;
   }
   .password-gate {
-    max-width: 400px;
+    max-width: 420px;
     margin: 4rem auto;
-    padding: 2rem;
-    background: rgba(255,255,255,0.02);
-    border: 1px solid #3a2e1a;
-    border-radius: 4px;
+    padding: 2.2rem;
+    background: #ffffff;
+    border: 1px solid #d9c9a8;
+    border-top: 4px solid #b8631e;
+    border-radius: 6px;
     text-align: center;
+    box-shadow: 0 4px 12px rgba(74, 60, 40, 0.1);
   }
   .password-gate h2 {
-    color: #c8a96e;
-    margin-bottom: 1rem;
+    color: #6b3410;
+    margin-bottom: 0.8rem;
     font-weight: normal;
+    font-size: 1.4rem;
   }
   .password-gate p {
-    color: #6b5a3a;
-    font-size: 0.85rem;
+    color: #8a6f4a;
+    font-size: 0.9rem;
     margin-bottom: 1.5rem;
+    line-height: 1.5;
   }
 </style>
 </head>
@@ -266,7 +310,7 @@
 
 <div class="container">
 
-  <!-- Password gate (only shown if password is required) -->
+  <!-- Password gate -->
   <div id="passwordGate" class="password-gate" style="display:none">
     <h2>Access Required</h2>
     <p>Enter the access password provided by your administrator.</p>
@@ -279,7 +323,6 @@
 
   <!-- Main app -->
   <div id="mainApp">
-    <!-- Upload Section -->
     <div class="card" id="uploadSection">
       <div class="field">
         <label>Subject Tract Description (optional)</label>
@@ -370,15 +413,11 @@ List the assumptions you made and limitations of this analysis. Note that this i
 
 Be precise with fractions. Always show your math. Use formal title opinion language but keep it readable. If a document is illegible or you cannot determine something, say so plainly and list what additional information would be needed.`;
 
-// State
 let appPassword = sessionStorage.getItem('app_password') || '';
 let files = [];
 let conversationHistory = [];
-let passwordRequired = false;
 
-// Init
 document.addEventListener('DOMContentLoaded', async () => {
-  // Check if password gate is needed
   await checkPasswordRequired();
   setupDragDrop();
   document.getElementById('fileInput').addEventListener('change', handleFileSelect);
@@ -391,7 +430,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function checkPasswordRequired() {
-  // Try a tiny ping to see if password is needed
   try {
     const r = await fetch('/api/analyze', {
       method: 'POST',
@@ -402,16 +440,13 @@ async function checkPasswordRequired() {
       body: JSON.stringify({ ping: true }),
     });
     if (r.status === 401) {
-      passwordRequired = true;
       document.getElementById('passwordGate').style.display = 'block';
       document.getElementById('mainApp').style.display = 'none';
     } else {
-      // Either no password required, or already authed
       document.getElementById('passwordGate').style.display = 'none';
       document.getElementById('mainApp').style.display = 'block';
     }
   } catch (e) {
-    // Network error — show main app, error will surface on first call
     document.getElementById('mainApp').style.display = 'block';
   }
 }
@@ -421,7 +456,6 @@ function checkPassword() {
   if (!pw) return;
   appPassword = pw;
   sessionStorage.setItem('app_password', pw);
-  // Try a real call to validate
   fetch('/api/analyze', {
     method: 'POST',
     headers: {
@@ -492,7 +526,7 @@ function renderFileList() {
   const list = document.getElementById('fileList');
   if (files.length === 0) { list.innerHTML = ''; return; }
   list.innerHTML = `
-    <div style="font-size: 0.7rem; letter-spacing: 0.15em; color: #6b5a3a; text-transform: uppercase; margin-bottom: 0.5rem;">
+    <div style="font-size: 0.72rem; letter-spacing: 0.15em; color: #8a6f4a; text-transform: uppercase; margin-bottom: 0.5rem; font-weight: bold;">
       ${files.length} document${files.length !== 1 ? 's' : ''} loaded
     </div>
   ` + files.map((f, i) => `
@@ -648,7 +682,6 @@ function renderResults() {
 function formatMarkdown(text) {
   let html = escapeHtml(text);
 
-  // Tables
   html = html.replace(/(\|[^\n]+\|\n)+/g, (match) => {
     const rows = match.trim().split('\n');
     if (rows.length < 2) return match;
