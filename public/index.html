@@ -23,281 +23,69 @@
     text-align: center;
     box-shadow: 0 1px 0 rgba(74, 60, 40, 0.05);
   }
-  .eyebrow {
-    font-size: 0.7rem;
-    letter-spacing: 0.3em;
-    color: #b8915e;
-    text-transform: uppercase;
-    margin-bottom: 0.5rem;
-    font-weight: bold;
-  }
-  h1 {
-    font-size: 2.2rem;
-    font-weight: normal;
-    color: #6b3410;
-    letter-spacing: 0.02em;
-    margin-bottom: 0.3rem;
-  }
-  .tagline {
-    color: #8a6f4a;
-    font-size: 0.9rem;
-    font-style: italic;
-  }
-  .container {
-    max-width: 860px;
-    margin: 0 auto;
-    padding: 1.8rem 1.5rem;
-  }
-  .card {
-    background: #ffffff;
-    border: 1px solid #d9c9a8;
-    border-radius: 6px;
-    padding: 1.8rem;
-    margin-bottom: 1.5rem;
-    box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06);
-  }
-  label {
-    display: block;
-    font-size: 0.72rem;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: #8a6f4a;
-    margin-bottom: 0.5rem;
-    font-weight: bold;
-  }
-  input[type="text"], input[type="password"], textarea {
-    width: 100%;
-    background: #faf6ee;
-    border: 1px solid #d9c9a8;
-    border-radius: 4px;
-    color: #4a3c28;
-    padding: 0.7rem 0.9rem;
-    font-size: 0.95rem;
-    font-family: Georgia, serif;
-    outline: none;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  input:focus, textarea:focus {
-    border-color: #b8631e;
-    background: #ffffff;
-  }
+  .eyebrow { font-size: 0.7rem; letter-spacing: 0.3em; color: #b8915e; text-transform: uppercase; margin-bottom: 0.5rem; font-weight: bold; }
+  h1 { font-size: 2.2rem; font-weight: normal; color: #6b3410; letter-spacing: 0.02em; margin-bottom: 0.3rem; }
+  .tagline { color: #8a6f4a; font-size: 0.9rem; font-style: italic; }
+  .disclaimer-banner { background: #fff8eb; border: 1px solid #c8a96e; border-left: 4px solid #b8631e; color: #6b3410; padding: 0.85rem 1.1rem; margin: 1rem auto 0; max-width: 860px; border-radius: 4px; font-size: 0.85rem; line-height: 1.5; }
+  .disclaimer-banner strong { color: #6b3410; }
+  .container { max-width: 860px; margin: 0 auto; padding: 1.8rem 1.5rem; }
+  .card { background: #ffffff; border: 1px solid #d9c9a8; border-radius: 6px; padding: 1.8rem; margin-bottom: 1.5rem; box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06); }
+  label { display: block; font-size: 0.72rem; letter-spacing: 0.15em; text-transform: uppercase; color: #8a6f4a; margin-bottom: 0.5rem; font-weight: bold; }
+  input[type="text"], input[type="password"], textarea { width: 100%; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; color: #4a3c28; padding: 0.7rem 0.9rem; font-size: 0.95rem; font-family: Georgia, serif; outline: none; transition: border-color 0.15s, background 0.15s; }
+  input:focus, textarea:focus { border-color: #b8631e; background: #ffffff; }
   textarea { resize: vertical; min-height: 60px; }
   .field { margin-bottom: 1.2rem; }
-  .upload-zone {
-    border: 2px dashed #c8a96e;
-    border-radius: 6px;
-    padding: 1.8rem;
-    text-align: center;
-    background: #faf6ee;
-    transition: all 0.2s;
-  }
+  .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; padding: 1.8rem; text-align: center; background: #faf6ee; transition: all 0.2s; }
   .upload-zone:hover { border-color: #b8631e; background: #fff8eb; }
   .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
-  .upload-zone label {
-    cursor: pointer;
-    color: #b8631e;
-    font-size: 1rem;
-    letter-spacing: 0.03em;
-    text-transform: none;
-    margin-bottom: 0;
-    font-weight: normal;
-  }
-  .upload-zone .hint {
-    color: #a08a6a;
-    font-size: 0.78rem;
-    margin-top: 0.6rem;
-  }
+  .upload-zone label { cursor: pointer; color: #b8631e; font-size: 1rem; letter-spacing: 0.03em; text-transform: none; margin-bottom: 0; font-weight: normal; }
+  .upload-zone .hint { color: #a08a6a; font-size: 0.78rem; margin-top: 0.6rem; }
   .file-list { margin-top: 1rem; }
-  .file-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.6rem 0.85rem;
-    background: #faf6ee;
-    border: 1px solid #d9c9a8;
-    border-radius: 4px;
-    margin-bottom: 0.35rem;
-    font-size: 0.9rem;
-  }
-  .file-item span { color: #4a3c28; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%; }
-  .file-item button {
-    background: none; border: none; color: #b8915e;
-    cursor: pointer; font-size: 1.3rem;
-    padding: 0 0.4rem;
-  }
+  .file-item { display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 0.85rem; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; margin-bottom: 0.35rem; font-size: 0.9rem; }
+  .file-item .file-info { flex: 1; overflow: hidden; }
+  .file-item .file-name { color: #4a3c28; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+  .file-item .file-size { color: #a08a6a; font-size: 0.78rem; }
+  .file-item button { background: none; border: none; color: #b8915e; cursor: pointer; font-size: 1.3rem; padding: 0 0.4rem; }
   .file-item button:hover { color: #b8631e; }
-  .btn-primary {
-    width: 100%;
-    background: linear-gradient(135deg, #b8631e 0%, #8a4510 100%);
-    border: none;
-    color: #ffffff;
-    padding: 0.95rem;
-    font-size: 0.95rem;
-    letter-spacing: 0.06em;
-    border-radius: 4px;
-    font-family: Georgia, serif;
-    cursor: pointer;
-    box-shadow: 0 2px 4px rgba(184, 99, 30, 0.2);
-    transition: all 0.15s;
-  }
-  .btn-primary:hover:not(:disabled) {
-    background: linear-gradient(135deg, #d07628 0%, #9a4f12 100%);
-    box-shadow: 0 3px 6px rgba(184, 99, 30, 0.3);
-  }
-  .btn-primary:disabled {
-    background: #d9c9a8;
-    cursor: not-allowed;
-    box-shadow: none;
-  }
-  .btn-secondary {
-    background: transparent;
-    border: 1px solid #c8a96e;
-    color: #8a6f4a;
-    padding: 0.6rem 1.3rem;
-    cursor: pointer;
-    border-radius: 4px;
-    font-family: Georgia, serif;
-    font-size: 0.85rem;
-    transition: all 0.15s;
-  }
+  .btn-primary { width: 100%; background: linear-gradient(135deg, #b8631e 0%, #8a4510 100%); border: none; color: #ffffff; padding: 0.95rem; font-size: 0.95rem; letter-spacing: 0.06em; border-radius: 4px; font-family: Georgia, serif; cursor: pointer; box-shadow: 0 2px 4px rgba(184, 99, 30, 0.2); transition: all 0.15s; }
+  .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #d07628 0%, #9a4f12 100%); box-shadow: 0 3px 6px rgba(184, 99, 30, 0.3); }
+  .btn-primary:disabled { background: #d9c9a8; cursor: not-allowed; box-shadow: none; }
+  .btn-secondary { background: transparent; border: 1px solid #c8a96e; color: #8a6f4a; padding: 0.6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia, serif; font-size: 0.85rem; transition: all 0.15s; }
   .btn-secondary:hover { background: #faf3e3; border-color: #b8631e; color: #b8631e; }
-  .btn-send {
-    background: #b8631e;
-    border: none;
-    color: #ffffff;
-    padding: 0.7rem 1.4rem;
-    cursor: pointer;
-    border-radius: 4px;
-    font-family: Georgia, serif;
-    font-size: 0.9rem;
-    white-space: nowrap;
-    transition: background 0.15s;
-  }
+  .btn-send { background: #b8631e; border: none; color: #ffffff; padding: 0.7rem 1.4rem; cursor: pointer; border-radius: 4px; font-family: Georgia, serif; font-size: 0.9rem; white-space: nowrap; transition: background 0.15s; }
   .btn-send:hover { background: #d07628; }
-  .analysis-card {
-    background: #ffffff;
-    border: 1px solid #d9c9a8;
-    border-left: 4px solid #b8631e;
-    border-radius: 6px;
-    padding: 1.8rem;
-    margin-bottom: 1.3rem;
-    box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06);
-  }
-  .analysis-eyebrow {
-    font-size: 0.7rem;
-    letter-spacing: 0.25em;
-    color: #b8915e;
-    text-transform: uppercase;
-    margin-bottom: 1rem;
-    font-weight: bold;
-  }
-  .analysis-content h2 {
-    color: #6b3410;
-    font-size: 1.15rem;
-    margin-top: 1.3rem;
-    margin-bottom: 0.5rem;
-    font-weight: normal;
-  }
-  .analysis-content h3 {
-    color: #b8631e;
-    margin-top: 1.5rem;
-    margin-bottom: 0.6rem;
-    font-size: 0.95rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    border-bottom: 2px solid #f0e3c8;
-    padding-bottom: 0.4rem;
-    font-weight: bold;
-  }
+  .analysis-card { background: #ffffff; border: 1px solid #d9c9a8; border-left: 4px solid #b8631e; border-radius: 6px; padding: 1.8rem; margin-bottom: 1.3rem; box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06); }
+  .analysis-eyebrow { font-size: 0.7rem; letter-spacing: 0.25em; color: #b8915e; text-transform: uppercase; margin-bottom: 1rem; font-weight: bold; }
+  .verify-banner { background: #fff3e0; border: 1px solid #d97755; color: #6b3410; padding: 0.7rem 1rem; margin-bottom: 1.2rem; border-radius: 4px; font-size: 0.85rem; line-height: 1.5; }
+  .verify-banner strong { color: #6b3410; }
+  .analysis-content h2 { color: #6b3410; font-size: 1.15rem; margin-top: 1.3rem; margin-bottom: 0.5rem; font-weight: normal; }
+  .analysis-content h3 { color: #b8631e; margin-top: 1.5rem; margin-bottom: 0.6rem; font-size: 0.95rem; letter-spacing: 0.08em; text-transform: uppercase; border-bottom: 2px solid #f0e3c8; padding-bottom: 0.4rem; font-weight: bold; }
   .analysis-content p { color: #4a3c28; margin-bottom: 0.5rem; line-height: 1.65; }
   .analysis-content strong { color: #6b3410; }
   .analysis-content ul { padding-left: 1.5rem; margin-bottom: 0.6rem; }
   .analysis-content li { color: #4a3c28; margin-bottom: 0.25rem; line-height: 1.6; list-style: none; position: relative; }
   .analysis-content li::before { content: "›"; color: #b8631e; position: absolute; left: -1rem; font-weight: bold; }
-  .analysis-content table {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 1.2rem 0;
-    font-size: 0.9rem;
-    background: #ffffff;
-    box-shadow: 0 1px 3px rgba(74, 60, 40, 0.08);
-  }
-  .analysis-content th, .analysis-content td {
-    border: 1px solid #e8d8b8;
-    padding: 0.6rem 0.8rem;
-    text-align: left;
-  }
-  .analysis-content th {
-    background: #b8631e;
-    color: #ffffff;
-    font-weight: normal;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    font-size: 0.78rem;
-  }
+  .analysis-content table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; background: #ffffff; box-shadow: 0 1px 3px rgba(74, 60, 40, 0.08); }
+  .analysis-content th, .analysis-content td { border: 1px solid #e8d8b8; padding: 0.6rem 0.8rem; text-align: left; }
+  .analysis-content th { background: #b8631e; color: #ffffff; font-weight: normal; letter-spacing: 0.05em; text-transform: uppercase; font-size: 0.78rem; }
   .analysis-content tr:nth-child(even) td { background: #faf6ee; }
   .analysis-content td { color: #4a3c28; }
-  .question-card {
-    background: #faf3e3;
-    border-left: 3px solid #c8a96e;
-    border-radius: 4px;
-    padding: 0.85rem 1.1rem;
-    margin-bottom: 1.2rem;
-    font-size: 0.92rem;
-    color: #6b5840;
-    font-style: italic;
-  }
+  .question-card { background: #faf3e3; border-left: 3px solid #c8a96e; border-radius: 4px; padding: 0.85rem 1.1rem; margin-bottom: 1.2rem; font-size: 0.92rem; color: #6b5840; font-style: italic; }
   .followup-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
   .followup-row input { flex: 1; min-width: 200px; }
-  .loading {
-    text-align: center;
-    color: #b8915e;
-    padding: 2rem;
-    font-style: italic;
-    font-size: 0.95rem;
-  }
-  .loading::after {
-    content: '...';
-    animation: dots 1.5s infinite;
-  }
-  @keyframes dots {
-    0%, 20% { content: '.'; }
-    40% { content: '..'; }
-    60%, 100% { content: '...'; }
-  }
-  .error-msg {
-    background: #fce8e0;
-    border: 1px solid #d97755;
-    border-left: 4px solid #b8631e;
-    color: #6b3410;
-    padding: 0.9rem 1.1rem;
-    border-radius: 4px;
-    margin-bottom: 1rem;
-    font-size: 0.9rem;
-  }
-  .password-gate {
-    max-width: 420px;
-    margin: 4rem auto;
-    padding: 2.2rem;
-    background: #ffffff;
-    border: 1px solid #d9c9a8;
-    border-top: 4px solid #b8631e;
-    border-radius: 6px;
-    text-align: center;
-    box-shadow: 0 4px 12px rgba(74, 60, 40, 0.1);
-  }
-  .password-gate h2 {
-    color: #6b3410;
-    margin-bottom: 0.8rem;
-    font-weight: normal;
-    font-size: 1.4rem;
-  }
-  .password-gate p {
-    color: #8a6f4a;
-    font-size: 0.9rem;
-    margin-bottom: 1.5rem;
-    line-height: 1.5;
-  }
+  .progress-card { background: #ffffff; border: 1px solid #d9c9a8; border-radius: 6px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 2px 8px rgba(74, 60, 40, 0.06); }
+  .progress-status { color: #6b3410; font-size: 0.95rem; margin-bottom: 0.8rem; font-style: italic; }
+  .progress-bar { width: 100%; height: 8px; background: #f0e3c8; border-radius: 4px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, #b8631e, #d07628); transition: width 0.4s ease; }
+  .progress-list { margin-top: 1rem; font-size: 0.85rem; }
+  .progress-item { padding: 0.4rem 0; color: #6b5840; display: flex; align-items: center; gap: 0.5rem; }
+  .progress-item.done { color: #4a7c4e; }
+  .progress-item.active { color: #b8631e; font-weight: bold; }
+  .error-msg { background: #fce8e0; border: 1px solid #d97755; border-left: 4px solid #b8631e; color: #6b3410; padding: 0.9rem 1.1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.9rem; }
+  .password-gate { max-width: 420px; margin: 4rem auto; padding: 2.2rem; background: #ffffff; border: 1px solid #d9c9a8; border-top: 4px solid #b8631e; border-radius: 6px; text-align: center; box-shadow: 0 4px 12px rgba(74, 60, 40, 0.1); }
+  .password-gate h2 { color: #6b3410; margin-bottom: 0.8rem; font-weight: normal; font-size: 1.4rem; }
+  .password-gate p { color: #8a6f4a; font-size: 0.9rem; margin-bottom: 1.5rem; line-height: 1.5; }
+  .size-warning { color: #b8631e; font-size: 0.78rem; margin-top: 0.4rem; }
 </style>
 </head>
 <body>
@@ -308,9 +96,12 @@
   <div class="tagline">Joe Brown Insurance — Title Research Tool</div>
 </div>
 
+<div class="disclaimer-banner" id="disclaimerBanner" style="display:none">
+  <strong>⚠ AI-Assisted Analysis Tool:</strong> This tool is a first-pass research assistant, not a legal opinion. Always verify the output against the source documents and consult a licensed attorney before any drilling, leasing, or division order action. The AI can miss details or make errors — your professional review is essential.
+</div>
+
 <div class="container">
 
-  <!-- Password gate -->
   <div id="passwordGate" class="password-gate" style="display:none">
     <h2>Access Required</h2>
     <p>Enter the access password provided by your administrator.</p>
@@ -321,38 +112,39 @@
     <div id="passwordError"></div>
   </div>
 
-  <!-- Main app -->
-  <div id="mainApp">
+  <div id="mainApp" style="display:none">
     <div class="card" id="uploadSection">
       <div class="field">
         <label>Subject Tract Description (optional)</label>
         <input type="text" id="tractDescription" placeholder="e.g. SE/4 of Section 14, T-3-N, R-5-W, Reeves County, TX" />
       </div>
-
       <div class="field">
         <label>Additional Context (optional)</label>
         <textarea id="contextNotes" placeholder="Time period, known issues, specific questions, original patent date, etc." rows="2"></textarea>
       </div>
-
       <div class="field">
         <label>Upload Documents (PDFs or images)</label>
         <div class="upload-zone" id="uploadZone">
           <input type="file" id="fileInput" multiple accept=".pdf,image/*" style="display:none" />
           <label for="fileInput">⬆ Click to select deeds, probate, assignments...</label>
-          <div class="hint">PDF or image files · Multiple uploads supported · Drag &amp; drop also works</div>
+          <div class="hint">PDFs or images · Documents are processed one at a time, no total size limit</div>
         </div>
       </div>
-
       <div class="file-list" id="fileList"></div>
-
-      <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>
-        → Build Chain of Title
-      </button>
+      <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title</button>
     </div>
 
     <div id="errorBox"></div>
+
+    <div id="progressSection" style="display:none">
+      <div class="progress-card">
+        <div class="progress-status" id="progressStatus">Starting analysis...</div>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+        <div class="progress-list" id="progressList"></div>
+      </div>
+    </div>
+
     <div id="results"></div>
-    <div class="loading" id="loadingBox" style="display:none">Reading documents and tracing title</div>
 
     <div id="followupSection" style="display:none">
       <div class="card">
@@ -369,85 +161,110 @@
 </div>
 
 <script>
-const SYSTEM_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions. You have been engaged to analyze courthouse documents and determine mineral ownership for a subject tract.
+const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney analyzing a single courthouse document. Your job is to extract every relevant fact from this one document — accurately, cautiously, and explicitly.
 
-Approach this with the rigor of a formal title opinion. You will receive deeds, assignments, probate orders, wills, affidavits of heirship, leases, division orders, mortgages, releases, and similar instruments.
+Extract and report:
+
+**Document Type:** (Warranty Deed, Special Warranty Deed, Quitclaim Deed, Mineral Deed, Royalty Deed, Assignment, Probate Order, Will, Affidavit of Heirship, Lease, Mortgage, Release, Division Order, etc.)
+**Date Executed:** (or "not visible" if unclear)
+**Date Recorded:** (or "not visible" if unclear)
+**Recording Reference:** (Vol/Page or Document/Instrument number — only state what is clearly visible)
+**Grantor(s):** (exact names as written, including marital status if stated)
+**Grantee(s):** (exact names as written)
+**Legal Description:** (quote the description as written; flag if metes and bounds vs. section/township/range)
+**Interest Conveyed:**
+- Surface: yes/no/unclear
+- Minerals: yes/no/unclear, what fraction
+- Royalty / NPRI: yes/no, what fraction
+- Term/perpetual: state which
+- After-acquired title clause: yes/no
+**Fraction Conveyed:** (be precise — e.g., "an undivided 1/4 of all minerals")
+**Reservations / Exceptions:** (list every reservation verbatim — these are critical)
+**Warranty Type:** (full warranty / special warranty / quitclaim)
+**Acknowledgment:** (properly notarized? yes/no/unclear)
+**Notable Issues:**
+- Anything illegible
+- Marital property concerns (homestead, community property)
+- Apparent execution defects
+- Cross-references to other instruments
+- Anything ambiguous
+**Confidence Note:** End with one sentence stating your confidence level. If anything is unclear, say so plainly. DO NOT GUESS or fill in information that isn't visible. If you cannot read something, write "ILLEGIBLE — VERIFY MANUALLY."`;
+
+const SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions.
+
+You have already abstracted each document individually. Now synthesize the abstracts into a complete title opinion for the subject tract.
+
+CRITICAL RULES:
+1. Only use facts present in the document abstracts. Do NOT invent dates, parties, fractions, or recording references.
+2. If an abstract noted something as illegible or unclear, flag it as a curative item. Do not guess.
+3. Show every fractional calculation step-by-step.
+4. If the chain has gaps you cannot bridge, state so explicitly — do not fill them with assumptions.
+5. End each section with explicit verification reminders.
 
 DELIVER YOUR ANALYSIS IN THIS STRUCTURE:
 
-## DOCUMENT ABSTRACT
-For each document, provide:
-- Document #, Type
-- Date executed / Date recorded
-- Vol/Page or Document/Instrument number
-- Grantor(s) → Grantee(s)
-- Legal description (subject tract reference)
-- Interest conveyed (fee surface, fee minerals, mineral only, royalty, NPRI, term interest, etc.)
-- Fraction conveyed
-- Reservations / exceptions / conditions
-- Notable language (warranty type, after-acquired title, etc.)
-
 ## CHAIN OF TITLE
-Chronological flow showing how title moved. Show your fractional math at each step.
+Chronological flow showing how title moved. At each step:
+- Date / Document / Recording reference
+- Grantor → Grantee
+- Interest conveyed
+- Running fractional balance with math shown
+- Any flag from the abstract
 
 ## MINERAL INTEREST CALCULATION
-Show the fractional math in detail. Use a table when helpful. Account separately for:
+A clear table or step-by-step calculation showing:
 - Surface estate
 - Mineral estate (executive rights)
 - Royalty interest
 - Non-Participating Royalty Interest (NPRI)
 - Outstanding leasehold interests
 - Term/defeasible interests
+Show the math at each step. If there is uncertainty about a fraction, state the range and note what would resolve it.
 
 ## TITLE DEFECTS & CURATIVE REQUIREMENTS
-Flag every issue formally. For each defect, specify the curative document needed (Affidavit of Heirship, Stipulation of Interest, Release, Quitclaim, etc.)
+Formal list of every issue. For each defect, specify the curative document needed.
 
 ## FINAL OWNERSHIP DETERMINATION
-A clean table:
+Clean table:
 | Owner | Mineral Interest | Royalty/NPRI | Subject To | Notes |
 
+If the chain is incomplete or contains unresolved issues, state explicitly that ownership cannot be definitively determined from the documents provided and list what additional records are needed.
+
 ## OPINION QUALIFICATIONS
-List the assumptions you made and limitations of this analysis. Note that this is an analytical aid, not a substitute for a formal title opinion of an attorney licensed in the state where the land lies.
-
----
-
-Be precise with fractions. Always show your math. Use formal title opinion language but keep it readable. If a document is illegible or you cannot determine something, say so plainly and list what additional information would be needed.`;
+- List every assumption made
+- List every document that was illegible or partially illegible
+- Note all limitations of this analysis
+- State plainly: "This is an AI-assisted analytical aid. It is not a formal title opinion and should not be relied upon for drilling, leasing, division order, or any other action without verification by a licensed attorney in the state where the land lies."`;
 
 let appPassword = sessionStorage.getItem('app_password') || '';
 let files = [];
 let conversationHistory = [];
+let documentAbstracts = [];
 
 document.addEventListener('DOMContentLoaded', async () => {
   await checkPasswordRequired();
   setupDragDrop();
   document.getElementById('fileInput').addEventListener('change', handleFileSelect);
-  document.getElementById('followupInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') askFollowup();
-  });
-  document.getElementById('passwordInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') checkPassword();
-  });
+  document.getElementById('followupInput').addEventListener('keydown', e => { if (e.key === 'Enter') askFollowup(); });
+  document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') checkPassword(); });
 });
 
 async function checkPasswordRequired() {
   try {
     const r = await fetch('/api/analyze', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-app-password': appPassword,
-      },
+      headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
       body: JSON.stringify({ ping: true }),
     });
     if (r.status === 401) {
       document.getElementById('passwordGate').style.display = 'block';
-      document.getElementById('mainApp').style.display = 'none';
     } else {
-      document.getElementById('passwordGate').style.display = 'none';
       document.getElementById('mainApp').style.display = 'block';
+      document.getElementById('disclaimerBanner').style.display = 'block';
     }
   } catch (e) {
     document.getElementById('mainApp').style.display = 'block';
+    document.getElementById('disclaimerBanner').style.display = 'block';
   }
 }
 
@@ -458,10 +275,7 @@ function checkPassword() {
   sessionStorage.setItem('app_password', pw);
   fetch('/api/analyze', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-app-password': appPassword,
-    },
+    headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
     body: JSON.stringify({ ping: true }),
   }).then(r => {
     if (r.status === 401) {
@@ -471,6 +285,7 @@ function checkPassword() {
     } else {
       document.getElementById('passwordGate').style.display = 'none';
       document.getElementById('mainApp').style.display = 'block';
+      document.getElementById('disclaimerBanner').style.display = 'block';
     }
   });
 }
@@ -478,20 +293,12 @@ function checkPassword() {
 function setupDragDrop() {
   const zone = document.getElementById('uploadZone');
   ['dragenter', 'dragover'].forEach(evt => {
-    zone.addEventListener(evt, e => {
-      e.preventDefault(); e.stopPropagation();
-      zone.classList.add('drag');
-    });
+    zone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone.classList.add('drag'); });
   });
   ['dragleave', 'drop'].forEach(evt => {
-    zone.addEventListener(evt, e => {
-      e.preventDefault(); e.stopPropagation();
-      zone.classList.remove('drag');
-    });
+    zone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('drag'); });
   });
-  zone.addEventListener('drop', e => {
-    handleFiles(Array.from(e.dataTransfer.files));
-  });
+  zone.addEventListener('drop', e => { handleFiles(Array.from(e.dataTransfer.files)); });
 }
 
 async function handleFileSelect(e) {
@@ -502,12 +309,7 @@ async function handleFileSelect(e) {
 async function handleFiles(newFiles) {
   for (const file of newFiles) {
     const data = await readFileAsBase64(file);
-    files.push({
-      name: file.name,
-      type: file.type,
-      size: file.size,
-      data: data,
-    });
+    files.push({ name: file.name, type: file.type, size: file.size, data: data });
   }
   renderFileList();
   updateAnalyzeButton();
@@ -522,6 +324,12 @@ function readFileAsBase64(file) {
   });
 }
 
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 function renderFileList() {
   const list = document.getElementById('fileList');
   if (files.length === 0) { list.innerHTML = ''; return; }
@@ -529,76 +337,74 @@ function renderFileList() {
     <div style="font-size: 0.72rem; letter-spacing: 0.15em; color: #8a6f4a; text-transform: uppercase; margin-bottom: 0.5rem; font-weight: bold;">
       ${files.length} document${files.length !== 1 ? 's' : ''} loaded
     </div>
-  ` + files.map((f, i) => `
-    <div class="file-item">
-      <span>📄 ${escapeHtml(f.name)}</span>
-      <button onclick="removeFile(${i})" title="Remove">×</button>
-    </div>
-  `).join('');
+  ` + files.map((f, i) => {
+    const sizeWarning = f.size > 4 * 1024 * 1024 ? '<div class="size-warning">⚠ Large file — may fail. Try splitting it.</div>' : '';
+    return `
+      <div class="file-item">
+        <div class="file-info">
+          <span class="file-name">📄 ${escapeHtml(f.name)}</span>
+          <span class="file-size">${formatBytes(f.size)}</span>
+          ${sizeWarning}
+        </div>
+        <button onclick="removeFile(${i})" title="Remove">×</button>
+      </div>
+    `;
+  }).join('');
 }
 
-function removeFile(idx) {
-  files.splice(idx, 1);
-  renderFileList();
-  updateAnalyzeButton();
-}
+function removeFile(idx) { files.splice(idx, 1); renderFileList(); updateAnalyzeButton(); }
+function updateAnalyzeButton() { document.getElementById('analyzeBtn').disabled = files.length === 0; }
+function escapeHtml(s) { const div = document.createElement('div'); div.textContent = s; return div.innerHTML; }
+function showError(msg) { document.getElementById('errorBox').innerHTML = `<div class="error-msg">${escapeHtml(msg)}</div>`; }
+function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 
-function updateAnalyzeButton() {
-  document.getElementById('analyzeBtn').disabled = files.length === 0;
-}
-
-function escapeHtml(s) {
-  const div = document.createElement('div');
-  div.textContent = s;
-  return div.innerHTML;
-}
-
-function showError(msg) {
-  document.getElementById('errorBox').innerHTML = `<div class="error-msg">${escapeHtml(msg)}</div>`;
-}
-
-function clearError() {
-  document.getElementById('errorBox').innerHTML = '';
-}
-
-function buildContent(userText) {
-  const content = [];
-  for (const f of files) {
-    if (f.type === 'application/pdf') {
-      content.push({
-        type: 'document',
-        source: { type: 'base64', media_type: 'application/pdf', data: f.data },
-      });
-    } else if (f.type.startsWith('image/')) {
-      content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: f.type, data: f.data },
-      });
-    }
+function updateProgress(pct, status, items) {
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressStatus').textContent = status;
+  if (items) {
+    document.getElementById('progressList').innerHTML = items.map(it => {
+      let cls = 'progress-item';
+      if (it.status === 'done') cls += ' done';
+      if (it.status === 'active') cls += ' active';
+      const icon = it.status === 'done' ? '✓' : (it.status === 'active' ? '◌' : '○');
+      return `<div class="${cls}">${icon} ${escapeHtml(it.label)}</div>`;
+    }).join('');
   }
-  content.push({ type: 'text', text: userText });
-  return content;
 }
 
-async function callBackend(messages) {
+async function callBackend(messages, system) {
   const response = await fetch('/api/analyze', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-app-password': appPassword,
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 4000,
-      system: SYSTEM_PROMPT,
-      messages: messages,
-    }),
+    headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
+    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, system: system, messages: messages }),
   });
-  const data = await response.json();
+
+  const responseText = await response.text();
+  let data;
+  try {
+    data = JSON.parse(responseText);
+  } catch (e) {
+    if (response.status === 413 || responseText.toLowerCase().includes('too large') || responseText.toLowerCase().includes('payload') || responseText.toLowerCase().includes('request en')) {
+      throw new Error('File too large for the server. The document is being split — try uploading one document at a time, or use smaller PDF files.');
+    }
+    throw new Error(`Server error (status ${response.status}). The file may be too large or the server is unreachable.`);
+  }
+
   if (!response.ok || data.error) {
     throw new Error(data.error?.message || data.error || `HTTP ${response.status}`);
   }
   return data.content?.map(b => b.text || '').join('') || '';
+}
+
+async function abstractDocument(file, idx) {
+  const content = [];
+  if (file.type === 'application/pdf') {
+    content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: file.data } });
+  } else if (file.type.startsWith('image/')) {
+    content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
+  }
+  content.push({ type: 'text', text: `Please abstract this document (Document #${idx + 1}, filename: "${file.name}"). Extract every relevant fact for a title chain analysis. Be cautious — do not guess at anything illegible.` });
+  return await callBackend([{ role: 'user', content: content }], ABSTRACT_PROMPT);
 }
 
 async function analyze() {
@@ -606,31 +412,66 @@ async function analyze() {
 
   clearError();
   document.getElementById('analyzeBtn').disabled = true;
-  document.getElementById('loadingBox').style.display = 'block';
+  document.getElementById('uploadSection').style.display = 'none';
+  document.getElementById('progressSection').style.display = 'block';
 
   const tract = document.getElementById('tractDescription').value;
   const ctx = document.getElementById('contextNotes').value;
 
-  let userText = `Please analyze the following ${files.length} courthouse document(s) and provide a formal title opinion analysis with chain of title and mineral ownership determination.\n\n`;
-  if (tract) userText += `**Subject Tract:** ${tract}\n\n`;
-  if (ctx) userText += `**Additional Context:** ${ctx}\n\n`;
-  userText += `**Documents Submitted:** ${files.map(f => f.name).join(', ')}`;
+  const items = files.map(f => ({ label: f.name, status: 'pending' }));
+  items.push({ label: 'Synthesize chain of title & ownership', status: 'pending' });
 
-  const content = buildContent(userText);
+  documentAbstracts = [];
+
+  for (let i = 0; i < files.length; i++) {
+    items[i].status = 'active';
+    const pct = Math.round((i / (files.length + 1)) * 100);
+    updateProgress(pct, `Abstracting document ${i + 1} of ${files.length}: ${files[i].name}`, items);
+
+    try {
+      const abstract = await abstractDocument(files[i], i);
+      documentAbstracts.push({ filename: files[i].name, abstract: abstract });
+      items[i].status = 'done';
+    } catch (e) {
+      items[i].status = 'pending';
+      showError(`Failed on document "${files[i].name}": ${e.message}`);
+      document.getElementById('progressSection').style.display = 'none';
+      document.getElementById('uploadSection').style.display = 'block';
+      document.getElementById('analyzeBtn').disabled = false;
+      return;
+    }
+  }
+
+  items[files.length].status = 'active';
+  updateProgress(Math.round((files.length / (files.length + 1)) * 100), 'Synthesizing chain of title and final ownership...', items);
+
+  let synthesisInput = `Below are the document abstracts from ${files.length} courthouse documents. Synthesize them into a complete title opinion analysis.\n\n`;
+  if (tract) synthesisInput += `**Subject Tract:** ${tract}\n\n`;
+  if (ctx) synthesisInput += `**Additional Context:** ${ctx}\n\n`;
+  synthesisInput += `---\n\n`;
+  documentAbstracts.forEach((d, i) => {
+    synthesisInput += `### Document ${i + 1}: ${d.filename}\n\n${d.abstract}\n\n---\n\n`;
+  });
 
   try {
-    const reply = await callBackend([{ role: 'user', content: content }]);
+    const synthesis = await callBackend([{ role: 'user', content: synthesisInput }], SYNTHESIS_PROMPT);
+    items[files.length].status = 'done';
+    updateProgress(100, 'Analysis complete', items);
+
     conversationHistory = [
-      { role: 'user', content: content },
-      { role: 'assistant', content: reply },
+      { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)` },
+      { role: 'assistant', content: synthesis },
     ];
-    renderResults();
-    document.getElementById('followupSection').style.display = 'block';
-    document.getElementById('uploadSection').style.display = 'none';
+
+    setTimeout(() => {
+      document.getElementById('progressSection').style.display = 'none';
+      renderResults();
+      document.getElementById('followupSection').style.display = 'block';
+    }, 800);
   } catch (e) {
-    showError('Error: ' + e.message);
-  } finally {
-    document.getElementById('loadingBox').style.display = 'none';
+    showError('Synthesis failed: ' + e.message);
+    document.getElementById('progressSection').style.display = 'none';
+    document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
   }
 }
@@ -639,21 +480,19 @@ async function askFollowup() {
   const q = document.getElementById('followupInput').value.trim();
   if (!q) return;
   document.getElementById('followupInput').value = '';
-  document.getElementById('loadingBox').style.display = 'block';
   clearError();
 
   conversationHistory.push({ role: 'user', content: q });
   renderResults();
 
   try {
-    const reply = await callBackend(conversationHistory);
+    const reply = await callBackend(conversationHistory, SYNTHESIS_PROMPT);
     conversationHistory.push({ role: 'assistant', content: reply });
     renderResults();
   } catch (e) {
     showError('Error: ' + e.message);
     conversationHistory.pop();
-  } finally {
-    document.getElementById('loadingBox').style.display = 'none';
+    renderResults();
   }
 }
 
@@ -663,15 +502,17 @@ function renderResults() {
   for (let i = 0; i < conversationHistory.length; i++) {
     const m = conversationHistory[i];
     if (m.role === 'assistant') {
+      const isFirst = i === 1;
       html += `
         <div class="analysis-card">
           <div class="analysis-eyebrow">◈ Title Opinion Analysis</div>
+          ${isFirst ? '<div class="verify-banner"><strong>⚠ Verify before relying on this:</strong> Cross-check every fact in this analysis against the source documents. The AI may misread fractions, miss reservations, or hallucinate citations. This is a research aid, not a legal opinion.</div>' : ''}
           <div class="analysis-content">${formatMarkdown(m.content)}</div>
         </div>
       `;
     } else if (m.role === 'user' && i > 0) {
-      const text = typeof m.content === 'string' ? m.content : '';
-      if (text) {
+      const text = typeof m.content === 'string' ? m.content : (m.displayText || '');
+      if (text && i > 1) {
         html += `<div class="question-card">Q: ${escapeHtml(text)}</div>`;
       }
     }
@@ -681,7 +522,6 @@ function renderResults() {
 
 function formatMarkdown(text) {
   let html = escapeHtml(text);
-
   html = html.replace(/(\|[^\n]+\|\n)+/g, (match) => {
     const rows = match.trim().split('\n');
     if (rows.length < 2) return match;
@@ -696,13 +536,11 @@ function formatMarkdown(text) {
     }).join('');
     return `<table>${headerHtml}${bodyHtml}</table>`;
   });
-
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/(?<![\*\w])\*(?!\s)([^\*\n]+?)\*(?!\w)/g, '<em>$1</em>');
-
   html = html.replace(/(?:^[\-\*•]\s+.+(?:\n|$))+/gm, (match) => {
     const items = match.trim().split('\n').map(l => {
       const content = l.replace(/^[\-\*•]\s+/, '');
@@ -710,26 +548,26 @@ function formatMarkdown(text) {
     }).join('');
     return `<ul>${items}</ul>`;
   });
-
   html = html.split('\n\n').map(block => {
     block = block.trim();
     if (!block) return '';
     if (block.startsWith('<h') || block.startsWith('<ul') || block.startsWith('<table')) return block;
     return `<p>${block.replace(/\n/g, '<br>')}</p>`;
   }).join('\n');
-
   return html;
 }
 
 function resetAll() {
   files = [];
   conversationHistory = [];
+  documentAbstracts = [];
   document.getElementById('tractDescription').value = '';
   document.getElementById('contextNotes').value = '';
   document.getElementById('results').innerHTML = '';
   document.getElementById('followupInput').value = '';
   document.getElementById('followupSection').style.display = 'none';
   document.getElementById('uploadSection').style.display = 'block';
+  document.getElementById('progressSection').style.display = 'none';
   renderFileList();
   updateAnalyzeButton();
   clearError();
