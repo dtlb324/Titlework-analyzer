@@ -35,11 +35,11 @@
   input:focus, textarea:focus { border-color: #b8631e; background: #ffffff; }
   textarea { resize: vertical; min-height: 60px; }
   .field { margin-bottom: 1.2rem; }
-  .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; padding: 1.8rem; text-align: center; background: #faf6ee; transition: all 0.2s; }
+  .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; text-align: center; background: #faf6ee; transition: all 0.2s; cursor: pointer; position: relative; }
   .upload-zone:hover { border-color: #b8631e; background: #fff8eb; }
   .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
-  .upload-zone label { cursor: pointer; color: #b8631e; font-size: 1rem; letter-spacing: 0.03em; text-transform: none; margin-bottom: 0; font-weight: normal; }
-  .upload-zone .hint { color: #a08a6a; font-size: 0.78rem; margin-top: 0.6rem; }
+  .upload-zone label { cursor: pointer; color: #b8631e; font-size: 1rem; letter-spacing: 0.03em; text-transform: none; margin-bottom: 0; font-weight: normal; display: block; width: 100%; padding: 2rem 1.5rem 1.5rem; }
+  .upload-zone .hint { color: #a08a6a; font-size: 0.78rem; padding-bottom: 1.5rem; display: block; }
   .file-list { margin-top: 1rem; }
   .file-item { display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 0.85rem; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; margin-bottom: 0.35rem; font-size: 0.9rem; }
   .file-item .file-info { flex: 1; overflow: hidden; }
@@ -124,10 +124,12 @@
       </div>
       <div class="field">
         <label>Upload Documents (PDFs or images)</label>
-        <div class="upload-zone" id="uploadZone">
+        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
           <input type="file" id="fileInput" multiple accept=".pdf,image/*" style="display:none" />
-          <label for="fileInput">⬆ Click to select deeds, probate, assignments...</label>
-          <div class="hint">PDFs or images · Documents are processed one at a time, no total size limit</div>
+          <label for="fileInput" onclick="event.stopPropagation()">
+            ⬆ Click anywhere here or drag &amp; drop files
+            <span class="hint">PDFs or images · Multiple files supported · No size limit</span>
+          </label>
         </div>
       </div>
       <div class="file-list" id="fileList"></div>
@@ -396,13 +398,110 @@ async function callBackend(messages, system) {
   return data.content?.map(b => b.text || '').join('') || '';
 }
 
-async function abstractDocument(file, idx) {
-  const content = [];
-  if (file.type === 'application/pdf') {
-    content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: file.data } });
-  } else if (file.type.startsWith('image/')) {
-    content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
+// Compress an image file to JPEG under the target size (bytes)
+async function compressImage(base64data, mimeType, targetBytes = 3.5 * 1024 * 1024) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      // Scale down if very large — max 2000px on longest side
+      let w = img.width, h = img.height;
+      const maxDim = 2000;
+      if (w > maxDim || h > maxDim) {
+        if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else { w = Math.round(w * maxDim / h); h = maxDim; }
+      }
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+
+      // Try progressively lower quality until under target size
+      let quality = 0.85;
+      let result = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+      while (result.length * 0.75 > targetBytes && quality > 0.3) {
+        quality -= 0.1;
+        result = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+      }
+      resolve({ data: result, type: 'image/jpeg' });
+    };
+    img.src = `data:${mimeType};base64,${base64data}`;
+  });
+}
+
+// Convert a PDF to images using PDF.js, one page at a time
+async function pdfToImages(base64data, filename, onPageProgress) {
+  // Dynamically load PDF.js from CDN
+  if (!window.pdfjsLib) {
+    await new Promise((res, rej) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      script.onload = res;
+      script.onerror = rej;
+      document.head.appendChild(script);
+    });
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
+
+  const pdfData = atob(base64data);
+  const uint8Array = new Uint8Array(pdfData.length);
+  for (let i = 0; i < pdfData.length; i++) uint8Array[i] = pdfData.charCodeAt(i);
+
+  const pdf = await window.pdfjsLib.getDocument({ data: uint8Array }).promise;
+  const images = [];
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    if (onPageProgress) onPageProgress(pageNum, pdf.numPages);
+    const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 1.5 }); // 1.5x = good quality/size balance
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    // Compress each page
+    let quality = 0.80;
+    let imgData = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+    const targetBytes = 3.5 * 1024 * 1024;
+    while (imgData.length * 0.75 > targetBytes && quality > 0.3) {
+      quality -= 0.1;
+      imgData = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+    }
+    images.push({ data: imgData, type: 'image/jpeg', page: pageNum });
+  }
+  return images;
+}
+
+async function abstractDocument(file, idx, onProgress) {
+  const content = [];
+
+  if (file.type === 'application/pdf') {
+    // Convert PDF pages to compressed images
+    const images = await pdfToImages(file.data, file.name, (pg, total) => {
+      if (onProgress) onProgress(`Converting page ${pg} of ${total}...`);
+    });
+
+    if (images.length === 1) {
+      // Single page — send as one image
+      content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: images[0].data } });
+    } else {
+      // Multi-page — send all pages as separate images
+      for (const img of images) {
+        content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: img.data } });
+      }
+    }
+  } else if (file.type.startsWith('image/')) {
+    // Compress images before sending
+    const compressed = await compressImage(file.data, file.type);
+    content.push({ type: 'image', source: { type: 'base64', media_type: compressed.type, data: compressed.data } });
+  }
+
   content.push({ type: 'text', text: `Please abstract this document (Document #${idx + 1}, filename: "${file.name}"). Extract every relevant fact for a title chain analysis. Be cautious — do not guess at anything illegible.` });
   return await callBackend([{ role: 'user', content: content }], ABSTRACT_PROMPT);
 }
@@ -429,7 +528,9 @@ async function analyze() {
     updateProgress(pct, `Abstracting document ${i + 1} of ${files.length}: ${files[i].name}`, items);
 
     try {
-      const abstract = await abstractDocument(files[i], i);
+      const abstract = await abstractDocument(files[i], i, (subStatus) => {
+        updateProgress(pct, `Document ${i + 1} of ${files.length}: ${subStatus}`, items);
+      });
       documentAbstracts.push({ filename: files[i].name, abstract: abstract });
       items[i].status = 'done';
     } catch (e) {
