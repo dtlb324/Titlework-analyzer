@@ -23,7 +23,7 @@
   .upload-zone:hover, .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
   .upload-icon { font-size: 2rem; margin-bottom: .5rem; display: block; }
   .upload-text { color: #b8631e; font-size: 1rem; display: block; margin-bottom: .4rem; }
-  .upload-hint { color: #a08a6a; font-size: .8rem; display: block; }
+  .upload-hint { color: #a08a6a; font-size: .8rem; display: block; line-height: 1.8; margin-top: .3rem; }
   .file-list { margin-top: 1rem; }
   .file-count { font-size: .72rem; letter-spacing: .15em; text-transform: uppercase; color: #8a6f4a; font-weight: bold; margin-bottom: .5rem; }
   .file-item { display: flex; justify-content: space-between; align-items: center; padding: .55rem .85rem; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; margin-bottom: .3rem; font-size: .88rem; }
@@ -110,7 +110,9 @@
         <label class="upload-zone" id="uploadZone" for="fileInput">
           <span class="upload-icon">⬆</span>
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
-          <span class="upload-hint">PDFs or images &nbsp;·&nbsp; Up to 10 documents &nbsp;·&nbsp; Processed in batches of 3</span>
+          <span class="upload-hint">
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+          </span>
         </label>
         <input type="file" id="fileInput" multiple accept=".pdf,image/*" style="display:none" />
       </div>
@@ -285,8 +287,8 @@ function formatBytes(b) {
 function renderFileList() {
   const el = document.getElementById('fileList');
   if (!files.length) { el.innerHTML = ''; return; }
-  const numBatches = Math.ceil(files.length / BATCH_SIZE);
-  el.innerHTML = `<div class="file-count">${files.length} document${files.length !== 1 ? 's' : ''} — will process in ${numBatches} batch${numBatches !== 1 ? 'es' : ''} of up to ${BATCH_SIZE}</div>` +
+
+  el.innerHTML = `<div class="file-count">${files.length} document${files.length !== 1 ? 's' : ''} loaded</div>` +
     files.map((f, i) => `
       <div class="file-item">
         <span class="file-name">📄 ${esc(f.name)}</span>
