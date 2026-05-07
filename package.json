@@ -2,5 +2,8 @@
   "name": "title-analyzer",
   "version": "1.0.0",
   "description": "Mineral Title Chain Analyzer for landmen",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@vercel/speed-insights": "^1.1.0"
+  }
 }
