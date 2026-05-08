@@ -9,7 +9,7 @@ This is a web app for landmen to analyze courthouse documents and build chain of
 
 ## What you'll end up with
 
-A URL like `https://title-analyzer-yourname.vercel.app` that you and your coworker can both bookmark. No API key needed on his end. You control access with an optional password.
+A URL like `https://titlework-analyzer-yourname.vercel.app` that you and your coworker can both bookmark. No API key needed on his end. You control access with an optional password.
 
 ---
 
@@ -37,11 +37,11 @@ GitHub stores your code so Vercel can deploy it.
 The easiest way (no command line needed):
 
 1. While logged into GitHub, click the **+** icon top-right → **New repository**
-2. Repository name: `title-analyzer` (or whatever you want)
+2. Repository name: `Titlework-analyzer` (or whatever you want)
 3. Set to **Private** (important — keeps your code from being public)
 4. Click **Create repository**
 5. On the next page, click **"uploading an existing file"** (it's a link in the middle of the page)
-6. Drag the entire contents of the `title-analyzer` folder into the upload box. **Important:** drag the *contents* (the `api` folder, `public` folder, `vercel.json`, `package.json`) — NOT the parent folder itself
+6. Drag the entire contents of the `Titlework-analyzer` folder into the upload box. **Important:** drag the *contents* (the `api` folder, `public` folder, `vercel.json`, `package.json`) — NOT the parent folder itself
 7. Scroll down and click **Commit changes**
 
 Your code is now on GitHub.
@@ -81,7 +81,7 @@ Done. You'll see a confetti animation and a link to your live site.
 
 ## Step 5: Use it
 
-1. Click the URL Vercel gives you (something like `title-analyzer-abc123.vercel.app`)
+1. Click the URL Vercel gives you (something like `Titlework-analyzer-abc123.vercel.app`)
 2. If you set a password, enter it
 3. Upload documents, click "Build Chain of Title"
 4. Bookmark the URL
