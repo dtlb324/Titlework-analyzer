@@ -65,7 +65,7 @@ Vercel runs the actual web app.
 2. You'll see a list of your GitHub repositories. Find `title-analyzer` and click **Import**
 3. **Don't click Deploy yet.** First, expand the **Environment Variables** section
 4. Add this environment variable:
-   - **Name:** `ANTHROPIC_API_KEY`
+   - **Name:** `ANTHROPIC_API_KEY` - Case-Sensitive so make sure you copy the name exatly. 
    - **Value:** paste your Anthropic API key (starts with `sk-ant-...`)
    - Click **Add**
 5. *(Optional but recommended)* Add a second environment variable for password protection:
