@@ -2,7 +2,7 @@
 
 This is a web app for landmen to analyze courthouse documents and build chain of title. Deploy it once to Vercel, then anyone with the URL can use it from any browser, anywhere.
 
-**Total deployment time: ~20 minutes**
+**Total deployment time: ~30 minutes**
 
 ---
 
