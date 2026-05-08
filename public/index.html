@@ -54,6 +54,8 @@
   .pi { padding: .3rem 0; color: #6b5840; display: flex; align-items: center; gap: .5rem; }
   .pi.done { color: #4a7c4e; }
   .pi.active { color: #b8631e; font-weight: bold; }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #f0e3c8; border-top: 2px solid #b8631e; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 4px; vertical-align: middle; }
+  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   .analysis-card { background: #fff; border: 1px solid #d9c9a8; border-left: 4px solid #b8631e; border-radius: 6px; padding: 1.8rem; margin-bottom: 1.3rem; box-shadow: 0 2px 8px rgba(74,60,40,.06); }
   .analysis-label { font-size: .7rem; letter-spacing: .25em; color: #b8915e; text-transform: uppercase; margin-bottom: 1rem; font-weight: bold; }
   .verify-note { background: #fff3e0; border: 1px solid #d97755; color: #6b3410; padding: .7rem 1rem; margin-bottom: 1.2rem; border-radius: 4px; font-size: .85rem; line-height: 1.5; }
@@ -373,8 +375,12 @@ function updateProgress(pct, status, items) {
   if (items) {
     document.getElementById('progressList').innerHTML = items.map(it => {
       const cls = 'pi' + (it.status === 'done' ? ' done' : it.status === 'active' ? ' active' : '');
-      const icon = it.status === 'done' ? '✓' : it.status === 'active' ? '◌' : '○';
-      return `<div class="${cls}">${icon} ${esc(it.label)}</div>`;
+      const icon = it.status === 'done'
+        ? '✓ '
+        : it.status === 'active'
+        ? '<span class="spinner"></span>'
+        : '○ ';
+      return `<div class="${cls}">${icon}${esc(it.label)}</div>`;
     }).join('');
   }
 }
@@ -496,15 +502,9 @@ async function analyze() {
     batches.push(files.slice(i, i + BATCH_SIZE));
   }
 
+  // One progress item per FILE (not per batch) so spinner shows on each doc
   const items = [
-    ...batches.map((b, bi) => {
-      const start = bi * BATCH_SIZE + 1;
-      const end = Math.min(start + b.length - 1, files.length);
-      const label = b.length === 1
-        ? `Document ${start}: ${b[0].name}`
-        : `Documents ${start}–${end} (batch of ${b.length})`;
-      return { label, status: 'pending' };
-    }),
+    ...files.map((f, fi) => ({ label: `${f.name}`, status: 'pending' })),
     { label: 'Synthesize chain of title & ownership', status: 'pending' },
   ];
 
@@ -513,7 +513,11 @@ async function analyze() {
   for (let bi = 0; bi < batches.length; bi++) {
     const batch = batches[bi];
     const globalStart = bi * BATCH_SIZE;
-    items[bi].status = 'active';
+
+    // Mark each file in this batch as active
+    for (let j = 0; j < batch.length; j++) {
+      items[globalStart + j].status = 'active';
+    }
     const pct = Math.round(bi / (batches.length + 1) * 100);
     const batchEnd = Math.min(globalStart + batch.length, files.length);
     const statusMsg = batch.length === 1
@@ -525,9 +529,14 @@ async function analyze() {
       const result = await abstractBatch(batch, globalStart);
       const parsed = parseBatchResult(result, batch, globalStart);
       documentAbstracts.push(...parsed);
-      items[bi].status = 'done';
+      // Mark each file in this batch as done
+      for (let j = 0; j < batch.length; j++) {
+        items[globalStart + j].status = 'done';
+      }
     } catch (e) {
-      items[bi].status = 'pending';
+      for (let j = 0; j < batch.length; j++) {
+        items[globalStart + j].status = 'pending';
+      }
       const failedNames = batch.map(f => f.name).join(', ');
       showError(`Batch ${bi + 1} failed (${failedNames}): ${e.message}`);
       document.getElementById('progressSection').style.display = 'none';
@@ -538,8 +547,8 @@ async function analyze() {
   }
 
   // Synthesis
-  items[batches.length].status = 'active';
-  updateProgress(Math.round(batches.length / (batches.length + 1) * 100), 'Synthesizing chain of title and final ownership...', items);
+  items[files.length].status = 'active';
+  updateProgress(Math.round(files.length / (files.length + 1) * 100), 'Synthesizing chain of title and final ownership...', items);
 
   let input = `Below are ${files.length} document abstracts. Synthesize into a complete title opinion.\n\n`;
   if (tract) input += `**Subject Tract:** ${tract}\n\n`;
@@ -713,12 +722,9 @@ async function analyzeAdditional() {
     batches.push(additionalFiles.slice(i, i + BATCH_SIZE));
   }
 
+  // One progress item per FILE so spinner shows on each doc
   const items = [
-    ...batches.map((b, bi) => {
-      const start = bi * BATCH_SIZE + 1;
-      const end = Math.min(start + b.length - 1, additionalFiles.length);
-      return { label: b.length === 1 ? `Additional doc ${start}: ${b[0].name}` : `Additional docs ${start}–${end}`, status: 'pending' };
-    }),
+    ...additionalFiles.map((f) => ({ label: f.name, status: 'pending' })),
     { label: 'Update chain of title with all documents', status: 'pending' },
   ];
 
@@ -728,7 +734,11 @@ async function analyzeAdditional() {
   for (let bi = 0; bi < batches.length; bi++) {
     const batch = batches[bi];
     const globalStart = bi * BATCH_SIZE;
-    items[bi].status = 'active';
+
+    // Mark each file in this batch as active
+    for (let j = 0; j < batch.length; j++) {
+      items[globalStart + j].status = 'active';
+    }
     updateProgress(Math.round(bi / (batches.length + 1) * 100),
       `Reading additional document${batch.length > 1 ? 's' : ''} ${globalStart + 1}${batch.length > 1 ? '–' + (globalStart + batch.length) : ''} of ${additionalFiles.length}...`, items);
 
@@ -736,9 +746,13 @@ async function analyzeAdditional() {
       const result = await abstractBatch(batch, globalOffset + globalStart);
       const parsed = parseBatchResult(result, batch, globalOffset + globalStart);
       newAbstracts.push(...parsed);
-      items[bi].status = 'done';
+      for (let j = 0; j < batch.length; j++) {
+        items[globalStart + j].status = 'done';
+      }
     } catch (e) {
-      items[bi].status = 'pending';
+      for (let j = 0; j < batch.length; j++) {
+        items[globalStart + j].status = 'pending';
+      }
       showError(`Failed on batch: ${e.message}`);
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('addDocsSection').style.display = 'block';
@@ -749,8 +763,8 @@ async function analyzeAdditional() {
 
   // Combine all abstracts
   const allAbstracts = [...documentAbstracts, ...newAbstracts];
-  items[batches.length].status = 'active';
-  updateProgress(Math.round(batches.length / (batches.length + 1) * 100), 'Updating chain of title with all documents combined...', items);
+  items[additionalFiles.length].status = 'active';
+  updateProgress(Math.round(additionalFiles.length / (additionalFiles.length + 1) * 100), 'Updating chain of title with all documents combined...', items);
 
   let input = `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Please re-synthesize the complete chain of title and ownership determination based on ALL ${allAbstracts.length} documents combined.
 
