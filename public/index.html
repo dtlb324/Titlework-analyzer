@@ -111,10 +111,10 @@
         <label class="upload-zone" id="uploadZone" for="fileInput">
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
           </span>
         </label>
-        <input type="file" id="fileInput" multiple accept=".pdf,image/*" style="display:none" />
+        <input type="file" id="fileInput" multiple accept=".pdf,.csv,image/*" style="display:none" />
       </div>
       <div id="fileList"></div>
       <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title</button>
@@ -155,10 +155,10 @@
         <label class="upload-zone" id="uploadZone2" for="fileInput2">
           <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
           </span>
         </label>
-        <input type="file" id="fileInput2" multiple accept=".pdf,image/*" style="display:none" />
+        <input type="file" id="fileInput2" multiple accept=".pdf,.csv,image/*" style="display:none" />
         <div id="fileList2"></div>
         <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
           <button class="btn-primary" id="addDocsBtn" onclick="analyzeAdditional()" disabled style="margin-top:0">→ Analyze Additional Documents</button>
@@ -291,13 +291,25 @@ function setupDragDrop() {
 
 async function handleFiles(newFiles) {
   for (const file of newFiles) {
-    const data = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result.split(',')[1]);
-      r.onerror = () => rej(new Error('Read failed'));
-      r.readAsDataURL(file);
-    });
-    files.push({ name: file.name, type: file.type, size: file.size, data });
+    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+      // Read CSV as plain text
+      const text = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsText(file);
+      });
+      files.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
+    } else {
+      // Read PDF/image as base64
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1]);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsDataURL(file);
+      });
+      files.push({ name: file.name, type: file.type, size: file.size, data, csvText: null });
+    }
   }
   renderFileList();
   document.getElementById('analyzeBtn').disabled = files.length === 0;
@@ -316,7 +328,7 @@ function renderFileList() {
   el.innerHTML = `<div class="file-count">${files.length} document${files.length !== 1 ? 's' : ''} loaded</div>` +
     files.map((f, i) => `
       <div class="file-item">
-        <span class="file-name">📄 ${esc(f.name)}</span>
+        <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
         <button class="file-remove" onclick="removeFile(${i})">×</button>
       </div>`).join('');
@@ -415,21 +427,43 @@ async function callBackend(messages, system) {
   return data.content?.map(b => b.text || '').join('') || '';
 }
 
-// Send a batch of 1-3 files in one API call
+// Send a batch of files in one API call — handles PDF, image, and CSV
 async function abstractBatch(batchFiles, globalStartIdx) {
   const content = [];
+  const csvFiles = [];
+
   for (const file of batchFiles) {
-    if (file.type === 'application/pdf') {
+    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+      // CSVs go as inline text — collect them to append at end
+      csvFiles.push(file);
+    } else if (file.type === 'application/pdf') {
       content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: file.data } });
     } else if (file.type.startsWith('image/')) {
       content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
     }
   }
+
   const docList = batchFiles.map((f, i) => `Document #${globalStartIdx + i + 1} ("${f.name}")`).join(', ');
-  content.push({
-    type: 'text',
-    text: `Abstract each of the following documents in order: ${docList}. Label each section clearly as "DOCUMENT #${globalStartIdx + 1}:", "DOCUMENT #${globalStartIdx + 2}:", etc. Extract every relevant fact. Do not guess at anything illegible.`
-  });
+  let textPrompt = `Abstract each of the following documents in order: ${docList}. Label each section clearly as "DOCUMENT #${globalStartIdx + 1}:", "DOCUMENT #${globalStartIdx + 2}:", etc. Extract every relevant fact. Do not guess at anything illegible.`;
+
+  // Append CSV content inline as text
+  if (csvFiles.length > 0) {
+    textPrompt += '
+
+';
+    csvFiles.forEach((f, i) => {
+      const docNum = globalStartIdx + batchFiles.indexOf(f) + 1;
+      textPrompt += '\n\nDOCUMENT #' + docNum + ' ("' + f.name + '") — CSV DATA:\n' + f.csvText + '\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information present in the data.';
+
+
+
+
+
+
+    });
+  }
+
+  content.push({ type: 'text', text: textPrompt });
   return await callBackend([{ role: 'user', content }], ABSTRACT_PROMPT);
 }
 
@@ -626,13 +660,23 @@ let additionalFiles = [];
 
 async function handleAdditionalFiles(newFiles) {
   for (const file of newFiles) {
-    const data = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result.split(',')[1]);
-      r.onerror = () => rej(new Error('Read failed'));
-      r.readAsDataURL(file);
-    });
-    additionalFiles.push({ name: file.name, type: file.type, size: file.size, data });
+    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+      const text = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsText(file);
+      });
+      additionalFiles.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
+    } else {
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1]);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsDataURL(file);
+      });
+      additionalFiles.push({ name: file.name, type: file.type, size: file.size, data, csvText: null });
+    }
   }
   renderAdditionalFileList();
   document.getElementById('addDocsBtn').disabled = additionalFiles.length === 0;
@@ -644,7 +688,7 @@ function renderAdditionalFileList() {
   el.innerHTML = `<div class="file-count" style="margin-top:.8rem">${additionalFiles.length} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded</div>` +
     additionalFiles.map((f, i) => `
       <div class="file-item">
-        <span class="file-name">📄 ${esc(f.name)}</span>
+        <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
         <button class="file-remove" onclick="removeAdditionalFile(${i})">×</button>
       </div>`).join('');
