@@ -3,10 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<<<<<<< vercel/install-and-configure-vercel-s-dt6cuk
 <title>Mineral Title Analyzer — Joe Brown Insurance</title>
 <script>
   window.si = window.si || function () { (window.siq = window.siq || []).push(arguments); };
 </script>
+=======
+<title>Mineral Title Analyzer</title>
+>>>>>>> main
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Georgia','Times New Roman',serif; background: #f5efe4; background-image: radial-gradient(ellipse at 15% 10%,#f9f1de 0%,transparent 55%),radial-gradient(ellipse at 85% 90%,#ede2cc 0%,transparent 55%); min-height: 100vh; color: #4a3c28; padding-bottom: 3rem; }
@@ -24,8 +28,7 @@
   textarea { resize: vertical; min-height: 60px; }
   .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; background: #faf6ee; cursor: pointer; transition: all .2s; display: block; width: 100%; padding: 2rem 1.5rem; text-align: center; }
   .upload-zone:hover, .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
-  .upload-icon { font-size: 2rem; margin-bottom: .5rem; display: block; }
-  .upload-text { color: #b8631e; font-size: 1rem; display: block; margin-bottom: .4rem; }
+  .upload-text { color: #b8631e; font-size: 1rem; display: block; margin-bottom: .4rem; text-align: center; }
   .upload-hint { color: #a08a6a; font-size: .8rem; display: block; line-height: 1.8; margin-top: .3rem; }
   .file-list { margin-top: 1rem; }
   .file-count { font-size: .72rem; letter-spacing: .15em; text-transform: uppercase; color: #8a6f4a; font-weight: bold; margin-bottom: .5rem; }
@@ -38,6 +41,8 @@
   .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg,#d07628,#9a4f12); }
   .btn-primary:disabled { background: #d9c9a8; cursor: not-allowed; }
   .btn-secondary { background: transparent; border: 1px solid #c8a96e; color: #8a6f4a; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; }
+  .btn-add-docs { background: #4a7c4e; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; transition: background .15s; }
+  .btn-add-docs:hover { background: #5a9c5e; }
   .btn-secondary:hover { background: #faf3e3; color: #b8631e; }
   .btn-ask { background: #b8631e; border: none; color: #fff; padding: .7rem 1.4rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .9rem; white-space: nowrap; }
   .btn-ask:hover { background: #d07628; }
@@ -76,9 +81,9 @@
 <body>
 
 <div class="header">
-  <div class="eyebrow">⬡ Chain of Title Analyzer ⬡</div>
   <h1>Mineral Ownership Builder</h1>
-  <div class="tagline">Joe Brown Insurance — Title Research Tool</div>
+  <div class="tagline">Title Research Tool</div>
+
 </div>
 
 <div class="disclaimer" id="disclaimer" style="display:none">
@@ -111,13 +116,12 @@
       <div class="field">
         <label class="field-label">Upload Documents</label>
         <label class="upload-zone" id="uploadZone" for="fileInput">
-          <span class="upload-icon">⬆</span>
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
           </span>
         </label>
-        <input type="file" id="fileInput" multiple accept=".pdf,image/*" style="display:none" />
+        <input type="file" id="fileInput" multiple accept=".pdf,.csv,image/*" style="display:none" />
       </div>
       <div id="fileList"></div>
       <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title</button>
@@ -142,7 +146,31 @@
           <input type="text" id="followupInput" placeholder="Ask about specific owners, fractions, gaps, curative items..." />
           <button class="btn-ask" onclick="askFollowup()">Ask</button>
         </div>
-        <button class="btn-secondary" onclick="resetAll()" style="margin-top:1rem">← New Analysis</button>
+        <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
+          <button class="btn-add-docs" onclick="showAddDocs()">+ Add More Documents</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add More Documents panel -->
+    <div id="addDocsSection" style="display:none">
+      <div class="card">
+        <label class="field-label">Add More Documents to This Analysis</label>
+        <p style="color:#8a6f4a;font-size:.88rem;margin-bottom:1rem;line-height:1.5">
+          Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined.
+        </p>
+        <label class="upload-zone" id="uploadZone2" for="fileInput2">
+          <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
+          <span class="upload-hint">
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+          </span>
+        </label>
+        <input type="file" id="fileInput2" multiple accept=".pdf,.csv,image/*" style="display:none" />
+        <div id="fileList2"></div>
+        <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
+          <button class="btn-primary" id="addDocsBtn" onclick="analyzeAdditional()" disabled style="margin-top:0">→ Analyze Additional Documents</button>
+          <button class="btn-secondary" onclick="hideAddDocs()">Cancel</button>
+        </div>
       </div>
     </div>
 
@@ -150,31 +178,32 @@
 </div>
 
 <script>
-const BATCH_SIZE = 3;
+const BATCH_SIZE = 2;
 
-const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney. You may receive one or more courthouse documents in a single request. Abstract EACH document separately with a clear header like "DOCUMENT #1:" before each one.
+const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
-For each document extract:
+Respond in this exact format — no extra commentary:
 
-**Document Type:** (Warranty Deed, Special Warranty Deed, Quitclaim Deed, Mineral Deed, Royalty Deed, Assignment, Probate Order, Will, Affidavit of Heirship, Lease, Mortgage, Release, Division Order, etc.)
-**Date Executed:** (or "not visible")
-**Date Recorded:** (or "not visible")
-**Recording Reference:** (Vol/Page or Instrument number — only what is clearly visible)
-**Grantor(s):** (exact names as written, marital status if stated)
-**Grantee(s):** (exact names as written)
-**Legal Description:** (quote as written; note if metes and bounds vs. section/township/range)
-**Interest Conveyed:**
-- Surface: yes/no/unclear
-- Minerals: yes/no/unclear — fraction if stated
-- Royalty/NPRI: yes/no — fraction if stated
-- Term or perpetual
-- After-acquired title clause: yes/no
-**Fraction Conveyed:** (exact wording)
-**Reservations/Exceptions:** (quote every reservation verbatim — critical)
-**Warranty Type:** (full / special / quitclaim)
-**Acknowledgment:** (properly notarized? yes/no/unclear)
-**Notable Issues:** illegible text, marital property concerns, execution defects, cross-references, ambiguities
-**Confidence:** one sentence on confidence level. Write "ILLEGIBLE — VERIFY MANUALLY" for anything unreadable. DO NOT GUESS.`;
+DOC TYPE: [type]
+DATE EXECUTED: [date or "not visible"]
+DATE RECORDED: [date or "not visible"]
+RECORDING REF: [Vol/Page or instrument number, or "not visible"]
+GRANTOR: [exact name(s) as written]
+GRANTEE: [exact name(s) as written]
+LEGAL DESC: [quoted description, abbreviated if long — note survey type]
+SURFACE: [yes/no/unclear]
+MINERALS: [yes/no/unclear — fraction if stated]
+ROYALTY/NPRI: [yes/no — fraction if stated]
+TERM: [perpetual/term — specify if term]
+AFTER-ACQUIRED TITLE: [yes/no]
+FRACTION CONVEYED: [exact wording]
+RESERVATIONS: [quote verbatim — if none, write "none stated"]
+WARRANTY: [full/special/quitclaim]
+ACKNOWLEDGMENT: [yes/no/unclear]
+ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities — or "none noted"]
+CONFIDENCE: [one sentence]
+
+Write ILLEGIBLE — VERIFY MANUALLY for anything you cannot read. DO NOT GUESS or fill in missing information.`;
 
 const SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions.
 
@@ -269,13 +298,25 @@ function setupDragDrop() {
 
 async function handleFiles(newFiles) {
   for (const file of newFiles) {
-    const data = await new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result.split(',')[1]);
-      r.onerror = () => rej(new Error('Read failed'));
-      r.readAsDataURL(file);
-    });
-    files.push({ name: file.name, type: file.type, size: file.size, data });
+    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+      // Read CSV as plain text
+      const text = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsText(file);
+      });
+      files.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
+    } else {
+      // Read PDF/image as base64
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1]);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsDataURL(file);
+      });
+      files.push({ name: file.name, type: file.type, size: file.size, data, csvText: null });
+    }
   }
   renderFileList();
   document.getElementById('analyzeBtn').disabled = files.length === 0;
@@ -294,7 +335,7 @@ function renderFileList() {
   el.innerHTML = `<div class="file-count">${files.length} document${files.length !== 1 ? 's' : ''} loaded</div>` +
     files.map((f, i) => `
       <div class="file-item">
-        <span class="file-name">📄 ${esc(f.name)}</span>
+        <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
         <button class="file-remove" onclick="removeFile(${i})">×</button>
       </div>`).join('');
@@ -307,7 +348,20 @@ function removeFile(i) {
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-function showError(msg) { document.getElementById('errorBox').innerHTML = `<div class="error-msg">${esc(msg)}</div>`; }
+function showError(msg) {
+  // Split on first colon to get a title vs detail
+  const colonIdx = msg.indexOf(':');
+  let title = 'Error';
+  let detail = msg;
+  if (colonIdx > 0 && colonIdx < 40) {
+    title = msg.slice(0, colonIdx).trim();
+    detail = msg.slice(colonIdx + 1).trim();
+  }
+  document.getElementById('errorBox').innerHTML = `
+    <div class="error-msg">
+      <strong>${esc(title)}</strong><br>${esc(detail)}
+    </div>`;
+}
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 
 function updateProgress(pct, status, items) {
@@ -323,39 +377,89 @@ function updateProgress(pct, status, items) {
 }
 
 async function callBackend(messages, system) {
-  const response = await fetch('/api/analyze', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
-    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, system, messages }),
-  });
+  let response;
+  try {
+    response = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, system, messages }),
+    });
+  } catch (networkErr) {
+    // Fetch itself failed — network level problem
+    if (networkErr.message.includes('Failed to fetch')) {
+      throw new Error('Network error: Could not reach the server. Check your internet connection and make sure you are using the Vercel URL (not a local file). If the problem persists, the server may be temporarily unavailable.');
+    }
+    throw new Error('Network error: ' + networkErr.message);
+  }
+
   const text = await response.text();
   let data;
   try { data = JSON.parse(text); }
   catch {
-    if (response.status === 413 || text.toLowerCase().includes('too large') || text.toLowerCase().includes('request en')) {
-      throw new Error('Files too large for this batch. Try uploading fewer or smaller documents.');
+    if (response.status === 413) {
+      throw new Error('File too large (HTTP 413): The document(s) in this batch exceed the server size limit. Try splitting into smaller files or scanning at a lower resolution (150 DPI instead of 300 DPI).');
     }
-    throw new Error(`Server error (${response.status}). Files in this batch may be too large.`);
+    if (response.status === 504 || response.status === 524) {
+      throw new Error('Timeout error (HTTP ' + response.status + '): The server took too long to process this batch. Try uploading fewer documents at a time, or check if the PDF files are very large.');
+    }
+    if (response.status === 403) {
+      throw new Error('Access denied (HTTP 403): Deployment protection may be enabled on Vercel. Go to Vercel → Project → Settings → Deployment Protection and disable it.');
+    }
+    if (response.status === 401) {
+      throw new Error('Incorrect password (HTTP 401): The access password is wrong or was not entered. Please refresh and try again.');
+    }
+    if (text.toLowerCase().includes('too large') || text.toLowerCase().includes('request en') || text.toLowerCase().includes('payload')) {
+      throw new Error('File too large: The document(s) in this batch are too big to send. Try uploading one document at a time, or reduce the file size by scanning at 150 DPI.');
+    }
+    throw new Error('Unexpected server response (HTTP ' + response.status + '): ' + text.slice(0, 200));
   }
-  if (!response.ok || data.error) throw new Error(data.error?.message || data.error || `HTTP ${response.status}`);
+
+  if (!response.ok || data.error) {
+    const errMsg = data.error?.message || data.error || '';
+    if (response.status === 401 || errMsg.includes('authentication') || errMsg.includes('api key') || errMsg.includes('x-api-key')) {
+      throw new Error('API key error: The Anthropic API key is missing or invalid. Check that ANTHROPIC_API_KEY is set correctly in Vercel → Project → Settings → Environment Variables, then redeploy.');
+    }
+    if (response.status === 429 || errMsg.includes('rate limit') || errMsg.includes('overloaded')) {
+      throw new Error("Rate limit / overloaded: Anthropic's servers are busy right now. Wait 30 seconds and try again.");
+    }
+    if (errMsg.includes('credit') || errMsg.includes('balance') || errMsg.includes('billing')) {
+      throw new Error('Insufficient API credits: Your Anthropic account is out of credit. Add credit at console.anthropic.com/settings/billing.');
+    }
+    if (errMsg.includes('max_tokens') || errMsg.includes('context') || errMsg.includes('too long')) {
+      throw new Error('Document too long: This document has too much text to process in one call. Try splitting it into separate files by page range.');
+    }
+    throw new Error('API error: ' + (errMsg || 'HTTP ' + response.status));
+  }
+
   return data.content?.map(b => b.text || '').join('') || '';
 }
 
-// Send a batch of 1-3 files in one API call
+// Send a batch of files in one API call — handles PDF, image, and CSV
 async function abstractBatch(batchFiles, globalStartIdx) {
   const content = [];
+  const csvFiles = [];
+
   for (const file of batchFiles) {
-    if (file.type === 'application/pdf') {
+    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+      csvFiles.push(file);
+    } else if (file.type === 'application/pdf') {
       content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: file.data } });
     } else if (file.type.startsWith('image/')) {
       content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
     }
   }
-  const docList = batchFiles.map((f, i) => `Document #${globalStartIdx + i + 1} ("${f.name}")`).join(', ');
-  content.push({
-    type: 'text',
-    text: `Abstract each of the following documents in order: ${docList}. Label each section clearly as "DOCUMENT #${globalStartIdx + 1}:", "DOCUMENT #${globalStartIdx + 2}:", etc. Extract every relevant fact. Do not guess at anything illegible.`
-  });
+
+  const docList = batchFiles.map((f, i) => 'Document #' + (globalStartIdx + i + 1) + ' (' + f.name + ')').join(', ');
+  let textPrompt = 'Abstract each of the following documents in order: ' + docList + '. Label each section clearly as DOCUMENT #' + (globalStartIdx + 1) + ':, DOCUMENT #' + (globalStartIdx + 2) + ':, etc. Extract every relevant fact. Do not guess at anything illegible.';
+
+  if (csvFiles.length > 0) {
+    csvFiles.forEach(function(f) {
+      var docNum = globalStartIdx + batchFiles.indexOf(f) + 1;
+      textPrompt += '\n\nDOCUMENT #' + docNum + ' (' + f.name + ') - CSV DATA:\n' + f.csvText + '\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.';
+    });
+  }
+
+  content.push({ type: 'text', text: textPrompt });
   return await callBackend([{ role: 'user', content }], ABSTRACT_PROMPT);
 }
 
@@ -410,7 +514,7 @@ async function analyze() {
     const pct = Math.round(bi / (batches.length + 1) * 100);
     const batchEnd = Math.min(globalStart + batch.length, files.length);
     const statusMsg = batch.length === 1
-      ? `Reading document ${globalStart + 1} of ${files.length}...`
+      ? `Reading document ${globalStart + 1} of ${files.length}: ${batch[0].name}...`
       : `Reading documents ${globalStart + 1}–${batchEnd} of ${files.length} together...`;
     updateProgress(pct, statusMsg, items);
 
@@ -421,7 +525,8 @@ async function analyze() {
       items[bi].status = 'done';
     } catch (e) {
       items[bi].status = 'pending';
-      showError(`Batch ${bi + 1} failed: ${e.message}`);
+      const failedNames = batch.map(f => f.name).join(', ');
+      showError(`Batch ${bi + 1} failed (${failedNames}): ${e.message}`);
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('uploadSection').style.display = 'block';
       document.getElementById('analyzeBtn').disabled = false;
@@ -525,15 +630,176 @@ function md(text) {
   return h;
 }
 
+function showAddDocs() {
+  document.getElementById('addDocsSection').style.display = 'block';
+  document.getElementById('followupSection').style.display = 'none';
+  // Setup drag drop for second upload zone
+  const zone2 = document.getElementById('uploadZone2');
+  ['dragenter','dragover'].forEach(evt => zone2.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone2.classList.add('drag'); }));
+  ['dragleave','drop'].forEach(evt => zone2.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone2.classList.remove('drag'); }));
+  zone2.addEventListener('drop', e => { handleAdditionalFiles(Array.from(e.dataTransfer.files)); });
+  document.getElementById('fileInput2').addEventListener('change', async e => {
+    await handleAdditionalFiles(Array.from(e.target.files));
+    e.target.value = '';
+  });
+}
+
+function hideAddDocs() {
+  document.getElementById('addDocsSection').style.display = 'none';
+  document.getElementById('followupSection').style.display = 'block';
+  additionalFiles = [];
+  document.getElementById('fileList2').innerHTML = '';
+  document.getElementById('addDocsBtn').disabled = true;
+}
+
+let additionalFiles = [];
+
+async function handleAdditionalFiles(newFiles) {
+  for (const file of newFiles) {
+    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+      const text = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsText(file);
+      });
+      additionalFiles.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
+    } else {
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1]);
+        r.onerror = () => rej(new Error('Read failed'));
+        r.readAsDataURL(file);
+      });
+      additionalFiles.push({ name: file.name, type: file.type, size: file.size, data, csvText: null });
+    }
+  }
+  renderAdditionalFileList();
+  document.getElementById('addDocsBtn').disabled = additionalFiles.length === 0;
+}
+
+function renderAdditionalFileList() {
+  const el = document.getElementById('fileList2');
+  if (!additionalFiles.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="file-count" style="margin-top:.8rem">${additionalFiles.length} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded</div>` +
+    additionalFiles.map((f, i) => `
+      <div class="file-item">
+        <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
+        <span class="file-size">${formatBytes(f.size)}</span>
+        <button class="file-remove" onclick="removeAdditionalFile(${i})">×</button>
+      </div>`).join('');
+}
+
+function removeAdditionalFile(i) {
+  additionalFiles.splice(i, 1);
+  renderAdditionalFileList();
+  document.getElementById('addDocsBtn').disabled = additionalFiles.length === 0;
+}
+
+async function analyzeAdditional() {
+  if (!additionalFiles.length) return;
+  clearError();
+  document.getElementById('addDocsBtn').disabled = true;
+
+  // Hide add docs panel, show progress
+  document.getElementById('addDocsSection').style.display = 'none';
+  document.getElementById('progressSection').style.display = 'block';
+
+  const batches = [];
+  for (let i = 0; i < additionalFiles.length; i += BATCH_SIZE) {
+    batches.push(additionalFiles.slice(i, i + BATCH_SIZE));
+  }
+
+  const items = [
+    ...batches.map((b, bi) => {
+      const start = bi * BATCH_SIZE + 1;
+      const end = Math.min(start + b.length - 1, additionalFiles.length);
+      return { label: b.length === 1 ? `Additional doc ${start}: ${b[0].name}` : `Additional docs ${start}–${end}`, status: 'pending' };
+    }),
+    { label: 'Update chain of title with all documents', status: 'pending' },
+  ];
+
+  const newAbstracts = [];
+  const globalOffset = documentAbstracts.length;
+
+  for (let bi = 0; bi < batches.length; bi++) {
+    const batch = batches[bi];
+    const globalStart = bi * BATCH_SIZE;
+    items[bi].status = 'active';
+    updateProgress(Math.round(bi / (batches.length + 1) * 100),
+      `Reading additional document${batch.length > 1 ? 's' : ''} ${globalStart + 1}${batch.length > 1 ? '–' + (globalStart + batch.length) : ''} of ${additionalFiles.length}...`, items);
+
+    try {
+      const result = await abstractBatch(batch, globalOffset + globalStart);
+      const parsed = parseBatchResult(result, batch, globalOffset + globalStart);
+      newAbstracts.push(...parsed);
+      items[bi].status = 'done';
+    } catch (e) {
+      items[bi].status = 'pending';
+      showError(`Failed on batch: ${e.message}`);
+      document.getElementById('progressSection').style.display = 'none';
+      document.getElementById('addDocsSection').style.display = 'block';
+      document.getElementById('addDocsBtn').disabled = false;
+      return;
+    }
+  }
+
+  // Combine all abstracts
+  const allAbstracts = [...documentAbstracts, ...newAbstracts];
+  items[batches.length].status = 'active';
+  updateProgress(Math.round(batches.length / (batches.length + 1) * 100), 'Updating chain of title with all documents combined...', items);
+
+  let input = `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Please re-synthesize the complete chain of title and ownership determination based on ALL ${allAbstracts.length} documents combined.
+
+---
+
+`;
+  allAbstracts.forEach((d, i) => { input += `### Document ${i + 1}: ${d.filename}
+
+${d.abstract}
+
+---
+
+`; });
+
+  try {
+    const synthesis = await callBackend([{ role: 'user', content: input }], SYNTHESIS_PROMPT);
+    items[batches.length].status = 'done';
+    updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
+
+    // Update global state
+    documentAbstracts = allAbstracts;
+    additionalFiles = [];
+
+    conversationHistory.push({ role: 'user', content: input, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together` });
+    conversationHistory.push({ role: 'assistant', content: synthesis });
+
+    setTimeout(() => {
+      document.getElementById('progressSection').style.display = 'none';
+      document.getElementById('fileList2').innerHTML = '';
+      document.getElementById('followupSection').style.display = 'block';
+      renderResults();
+    }, 600);
+  } catch (e) {
+    showError('Update failed: ' + e.message);
+    document.getElementById('progressSection').style.display = 'none';
+    document.getElementById('addDocsSection').style.display = 'block';
+    document.getElementById('addDocsBtn').disabled = false;
+  }
+}
+
 function resetAll() {
-  files = []; conversationHistory = []; documentAbstracts = [];
+  files = []; conversationHistory = []; documentAbstracts = []; additionalFiles = [];
   ['tractDescription','contextNotes','followupInput'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('results').innerHTML = '';
   document.getElementById('fileList').innerHTML = '';
+  document.getElementById('fileList2').innerHTML = '';
   document.getElementById('followupSection').style.display = 'none';
+  document.getElementById('addDocsSection').style.display = 'none';
   document.getElementById('uploadSection').style.display = 'block';
   document.getElementById('progressSection').style.display = 'none';
   document.getElementById('analyzeBtn').disabled = true;
+  document.getElementById('addDocsBtn').disabled = true;
   clearError();
 }
 </script>

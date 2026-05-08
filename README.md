@@ -1,8 +1,9 @@
-# Mineral Title Analyzer — Deployment Guide
+# Mineral Title Analyzer — Deployment Guide  
 
 This is a web app for landmen to analyze courthouse documents and build chain of title. Deploy it once to Vercel, then anyone with the URL can use it from any browser, anywhere.
+**The analysis only works with Claude AI right now**
 
-**Total deployment time: ~20 minutes**
+**Total deployment time: ~30 minutes**
 
 ---
 
@@ -15,9 +16,8 @@ A URL like `https://title-analyzer-yourname.vercel.app` that you and your cowork
 ## What you need before starting
 
 1. The `title-analyzer` folder (this folder, with `api/`, `public/`, etc.)
-2. Your Anthropic API key (from `console.anthropic.com/settings/keys`)
-3. About 20 minutes
-4. An email address
+2. Your Anthropic API key (from `console.anthropic.com/settings/keys`). 
+3. An email address
 
 ---
 
@@ -65,12 +65,12 @@ Vercel runs the actual web app.
 2. You'll see a list of your GitHub repositories. Find `title-analyzer` and click **Import**
 3. **Don't click Deploy yet.** First, expand the **Environment Variables** section
 4. Add this environment variable:
-   - **Name:** `ANTHROPIC_API_KEY`
+   - **Name:** `ANTHROPIC_API_KEY` - Case-Sensitive so make sure you copy the name exatly. 
    - **Value:** paste your Anthropic API key (starts with `sk-ant-...`)
    - Click **Add**
 5. *(Optional but recommended)* Add a second environment variable for password protection:
    - **Name:** `APP_PASSWORD`
-   - **Value:** any password you want (e.g., `JoeBrown2026`)
+   - **Value:** any password you want (e.g., `Joe2026`)
    - Click **Add**
 6. Click **Deploy**
 7. Wait ~30 seconds for it to build
@@ -103,7 +103,7 @@ Set a monthly spending limit at https://console.anthropic.com/settings/limits as
 
 ## How to update the app later
 
-If you ever want to change something (system prompt, styling, etc.):
+If you ever want to change something in your cloned repository (system prompt, styling, etc.):
 
 1. Edit the file on GitHub directly (click the pencil icon)
 2. Commit the change
