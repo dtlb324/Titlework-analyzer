@@ -16,8 +16,7 @@ A URL like `https://title-analyzer-yourname.vercel.app` that you and your cowork
 
 1. The `title-analyzer` folder (this folder, with `api/`, `public/`, etc.)
 2. Your Anthropic API key (from `console.anthropic.com/settings/keys`)
-3. About 20 minutes
-4. An email address
+3. An email address
 
 ---
 
