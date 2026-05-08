@@ -434,7 +434,6 @@ async function abstractBatch(batchFiles, globalStartIdx) {
 
   for (const file of batchFiles) {
     if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
-      // CSVs go as inline text — collect them to append at end
       csvFiles.push(file);
     } else if (file.type === 'application/pdf') {
       content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: file.data } });
@@ -443,23 +442,13 @@ async function abstractBatch(batchFiles, globalStartIdx) {
     }
   }
 
-  const docList = batchFiles.map((f, i) => `Document #${globalStartIdx + i + 1} ("${f.name}")`).join(', ');
-  let textPrompt = `Abstract each of the following documents in order: ${docList}. Label each section clearly as "DOCUMENT #${globalStartIdx + 1}:", "DOCUMENT #${globalStartIdx + 2}:", etc. Extract every relevant fact. Do not guess at anything illegible.`;
+  const docList = batchFiles.map((f, i) => 'Document #' + (globalStartIdx + i + 1) + ' (' + f.name + ')').join(', ');
+  let textPrompt = 'Abstract each of the following documents in order: ' + docList + '. Label each section clearly as DOCUMENT #' + (globalStartIdx + 1) + ':, DOCUMENT #' + (globalStartIdx + 2) + ':, etc. Extract every relevant fact. Do not guess at anything illegible.';
 
-  // Append CSV content inline as text
   if (csvFiles.length > 0) {
-    textPrompt += '
-
-';
-    csvFiles.forEach((f, i) => {
-      const docNum = globalStartIdx + batchFiles.indexOf(f) + 1;
-      textPrompt += '\n\nDOCUMENT #' + docNum + ' ("' + f.name + '") — CSV DATA:\n' + f.csvText + '\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information present in the data.';
-
-
-
-
-
-
+    csvFiles.forEach(function(f) {
+      var docNum = globalStartIdx + batchFiles.indexOf(f) + 1;
+      textPrompt += '\n\nDOCUMENT #' + docNum + ' (' + f.name + ') - CSV DATA:\n' + f.csvText + '\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.';
     });
   }
 
