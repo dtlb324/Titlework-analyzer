@@ -1,6 +1,7 @@
-# Mineral Title Analyzer — Deployment Guide
+# Mineral Title Analyzer — Deployment Guide  
 
 This is a web app for landmen to analyze courthouse documents and build chain of title. Deploy it once to Vercel, then anyone with the URL can use it from any browser, anywhere.
+**The analysis only works with Claude AI right now**
 
 **Total deployment time: ~30 minutes**
 
@@ -15,7 +16,7 @@ A URL like `https://title-analyzer-yourname.vercel.app` that you and your cowork
 ## What you need before starting
 
 1. The `title-analyzer` folder (this folder, with `api/`, `public/`, etc.)
-2. Your Anthropic API key (from `console.anthropic.com/settings/keys`). Currently ownly works with Claude AI. 
+2. Your Anthropic API key (from `console.anthropic.com/settings/keys`). 
 3. An email address
 
 ---
@@ -69,7 +70,7 @@ Vercel runs the actual web app.
    - Click **Add**
 5. *(Optional but recommended)* Add a second environment variable for password protection:
    - **Name:** `APP_PASSWORD`
-   - **Value:** any password you want (e.g., `JoeBrown2026`)
+   - **Value:** any password you want (e.g., `Joe2026`)
    - Click **Add**
 6. Click **Deploy**
 7. Wait ~30 seconds for it to build
