@@ -39,8 +39,12 @@
   .btn-secondary { background: transparent; border: 1px solid #c8a96e; color: #8a6f4a; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; }
   .btn-add-docs { background: #4a7c4e; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; transition: background .15s; }
   .btn-add-docs:hover { background: #5a9c5e; }
+  .btn-download { background: #2a5f8f; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; transition: background .15s; }
+  .btn-download:hover { background: #3a7abf; }
   .btn-secondary:hover { background: #faf3e3; color: #b8631e; }
   .btn-ask { background: #b8631e; border: none; color: #fff; padding: .7rem 1.4rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .9rem; white-space: nowrap; }
+  .btn-download { background: #2a5c2a; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; white-space: nowrap; transition: background .15s; }
+  .btn-download:hover { background: #3a7c3a; }
   .btn-ask:hover { background: #d07628; }
   .progress-card { background: #fff; border: 1px solid #d9c9a8; border-radius: 6px; padding: 1.5rem; margin-bottom: 1.5rem; }
   .progress-status { color: #6b3410; font-size: .95rem; margin-bottom: .8rem; font-style: italic; }
@@ -73,6 +77,8 @@
   .password-gate h2 { color: #6b3410; margin-bottom: .8rem; font-weight: normal; font-size: 1.4rem; }
   .password-gate p { color: #8a6f4a; font-size: .9rem; margin-bottom: 1.5rem; line-height: 1.5; }
 </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body>
 
@@ -144,6 +150,7 @@
         </div>
         <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
           <button class="btn-add-docs" onclick="showAddDocs()">+ Add More Documents</button>
+          <button class="btn-download" onclick="downloadPDF()">Download PDF</button>
         </div>
       </div>
     </div>
@@ -784,6 +791,194 @@ ${d.abstract}
   }
 }
 
+function downloadPDF() {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 20;
+  const maxWidth = pageWidth - margin * 2;
+  let y = margin;
+
+  // Header
+  doc.setFillColor(184, 99, 30);
+  doc.rect(0, 0, pageWidth, 18, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(14);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Mineral Ownership Builder', margin, 12);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Title Research Tool', pageWidth - margin, 12, { align: 'right' });
+
+  y = 28;
+
+  // Date
+  doc.setTextColor(120, 80, 40);
+  doc.setFontSize(8);
+  doc.text('Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), margin, y);
+  y += 8;
+
+  // Disclaimer
+  doc.setFillColor(255, 248, 235);
+  doc.setDrawColor(200, 169, 110);
+  doc.rect(margin, y, maxWidth, 10, 'FD');
+  doc.setTextColor(107, 52, 16);
+  doc.setFontSize(7.5);
+  doc.setFont('helvetica', 'bold');
+  doc.text('AI-ASSISTED ANALYSIS — NOT A LEGAL OPINION. Verify all facts against source documents before any action.', margin + 3, y + 6.5);
+  y += 16;
+
+  // Get analysis content from the page
+  const analysisCards = document.querySelectorAll('.analysis-card');
+  if (analysisCards.length === 0) {
+    alert('No analysis to download yet.');
+    return;
+  }
+
+  function addText(text, fontSize, isBold, color, indent) {
+    doc.setFontSize(fontSize);
+    doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+    doc.setTextColor(color[0], color[1], color[2]);
+    const lines = doc.splitTextToSize(text, maxWidth - (indent || 0));
+    lines.forEach(line => {
+      if (y + fontSize * 0.4 > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+        // Repeat header on new pages
+        doc.setFillColor(184, 99, 30);
+        doc.rect(0, 0, pageWidth, 12, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Mineral Ownership Builder — Title Research Tool', margin, 8);
+        y = 20;
+        doc.setFontSize(fontSize);
+        doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+        doc.setTextColor(color[0], color[1], color[2]);
+      }
+      doc.text(line, margin + (indent || 0), y);
+      y += fontSize * 0.45;
+    });
+    y += fontSize * 0.15;
+  }
+
+  // Process each analysis card
+  analysisCards.forEach((card, cardIdx) => {
+    const acDiv = card.querySelector('.ac');
+    if (!acDiv) return;
+
+    if (cardIdx > 0) {
+      // Follow-up answers — add a separator
+      y += 4;
+      doc.setDrawColor(200, 169, 110);
+      doc.line(margin, y, pageWidth - margin, y);
+      y += 6;
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(138, 111, 74);
+      doc.text('Updated Analysis', margin, y);
+      y += 6;
+    }
+
+    // Walk through child elements
+    acDiv.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) return;
+      const tag = node.tagName?.toLowerCase();
+      const text = node.innerText || node.textContent || '';
+      if (!text.trim()) return;
+
+      if (tag === 'h3') {
+        y += 3;
+        // Section header with background
+        doc.setFillColor(240, 227, 200);
+        doc.rect(margin, y - 4, maxWidth, 8, 'F');
+        addText(text.trim().toUpperCase(), 8.5, true, [184, 99, 30], 0);
+        y += 1;
+      } else if (tag === 'h2') {
+        y += 2;
+        addText(text.trim(), 11, true, [107, 52, 16], 0);
+      } else if (tag === 'p') {
+        // Handle bold inline
+        const parts = node.innerHTML.split(/<strong>|<\/strong>/);
+        let lineText = '';
+        parts.forEach((part, pi) => {
+          lineText += part.replace(/<[^>]+>/g, '');
+        });
+        addText(lineText.trim(), 9, false, [74, 60, 40], 0);
+      } else if (tag === 'ul') {
+        node.querySelectorAll('li').forEach(li => {
+          addText('• ' + (li.innerText || li.textContent || '').trim(), 8.5, false, [74, 60, 40], 4);
+        });
+      } else if (tag === 'table') {
+        y += 2;
+        const rows = node.querySelectorAll('tr');
+        const colCount = rows[0]?.querySelectorAll('th,td').length || 1;
+        const colWidth = maxWidth / colCount;
+        const rowHeight = 7;
+
+        rows.forEach((row, ri) => {
+          if (y + rowHeight > pageHeight - margin) {
+            doc.addPage();
+            y = margin + 8;
+          }
+          const cells = row.querySelectorAll('th, td');
+          const isHeader = row.querySelector('th') !== null;
+
+          if (isHeader) {
+            doc.setFillColor(184, 99, 30);
+            doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
+            doc.setTextColor(255, 255, 255);
+            doc.setFontSize(7.5);
+            doc.setFont('helvetica', 'bold');
+          } else {
+            if (ri % 2 === 0) {
+              doc.setFillColor(250, 246, 238);
+              doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
+            }
+            doc.setDrawColor(232, 216, 184);
+            doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'D');
+            doc.setTextColor(74, 60, 40);
+            doc.setFontSize(7.5);
+            doc.setFont('helvetica', 'normal');
+          }
+
+          cells.forEach((cell, ci) => {
+            const cellText = (cell.innerText || cell.textContent || '').trim();
+            const x = margin + ci * colWidth + 2;
+            const lines = doc.splitTextToSize(cellText, colWidth - 4);
+            doc.text(lines[0] || '', x, y);
+          });
+          y += rowHeight;
+        });
+        y += 3;
+      }
+    });
+  });
+
+  // Footer on last page
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFontSize(7);
+    doc.setTextColor(160, 138, 106);
+    doc.setFont('helvetica', 'normal');
+    doc.text('Page ' + p + ' of ' + totalPages, pageWidth / 2, pageHeight - 8, { align: 'center' });
+    doc.text('Mineral Ownership Builder — Title Research Tool', margin, pageHeight - 8);
+    doc.text('AI-assisted analysis — not a legal opinion', pageWidth - margin, pageHeight - 8, { align: 'right' });
+  }
+
+  // Generate filename with date
+  const date = new Date().toISOString().slice(0, 10);
+  const tract = document.getElementById('tractDescription')?.value?.trim();
+  const filename = tract
+    ? 'Title-Analysis-' + tract.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30) + '-' + date + '.pdf'
+    : 'Title-Analysis-' + date + '.pdf';
+
+  doc.save(filename);
+}
+
 function resetAll() {
   files = []; conversationHistory = []; documentAbstracts = []; additionalFiles = [];
   ['tractDescription','contextNotes','followupInput'].forEach(id => document.getElementById(id).value = '');
@@ -799,6 +994,6 @@ function resetAll() {
   clearError();
 }
 </script>
- <script defer src="/_vercel/insights/script.js"></script>
+  <script defer src="/_vercel/insights/script.js"></script>
 </body>
 </html>
