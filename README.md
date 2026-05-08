@@ -15,7 +15,7 @@ A URL like `https://title-analyzer-yourname.vercel.app` that you and your cowork
 ## What you need before starting
 
 1. The `title-analyzer` folder (this folder, with `api/`, `public/`, etc.)
-2. Your Anthropic API key (from `console.anthropic.com/settings/keys`)
+2. Your Anthropic API key (from `console.anthropic.com/settings/keys`). Currently ownly works with Claude AI. 
 3. An email address
 
 ---
