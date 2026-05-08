@@ -16,7 +16,7 @@ If you discover a security vulnerability in this project, please do **not** open
 Instead, please report vulnerabilities privately:
 
 - **Email:** loganb205@yahoo.com
-- **Subject line:** `[SECURITY] title-analyzer vulnerability report`
+- **Subject line:** `[SECURITY] Titlework-analyzer vulnerability report`
 
 Please include:
 - A description of the vulnerability
