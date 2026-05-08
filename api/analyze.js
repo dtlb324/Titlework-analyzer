@@ -51,7 +51,7 @@ function validateRequestBody(body) {
   if (!body || !Array.isArray(body.messages)) {
     return { valid: false, reason: 'Invalid request structure.' };
   }
-  const allowedModels = ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5-20251001'];
+  const allowedModels = ['claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-haiku-4-5'];
   if (!body.model || !allowedModels.includes(body.model)) {
     return { valid: false, reason: 'Invalid or disallowed model.' };
   }
