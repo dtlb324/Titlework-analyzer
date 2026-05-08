@@ -147,7 +147,7 @@ Just share the URL and password. No account or installation needed on their end.
 
 ## What It Does
 
-Upload courthouse documents and the AI analyzes them acting as a Texas-licensed oil and gas title attorney with 30 years of experience, producing a formal title opinion structure:
+Upload courthouse documents and the AI analyzes them acting as a licensed oil and gas title attorney with 30 years of experience, producing a formal title opinion structure:
 
 - **Document Abstract** — extracts every key fact from each document including grantor, grantee, recording reference, fraction conveyed, reservations, warranty type, and acknowledgment
 - **Chain of Title** — chronological ownership flow with fractional math shown at every step
