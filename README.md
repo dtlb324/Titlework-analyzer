@@ -102,7 +102,7 @@ Set a monthly spending limit at https://console.anthropic.com/settings/limits as
 
 ## How to update the app later
 
-If you ever want to change something (system prompt, styling, etc.):
+If you ever want to change something in your cloned repository (system prompt, styling, etc.):
 
 1. Edit the file on GitHub directly (click the pencil icon)
 2. Commit the change
