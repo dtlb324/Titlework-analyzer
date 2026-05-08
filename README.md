@@ -1,7 +1,7 @@
 # Mineral Title Analyzer — Deployment Guide  
 
 This is a web app for landmen to analyze courthouse documents and build chain of title. Deploy it once to Vercel, then anyone with the URL can use it from any browser, anywhere.
-**The analysis only works with Claude AI right now.**
+**The analyzer only works with Claude AI right now.**
 
 **Total deployment time: ~30 minutes**
 
