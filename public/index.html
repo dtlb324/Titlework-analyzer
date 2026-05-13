@@ -391,7 +391,7 @@ async function callBackend(messages, system) {
     response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, system, messages }),
+      body: JSON.stringify({ model: 'claude-opus-4-7', max_tokens: 4000, system, messages }),
     });
   } catch (networkErr) {
     // Fetch itself failed — network level problem
@@ -766,18 +766,8 @@ async function analyzeAdditional() {
   items[additionalFiles.length].status = 'active';
   updateProgress(Math.round(additionalFiles.length / (additionalFiles.length + 1) * 100), 'Updating chain of title with all documents combined...', items);
 
-  let input = `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Please re-synthesize the complete chain of title and ownership determination based on ALL ${allAbstracts.length} documents combined.
-
----
-
-`;
-  allAbstracts.forEach((d, i) => { input += `### Document ${i + 1}: ${d.filename}
-
-${d.abstract}
-
----
-
-`; });
+  let input = `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Please re-synthesize the complete chain of title and ownership determination based on ALL ${allAbstracts.length} documents combined.\n\n---\n\n`;
+  allAbstracts.forEach((d, i) => { input += `### Document ${i + 1}: ${d.filename}\n\n${d.abstract}\n\n---\n\n`; });
 
   try {
     const synthesis = await callBackend([{ role: 'user', content: input }], SYNTHESIS_PROMPT);
