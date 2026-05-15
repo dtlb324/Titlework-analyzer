@@ -22,13 +22,13 @@
   input[type=text], input[type=password], textarea { width: 100%; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; color: #4a3c28; padding: .7rem .9rem; font-size: .95rem; font-family: Georgia,serif; outline: none; }
   input:focus, textarea:focus { border-color: #b8631e; background: #fff; }
   textarea { resize: vertical; min-height: 60px; }
-  .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; background: #faf6ee; cursor: pointer; transition: all .2s; display: block; width: 100%; padding: 2rem 1.5rem; text-align: center; }
+  .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; background: #faf6ee; cursor: pointer; transition: all .2s; display: block; width: 100%; padding: 1.5rem; text-align: center; }
   .upload-zone:hover, .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
   .upload-text { color: #b8631e; font-size: 1rem; display: block; margin-bottom: .4rem; text-align: center; }
   .upload-hint { color: #a08a6a; font-size: .8rem; display: block; line-height: 1.8; margin-top: .3rem; }
-  .file-list { margin-top: 1rem; }
+  .file-list { margin-top: .8rem; text-align: left; }
   .file-count { font-size: .72rem; letter-spacing: .15em; text-transform: uppercase; color: #8a6f4a; font-weight: bold; margin-bottom: .5rem; }
-  .file-item { display: flex; justify-content: space-between; align-items: center; padding: .55rem .85rem; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; margin-bottom: .3rem; font-size: .88rem; }
+  .file-item { display: flex; justify-content: space-between; align-items: center; padding: .55rem .85rem; background: #fff; border: 1px solid #d9c9a8; border-radius: 4px; margin-bottom: .3rem; font-size: .88rem; }
   .file-name { color: #4a3c28; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .file-size { color: #a08a6a; font-size: .78rem; margin-left: .5rem; white-space: nowrap; }
   .file-remove { background: none; border: none; color: #b8915e; cursor: pointer; font-size: 1.2rem; padding: 0 .3rem; margin-left: .5rem; }
@@ -119,15 +119,15 @@
       </div>
       <div class="field">
         <label class="field-label">Upload Documents</label>
-        <label class="upload-zone" id="uploadZone" for="fileInput">
+        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>max 10 files</em>
           </span>
-        </label>
+          <div id="fileList"></div>
+        </div>
         <input type="file" id="fileInput" multiple accept=".pdf,.csv,image/*" style="display:none" />
       </div>
-      <div id="fileList"></div>
       <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title</button>
     </div>
 
@@ -164,14 +164,14 @@
         <p style="color:#8a6f4a;font-size:.88rem;margin-bottom:1rem;line-height:1.5">
           Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined.
         </p>
-        <label class="upload-zone" id="uploadZone2" for="fileInput2">
+        <div class="upload-zone" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>max 10 files</em>
           </span>
-        </label>
+          <div id="fileList2"></div>
+        </div>
         <input type="file" id="fileInput2" multiple accept=".pdf,.csv,image/*" style="display:none" />
-        <div id="fileList2"></div>
         <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
           <button class="btn-primary" id="addDocsBtn" onclick="analyzeAdditional()" disabled style="margin-top:0">→ Analyze Additional Documents</button>
           <button class="btn-secondary" onclick="hideAddDocs()">Cancel</button>
@@ -301,10 +301,14 @@ function setupDragDrop() {
   zone.addEventListener('drop', e => { handleFiles(Array.from(e.dataTransfer.files)); });
 }
 
+const MAX_FILES = 10;
+
 async function handleFiles(newFiles) {
-  for (const file of newFiles) {
+  const available = MAX_FILES - files.length;
+  if (available <= 0) return;
+  const toAdd = Array.from(newFiles).slice(0, available);
+  for (const file of toAdd) {
     if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
-      // Read CSV as plain text
       const text = await new Promise((res, rej) => {
         const r = new FileReader();
         r.onload = () => res(r.result);
@@ -313,7 +317,6 @@ async function handleFiles(newFiles) {
       });
       files.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
     } else {
-      // Read PDF/image as base64
       const data = await new Promise((res, rej) => {
         const r = new FileReader();
         r.onload = () => res(r.result.split(',')[1]);
@@ -337,12 +340,13 @@ function renderFileList() {
   const el = document.getElementById('fileList');
   if (!files.length) { el.innerHTML = ''; return; }
 
-  el.innerHTML = `<div class="file-count">${files.length} document${files.length !== 1 ? 's' : ''} loaded</div>` +
+  const limitNote = files.length >= MAX_FILES ? ' <span style="color:#b8631e">(limit reached)</span>' : '';
+  el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${files.length} of ${MAX_FILES} document${files.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
     files.map((f, i) => `
-      <div class="file-item">
+      <div class="file-item" onclick="event.stopPropagation()">
         <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
-        <button class="file-remove" onclick="removeFile(${i})">×</button>
+        <button class="file-remove" onclick="event.stopPropagation();removeFile(${i})">×</button>
       </div>`).join('');
 }
 
@@ -667,7 +671,10 @@ function hideAddDocs() {
 let additionalFiles = [];
 
 async function handleAdditionalFiles(newFiles) {
-  for (const file of newFiles) {
+  const available = MAX_FILES - additionalFiles.length;
+  if (available <= 0) return;
+  const toAdd = Array.from(newFiles).slice(0, available);
+  for (const file of toAdd) {
     if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
       const text = await new Promise((res, rej) => {
         const r = new FileReader();
@@ -693,12 +700,13 @@ async function handleAdditionalFiles(newFiles) {
 function renderAdditionalFileList() {
   const el = document.getElementById('fileList2');
   if (!additionalFiles.length) { el.innerHTML = ''; return; }
-  el.innerHTML = `<div class="file-count" style="margin-top:.8rem">${additionalFiles.length} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded</div>` +
+  const limitNote = additionalFiles.length >= MAX_FILES ? ' <span style="color:#b8631e">(limit reached)</span>' : '';
+  el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${additionalFiles.length} of ${MAX_FILES} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
     additionalFiles.map((f, i) => `
-      <div class="file-item">
+      <div class="file-item" onclick="event.stopPropagation()">
         <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
-        <button class="file-remove" onclick="removeAdditionalFile(${i})">×</button>
+        <button class="file-remove" onclick="event.stopPropagation();removeAdditionalFile(${i})">×</button>
       </div>`).join('');
 }
 
