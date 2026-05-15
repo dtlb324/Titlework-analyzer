@@ -122,7 +122,8 @@
         <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>max 10 files</em>
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>max 10 files per batch</em>
+            <br>After the analysis you can add more documents in additional batches — no limit on the total number of documents per project.
           </span>
           <div id="fileList"></div>
         </div>
@@ -162,7 +163,7 @@
       <div class="card">
         <label class="field-label">Add More Documents to This Analysis</label>
         <p style="color:#8a6f4a;font-size:.88rem;margin-bottom:1rem;line-height:1.5">
-          Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined.
+          Upload the next batch of documents (up to 10 at a time) and Claude will re-analyze the full chain of title using all documents combined — original and new together. Repeat as many times as needed until your entire project is covered. There is no limit on the total number of documents.
         </p>
         <div class="upload-zone" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
