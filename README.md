@@ -96,16 +96,44 @@ By default Vercel locks your deployment behind a Vercel login screen. Turn that 
 |---------|------|
 | GitHub | Free |
 | Vercel Hobby tier | Free |
-| Anthropic API | Pay-per-use (~$0.10–$0.50 per analysis) |
+| Anthropic API | Pay-per-use (see estimates below) |
 
 **The Anthropic API is completely separate from any Claude.ai subscription.** A Claude.ai Pro subscription ($20/month) does not cover API usage. API charges are billed separately per use to a credit card on file at `console.anthropic.com`.
 
-**Recommended:** Set a monthly spending limit at `console.anthropic.com/settings/limits` to cap costs. A $25/month limit is a reasonable starting point for light use.
+**Recommended:** Set a monthly spending limit at `console.anthropic.com/settings/limits` to cap costs. A $50/month limit is a reasonable starting point for light use with Opus 4.7; $10/month covers light use with Sonnet 4.6.
 
-**API cost estimates:**
-- ~$0.10–$0.20 per analysis for a small run (3–5 documents)
-- ~$0.30–$0.60 per analysis for a medium run (10 documents)
-- ~$0.75–$1.50 per analysis for a large run (20+ documents)
+The app runs one API call per pair of documents (abstraction) plus one call to synthesize everything, plus one call per follow-up question. Each call sends document content as tokens, so larger or higher-resolution scans cost more.
+
+### Per-token pricing
+
+| Model | Input | Output |
+|-------|-------|--------|
+| Claude Opus 4.7 | $15.00 / million tokens | $75.00 / million tokens |
+| Claude Sonnet 4.6 | $3.00 / million tokens | $15.00 / million tokens |
+
+### Claude Opus 4.7 — cost estimates (single-page documents at standard resolution)
+
+Best for complex chains of title with ambiguous or multi-party documents. Default model.
+
+| Run size | Estimated cost |
+|----------|----------------|
+| Small — 3–5 documents | ~$0.50–$1.00 |
+| Medium — 10 documents | ~$1.00–$1.75 |
+| Large — 20+ documents | ~$2.00–$3.50 |
+| Per follow-up question | ~$0.05–$0.15 |
+
+### Claude Sonnet 4.6 — cost estimates (single-page documents at standard resolution)
+
+Good for straightforward title work. Costs roughly 5× less than Opus 4.7.
+
+| Run size | Estimated cost |
+|----------|----------------|
+| Small — 3–5 documents | ~$0.10–$0.20 |
+| Medium — 10 documents | ~$0.20–$0.35 |
+| Large — 20+ documents | ~$0.40–$0.70 |
+| Per follow-up question | ~$0.01–$0.03 |
+
+Switch models using the model picker before running an analysis.
 
 ---
 
