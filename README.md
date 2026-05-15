@@ -96,16 +96,23 @@ By default Vercel locks your deployment behind a Vercel login screen. Turn that 
 |---------|------|
 | GitHub | Free |
 | Vercel Hobby tier | Free |
-| Anthropic API | Pay-per-use (~$0.10–$0.50 per analysis) |
+| Anthropic API | Pay-per-use (~$0.50–$3.50 per analysis with Claude Opus 4.7) |
 
 **The Anthropic API is completely separate from any Claude.ai subscription.** A Claude.ai Pro subscription ($20/month) does not cover API usage. API charges are billed separately per use to a credit card on file at `console.anthropic.com`.
 
-**Recommended:** Set a monthly spending limit at `console.anthropic.com/settings/limits` to cap costs. A $25/month limit is a reasonable starting point for light use.
+**Recommended:** Set a monthly spending limit at `console.anthropic.com/settings/limits` to cap costs. A $50/month limit is a reasonable starting point for light use with Opus 4.7.
 
-**API cost estimates:**
-- ~$0.10–$0.20 per analysis for a small run (3–5 documents)
-- ~$0.30–$0.60 per analysis for a medium run (10 documents)
-- ~$0.75–$1.50 per analysis for a large run (20+ documents)
+**Claude Opus 4.7 pricing:** $15.00 per million input tokens · $75.00 per million output tokens
+
+The app runs two API calls per pair of documents (one to abstract each batch, one to synthesize everything) plus one call per follow-up question. Each call sends document content as tokens, so larger or higher-resolution scans cost more.
+
+**API cost estimates (Claude Opus 4.7, single-page documents at standard resolution):**
+- ~$0.50–$1.00 per analysis for a small run (3–5 documents)
+- ~$1.00–$1.75 per analysis for a medium run (10 documents)
+- ~$2.00–$3.50 per analysis for a large run (20+ documents)
+- ~$0.05–$0.15 per follow-up question (added to the above)
+
+To reduce costs, select **Claude Sonnet 4.6** or **Claude Haiku 4.5** in the model picker — both produce good results at a fraction of the price. Opus 4.7 is the default for maximum accuracy on complex chains of title.
 
 ---
 
