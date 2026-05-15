@@ -111,16 +111,29 @@ The app runs one API call per pair of documents (abstraction) plus one call to s
 | Claude Opus 4.7 | $15.00 / million tokens | $75.00 / million tokens |
 | Claude Sonnet 4.6 | $3.00 / million tokens | $15.00 / million tokens |
 
-### API cost estimates (single-page documents at standard resolution)
+### Claude Opus 4.7 — cost estimates (single-page documents at standard resolution)
 
-| Run size | Claude Opus 4.7 | Claude Sonnet 4.6 |
-|----------|-----------------|-------------------|
-| Small — 3–5 documents | ~$0.50–$1.00 | ~$0.10–$0.20 |
-| Medium — 10 documents | ~$1.00–$1.75 | ~$0.20–$0.35 |
-| Large — 20+ documents | ~$2.00–$3.50 | ~$0.40–$0.70 |
-| Per follow-up question | ~$0.05–$0.15 | ~$0.01–$0.03 |
+Best for complex chains of title with ambiguous or multi-party documents. Default model.
 
-**Opus 4.7** is the default and delivers the highest accuracy on complex chains of title with ambiguous documents. **Sonnet 4.6** costs roughly 5× less and handles most straightforward title work well. Switch models using the model picker before running an analysis.
+| Run size | Estimated cost |
+|----------|----------------|
+| Small — 3–5 documents | ~$0.50–$1.00 |
+| Medium — 10 documents | ~$1.00–$1.75 |
+| Large — 20+ documents | ~$2.00–$3.50 |
+| Per follow-up question | ~$0.05–$0.15 |
+
+### Claude Sonnet 4.6 — cost estimates (single-page documents at standard resolution)
+
+Good for straightforward title work. Costs roughly 5× less than Opus 4.7.
+
+| Run size | Estimated cost |
+|----------|----------------|
+| Small — 3–5 documents | ~$0.10–$0.20 |
+| Medium — 10 documents | ~$0.20–$0.35 |
+| Large — 20+ documents | ~$0.40–$0.70 |
+| Per follow-up question | ~$0.01–$0.03 |
+
+Switch models using the model picker before running an analysis.
 
 ---
 
