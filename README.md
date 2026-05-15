@@ -83,8 +83,9 @@ By default Vercel locks your deployment behind a Vercel login screen. Turn that 
 1. Click the URL Vercel gave you (e.g. `Titlework-analyzer-abc123.vercel.app`)
 2. Enter the password if you set one
 3. Add a subject tract description (optional but helpful)
-4. Upload documents and click **Build Chain of Title**
-5. Bookmark the URL and share it with anyone who needs access
+4. Upload up to 10 documents and click **Build Chain of Title**
+5. After the analysis finishes, click **Add More Documents** to upload the next batch — repeat as many times as needed to cover the full chain of title
+6. Bookmark the URL and share it with anyone who needs access
 
 > ⚠️ Always use the Vercel URL in your browser. Never open the HTML file directly from your computer — the local file cannot connect to the server.
 
@@ -206,9 +207,16 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 | CSV | Converted to plain text — useful for division order schedules, ownership tables, lease summaries |
 
 ### Add More Documents
-- After the initial analysis, click **Add More Documents** to upload additional batches
-- The AI re-synthesizes the entire chain of title using all documents combined
-- Use this when a chain of title spans more documents than fit in one upload
+
+There is no limit to the total number of documents you can include in a project — upload as many as your chain of title requires. Documents are uploaded in batches of up to 10 at a time.
+
+1. Run the initial analysis with your first batch (up to 10 documents)
+2. Once the analysis is complete, click **Add More Documents**
+3. Select the next batch of documents (up to 10) and click **Build Chain of Title**
+4. The AI re-synthesizes the full chain using all documents combined — original and new together
+5. Repeat until all documents are included
+
+Each additional batch triggers a new synthesis pass, so the final result always reflects every document uploaded so far.
 
 ### Download PDF
 - Click **Download PDF** after the analysis completes to save a formatted copy
