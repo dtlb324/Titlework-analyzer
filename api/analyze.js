@@ -10,7 +10,11 @@ export const config = {
 // In-memory rate limiter
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const RATE_LIMIT_MAX_REQUESTS = 20;
+// Default 60 req/min supports bulk runs (~400 docs). Override via ANALYZE_RATE_LIMIT_MAX env var.
+const RATE_LIMIT_MAX_REQUESTS = Math.min(
+  Math.max(parseInt(process.env.ANALYZE_RATE_LIMIT_MAX || '60', 10) || 60, 10),
+  200
+);
 const PASSWORD_RATE_LIMIT_MAX = 5;
 
 function getRateLimitEntry(ip) {

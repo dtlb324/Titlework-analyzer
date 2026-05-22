@@ -122,12 +122,12 @@
         <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>max 10 files</em>
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
           </span>
           <div id="fileList"></div>
         </div>
         <p style="color:#8a6f4a;font-size:.83rem;margin-top:.6rem;line-height:1.5">
-          <strong style="color:#6b3410">Tip:</strong> You can upload more documents after the initial analysis — add as many as you need, up to 10 at a time.
+          <strong style="color:#6b3410">Tip:</strong> Large runs (100+ documents) process automatically in batches — keep this tab open until complete. You can add more documents after the initial analysis.
         </p>
         <input type="file" id="fileInput" multiple accept=".pdf,.csv,image/*" style="display:none" />
       </div>
@@ -165,12 +165,12 @@
       <div class="card">
         <label class="field-label">Add More Documents to This Analysis</label>
         <p style="color:#8a6f4a;font-size:.88rem;margin-bottom:1rem;line-height:1.5">
-          Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined. You can repeat this as many times as needed — up to 10 files per upload.
+          Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined. You can repeat this as many times as needed — up to 400 files per upload.
         </p>
         <div class="upload-zone" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>max 10 files</em>
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
           </span>
           <div id="fileList2"></div>
         </div>
@@ -186,7 +186,14 @@
 </div>
 
 <script>
+const MAX_FILES = 400;
 const BATCH_SIZE = 2;
+const SYNTHESIS_CHUNK_SIZE = 25;
+const MAX_FILE_LIST_DISPLAY = 8;
+const REQUEST_MIN_INTERVAL_MS = 1100;
+const MAX_RETRIES = 4;
+
+let requestTimestamps = [];
 
 const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
@@ -239,6 +246,18 @@ If ownership cannot be definitively determined, state so and list what additiona
 
 ## OPINION QUALIFICATIONS
 List every assumption. List every illegible or unclear document. State: "This is an AI-assisted analytical aid. It is not a formal title opinion and should not be relied upon for drilling, leasing, division order, or any other action without verification by a licensed attorney in the state where the land lies."`;
+
+const PARTIAL_SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney synthesizing one segment of a larger chain of title.
+
+You will receive abstracts for a subset of documents from a full run. Produce a partial chain-of-title analysis for this segment only.
+
+Include:
+- Chronological ownership flow for these documents
+- Fractional math at each step
+- Title defects and curative items found in this segment
+- Running fractional balance at the end of this segment
+
+Do NOT produce a final ownership determination table — a later pass merges all segments. Only use facts from the abstracts provided. Flag gaps explicitly.`;
 
 let appPassword = sessionStorage.getItem('app_password') || '';
 let files = [];
@@ -304,12 +323,32 @@ function setupDragDrop() {
   zone.addEventListener('drop', e => { handleFiles(Array.from(e.dataTransfer.files)); });
 }
 
-const MAX_FILES = 10;
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function throttleRequest() {
+  const now = Date.now();
+  requestTimestamps = requestTimestamps.filter(t => now - t < 60000);
+  if (requestTimestamps.length > 0) {
+    const sinceLast = now - requestTimestamps[requestTimestamps.length - 1];
+    if (sinceLast < REQUEST_MIN_INTERVAL_MS) {
+      await sleep(REQUEST_MIN_INTERVAL_MS - sinceLast);
+    }
+  }
+  requestTimestamps.push(Date.now());
+}
+
+function freeFileMemory(file) {
+  file.data = null;
+  file.csvText = null;
+}
 
 async function handleFiles(newFiles) {
   const available = MAX_FILES - files.length;
   if (available <= 0) return;
   const toAdd = Array.from(newFiles).slice(0, available);
+  if (toAdd.length > 5) {
+    document.getElementById('fileList').innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${toAdd.length} files...</div>`;
+  }
   for (const file of toAdd) {
     if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
       const text = await new Promise((res, rej) => {
@@ -344,13 +383,16 @@ function renderFileList() {
   if (!files.length) { el.innerHTML = ''; return; }
 
   const limitNote = files.length >= MAX_FILES ? ' <span style="color:#b8631e">(limit reached)</span>' : '';
+  const displayFiles = files.length > MAX_FILE_LIST_DISPLAY ? files.slice(0, MAX_FILE_LIST_DISPLAY) : files;
+  const hiddenCount = files.length - displayFiles.length;
   el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${files.length} of ${MAX_FILES} document${files.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
-    files.map((f, i) => `
+    displayFiles.map((f, i) => `
       <div class="file-item" onclick="event.stopPropagation()">
         <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
         <button class="file-remove" onclick="event.stopPropagation();removeFile(${i})">×</button>
-      </div>`).join('');
+      </div>`).join('') +
+    (hiddenCount > 0 ? `<div class="file-item" style="justify-content:center;color:#8a6f4a;font-style:italic">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '');
 }
 
 function removeFile(i) {
@@ -392,7 +434,8 @@ function updateProgress(pct, status, items) {
   }
 }
 
-async function callBackend(messages, system) {
+async function callBackend(messages, system, retryCount = 0) {
+  await throttleRequest();
   let response;
   try {
     response = await fetch('/api/analyze', {
@@ -436,7 +479,11 @@ async function callBackend(messages, system) {
       throw new Error('API key error: The Anthropic API key is missing or invalid. Check that ANTHROPIC_API_KEY is set correctly in Vercel → Project → Settings → Environment Variables, then redeploy.');
     }
     if (response.status === 429 || errMsg.includes('rate limit') || errMsg.includes('overloaded')) {
-      throw new Error("Rate limit / overloaded: Anthropic's servers are busy right now. Wait 30 seconds and try again.");
+      if (retryCount < MAX_RETRIES) {
+        await sleep(3000 * (retryCount + 1));
+        return callBackend(messages, system, retryCount + 1);
+      }
+      throw new Error("Rate limit exceeded after retries. Wait a minute and try again.");
     }
     if (errMsg.includes('credit') || errMsg.includes('balance') || errMsg.includes('billing')) {
       throw new Error('Insufficient API credits: Your Anthropic account is out of credit. Add credit at console.anthropic.com/settings/billing.');
@@ -448,6 +495,62 @@ async function callBackend(messages, system) {
   }
 
   return data.content?.map(b => b.text || '').join('') || '';
+}
+
+
+function buildAbstractInput(abstracts, tract, ctx, preamble) {
+  let input = preamble + '\n\n';
+  if (tract) input += `**Subject Tract:** ${tract}\n\n`;
+  if (ctx) input += `**Additional Context:** ${ctx}\n\n`;
+  input += '---\n\n';
+  abstracts.forEach((d, i) => { input += `### Document ${i + 1}: ${d.filename}\n\n${d.abstract}\n\n---\n\n`; });
+  return input;
+}
+
+async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt) {
+  const input = buildAbstractInput(abstracts, tract, ctx, preamble);
+  return await callBackend([{ role: 'user', content: input }], systemPrompt || SYNTHESIS_PROMPT);
+}
+
+async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
+  if (abstracts.length <= SYNTHESIS_CHUNK_SIZE) {
+    return await synthesizeAbstracts(
+      abstracts,
+      tract,
+      ctx,
+      `Below are ${abstracts.length} document abstracts. Synthesize into a complete title opinion.`
+    );
+  }
+
+  const chunks = [];
+  for (let i = 0; i < abstracts.length; i += SYNTHESIS_CHUNK_SIZE) {
+    chunks.push(abstracts.slice(i, i + SYNTHESIS_CHUNK_SIZE));
+  }
+
+  const segmentSummaries = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const start = i * SYNTHESIS_CHUNK_SIZE + 1;
+    const end = Math.min((i + 1) * SYNTHESIS_CHUNK_SIZE, abstracts.length);
+    onProgress(`Synthesizing segment ${i + 1} of ${chunks.length} (documents ${start}–${end})...`);
+    const summary = await synthesizeAbstracts(
+      chunks[i],
+      tract,
+      ctx,
+      `Below are document abstracts ${start}–${end} of ${abstracts.length}. Produce a partial chain-of-title segment.`,
+      PARTIAL_SYNTHESIS_PROMPT
+    );
+    segmentSummaries.push({ segment: i + 1, start, end, summary });
+  }
+
+  onProgress('Final synthesis — merging all segments into complete title opinion...');
+  let mergeInput = `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${abstracts.length} documents. Merge them into one complete title opinion.\n\n`;
+  if (tract) mergeInput += `**Subject Tract:** ${tract}\n\n`;
+  if (ctx) mergeInput += `**Additional Context:** ${ctx}\n\n`;
+  mergeInput += '---\n\n';
+  segmentSummaries.forEach(s => {
+    mergeInput += `## Segment ${s.segment} (Documents ${s.start}–${s.end})\n\n${s.summary}\n\n---\n\n`;
+  });
+  return await callBackend([{ role: 'user', content: mergeInput }], SYNTHESIS_PROMPT);
 }
 
 // Send a batch of files in one API call — handles PDF, image, and CSV
@@ -509,11 +612,10 @@ async function analyze() {
     batches.push(files.slice(i, i + BATCH_SIZE));
   }
 
-  // One progress item per FILE (not per batch) so spinner shows on each doc
-  const items = [
-    ...files.map((f, fi) => ({ label: `${f.name}`, status: 'pending' })),
-    { label: 'Synthesize chain of title & ownership', status: 'pending' },
-  ];
+  const showAllProgress = files.length <= 50;
+  const items = showAllProgress
+    ? [...files.map(f => ({ label: f.name, status: 'pending' })), { label: 'Synthesize chain of title & ownership', status: 'pending' }]
+    : [{ label: `Abstracting ${files.length} documents...`, status: 'pending' }, { label: 'Synthesize chain of title & ownership', status: 'pending' }];
 
   documentAbstracts = [];
 
@@ -521,28 +623,35 @@ async function analyze() {
     const batch = batches[bi];
     const globalStart = bi * BATCH_SIZE;
 
-    // Mark each file in this batch as active
-    for (let j = 0; j < batch.length; j++) {
-      items[globalStart + j].status = 'active';
-    }
-    const pct = Math.round(bi / (batches.length + 1) * 100);
     const batchEnd = Math.min(globalStart + batch.length, files.length);
+    const pct = Math.round(bi / (batches.length + 1) * 100);
     const statusMsg = batch.length === 1
       ? `Reading document ${globalStart + 1} of ${files.length}: ${batch[0].name}...`
-      : `Reading documents ${globalStart + 1}–${batchEnd} of ${files.length} together...`;
+      : `Reading documents ${globalStart + 1}–${batchEnd} of ${files.length}...`;
+    if (showAllProgress) {
+      for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'active';
+    } else {
+      items[0].status = 'active';
+      items[0].label = statusMsg;
+    }
     updateProgress(pct, statusMsg, items);
 
     try {
       const result = await abstractBatch(batch, globalStart);
       const parsed = parseBatchResult(result, batch, globalStart);
       documentAbstracts.push(...parsed);
-      // Mark each file in this batch as done
-      for (let j = 0; j < batch.length; j++) {
-        items[globalStart + j].status = 'done';
+      batch.forEach(freeFileMemory);
+      if (showAllProgress) {
+        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'done';
+      } else {
+        items[0].status = 'done';
+        items[0].label = `Abstracted ${batchEnd} of ${files.length} documents`;
       }
     } catch (e) {
-      for (let j = 0; j < batch.length; j++) {
-        items[globalStart + j].status = 'pending';
+      if (showAllProgress) {
+        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'pending';
+      } else {
+        items[0].status = 'pending';
       }
       const failedNames = batch.map(f => f.name).join(', ');
       showError(`Batch ${bi + 1} failed (${failedNames}): ${e.message}`);
@@ -554,21 +663,24 @@ async function analyze() {
   }
 
   // Synthesis
-  items[files.length].status = 'active';
+  items[items.length - 1].status = 'active';
   updateProgress(Math.round(files.length / (files.length + 1) * 100), 'Synthesizing chain of title and final ownership...', items);
 
-  let input = `Below are ${files.length} document abstracts. Synthesize into a complete title opinion.\n\n`;
-  if (tract) input += `**Subject Tract:** ${tract}\n\n`;
-  if (ctx) input += `**Additional Context:** ${ctx}\n\n`;
-  input += `---\n\n`;
-  documentAbstracts.forEach((d, i) => { input += `### Document ${i + 1}: ${d.filename}\n\n${d.abstract}\n\n---\n\n`; });
+  const synthesisInput = buildAbstractInput(
+    documentAbstracts,
+    tract,
+    ctx,
+    `Below are ${files.length} document abstracts. Synthesize into a complete title opinion.`
+  );
 
   try {
-    const synthesis = await callBackend([{ role: 'user', content: input }], SYNTHESIS_PROMPT);
-    items[batches.length].status = 'done';
+    const synthesis = await hierarchicalSynthesis(documentAbstracts, tract, ctx, status => {
+      updateProgress(Math.round(files.length / (files.length + 1) * 100), status, items);
+    });
+    items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${files.length} documents processed`, items);
     conversationHistory = [
-      { role: 'user', content: input, displayText: `Analyzed ${files.length} document(s)` },
+      { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)` },
       { role: 'assistant', content: synthesis },
     ];
     setTimeout(() => {
@@ -677,6 +789,9 @@ async function handleAdditionalFiles(newFiles) {
   const available = MAX_FILES - additionalFiles.length;
   if (available <= 0) return;
   const toAdd = Array.from(newFiles).slice(0, available);
+  if (toAdd.length > 5) {
+    document.getElementById('fileList2').innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${toAdd.length} files...</div>`;
+  }
   for (const file of toAdd) {
     if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
       const text = await new Promise((res, rej) => {
@@ -704,13 +819,16 @@ function renderAdditionalFileList() {
   const el = document.getElementById('fileList2');
   if (!additionalFiles.length) { el.innerHTML = ''; return; }
   const limitNote = additionalFiles.length >= MAX_FILES ? ' <span style="color:#b8631e">(limit reached)</span>' : '';
+  const displayFiles = additionalFiles.length > MAX_FILE_LIST_DISPLAY ? additionalFiles.slice(0, MAX_FILE_LIST_DISPLAY) : additionalFiles;
+  const hiddenCount = additionalFiles.length - displayFiles.length;
   el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${additionalFiles.length} of ${MAX_FILES} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
-    additionalFiles.map((f, i) => `
+    displayFiles.map((f, i) => `
       <div class="file-item" onclick="event.stopPropagation()">
         <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
         <button class="file-remove" onclick="event.stopPropagation();removeAdditionalFile(${i})">×</button>
-      </div>`).join('');
+      </div>`).join('') +
+    (hiddenCount > 0 ? `<div class="file-item" style="justify-content:center;color:#8a6f4a;font-style:italic">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '');
 }
 
 function removeAdditionalFile(i) {
@@ -733,11 +851,10 @@ async function analyzeAdditional() {
     batches.push(additionalFiles.slice(i, i + BATCH_SIZE));
   }
 
-  // One progress item per FILE so spinner shows on each doc
-  const items = [
-    ...additionalFiles.map((f) => ({ label: f.name, status: 'pending' })),
-    { label: 'Update chain of title with all documents', status: 'pending' },
-  ];
+  const showAllProgress = additionalFiles.length <= 50;
+  const items = showAllProgress
+    ? [...additionalFiles.map(f => ({ label: f.name, status: 'pending' })), { label: 'Update chain of title with all documents', status: 'pending' }]
+    : [{ label: `Abstracting ${additionalFiles.length} additional documents...`, status: 'pending' }, { label: 'Update chain of title with all documents', status: 'pending' }];
 
   const newAbstracts = [];
   const globalOffset = documentAbstracts.length;
@@ -745,24 +862,33 @@ async function analyzeAdditional() {
   for (let bi = 0; bi < batches.length; bi++) {
     const batch = batches[bi];
     const globalStart = bi * BATCH_SIZE;
+    const batchEnd = Math.min(globalStart + batch.length, additionalFiles.length);
+    const statusMsg = `Reading additional document${batch.length > 1 ? 's' : ''} ${globalStart + 1}${batch.length > 1 ? '–' + batchEnd : ''} of ${additionalFiles.length}...`;
 
-    // Mark each file in this batch as active
-    for (let j = 0; j < batch.length; j++) {
-      items[globalStart + j].status = 'active';
+    if (showAllProgress) {
+      for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'active';
+    } else {
+      items[0].status = 'active';
+      items[0].label = statusMsg;
     }
-    updateProgress(Math.round(bi / (batches.length + 1) * 100),
-      `Reading additional document${batch.length > 1 ? 's' : ''} ${globalStart + 1}${batch.length > 1 ? '–' + (globalStart + batch.length) : ''} of ${additionalFiles.length}...`, items);
+    updateProgress(Math.round(bi / (batches.length + 1) * 100), statusMsg, items);
 
     try {
       const result = await abstractBatch(batch, globalOffset + globalStart);
       const parsed = parseBatchResult(result, batch, globalOffset + globalStart);
       newAbstracts.push(...parsed);
-      for (let j = 0; j < batch.length; j++) {
-        items[globalStart + j].status = 'done';
+      batch.forEach(freeFileMemory);
+      if (showAllProgress) {
+        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'done';
+      } else {
+        items[0].status = 'done';
+        items[0].label = `Abstracted ${batchEnd} of ${additionalFiles.length} additional documents`;
       }
     } catch (e) {
-      for (let j = 0; j < batch.length; j++) {
-        items[globalStart + j].status = 'pending';
+      if (showAllProgress) {
+        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'pending';
+      } else {
+        items[0].status = 'pending';
       }
       showError(`Failed on batch: ${e.message}`);
       document.getElementById('progressSection').style.display = 'none';
@@ -774,22 +900,31 @@ async function analyzeAdditional() {
 
   // Combine all abstracts
   const allAbstracts = [...documentAbstracts, ...newAbstracts];
-  items[additionalFiles.length].status = 'active';
+  items[items.length - 1].status = 'active';
   updateProgress(Math.round(additionalFiles.length / (additionalFiles.length + 1) * 100), 'Updating chain of title with all documents combined...', items);
 
-  let input = `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Please re-synthesize the complete chain of title and ownership determination based on ALL ${allAbstracts.length} documents combined.\n\n---\n\n`;
-  allAbstracts.forEach((d, i) => { input += `### Document ${i + 1}: ${d.filename}\n\n${d.abstract}\n\n---\n\n`; });
+  const synthesisInput = buildAbstractInput(
+    allAbstracts,
+    document.getElementById('tractDescription').value,
+    document.getElementById('contextNotes').value,
+    `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Re-synthesize the complete chain of title based on ALL ${allAbstracts.length} documents combined.`
+  );
 
   try {
-    const synthesis = await callBackend([{ role: 'user', content: input }], SYNTHESIS_PROMPT);
-    items[batches.length].status = 'done';
+    const synthesis = await hierarchicalSynthesis(
+      allAbstracts,
+      document.getElementById('tractDescription').value,
+      document.getElementById('contextNotes').value,
+      status => updateProgress(Math.round(additionalFiles.length / (additionalFiles.length + 1) * 100), status, items)
+    );
+    items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
 
     // Update global state
     documentAbstracts = allAbstracts;
     additionalFiles = [];
 
-    conversationHistory.push({ role: 'user', content: input, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together` });
+    conversationHistory.push({ role: 'user', content: synthesisInput, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together` });
     conversationHistory.push({ role: 'assistant', content: synthesis });
 
     setTimeout(() => {

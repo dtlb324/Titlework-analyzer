@@ -240,7 +240,7 @@ The AI follows strict rules for accuracy and caution:
 | Password gate | Access restricted to users with the correct password |
 | Brute-force protection | 5 failed password attempts locks the IP for 60 seconds |
 | Constant-time password comparison | Prevents timing attacks |
-| Rate limiting | 20 requests per IP per minute maximum |
+| Rate limiting | 60 requests per IP per minute (configurable via `ANALYZE_RATE_LIMIT_MAX`) |
 | Input validation | All requests validated before reaching the Anthropic API |
 | Model whitelist | Only approved Claude models accepted |
 | XSS protection headers | On every server response |
