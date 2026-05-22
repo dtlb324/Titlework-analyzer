@@ -1,7 +1,7 @@
 function estimateFilePayload(file) {
   if (file.csvText) return file.csvText.length + 500;
   if (file.data) return Math.ceil(file.data.length * 0.75);
-  return file.size || 100000;
+  return file.size || 0;
 }
 
 function buildAdaptiveBatches(fileList) {
@@ -24,7 +24,7 @@ function buildAdaptiveBatches(fileList) {
     }
 
     if (current.length && (current.length >= MAX_DOCS_PER_BATCH || currentPayload + filePayload > MAX_PAYLOAD_BYTES)) {
-      batches.push({ files: current, globalStart });
+      batches.push({ files: [...current], globalStart });
       globalStart += current.length;
       current = [];
       currentPayload = 0;
@@ -40,7 +40,7 @@ function buildAdaptiveBatches(fileList) {
     currentPayload += filePayload;
   }
 
-  if (current.length) batches.push({ files: current, globalStart });
+  if (current.length) batches.push({ files: [...current], globalStart });
   return batches;
 }
 

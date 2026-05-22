@@ -115,6 +115,15 @@ test('rate limit default allows bulk throughput', () => {
   assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '300'"), 'Rate limit should default to 300');
 });
 
+test('preserves PDF data for retries via sourceFile', () => {
+  assert(script.includes('sourceFile: file'), 'Should retain original File object on upload');
+  assert(script.includes('async function ensureFileData'), 'Should re-read file data before API calls');
+  assert(script.includes('async function readSourceFile'), 'Should have readSourceFile helper');
+  assert(!script.includes('batchFiles.forEach(freeFileMemory)'), 'Should not free memory after each batch');
+  assert(script.includes('files.forEach(freeFileMemory)'), 'Should free memory only after successful run');
+});
+
+
 let passed = 0;
 let failed = 0;
 let skipped = 0;
