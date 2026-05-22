@@ -113,7 +113,7 @@ The app runs one API call per pair of documents (abstraction) plus one call to s
 
 ### Claude Opus 4.7 — cost estimates (single-page documents at standard resolution)
 
-Best for complex chains of title with ambiguous or multi-party documents. Default model.
+Best for complex chains of title with ambiguous or multi-party documents where maximum accuracy is required.
 
 | Run size | Estimated cost |
 |----------|----------------|
