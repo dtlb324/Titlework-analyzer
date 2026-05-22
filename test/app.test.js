@@ -125,6 +125,16 @@ test('auto-splits large PDFs client-side', () => {
   assert(script.includes('ingestUploadedFiles'), 'Missing shared upload ingest helper');
 });
 
+
+test('shows estimated processing time during runs', () => {
+  assert(indexHtml.includes('id="progressEta"'), 'Missing progress ETA element');
+  assert(script.includes('createProgressTimer'), 'Missing progress timer');
+  assert(script.includes('formatDurationPrecise'), 'Missing precise duration formatter');
+  assert(script.includes('buildProcessingPlan'), 'Missing processing plan builder');
+  assert(script.includes('formatInitialEstimate'), 'Missing initial estimate formatter');
+  assert(script.includes('formatEtaRemaining'), 'Missing ETA formatter');
+});
+
 test('preserves PDF data for retries via sourceFile', () => {
   assert(script.includes('sourceFile: file'), 'Should retain original File object on upload');
   assert(script.includes('async function ensureFileData'), 'Should re-read file data before API calls');
