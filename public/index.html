@@ -358,6 +358,54 @@ async function acquireRequestSlot() {
   await job;
 }
 
+function isPdfFile(file) {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+}
+
+function isImageFile(file) {
+  return file.type && file.type.startsWith('image/');
+}
+
+function isCsvFile(file) {
+  return file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv');
+}
+
+async function readSourceFile(entry) {
+  const file = entry.sourceFile;
+  if (!file) throw new Error(`${entry.name}: file data missing — remove and re-upload this document.`);
+  if (isCsvFile(entry)) {
+    entry.csvText = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(new Error('Read failed'));
+      r.readAsText(file);
+    });
+    entry.data = null;
+    return;
+  }
+  const dataUrl = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(new Error('Read failed'));
+    r.readAsDataURL(file);
+  });
+  const base64 = typeof dataUrl === 'string' && dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
+  if (!base64) throw new Error(`${entry.name}: could not read file data — try re-uploading.`);
+  entry.data = base64;
+  if (!entry.type || entry.type === 'application/octet-stream') {
+    if (isPdfFile(entry)) entry.type = 'application/pdf';
+  }
+}
+
+async function ensureFileData(entry) {
+  if (isCsvFile(entry)) {
+    if (entry.csvText) return;
+    return readSourceFile(entry);
+  }
+  if (typeof entry.data === 'string' && entry.data.length > 0) return;
+  return readSourceFile(entry);
+}
+
 function freeFileMemory(file) {
   file.data = null;
   file.csvText = null;
@@ -367,6 +415,7 @@ async function handleFiles(newFiles) {
   const available = MAX_FILES - files.length;
   if (available <= 0) return;
   const toAdd = Array.from(newFiles).slice(0, available);
+  document.getElementById('analyzeBtn').disabled = true;
   if (toAdd.length > 5) {
     document.getElementById('fileList').innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${toAdd.length} files...</div>`;
   }
@@ -378,7 +427,7 @@ async function handleFiles(newFiles) {
         r.onerror = () => rej(new Error('Read failed'));
         r.readAsText(file);
       });
-      files.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
+      files.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file });
     } else {
       const data = await new Promise((res, rej) => {
         const r = new FileReader();
@@ -386,7 +435,7 @@ async function handleFiles(newFiles) {
         r.onerror = () => rej(new Error('Read failed'));
         r.readAsDataURL(file);
       });
-      files.push({ name: file.name, type: file.type, size: file.size, data, csvText: null });
+      files.push({ name: file.name, type: file.type, size: file.size, data, csvText: null, sourceFile: file });
     }
   }
   renderFileList();
@@ -529,7 +578,7 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
 function estimateFilePayload(file) {
   if (file.csvText) return file.csvText.length + 500;
   if (file.data) return Math.ceil(file.data.length * 0.75);
-  return file.size || 100000;
+  return file.size || 0;
 }
 
 function buildAdaptiveBatches(fileList) {
@@ -549,7 +598,7 @@ function buildAdaptiveBatches(fileList) {
     }
 
     if (current.length && (current.length >= MAX_DOCS_PER_BATCH || currentPayload + filePayload > MAX_PAYLOAD_BYTES)) {
-      batches.push({ files: current, globalStart });
+      batches.push({ files: [...current], globalStart });
       globalStart += current.length;
       current = [];
       currentPayload = 0;
@@ -565,7 +614,7 @@ function buildAdaptiveBatches(fileList) {
     currentPayload += filePayload;
   }
 
-  if (current.length) batches.push({ files: current, globalStart });
+  if (current.length) batches.push({ files: [...current], globalStart });
   return batches;
 }
 
@@ -601,7 +650,6 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
     try {
       const result = await abstractBatch(batchFiles, globalStart);
       const parsed = parseBatchResult(result, batchFiles, globalStart);
-      batchFiles.forEach(freeFileMemory);
       results[bi] = parsed;
       completedDocs += batchFiles.length;
 
@@ -689,12 +737,21 @@ async function abstractBatch(batchFiles, globalStartIdx) {
   const csvFiles = [];
 
   for (const file of batchFiles) {
-    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
+    await ensureFileData(file);
+    if (isCsvFile(file)) {
       csvFiles.push(file);
-    } else if (file.type === 'application/pdf') {
+    } else if (isPdfFile(file)) {
+      if (typeof file.data !== 'string' || !file.data.length) {
+        throw new Error(`${file.name}: missing PDF data — remove and re-upload.`);
+      }
       content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: file.data } });
-    } else if (file.type.startsWith('image/')) {
+    } else if (isImageFile(file)) {
+      if (typeof file.data !== 'string' || !file.data.length) {
+        throw new Error(`${file.name}: missing image data — remove and re-upload.`);
+      }
       content.push({ type: 'image', source: { type: 'base64', media_type: file.type, data: file.data } });
+    } else {
+      throw new Error(`${file.name}: unsupported file type (${file.type || 'unknown'}). Use PDF, image, or CSV.`);
     }
   }
 
@@ -770,6 +827,7 @@ async function analyze() {
     });
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${files.length} documents processed`, items);
+    files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)` },
       { role: 'assistant', content: synthesis },
@@ -880,6 +938,7 @@ async function handleAdditionalFiles(newFiles) {
   const available = MAX_FILES - additionalFiles.length;
   if (available <= 0) return;
   const toAdd = Array.from(newFiles).slice(0, available);
+  document.getElementById('addDocsBtn').disabled = true;
   if (toAdd.length > 5) {
     document.getElementById('fileList2').innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${toAdd.length} files...</div>`;
   }
@@ -891,7 +950,7 @@ async function handleAdditionalFiles(newFiles) {
         r.onerror = () => rej(new Error('Read failed'));
         r.readAsText(file);
       });
-      additionalFiles.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text });
+      additionalFiles.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file });
     } else {
       const data = await new Promise((res, rej) => {
         const r = new FileReader();
@@ -899,7 +958,7 @@ async function handleAdditionalFiles(newFiles) {
         r.onerror = () => rej(new Error('Read failed'));
         r.readAsDataURL(file);
       });
-      additionalFiles.push({ name: file.name, type: file.type, size: file.size, data, csvText: null });
+      additionalFiles.push({ name: file.name, type: file.type, size: file.size, data, csvText: null, sourceFile: file });
     }
   }
   renderAdditionalFileList();
@@ -979,6 +1038,7 @@ async function analyzeAdditional() {
 
     // Update global state
     documentAbstracts = allAbstracts;
+    additionalFiles.forEach(freeFileMemory);
     additionalFiles = [];
 
     conversationHistory.push({ role: 'user', content: synthesisInput, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together` });
