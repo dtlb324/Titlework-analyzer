@@ -108,7 +108,7 @@ The app uses a **two-model pipeline** optimized for cost and quality on bulk run
 - **Claude Haiku 4.5** — reads and abstracts each document (fast, low cost)
 - **Claude Sonnet 4.6** — synthesizes chain of title and ownership (higher quality reasoning)
 
-API calls scale with document count. Abstraction uses adaptive batching (up to 8 documents per call). Synthesis uses hierarchical merging for runs over 50 documents. Follow-up questions use Sonnet 4.6.
+API calls scale with document count. Abstraction uses adaptive batching (up to 2 documents per call, with large files processed alone). Synthesis uses dynamic hierarchical merging for large or high-payload runs. Follow-up questions use Sonnet 4.6 with shortened conversation context to stay under request limits.
 
 ### Per-token pricing
 
@@ -187,7 +187,7 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 ### Document Analysis
 - **Two-stage pipeline:** Haiku 4.5 abstracts each document, then Sonnet 4.6 synthesizes chain of title and ownership
 - **Bulk upload:** up to **400 documents** per run (PDF, images, or CSV)
-- **Adaptive batching:** groups up to 8 documents per API call, capped at ~3 MB payload — large files batch alone
+- **Adaptive batching:** groups up to 2 documents per API call, capped at a ~3.5 MB safe file-payload budget under Vercel's 4.5 MB request limit — large files batch alone
 - **Parallel processing:** 2 abstraction batches run concurrently for faster throughput
 - **Hierarchical synthesis:** runs over 50 documents are synthesized in 50-document segments, then merged into one title opinion
 - **Client throttling:** automatic request pacing (~120 req/min) to stay within server rate limits during bulk runs
@@ -227,8 +227,8 @@ Upload (up to 400 files)
         ▼
 ┌───────────────────────────────┐
 │  Abstraction (Haiku 4.5)      │
-│  • Adaptive batches (≤8 docs) │
-│  • ~3 MB payload cap per call │
+│  • Adaptive batches (≤2 docs) │
+│  • ~3.5 MB safe payload cap  │
 │  • 2 parallel batches         │
 │  • Client throttle ~120/min   │
 └───────────────────────────────┘
@@ -304,7 +304,8 @@ Titlework-analyzer/
 │   └── index.html        # Entire frontend — single HTML file, no build step
 ├── test/
 │   ├── app.test.js       # Integration tests (API handler, frontend constants, syntax)
-│   └── batching.test.js  # Unit tests for adaptive batching logic
+│   ├── batching.test.js  # Unit tests for adaptive batching logic
+│   └── reliability.test.js # Regression tests for payload, timeout, and synthesis guardrails
 ├── vercel.json           # Vercel config — sets function timeout to 60 seconds
 ├── package.json          # Project metadata — type: module
 ├── SECURITY.md           # Security policy and vulnerability reporting
@@ -314,8 +315,7 @@ Titlework-analyzer/
 Run tests locally (requires Node.js):
 
 ```bash
-node test/app.test.js
-node test/batching.test.js
+npm test
 ```
 
 ---
@@ -369,7 +369,7 @@ A PDF was sent to the API without file data — usually caused by a failed batch
 5 incorrect password attempts were made from the same IP. Wait 60 seconds and try again with the correct password.
 
 **"File too large"**
-The documents in the batch exceed the server size limit (~3 MB per batch). Oversized files are batched alone automatically, but very large scans may still fail. Scan at 150 DPI instead of 300 DPI to reduce file size, or split multi-page PDFs by page range.
+The documents in the batch exceed the app's safe request budget (~3.5 MB of file payload under Vercel's 4.5 MB hard limit). Oversized files are batched alone automatically, but very large scans may still fail. Re-scan at 150 DPI black and white where legibility allows, or split multi-page PDFs into about 10-page sections.
 
 **Bulk run tips (100–400 documents)**
 - Scan at 150 DPI where legibility allows — this cuts API cost and avoids timeout errors

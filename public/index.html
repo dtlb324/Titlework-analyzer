@@ -189,21 +189,23 @@
 <script>
 const MAX_FILES = 400;
 const VERCEL_MAX_REQUEST_BYTES = 4_500_000;
-const REQUEST_OVERHEAD_BYTES = 400_000;
-const MAX_PAYLOAD_BYTES = VERCEL_MAX_REQUEST_BYTES - REQUEST_OVERHEAD_BYTES;
+const REQUEST_ENVELOPE_SAFE_BYTES = 3_900_000;
+const REQUEST_OVERHEAD_BYTES = 350_000;
+const MAX_PAYLOAD_BYTES = REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES;
 const MAX_DOCS_PER_BATCH = 2;
-const LARGE_FILE_BYTES = 1_000_000;
-const TIMEOUT_SAFE_FILE_BYTES = 500_000;
-const TIMEOUT_SPLIT_CHUNK_RAW = 600_000;
-const VERCEL_FUNCTION_TIMEOUT_MS = 55_000;
+const LARGE_FILE_BYTES = 800_000;
+const TIMEOUT_SAFE_FILE_BYTES = 350_000;
+const TIMEOUT_SPLIT_CHUNK_RAW = 400_000;
+const VERCEL_FUNCTION_TIMEOUT_MS = 45_000;
 const ABSTRACT_CONCURRENCY = 2;
 const SYNTHESIS_CHUNK_SIZE = 50;
+const FOLLOWUP_HISTORY_TURNS = 4;
 const MAX_FILE_LIST_DISPLAY = 8;
 const CLIENT_MAX_REQUESTS_PER_MIN = 120;
 const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
-const PDF_SPLIT_RAW_THRESHOLD = 2_400_000;
-const MAX_PDF_CHUNK_RAW_BYTES = 2_400_000;
+const PDF_SPLIT_RAW_THRESHOLD = 1_500_000;
+const MAX_PDF_CHUNK_RAW_BYTES = 1_500_000;
 
 const ABSTRACT_MODEL = 'claude-haiku-4-5';
 const SYNTHESIS_MODEL = 'claude-sonnet-4-6';
@@ -213,18 +215,73 @@ const SYNTHESIS_MAX_TOKENS = 8000;
 let requestTimestamps = [];
 let requestSlotQueue = Promise.resolve();
 let activeProgressTimer = null;
+let observedBatchBytesPerMs = 80;
 
-function estimateBatchTimeMs(batch) {
+function createRequestId() {
+  const random = Math.random().toString(36).slice(2, 10);
+  return `req_${Date.now().toString(36)}_${random}`;
+}
+
+function safeJsonStringify(value) {
+  return JSON.stringify(value);
+}
+
+function utf8ByteLength(value) {
+  const text = String(value);
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(text).length;
+  }
+  return unescape(encodeURIComponent(text)).length;
+}
+
+function buildBackendPayload(model, max_tokens, system, messages) {
+  return { model, max_tokens, system, messages };
+}
+
+function serializeBackendPayload(model, max_tokens, system, messages) {
+  const payload = buildBackendPayload(model, max_tokens, system, messages);
+  const body = safeJsonStringify(payload);
+  return { payload, body, bytes: utf8ByteLength(body) };
+}
+
+function assertRequestEnvelope(model, max_tokens, system, messages, label = 'Request') {
+  const serialized = serializeBackendPayload(model, max_tokens, system, messages);
+  if (serialized.bytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+    throw new Error(`${label} too large: ${(serialized.bytes / 1024 / 1024).toFixed(1)} MB exceeds the app's ${(REQUEST_ENVELOPE_SAFE_BYTES / 1024 / 1024).toFixed(1)} MB safety budget under Vercel's 4.5 MB request limit. Split the documents or reduce scan resolution.`);
+  }
+  return serialized;
+}
+
+function fileProcessingWeight(file) {
+  if (isImageFile(file)) return 1.25;
+  if (isCsvFile(file)) return 0.75;
+  return 1;
+}
+
+function estimateBatchTimeMs(batch, model = ABSTRACT_MODEL) {
   const files = batch.files || batch;
   let payload = 0;
-  for (const f of files) payload += estimateFilePayload(f);
+  for (const f of files) payload += estimateFilePayload(f) * fileProcessingWeight(f);
   const docs = files.length;
-  const payloadMs = Math.min(payload / 80, 45_000);
-  return 8000 + docs * 6000 + payloadMs;
+  const bytesPerMs = Math.max(30, Math.min(observedBatchBytesPerMs, 100));
+  const modelMultiplier = model === SYNTHESIS_MODEL ? 1.3 : 1;
+  const payloadMs = Math.min((payload / bytesPerMs) * modelMultiplier, 35_000);
+  return 7000 + docs * 5000 + payloadMs;
 }
 
 function batchExceedsTimeoutLimit(files) {
   return files.length > 0 && estimateBatchTimeMs({ files }) > VERCEL_FUNCTION_TIMEOUT_MS;
+}
+
+function recordBatchLatency(files, elapsedMs) {
+  if (!files.length || elapsedMs <= 0) return;
+  const baselineMs = 7000 + files.length * 5000;
+  const payloadMs = Math.max(1, elapsedMs - baselineMs);
+  const payloadBytes = files.reduce((sum, file) => sum + estimateFilePayload(file) * fileProcessingWeight(file), 0);
+  const measuredBytesPerMs = payloadBytes / payloadMs;
+  if (Number.isFinite(measuredBytesPerMs) && measuredBytesPerMs > 0) {
+    observedBatchBytesPerMs = observedBatchBytesPerMs * 0.7 + measuredBytesPerMs * 0.3;
+  }
 }
 
 function splitFilesForTimeout(files) {
@@ -589,6 +646,19 @@ async function extractPdfPageRange(srcDoc, fromPage, toPage) {
   return new Uint8Array(await newDoc.save());
 }
 
+function estimatePdfChunkRequestBytes(name, rawBytes) {
+  const dataLength = Math.ceil(rawBytes * 1.37);
+  const placeholderData = 'x'.repeat(dataLength);
+  const messages = [{
+    role: 'user',
+    content: [
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: placeholderData } },
+      { type: 'text', text: `Abstract each of the following documents in order: Document #1 (${name}). Label each section clearly as DOCUMENT #1:. Extract every relevant fact. Do not guess at anything illegible.` },
+    ],
+  }];
+  return estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, messages);
+}
+
 async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_CHUNK_RAW_BYTES) {
   if (!window.PDFLib) {
     throw new Error(`${file.name}: PDF splitting library did not load. Refresh the page or split the PDF manually.`);
@@ -619,7 +689,7 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
     while (lo <= hi) {
       const mid = Math.ceil((lo + hi) / 2);
       const chunk = await extractPdfPageRange(srcDoc, page, page + mid);
-      if (chunk.byteLength <= maxChunkRaw) {
+      if (chunk.byteLength <= maxChunkRaw && estimatePdfChunkRequestBytes(file.name, chunk.byteLength) <= REQUEST_ENVELOPE_SAFE_BYTES) {
         best = mid;
         lo = mid + 1;
       } else {
@@ -628,8 +698,8 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
     }
 
     const chunkBytes = await extractPdfPageRange(srcDoc, page, page + best);
-    if (Math.ceil(chunkBytes.byteLength * 1.37) > MAX_PAYLOAD_BYTES) {
-      throw new Error(`${file.name} page ${page + 1}: single page exceeds upload limit. Scan at 150 DPI or reduce scan resolution.`);
+    if (estimatePdfChunkRequestBytes(file.name, chunkBytes.byteLength) > REQUEST_ENVELOPE_SAFE_BYTES) {
+      throw new Error(`${file.name} page ${page + 1}: single page exceeds the safe upload limit. Scan at 150 DPI black and white or split into about 10-page sections.`);
     }
 
     const from = page + 1;
@@ -639,7 +709,7 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
       : `${baseName} (pp ${from}${to === from ? '' : `-${to}`}).pdf`;
     const chunkFile = new File([chunkBytes], chunkName, { type: 'application/pdf' });
     const data = await readFileAsBase64(chunkFile);
-    entries.push({
+    const entry = {
       name: chunkName,
       type: 'application/pdf',
       size: chunkBytes.byteLength,
@@ -648,7 +718,13 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
       sourceFile: chunkFile,
       splitFrom: file.name,
       pageRange: [from, to],
-    });
+    };
+    const actualMessages = await buildAbstractMessages([entry], 0);
+    const actualBytes = estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, actualMessages);
+    if (actualBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+      throw new Error(`${chunkName}: chunk exceeds the safe upload limit after encoding. Scan at 150 DPI black and white or split into about 10-page sections.`);
+    }
+    entries.push(entry);
     page += best;
   }
 
@@ -731,6 +807,72 @@ async function ensureFileData(entry) {
 function freeFileMemory(file) {
   file.data = null;
   file.csvText = null;
+}
+
+function getStorage() {
+  try {
+    if (typeof localStorage !== 'undefined') return localStorage;
+  } catch {}
+  return null;
+}
+
+function hashStringSample(value) {
+  const text = String(value || '');
+  const sample = `${text.length}:${text.slice(0, 512)}:${text.slice(-512)}`;
+  let hash = 2166136261;
+  for (let i = 0; i < sample.length; i++) {
+    hash ^= sample.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function getFileFingerprint(file) {
+  const source = file.sourceFile || file;
+  const modified = source?.lastModified || file.lastModified || '';
+  const range = file.pageRange ? file.pageRange.join('-') : '';
+  const split = file.splitFrom || '';
+  const contentHash = file.csvText
+    ? hashStringSample(file.csvText)
+    : typeof file.data === 'string'
+      ? hashStringSample(file.data)
+      : '';
+  return `${file.name}:${file.size}:${file.type || ''}:${modified}:${split}:${range}:${contentHash}`;
+}
+
+function getFileSignature(fileList, indexOffset, label) {
+  const filesKey = fileList.map(getFileFingerprint).join('|');
+  return `title-analyzer-abstraction:${label}:${indexOffset}:${filesKey}`;
+}
+
+function loadAbstractionCheckpoint(fileList, indexOffset, label) {
+  const storage = getStorage();
+  if (!storage) return null;
+  const key = getFileSignature(fileList, indexOffset, label);
+  try {
+    const parsed = JSON.parse(storage.getItem(key) || 'null');
+    if (!parsed || !Array.isArray(parsed.entries)) return { key, entries: [] };
+    return { key, entries: parsed.entries };
+  } catch {
+    storage.removeItem(key);
+    return { key, entries: [] };
+  }
+}
+
+function saveAbstractionCheckpoint(key, entries) {
+  const storage = getStorage();
+  if (!storage || !key) return false;
+  try {
+    storage.setItem(key, JSON.stringify({ savedAt: Date.now(), entries }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearAbstractionCheckpoint(key) {
+  const storage = getStorage();
+  if (storage && key) storage.removeItem(key);
 }
 
 async function handleFiles(newFiles) {
@@ -827,13 +969,26 @@ function updateProgress(pct, status, items) {
 async function callBackend(messages, system, options = {}, retryCount = 0) {
   const model = options.model || SYNTHESIS_MODEL;
   const max_tokens = options.max_tokens || SYNTHESIS_MAX_TOKENS;
+  const requestId = options.requestId || createRequestId();
+  const phase = options.phase || 'unknown';
+  const serialized = assertRequestEnvelope(model, max_tokens, system, messages, options.label || `${phase} request`);
   await acquireRequestSlot();
   let response;
+  const startedAt = Date.now();
+  console.debug(JSON.stringify({
+    event: 'client_api_request',
+    requestId,
+    phase,
+    model,
+    payloadBytes: serialized.bytes,
+    docCount: options.docCount || 0,
+    retryCount,
+  }));
   try {
     response = await fetch('/api/analyze', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ model, max_tokens, system, messages }),
+      headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword, 'x-request-id': requestId },
+      body: serialized.body,
     });
   } catch (networkErr) {
     // Fetch itself failed — network level problem
@@ -844,6 +999,17 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   }
 
   const text = await response.text();
+  const elapsedMs = Date.now() - startedAt;
+  console.debug(JSON.stringify({
+    event: 'client_api_response',
+    requestId,
+    phase,
+    model,
+    payloadBytes: serialized.bytes,
+    status: response.status,
+    elapsedMs,
+    retryCount,
+  }));
   let data;
   try { data = JSON.parse(text); }
   catch {
@@ -878,7 +1044,7 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
           : isServerLimit ? 62000
           : 5000 * (retryCount + 1);
         await sleep(waitMs);
-        return callBackend(messages, system, options, retryCount + 1);
+        return callBackend(messages, system, { ...options, requestId }, retryCount + 1);
       }
       throw new Error('Rate limit reached: Too many requests in a short period. Wait 60 seconds — processing will continue automatically if you retry, or refresh and run a smaller batch first.');
     }
@@ -905,7 +1071,7 @@ function estimateFilePayload(file) {
 }
 
 function estimateRequestBytes(model, max_tokens, system, messages) {
-  return JSON.stringify({ model, max_tokens, system, messages }).length;
+  return serializeBackendPayload(model, max_tokens, system, messages).bytes;
 }
 
 function formatMegabytes(bytes) {
@@ -914,7 +1080,16 @@ function formatMegabytes(bytes) {
 
 function isTimeoutError(err) {
   const msg = String(err?.message || err || '');
-  return msg.includes('504') || msg.includes('524') || msg.includes('Timeout') || msg.includes('too long to process') || msg.includes('FUNCTION_INVOCATION_TIMEOUT');
+  const name = String(err?.name || '');
+  return msg.includes('504')
+    || msg.includes('524')
+    || msg.includes('Timeout')
+    || msg.includes('timeout')
+    || msg.includes('aborted')
+    || msg.includes('too long to process')
+    || msg.includes('FUNCTION_INVOCATION_TIMEOUT')
+    || name.includes('Abort')
+    || name.includes('Timeout');
 }
 
 function maxDocsForPayload(filePayload) {
@@ -934,7 +1109,13 @@ async function abstractSinglePdfOnTimeout(file, globalStartIdx) {
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     const messages = await buildAbstractMessages([part], globalStartIdx);
-    const partText = await callBackend(messages, ABSTRACT_PROMPT, { model: ABSTRACT_MODEL, max_tokens: ABSTRACT_MAX_TOKENS });
+    const partText = await callBackend(messages, ABSTRACT_PROMPT, {
+      model: ABSTRACT_MODEL,
+      max_tokens: ABSTRACT_MAX_TOKENS,
+      phase: 'abstraction-timeout-split',
+      docCount: 1,
+      label: 'Timeout PDF chunk',
+    });
     const pr = part.pageRange;
     const rangeLabel = pr ? ` (pp ${pr[0]}${pr[1] !== pr[0] ? '-' + pr[1] : ''})` : '';
     sections.push(`[${file.name}${rangeLabel}]\n${partText}`);
@@ -996,17 +1177,37 @@ async function runWithConcurrency(taskFns, limit) {
   await Promise.all(executing);
 }
 
-async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgress) {
+async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgress, checkpointLabel = 'initial') {
   const batches = buildAdaptiveBatches(fileList);
   const results = new Array(batches.length);
   let completedDocs = 0;
   let firstError = null;
+  const checkpoint = loadAbstractionCheckpoint(fileList, indexOffset, checkpointLabel);
+  const checkpointEntries = new Map((checkpoint?.entries || []).map(entry => [entry.localIndex, entry]));
+  let checkpointPersisted = checkpointEntries.size > 0;
 
   const tasks = batches.map((batch, bi) => async () => {
     if (firstError) return;
     const batchFiles = batch.files;
     const globalStart = batch.globalStart + indexOffset;
     const localStart = batch.globalStart;
+    const cached = batchFiles.map((_, j) => checkpointEntries.get(localStart + j));
+    if (cached.every(Boolean)) {
+      results[bi] = cached.map(entry => ({ filename: entry.filename, abstract: entry.abstract }));
+      completedDocs += batchFiles.length;
+      if (showAllProgress) {
+        for (let j = 0; j < batchFiles.length; j++) {
+          const itemIdx = localStart + j;
+          if (items[itemIdx]) items[itemIdx].status = 'done';
+        }
+      }
+      updateProgress(
+        Math.round(Math.min(85, (completedDocs / fileList.length) * 85)),
+        `Restored ${completedDocs} of ${fileList.length} abstracts from local checkpoint...`,
+        items
+      );
+      return;
+    }
 
     if (showAllProgress) {
       for (let j = 0; j < batchFiles.length; j++) {
@@ -1020,6 +1221,17 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
       const result = await abstractBatch(batchFiles, globalStart);
       const parsed = parseBatchResult(result, batchFiles, globalStart);
       results[bi] = parsed;
+      parsed.forEach((abstract, j) => {
+        checkpointEntries.set(localStart + j, {
+          localIndex: localStart + j,
+          filename: abstract.filename,
+          abstract: abstract.abstract,
+        });
+      });
+      checkpointPersisted = saveAbstractionCheckpoint(
+        checkpoint?.key,
+        Array.from(checkpointEntries.values()).sort((a, b) => a.localIndex - b.localIndex)
+      ) || checkpointPersisted;
       completedDocs += batchFiles.length;
       if (activeProgressTimer?.plan) {
         activeProgressTimer.completedBatchCount += 1;
@@ -1044,7 +1256,14 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
   });
 
   await runWithConcurrency(tasks, ABSTRACT_CONCURRENCY);
-  if (firstError) throw firstError;
+  if (firstError) {
+    const savedCount = checkpointEntries.size;
+    const resumeHint = checkpointPersisted
+      ? `${savedCount} of ${fileList.length} document abstract(s) were saved locally; retry this same upload to skip completed batches and process only the remaining failures.`
+      : `${savedCount} of ${fileList.length} document abstract(s) completed before the failure, but this browser did not allow saving a local checkpoint. Keep the tab open and retry smaller batches if needed.`;
+    throw new Error(`${firstError.message}. ${resumeHint}`);
+  }
+  clearAbstractionCheckpoint(checkpoint?.key);
   return results.flat();
 }
 
@@ -1060,48 +1279,134 @@ function buildAbstractInput(abstracts, tract, ctx, preamble) {
 
 async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt) {
   const input = buildAbstractInput(abstracts, tract, ctx, preamble);
-  return await callBackend([{ role: 'user', content: input }], systemPrompt || SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
+  const prompt = systemPrompt || SYNTHESIS_PROMPT;
+  const messages = [{ role: 'user', content: input }];
+  const requestBytes = estimateRequestBytes(SYNTHESIS_MODEL, SYNTHESIS_MAX_TOKENS, prompt, messages);
+
+  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES && abstracts.length > 1) {
+    return await synthesizeSplitAndMerge(abstracts, tract, ctx, preamble, prompt, 'safe request budget');
+  }
+  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+    throw new Error(`Synthesis request too large: ${(requestBytes / 1024 / 1024).toFixed(1)} MB exceeds the app's safe request budget. Split this document or reduce the source scan size.`);
+  }
+
+  try {
+    return await callBackend(messages, prompt, {
+      model: SYNTHESIS_MODEL,
+      max_tokens: SYNTHESIS_MAX_TOKENS,
+      phase: 'synthesis',
+      docCount: abstracts.length,
+      label: 'Synthesis request',
+    });
+  } catch (e) {
+    if (abstracts.length > 1 && (isEnvelopeError(e) || isTimeoutError(e))) {
+      return await synthesizeSplitAndMerge(abstracts, tract, ctx, preamble, prompt, isTimeoutError(e) ? 'timeout' : 'request size');
+    }
+    throw e;
+  }
+}
+
+function isEnvelopeError(err) {
+  const msg = String(err?.message || err || '');
+  return msg.includes('413') || msg.includes('too large') || msg.includes('Payload') || msg.includes('request budget') || msg.includes('4.5 MB');
+}
+
+async function synthesizeSplitAndMerge(abstracts, tract, ctx, preamble, systemPrompt, reason) {
+  const mid = Math.ceil(abstracts.length / 2);
+  const left = abstracts.slice(0, mid);
+  const right = abstracts.slice(mid);
+  const leftSummary = await synthesizeAbstracts(
+    left,
+    tract,
+    ctx,
+    `${preamble}\n\nThis subset was split automatically because the original synthesis hit ${reason}. Produce a faithful partial chain-of-title segment.`,
+    PARTIAL_SYNTHESIS_PROMPT
+  );
+  const rightSummary = await synthesizeAbstracts(
+    right,
+    tract,
+    ctx,
+    `${preamble}\n\nThis subset was split automatically because the original synthesis hit ${reason}. Produce a faithful partial chain-of-title segment.`,
+    PARTIAL_SYNTHESIS_PROMPT
+  );
+
+  const mergeAbstracts = [
+    { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftSummary },
+    { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightSummary },
+  ];
+  return await synthesizeAbstracts(
+    mergeAbstracts,
+    tract,
+    ctx,
+    'Merge these partial chain-of-title syntheses into one complete title opinion. Preserve all caveats, gaps, curative requirements, and fractional calculations.',
+    systemPrompt
+  );
+}
+
+function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemPrompt) {
+  const chunks = [];
+  let current = [];
+  for (const abstract of abstracts) {
+    const candidate = [...current, abstract];
+    const candidateInput = buildAbstractInput(candidate, tract, ctx, preamble);
+    const candidateBytes = estimateRequestBytes(
+      SYNTHESIS_MODEL,
+      SYNTHESIS_MAX_TOKENS,
+      systemPrompt || SYNTHESIS_PROMPT,
+      [{ role: 'user', content: candidateInput }]
+    );
+    if (current.length && (current.length >= SYNTHESIS_CHUNK_SIZE || candidateBytes > REQUEST_ENVELOPE_SAFE_BYTES)) {
+      chunks.push(current);
+      current = [abstract];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
 }
 
 async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
-  if (abstracts.length <= SYNTHESIS_CHUNK_SIZE) {
+  const singlePassPreamble = `Below are ${abstracts.length} document abstracts. Synthesize into a complete title opinion.`;
+  const dynamicChunks = buildSynthesisChunks(abstracts, tract, ctx, singlePassPreamble, SYNTHESIS_PROMPT);
+
+  if (dynamicChunks.length === 1) {
     return await synthesizeAbstracts(
       abstracts,
       tract,
       ctx,
-      `Below are ${abstracts.length} document abstracts. Synthesize into a complete title opinion.`
+      singlePassPreamble
     );
   }
 
-  const chunks = [];
-  for (let i = 0; i < abstracts.length; i += SYNTHESIS_CHUNK_SIZE) {
-    chunks.push(abstracts.slice(i, i + SYNTHESIS_CHUNK_SIZE));
-  }
-
   const segmentSummaries = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const start = i * SYNTHESIS_CHUNK_SIZE + 1;
-    const end = Math.min((i + 1) * SYNTHESIS_CHUNK_SIZE, abstracts.length);
-    onProgress(`Synthesizing segment ${i + 1} of ${chunks.length} (documents ${start}–${end})...`);
+  let start = 1;
+  for (let i = 0; i < dynamicChunks.length; i++) {
+    const chunk = dynamicChunks[i];
+    const end = start + chunk.length - 1;
+    onProgress(`Synthesizing segment ${i + 1} of ${dynamicChunks.length} (documents ${start}–${end})...`);
     const summary = await synthesizeAbstracts(
-      chunks[i],
+      chunk,
       tract,
       ctx,
       `Below are document abstracts ${start}–${end} of ${abstracts.length}. Produce a partial chain-of-title segment.`,
       PARTIAL_SYNTHESIS_PROMPT
     );
     segmentSummaries.push({ segment: i + 1, start, end, summary });
+    start = end + 1;
   }
 
   onProgress('Final synthesis — merging all segments into complete title opinion...');
-  let mergeInput = `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${abstracts.length} documents. Merge them into one complete title opinion.\n\n`;
-  if (tract) mergeInput += `**Subject Tract:** ${tract}\n\n`;
-  if (ctx) mergeInput += `**Additional Context:** ${ctx}\n\n`;
-  mergeInput += '---\n\n';
-  segmentSummaries.forEach(s => {
-    mergeInput += `## Segment ${s.segment} (Documents ${s.start}–${s.end})\n\n${s.summary}\n\n---\n\n`;
-  });
-  return await callBackend([{ role: 'user', content: mergeInput }], SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
+  return await synthesizeAbstracts(
+    segmentSummaries.map(s => ({
+      filename: `Segment ${s.segment} (Documents ${s.start}-${s.end})`,
+      abstract: s.summary,
+    })),
+    tract,
+    ctx,
+    `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${abstracts.length} documents. Merge them into one complete title opinion.`,
+    SYNTHESIS_PROMPT
+  );
 }
 
 async function buildAbstractMessages(batchFiles, globalStartIdx) {
@@ -1163,7 +1468,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
   const messages = await buildAbstractMessages(batchFiles, globalStartIdx);
   const requestBytes = estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, messages);
 
-  if (requestBytes > VERCEL_MAX_REQUEST_BYTES) {
+  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
     if (allowSplit && batchFiles.length > 1) {
       const mid = Math.ceil(batchFiles.length / 2);
       const part1 = await abstractBatch(batchFiles.slice(0, mid), globalStartIdx, true);
@@ -1171,11 +1476,20 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       return part1 + '\n\n' + part2;
     }
     const names = batchFiles.map(f => f.name).join(', ');
-    throw new Error(`File too large: ${names} (${formatMegabytes(requestBytes)} MB) exceeds Vercel's 4.5 MB upload limit. Scan at 150 DPI or split the PDF into smaller files by page range.`);
+    throw new Error(`File too large: ${names} (${formatMegabytes(requestBytes)} MB) exceeds the app's safe ${formatMegabytes(REQUEST_ENVELOPE_SAFE_BYTES)} MB request budget under Vercel's 4.5 MB limit. Scan at 150 DPI black and white or split into about 10-page sections.`);
   }
 
   try {
-    return await callBackend(messages, ABSTRACT_PROMPT, { model: ABSTRACT_MODEL, max_tokens: ABSTRACT_MAX_TOKENS });
+    const startedAt = Date.now();
+    const result = await callBackend(messages, ABSTRACT_PROMPT, {
+      model: ABSTRACT_MODEL,
+      max_tokens: ABSTRACT_MAX_TOKENS,
+      phase: 'abstraction',
+      docCount: batchFiles.length,
+      label: 'Abstraction batch',
+    });
+    recordBatchLatency(batchFiles, Date.now() - startedAt);
+    return result;
   } catch (e) {
     const splittable = allowSplit && (e.message.includes('413') || e.message.includes('too large') || e.message.includes('Payload') || isTimeoutError(e));
     if (splittable && batchFiles.length > 1) {
@@ -1263,8 +1577,8 @@ async function analyze() {
     clearProgressTimer();
     files.forEach(freeFileMemory);
     conversationHistory = [
-      { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)` },
-      { role: 'assistant', content: synthesis },
+      { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)`, kind: 'analysis-input' },
+      { role: 'assistant', content: synthesis, kind: 'title-opinion' },
     ];
     setTimeout(() => {
       document.getElementById('progressSection').style.display = 'none';
@@ -1280,16 +1594,57 @@ async function analyze() {
   }
 }
 
+function buildFollowupMessages(question) {
+  const titleOpinion = conversationHistory
+    .slice()
+    .reverse()
+    .find(m => m.role === 'assistant' && (m.kind === 'title-opinion' || !m.kind))?.content || '';
+  const followupOnly = conversationHistory
+    .slice(2, -1)
+    .filter(m => m.kind === 'followup' && typeof m.content === 'string');
+  for (let turns = FOLLOWUP_HISTORY_TURNS; turns >= 0; turns--) {
+    const recent = followupOnly.slice(-turns * 2);
+    const recentText = recent.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
+    const content = `Use the completed title opinion below to answer the landman's follow-up question. Do not rely on the original raw document abstracts unless they are quoted in the title opinion. If the answer requires checking source documents, say so clearly.\n\n## Completed Title Opinion\n\n${titleOpinion}\n\n${recentText ? `## Recent Follow-up Context\n\n${recentText}\n\n` : ''}## Follow-up Question\n\n${question}`;
+    const messages = [{ role: 'user', content }];
+    if (estimateRequestBytes(SYNTHESIS_MODEL, SYNTHESIS_MAX_TOKENS, SYNTHESIS_PROMPT, messages) <= REQUEST_ENVELOPE_SAFE_BYTES) {
+      return messages;
+    }
+  }
+  let keepChars = Math.min(titleOpinion.length, Math.max(0, REQUEST_ENVELOPE_SAFE_BYTES - 100_000));
+  while (keepChars > 0) {
+    const trimmedOpinion = titleOpinion.slice(0, keepChars);
+    const messages = [{
+      role: 'user',
+      content: `Use this truncated title opinion to answer the follow-up. If the truncation removes facts needed to answer safely, ask the user to rerun or narrow the question.\n\n## Title Opinion\n\n${trimmedOpinion}\n\n## Follow-up Question\n\n${question}`,
+    }];
+    if (estimateRequestBytes(SYNTHESIS_MODEL, SYNTHESIS_MAX_TOKENS, SYNTHESIS_PROMPT, messages) <= REQUEST_ENVELOPE_SAFE_BYTES) {
+      return messages;
+    }
+    keepChars = Math.floor(keepChars * 0.75);
+  }
+  return [{
+    role: 'user',
+    content: `The prior title opinion is too large to include safely in this follow-up request. Ask the user to narrow the question or rerun a smaller analysis.\n\n## Follow-up Question\n\n${question}`,
+  }];
+}
+
 async function askFollowup() {
   const q = document.getElementById('followupInput').value.trim();
   if (!q) return;
   document.getElementById('followupInput').value = '';
   clearError();
-  conversationHistory.push({ role: 'user', content: q });
+  conversationHistory.push({ role: 'user', content: q, kind: 'followup' });
   renderResults();
   try {
-    const reply = await callBackend(conversationHistory, SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
-    conversationHistory.push({ role: 'assistant', content: reply });
+    const reply = await callBackend(buildFollowupMessages(q), SYNTHESIS_PROMPT, {
+      model: SYNTHESIS_MODEL,
+      max_tokens: SYNTHESIS_MAX_TOKENS,
+      phase: 'followup',
+      docCount: documentAbstracts.length,
+      label: 'Follow-up request',
+    });
+    conversationHistory.push({ role: 'assistant', content: reply, kind: 'followup' });
   } catch (e) {
     showError('Error: ' + e.message);
     conversationHistory.pop();
@@ -1435,7 +1790,7 @@ async function analyzeAdditional() {
   updateProgress(0, `Starting analysis of ${additionalFiles.length} additional document${additionalFiles.length === 1 ? '' : 's'}...`, items);
 
   try {
-    newAbstracts = await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress);
+    newAbstracts = await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress, `additional-${globalOffset}`);
   } catch (e) {
     showError(e.message);
     clearProgressTimer();
@@ -1480,8 +1835,8 @@ async function analyzeAdditional() {
     additionalFiles.forEach(freeFileMemory);
     additionalFiles = [];
 
-    conversationHistory.push({ role: 'user', content: synthesisInput, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together` });
-    conversationHistory.push({ role: 'assistant', content: synthesis });
+    conversationHistory.push({ role: 'user', content: synthesisInput, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together`, kind: 'analysis-input' });
+    conversationHistory.push({ role: 'assistant', content: synthesis, kind: 'title-opinion' });
 
     setTimeout(() => {
       document.getElementById('progressSection').style.display = 'none';

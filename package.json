@@ -3,5 +3,8 @@
   "version": "1.0.0",
   "description": "Mineral Title Chain Analyzer for landmen",
   "type": "module",
-  "private": true
+  "private": true,
+  "scripts": {
+    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js"
+  }
 }

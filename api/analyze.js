@@ -17,6 +17,38 @@ const RATE_LIMIT_MAX_REQUESTS = Math.min(
 );
 const PASSWORD_RATE_LIMIT_MAX = 5;
 const MAX_REQUEST_BYTES = 4_500_000;
+const UPSTREAM_TIMEOUT_MS = 52_000;
+
+function createRequestId() {
+  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function logRequestEvent(event, fields = {}) {
+  console.log(JSON.stringify({
+    event,
+    timestamp: new Date().toISOString(),
+    ...fields,
+  }));
+}
+
+function isAbortError(err) {
+  const name = String(err?.name || '');
+  const message = String(err?.message || '');
+  return name.includes('Abort')
+    || name.includes('Timeout')
+    || message.includes('aborted')
+    || message.includes('timeout')
+    || message.includes('Timeout');
+}
+
+function createTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return { signal: AbortSignal.timeout(ms), cleanup() {} };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, cleanup: () => clearTimeout(timeout) };
+}
 
 function getRateLimitEntry(ip) {
   const now = Date.now();
@@ -108,9 +140,13 @@ function setSecurityHeaders(res) {
 
 export default async function handler(req, res) {
   setSecurityHeaders(res);
+  const requestId = req.headers['x-request-id'] || createRequestId();
+  const startedAt = Date.now();
+  res.setHeader('X-Request-Id', requestId);
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed.' });
+    logRequestEvent('api_reject', { requestId, status: 405, reason: 'method_not_allowed', latencyMs: Date.now() - startedAt });
+    return res.status(405).json({ error: 'Method not allowed.', requestId });
   }
 
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
@@ -121,12 +157,16 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') {
     try { body = JSON.parse(body); }
-    catch { return res.status(400).json({ error: 'Invalid JSON in request body.' }); }
+    catch {
+      logRequestEvent('api_reject', { requestId, status: 400, reason: 'invalid_json', latencyMs: Date.now() - startedAt });
+      return res.status(400).json({ error: 'Invalid JSON in request body.', requestId });
+    }
   }
 
   const validation = validateRequestBody(body);
   if (!validation.valid) {
-    return res.status(400).json({ error: validation.reason });
+    logRequestEvent('api_reject', { requestId, status: 400, reason: validation.reason, latencyMs: Date.now() - startedAt });
+    return res.status(400).json({ error: validation.reason, requestId });
   }
 
   if (validation.isPing) {
@@ -139,12 +179,14 @@ export default async function handler(req, res) {
   rateEntry.count++;
   if (rateEntry.count > RATE_LIMIT_MAX_REQUESTS) {
     res.setHeader('Retry-After', '60');
-    return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.' });
+    logRequestEvent('api_reject', { requestId, status: 429, reason: 'rate_limit', ip, latencyMs: Date.now() - startedAt });
+    return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.', requestId });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'API key not configured on server.' });
+    logRequestEvent('api_error', { requestId, status: 500, reason: 'missing_api_key', latencyMs: Date.now() - startedAt });
+    return res.status(500).json({ error: 'API key not configured on server.', requestId });
   }
 
   const requiredPassword = process.env.APP_PASSWORD;
@@ -152,12 +194,14 @@ export default async function handler(req, res) {
     const providedPassword = req.headers['x-app-password'];
     if (rateEntry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) {
       res.setHeader('Retry-After', '60');
-      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.' });
+      logRequestEvent('api_reject', { requestId, status: 429, reason: 'password_rate_limit', ip, latencyMs: Date.now() - startedAt });
+      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
     }
     if (!secureCompare(providedPassword || '', requiredPassword)) {
       rateEntry.failedAuth++,
       await new Promise(r => setTimeout(r, 500));
-      return res.status(401).json({ error: 'Invalid password.' });
+      logRequestEvent('api_reject', { requestId, status: 401, reason: 'invalid_password', ip, latencyMs: Date.now() - startedAt });
+      return res.status(401).json({ error: 'Invalid password.', requestId });
     }
   }
 
@@ -168,14 +212,31 @@ export default async function handler(req, res) {
   };
   if (body.system) safeBody.system = body.system;
 
-  const payloadSize = JSON.stringify(safeBody).length;
+  const serializedBody = JSON.stringify(safeBody);
+  const payloadSize = Buffer.byteLength(serializedBody, 'utf8');
   if (payloadSize > MAX_REQUEST_BYTES) {
+    logRequestEvent('api_reject', {
+      requestId,
+      status: 413,
+      reason: 'payload_too_large',
+      model: safeBody.model,
+      payloadBytes: payloadSize,
+      latencyMs: Date.now() - startedAt,
+    });
     return res.status(413).json({
-      error: `Request too large (${(payloadSize / 1024 / 1024).toFixed(1)} MB). Vercel limit is 4.5 MB. Scan at 150 DPI or split large PDFs.`,
+      error: `Request too large (${(payloadSize / 1024 / 1024).toFixed(1)} MB). Vercel limit is 4.5 MB. Scan at 150 DPI black and white or split into about 10-page sections.`,
+      requestId,
     });
   }
 
   try {
+    logRequestEvent('api_request', {
+      requestId,
+      model: safeBody.model,
+      payloadBytes: payloadSize,
+      messageCount: safeBody.messages.length,
+    });
+    const timeout = createTimeoutSignal(UPSTREAM_TIMEOUT_MS);
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -183,8 +244,10 @@ export default async function handler(req, res) {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify(safeBody),
+      body: serializedBody,
+      signal: timeout.signal,
     });
+    timeout.cleanup();
 
     const data = await response.json();
 
@@ -194,11 +257,36 @@ export default async function handler(req, res) {
       stop_reason: data.stop_reason,
       usage: data.usage,
       error: data.error,
+      requestId,
     };
 
+    logRequestEvent('api_response', {
+      requestId,
+      model: safeBody.model,
+      status: response.status,
+      payloadBytes: payloadSize,
+      latencyMs: Date.now() - startedAt,
+      errorType: data.error?.type || null,
+    });
     return res.status(response.status).json(safeResponse);
   } catch (err) {
-    console.error('Handler error:', err.message);
-    return res.status(500).json({ error: 'Internal server error. Please try again.' });
+    const status = isAbortError(err) ? 504 : 500;
+    const reason = isAbortError(err) ? 'upstream_timeout' : 'internal_error';
+    logRequestEvent('api_error', {
+      requestId,
+      status,
+      reason,
+      model: safeBody.model,
+      payloadBytes: payloadSize,
+      latencyMs: Date.now() - startedAt,
+      errorType: err.name || 'Error',
+    });
+    if (status === 504) {
+      return res.status(504).json({
+        error: `Timeout error: Anthropic did not respond within ${Math.round(UPSTREAM_TIMEOUT_MS / 1000)} seconds. The app will retry smaller batches when possible.`,
+        requestId,
+      });
+    }
+    return res.status(500).json({ error: 'Internal server error. Please try again.', requestId });
   }
 }
