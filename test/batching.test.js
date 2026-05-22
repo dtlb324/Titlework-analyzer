@@ -1,13 +1,13 @@
 function estimateFilePayload(file) {
   if (file.csvText) return file.csvText.length + 500;
-  if (file.data) return Math.ceil(file.data.length * 0.75);
-  return file.size || 0;
+  if (typeof file.data === 'string' && file.data.length) return file.data.length;
+  return Math.ceil((file.size || 0) * 1.37);
 }
 
 function buildAdaptiveBatches(fileList) {
-  const MAX_PAYLOAD_BYTES = 3_000_000;
-  const MAX_DOCS_PER_BATCH = 8;
-  const LARGE_FILE_BYTES = 2_000_000;
+  const MAX_PAYLOAD_BYTES = 4_100_000;
+  const MAX_DOCS_PER_BATCH = 4;
+  const LARGE_FILE_BYTES = 1_000_000;
   const batches = [];
   let current = [];
   let currentPayload = 0;
@@ -51,8 +51,8 @@ function assert(condition, message) {
 const small = (n, size = 100000) => ({ name: `doc-${n}.pdf`, size, data: 'x'.repeat(size) });
 
 const smallBatch = buildAdaptiveBatches(Array.from({ length: 10 }, (_, i) => small(i)));
-assert(smallBatch.length <= 2, `10 small docs should pack into <=2 batches, got ${smallBatch.length}`);
-assert(smallBatch[0].files.length >= 8, 'First batch should pack up to 8 small docs');
+assert(smallBatch.length === 3, `10 small docs should pack into 3 batches (max 4 docs each), got ${smallBatch.length}`);
+assert(smallBatch[0].files.length === 4, 'First batch should pack up to 4 small docs');
 
 const large = buildAdaptiveBatches([{ name: 'big.pdf', size: 3_000_000, data: 'x'.repeat(3_000_000) }]);
 assert(large.length === 1 && large[0].files.length === 1, 'Large file should batch alone');

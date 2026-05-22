@@ -16,6 +16,7 @@ const RATE_LIMIT_MAX_REQUESTS = Math.min(
   600
 );
 const PASSWORD_RATE_LIMIT_MAX = 5;
+const MAX_REQUEST_BYTES = 4_500_000;
 
 function getRateLimitEntry(ip) {
   const now = Date.now();
@@ -166,6 +167,13 @@ export default async function handler(req, res) {
     messages: body.messages,
   };
   if (body.system) safeBody.system = body.system;
+
+  const payloadSize = JSON.stringify(safeBody).length;
+  if (payloadSize > MAX_REQUEST_BYTES) {
+    return res.status(413).json({
+      error: `Request too large (${(payloadSize / 1024 / 1024).toFixed(1)} MB). Vercel limit is 4.5 MB. Scan at 150 DPI or split large PDFs.`,
+    });
+  }
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {

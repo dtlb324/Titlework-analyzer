@@ -187,9 +187,11 @@
 
 <script>
 const MAX_FILES = 400;
-const MAX_PAYLOAD_BYTES = 3_000_000;
-const MAX_DOCS_PER_BATCH = 8;
-const LARGE_FILE_BYTES = 2_000_000;
+const VERCEL_MAX_REQUEST_BYTES = 4_500_000;
+const REQUEST_OVERHEAD_BYTES = 400_000;
+const MAX_PAYLOAD_BYTES = VERCEL_MAX_REQUEST_BYTES - REQUEST_OVERHEAD_BYTES;
+const MAX_DOCS_PER_BATCH = 4;
+const LARGE_FILE_BYTES = 1_000_000;
 const ABSTRACT_CONCURRENCY = 2;
 const SYNTHESIS_CHUNK_SIZE = 50;
 const MAX_FILE_LIST_DISPLAY = 8;
@@ -528,7 +530,7 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   try { data = JSON.parse(text); }
   catch {
     if (response.status === 413) {
-      throw new Error('File too large (HTTP 413): The document(s) in this batch exceed the server size limit. Try splitting into smaller files or scanning at a lower resolution (150 DPI instead of 300 DPI).');
+      throw new Error('File too large (HTTP 413): This batch exceeds Vercel\'s 4.5 MB upload limit. The app will retry with smaller batches automatically; if the error persists, scan at 150 DPI or split large PDFs by page range.');
     }
     if (response.status === 504 || response.status === 524) {
       throw new Error('Timeout error (HTTP ' + response.status + '): The server took too long to process this batch. Try uploading fewer documents at a time, or check if the PDF files are very large.');
@@ -577,8 +579,16 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
 
 function estimateFilePayload(file) {
   if (file.csvText) return file.csvText.length + 500;
-  if (file.data) return Math.ceil(file.data.length * 0.75);
-  return file.size || 0;
+  if (typeof file.data === 'string' && file.data.length) return file.data.length;
+  return Math.ceil((file.size || 0) * 1.37);
+}
+
+function estimateRequestBytes(model, max_tokens, system, messages) {
+  return JSON.stringify({ model, max_tokens, system, messages }).length;
+}
+
+function formatMegabytes(bytes) {
+  return (bytes / 1024 / 1024).toFixed(1);
 }
 
 function buildAdaptiveBatches(fileList) {
@@ -731,8 +741,7 @@ async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
   return await callBackend([{ role: 'user', content: mergeInput }], SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
 }
 
-// Send a batch of files in one API call — handles PDF, image, and CSV
-async function abstractBatch(batchFiles, globalStartIdx) {
+async function buildAbstractMessages(batchFiles, globalStartIdx) {
   const content = [];
   const csvFiles = [];
 
@@ -766,7 +775,38 @@ async function abstractBatch(batchFiles, globalStartIdx) {
   }
 
   content.push({ type: 'text', text: textPrompt });
-  return await callBackend([{ role: 'user', content }], ABSTRACT_PROMPT, { model: ABSTRACT_MODEL, max_tokens: ABSTRACT_MAX_TOKENS });
+  return [{ role: 'user', content }];
+}
+
+// Send a batch of files in one API call — handles PDF, image, and CSV
+async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
+  if (!batchFiles.length) return '';
+
+  const messages = await buildAbstractMessages(batchFiles, globalStartIdx);
+  const requestBytes = estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, messages);
+
+  if (requestBytes > VERCEL_MAX_REQUEST_BYTES) {
+    if (allowSplit && batchFiles.length > 1) {
+      const mid = Math.ceil(batchFiles.length / 2);
+      const part1 = await abstractBatch(batchFiles.slice(0, mid), globalStartIdx, true);
+      const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
+      return part1 + '\n\n' + part2;
+    }
+    const names = batchFiles.map(f => f.name).join(', ');
+    throw new Error(`File too large: ${names} (${formatMegabytes(requestBytes)} MB) exceeds Vercel's 4.5 MB upload limit. Scan at 150 DPI or split the PDF into smaller files by page range.`);
+  }
+
+  try {
+    return await callBackend(messages, ABSTRACT_PROMPT, { model: ABSTRACT_MODEL, max_tokens: ABSTRACT_MAX_TOKENS });
+  } catch (e) {
+    if (allowSplit && batchFiles.length > 1 && (e.message.includes('413') || e.message.includes('too large') || e.message.includes('Payload'))) {
+      const mid = Math.ceil(batchFiles.length / 2);
+      const part1 = await abstractBatch(batchFiles.slice(0, mid), globalStartIdx, true);
+      const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
+      return part1 + '\n\n' + part2;
+    }
+    throw e;
+  }
 }
 
 // Parse batch result into per-document abstracts
