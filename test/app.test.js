@@ -59,7 +59,9 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('buildAdaptiveBatches'), 'Missing adaptive batching');
   assert(script.includes('runDocumentAbstraction'), 'Missing shared abstraction runner');
   assert(script.includes('ABSTRACT_CONCURRENCY = 2'), 'Missing parallel pool');
-  assert(script.includes('MAX_DOCS_PER_BATCH = 8'), 'Missing max docs per batch');
+  assert(script.includes('MAX_DOCS_PER_BATCH = 4'), 'Max docs per batch should be 4 for Vercel payload limit');
+  assert(script.includes('VERCEL_MAX_REQUEST_BYTES'), 'Missing Vercel payload guard');
+  assert(script.includes('buildAbstractMessages'), 'Missing abstract message builder');
   assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
 });
 
@@ -113,6 +115,14 @@ test('API accepts claude-haiku-4-5 and claude-sonnet-4-6', async () => {
 test('rate limit default allows bulk throughput', () => {
   const analyzeJs = readFileSync(join(root, 'api/analyze.js'), 'utf8');
   assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '300'"), 'Rate limit should default to 300');
+});
+
+
+test('auto-splits large PDFs client-side', () => {
+  assert(script.includes('splitPdfIntoEntries'), 'Missing PDF split helper');
+  assert(script.includes('PDF_SPLIT_RAW_THRESHOLD'), 'Missing PDF split threshold');
+  assert(indexHtml.includes('pdf-lib'), 'Missing pdf-lib script');
+  assert(script.includes('ingestUploadedFiles'), 'Missing shared upload ingest helper');
 });
 
 test('preserves PDF data for retries via sourceFile', () => {
