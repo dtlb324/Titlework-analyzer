@@ -5,6 +5,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js"
+    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0"
   }
 }

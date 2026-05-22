@@ -139,6 +139,7 @@
     <div id="progressSection" style="display:none">
       <div class="progress-card">
         <div class="progress-status" id="progressStatus">Starting...</div>
+        <div class="progress-eta" id="jobMeta"></div>
         <div class="progress-eta" id="progressEta"></div>
         <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
         <div class="progress-list" id="progressList"></div>
@@ -216,6 +217,10 @@ let requestTimestamps = [];
 let requestSlotQueue = Promise.resolve();
 let activeProgressTimer = null;
 let observedBatchBytesPerMs = 80;
+let activeJobId = null;
+let activeJobPollTimer = null;
+let jobPatchQueue = Promise.resolve();
+let activeJobCompletedDocuments = 0;
 
 function createRequestId() {
   const random = Math.random().toString(36).slice(2, 10);
@@ -553,6 +558,7 @@ async function checkPasswordRequired() {
 function showMain() {
   document.getElementById('mainApp').style.display = 'block';
   document.getElementById('disclaimer').style.display = 'block';
+  resumeLastAnalysisJob();
 }
 
 function checkPassword() {
@@ -875,6 +881,163 @@ function clearAbstractionCheckpoint(key) {
   if (storage && key) storage.removeItem(key);
 }
 
+function getJobStorageKey() {
+  return 'title-analyzer:last-job';
+}
+
+function getJobHeaders() {
+  return { 'Content-Type': 'application/json', 'x-app-password': appPassword };
+}
+
+function getJobLink(jobId) {
+  if (!jobId || typeof window === 'undefined' || !window.location) return '';
+  return `${window.location.origin}${window.location.pathname}?job=${encodeURIComponent(jobId)}`;
+}
+
+function getRequestedJobId() {
+  try {
+    const params = new URLSearchParams(location.search || '');
+    const fromQuery = params.get('job');
+    if (fromQuery) return fromQuery;
+    const hash = String(location.hash || '').replace(/^#/, '');
+    return hash.startsWith('job_') ? hash : '';
+  } catch {
+    return '';
+  }
+}
+
+function saveActiveJob(job) {
+  const storage = getStorage();
+  if (!storage || !job?.id) return;
+  storage.setItem(getJobStorageKey(), JSON.stringify({ id: job.id, savedAt: Date.now() }));
+}
+
+function loadSavedJobId() {
+  const requested = getRequestedJobId();
+  if (requested) return requested;
+  const storage = getStorage();
+  if (!storage) return '';
+  try {
+    const saved = JSON.parse(storage.getItem(getJobStorageKey()) || 'null');
+    return saved?.id || '';
+  } catch {
+    storage.removeItem(getJobStorageKey());
+    return '';
+  }
+}
+
+function renderJobMeta(job) {
+  const el = document.getElementById('jobMeta');
+  if (!el || !job?.id) return;
+  const link = getJobLink(job.id);
+  el.innerHTML = link
+    ? `Job ID: <strong>${esc(job.id)}</strong> · <a href="${esc(link)}">resume link</a>`
+    : `Job ID: <strong>${esc(job.id)}</strong>`;
+}
+
+function progressPercentFromJob(job) {
+  if (!job?.totalDocuments) return job?.status === 'complete' ? 100 : 0;
+  const finished = (job.completedDocuments || 0) + (job.failedDocuments || 0);
+  if (job.status === 'complete') return 100;
+  if (job.status === 'synthesizing') return Math.max(88, Math.round((finished / job.totalDocuments) * 85));
+  return Math.round(Math.min(85, (finished / job.totalDocuments) * 85));
+}
+
+function renderPolledJobStatus(job) {
+  if (!job) return;
+  renderJobMeta(job);
+  document.getElementById('progressSection').style.display = 'block';
+  const pct = progressPercentFromJob(job);
+  const label = job.currentPhase || job.status;
+  updateProgress(pct, `Job ${job.id}: ${label}`, null);
+  if (job.status === 'complete' || job.status === 'failed') stopJobPolling();
+}
+
+async function createAnalysisJob(input) {
+  const response = await fetch('/api/jobs', {
+    method: 'POST',
+    headers: getJobHeaders(),
+    body: JSON.stringify(input),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Could not create job metadata (HTTP ${response.status}).`);
+  activeJobId = data.job.id;
+  activeJobCompletedDocuments = 0;
+  jobPatchQueue = Promise.resolve();
+  saveActiveJob(data.job);
+  renderJobMeta(data.job);
+  startJobPolling(activeJobId);
+  return data.job;
+}
+
+async function patchAnalysisJob(jobId, patch) {
+  if (!jobId) return null;
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'PATCH',
+    headers: getJobHeaders(),
+    body: JSON.stringify(patch),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Could not update job metadata (HTTP ${response.status}).`);
+  saveActiveJob(data.job);
+  renderJobMeta(data.job);
+  return data.job;
+}
+
+async function safePatchAnalysisJob(jobId, patch) {
+  try {
+    jobPatchQueue = jobPatchQueue
+      .catch(() => {})
+      .then(() => patchAnalysisJob(jobId, patch));
+    const job = await jobPatchQueue;
+    if (Number.isInteger(job?.completedDocuments)) {
+      activeJobCompletedDocuments = Math.max(activeJobCompletedDocuments, job.completedDocuments);
+    }
+    return job;
+  } catch (err) {
+    console.warn('Could not update durable job progress', err);
+    return null;
+  }
+}
+
+async function pollAnalysisJobOnce(jobId) {
+  if (!jobId) return null;
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'GET',
+    headers: getJobHeaders(),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Could not fetch job metadata (HTTP ${response.status}).`);
+  saveActiveJob(data.job);
+  renderPolledJobStatus(data.job);
+  return data.job;
+}
+
+function startJobPolling(jobId) {
+  stopJobPolling();
+  if (!jobId) return;
+  activeJobPollTimer = setInterval(() => {
+    pollAnalysisJobOnce(jobId).catch(err => console.warn('Could not poll durable job status', err));
+  }, 5000);
+}
+
+function stopJobPolling() {
+  if (activeJobPollTimer) clearInterval(activeJobPollTimer);
+  activeJobPollTimer = null;
+}
+
+async function resumeLastAnalysisJob() {
+  const jobId = loadSavedJobId();
+  if (!jobId || activeJobId === jobId) return;
+  activeJobId = jobId;
+  try {
+    const job = await pollAnalysisJobOnce(jobId);
+    if (job && job.status !== 'complete' && job.status !== 'failed') startJobPolling(jobId);
+  } catch (err) {
+    console.warn('Could not resume durable job status', err);
+  }
+}
+
 async function handleFiles(newFiles) {
   if (MAX_FILES - files.length <= 0) return;
   document.getElementById('analyzeBtn').disabled = true;
@@ -1177,7 +1340,7 @@ async function runWithConcurrency(taskFns, limit) {
   await Promise.all(executing);
 }
 
-async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgress, checkpointLabel = 'initial') {
+async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgress, checkpointLabel = 'initial', jobId = null) {
   const batches = buildAdaptiveBatches(fileList);
   const results = new Array(batches.length);
   let completedDocs = 0;
@@ -1195,6 +1358,7 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
     if (cached.every(Boolean)) {
       results[bi] = cached.map(entry => ({ filename: entry.filename, abstract: entry.abstract }));
       completedDocs += batchFiles.length;
+      activeJobCompletedDocuments = Math.max(activeJobCompletedDocuments, completedDocs);
       if (showAllProgress) {
         for (let j = 0; j < batchFiles.length; j++) {
           const itemIdx = localStart + j;
@@ -1206,6 +1370,12 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
         `Restored ${completedDocs} of ${fileList.length} abstracts from local checkpoint...`,
         items
       );
+      await safePatchAnalysisJob(jobId, {
+        status: 'abstracting',
+        completedDocuments: completedDocs,
+        failedDocuments: 0,
+        currentPhase: `Restored ${completedDocs} of ${fileList.length} abstracts from local checkpoint`,
+      });
       return;
     }
 
@@ -1233,6 +1403,7 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
         Array.from(checkpointEntries.values()).sort((a, b) => a.localIndex - b.localIndex)
       ) || checkpointPersisted;
       completedDocs += batchFiles.length;
+      activeJobCompletedDocuments = Math.max(activeJobCompletedDocuments, completedDocs);
       if (activeProgressTimer?.plan) {
         activeProgressTimer.completedBatchCount += 1;
         activeProgressTimer.actualBatchMs += Date.now() - batchStarted;
@@ -1250,6 +1421,12 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
 
       const pct = Math.round(Math.min(85, (completedDocs / fileList.length) * 85));
       updateProgress(pct, `Abstracted ${completedDocs} of ${fileList.length} documents (${completedDocs}/${fileList.length})...`, items);
+      await safePatchAnalysisJob(jobId, {
+        status: 'abstracting',
+        completedDocuments: completedDocs,
+        failedDocuments: 0,
+        currentPhase: `Abstracted ${completedDocs} of ${fileList.length} documents`,
+      });
     } catch (e) {
       firstError = new Error(`Batch failed (${batchFiles.map(f => f.name).join(', ')}): ${e.message}`);
     }
@@ -1529,6 +1706,21 @@ async function analyze() {
   const tract = document.getElementById('tractDescription').value;
   const ctx = document.getElementById('contextNotes').value;
 
+  let job;
+  try {
+    job = await createAnalysisJob({
+      subjectTract: tract,
+      contextNotes: ctx,
+      totalDocuments: files.length,
+    });
+  } catch (e) {
+    showError('Job setup failed: ' + e.message);
+    document.getElementById('progressSection').style.display = 'none';
+    document.getElementById('uploadSection').style.display = 'block';
+    document.getElementById('analyzeBtn').disabled = false;
+    return;
+  }
+
   const showAllProgress = files.length <= 50;
   const items = showAllProgress
     ? [...files.map(f => ({ label: f.name, status: 'pending' })), { label: 'Synthesize chain of title & ownership', status: 'pending' }]
@@ -1539,12 +1731,26 @@ async function analyze() {
   activeProgressTimer = createProgressTimer(files, files.length);
   setProgressEta(formatInitialEstimate(activeProgressTimer));
   updateProgress(0, `Starting analysis of ${files.length} document${files.length === 1 ? '' : 's'}...`, items);
+  await safePatchAnalysisJob(job.id, {
+    status: 'abstracting',
+    completedDocuments: 0,
+    failedDocuments: 0,
+    currentPhase: `Starting analysis of ${files.length} document${files.length === 1 ? '' : 's'}`,
+  });
 
   try {
-    documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress);
+    documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id);
   } catch (e) {
+    await safePatchAnalysisJob(job.id, {
+      status: 'failed',
+      completedDocuments: activeJobCompletedDocuments,
+      failedDocuments: Math.max(0, files.length - activeJobCompletedDocuments),
+      currentPhase: 'abstracting',
+      errorMessage: e.message,
+    });
     showError(e.message);
     clearProgressTimer();
+    stopJobPolling();
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
@@ -1555,6 +1761,12 @@ async function analyze() {
   if (activeProgressTimer) activeProgressTimer.phase = 'synthesis';
   items[items.length - 1].status = 'active';
   updateProgress(88, 'Synthesizing chain of title and final ownership...', items);
+  await safePatchAnalysisJob(job.id, {
+    status: 'synthesizing',
+    completedDocuments: documentAbstracts.length,
+    failedDocuments: 0,
+    currentPhase: 'Synthesizing chain of title and final ownership',
+  });
 
   const synthesisInput = buildAbstractInput(
     documentAbstracts,
@@ -1571,10 +1783,24 @@ async function analyze() {
       if (activeProgressTimer) activeProgressTimer.synthesisStep = synthStep;
       const pct = 88 + Math.round((synthStep / synthSteps) * 10);
       updateProgress(Math.min(99, pct), status, items);
+      safePatchAnalysisJob(job.id, {
+        status: 'synthesizing',
+        completedDocuments: documentAbstracts.length,
+        failedDocuments: 0,
+        currentPhase: status,
+      });
     });
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${files.length} documents processed`, items);
+    await safePatchAnalysisJob(job.id, {
+      status: 'complete',
+      completedDocuments: files.length,
+      failedDocuments: 0,
+      currentPhase: 'complete',
+      errorMessage: null,
+    });
     clearProgressTimer();
+    stopJobPolling();
     files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)`, kind: 'analysis-input' },
@@ -1586,8 +1812,16 @@ async function analyze() {
       document.getElementById('followupSection').style.display = 'block';
     }, 600);
   } catch (e) {
+    await safePatchAnalysisJob(job.id, {
+      status: 'failed',
+      completedDocuments: documentAbstracts.length,
+      failedDocuments: Math.max(0, files.length - documentAbstracts.length),
+      currentPhase: 'synthesizing',
+      errorMessage: e.message,
+    });
     showError('Synthesis failed: ' + e.message);
     clearProgressTimer();
+    stopJobPolling();
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
