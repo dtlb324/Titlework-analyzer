@@ -117,6 +117,14 @@ test('rate limit default allows bulk throughput', () => {
   assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '300'"), 'Rate limit should default to 300');
 });
 
+
+test('auto-splits large PDFs client-side', () => {
+  assert(script.includes('splitPdfIntoEntries'), 'Missing PDF split helper');
+  assert(script.includes('PDF_SPLIT_RAW_THRESHOLD'), 'Missing PDF split threshold');
+  assert(indexHtml.includes('pdf-lib'), 'Missing pdf-lib script');
+  assert(script.includes('ingestUploadedFiles'), 'Missing shared upload ingest helper');
+});
+
 test('preserves PDF data for retries via sourceFile', () => {
   assert(script.includes('sourceFile: file'), 'Should retain original File object on upload');
   assert(script.includes('async function ensureFileData'), 'Should re-read file data before API calls');

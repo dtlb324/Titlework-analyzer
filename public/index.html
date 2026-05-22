@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self';">
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -80,7 +80,7 @@
   .password-gate p { color: #8a6f4a; font-size: .9rem; margin-bottom: 1.5rem; line-height: 1.5; }
 </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 </head>
 <body>
 
@@ -122,7 +122,7 @@
         <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em> &nbsp;·&nbsp; large PDFs auto-split by page
           </span>
           <div id="fileList"></div>
         </div>
@@ -198,6 +198,8 @@ const MAX_FILE_LIST_DISPLAY = 8;
 const CLIENT_MAX_REQUESTS_PER_MIN = 120;
 const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
+const PDF_SPLIT_RAW_THRESHOLD = 2_400_000;
+const MAX_PDF_CHUNK_RAW_BYTES = 2_400_000;
 
 const ABSTRACT_MODEL = 'claude-haiku-4-5';
 const SYNTHESIS_MODEL = 'claude-sonnet-4-6';
@@ -372,6 +374,135 @@ function isCsvFile(file) {
   return file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv');
 }
 
+async function readFileAsBase64(file) {
+  return await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1] || '');
+    r.onerror = () => rej(new Error('Read failed'));
+    r.readAsDataURL(file);
+  });
+}
+
+async function readFileAsText(file) {
+  return await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(new Error('Read failed'));
+    r.readAsText(file);
+  });
+}
+
+async function extractPdfPageRange(srcDoc, fromPage, toPage) {
+  const newDoc = await PDFLib.PDFDocument.create();
+  const indices = Array.from({ length: toPage - fromPage }, (_, i) => fromPage + i);
+  const copied = await newDoc.copyPages(srcDoc, indices);
+  copied.forEach(p => newDoc.addPage(p));
+  return new Uint8Array(await newDoc.save());
+}
+
+async function splitPdfIntoEntries(file, slotsAvailable) {
+  if (!window.PDFLib) {
+    throw new Error(`${file.name}: PDF splitting library did not load. Refresh the page or split the PDF manually.`);
+  }
+  const bytes = await file.arrayBuffer();
+  let srcDoc;
+  try {
+    srcDoc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+  } catch (e) {
+    throw new Error(`${file.name}: could not read PDF for splitting. Re-export the file or scan at 150 DPI.`);
+  }
+
+  const pageCount = srcDoc.getPageCount();
+  if (!pageCount) throw new Error(`${file.name}: PDF has no pages.`);
+
+  const baseName = file.name.replace(/\.pdf$/i, '');
+  const entries = [];
+  let page = 0;
+
+  while (page < pageCount) {
+    if (entries.length >= slotsAvailable) {
+      throw new Error(`${file.name}: split would exceed the ${MAX_FILES}-file limit. Upload this PDF separately or remove other files.`);
+    }
+
+    let lo = 1;
+    let hi = pageCount - page;
+    let best = 1;
+    while (lo <= hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const chunk = await extractPdfPageRange(srcDoc, page, page + mid);
+      if (chunk.byteLength <= MAX_PDF_CHUNK_RAW_BYTES) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    const chunkBytes = await extractPdfPageRange(srcDoc, page, page + best);
+    if (Math.ceil(chunkBytes.byteLength * 1.37) > MAX_PAYLOAD_BYTES) {
+      throw new Error(`${file.name} page ${page + 1}: single page exceeds upload limit. Scan at 150 DPI or reduce scan resolution.`);
+    }
+
+    const from = page + 1;
+    const to = page + best;
+    const chunkName = pageCount === 1 && best === pageCount
+      ? file.name
+      : `${baseName} (pp ${from}${to === from ? '' : `-${to}`}).pdf`;
+    const chunkFile = new File([chunkBytes], chunkName, { type: 'application/pdf' });
+    const data = await readFileAsBase64(chunkFile);
+    entries.push({
+      name: chunkName,
+      type: 'application/pdf',
+      size: chunkBytes.byteLength,
+      data,
+      csvText: null,
+      sourceFile: chunkFile,
+      splitFrom: file.name,
+      pageRange: [from, to],
+    });
+    page += best;
+  }
+
+  return entries;
+}
+
+async function prepareFileEntries(file, slotsAvailable) {
+  if (isCsvFile(file)) {
+    const text = await readFileAsText(file);
+    return [{ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file }];
+  }
+  if (isPdfFile(file) && file.size > PDF_SPLIT_RAW_THRESHOLD) {
+    return await splitPdfIntoEntries(file, slotsAvailable);
+  }
+  const data = await readFileAsBase64(file);
+  return [{
+    name: file.name,
+    type: file.type || (isPdfFile(file) ? 'application/pdf' : file.type),
+    size: file.size,
+    data,
+    csvText: null,
+    sourceFile: file,
+  }];
+}
+
+async function ingestUploadedFiles(newFiles, targetArray, statusEl) {
+  let splitParts = 0;
+  for (const file of newFiles) {
+    const remaining = MAX_FILES - targetArray.length;
+    if (remaining <= 0) break;
+    if (statusEl && newFiles.length > 2) {
+      statusEl.innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${esc(file.name)}...</div>`;
+    }
+    const entries = await prepareFileEntries(file, remaining);
+    if (entries.length > 1) splitParts += entries.length - 1;
+    for (const entry of entries) {
+      if (targetArray.length >= MAX_FILES) break;
+      targetArray.push(entry);
+    }
+  }
+  return splitParts;
+}
+
 async function readSourceFile(entry) {
   const file = entry.sourceFile;
   if (!file) throw new Error(`${entry.name}: file data missing — remove and re-upload this document.`);
@@ -414,31 +545,21 @@ function freeFileMemory(file) {
 }
 
 async function handleFiles(newFiles) {
-  const available = MAX_FILES - files.length;
-  if (available <= 0) return;
-  const toAdd = Array.from(newFiles).slice(0, available);
+  if (MAX_FILES - files.length <= 0) return;
   document.getElementById('analyzeBtn').disabled = true;
-  if (toAdd.length > 5) {
-    document.getElementById('fileList').innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${toAdd.length} files...</div>`;
+  const statusEl = document.getElementById('fileList');
+  if (newFiles.length > 2) {
+    statusEl.innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${newFiles.length} files...</div>`;
   }
-  for (const file of toAdd) {
-    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
-      const text = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result);
-        r.onerror = () => rej(new Error('Read failed'));
-        r.readAsText(file);
-      });
-      files.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file });
+  try {
+    const splitParts = await ingestUploadedFiles(Array.from(newFiles), files, statusEl);
+    if (splitParts > 0) {
+      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay under Vercel's 4.5 MB upload limit. Each segment is abstracted separately; synthesis connects them by filename.`);
     } else {
-      const data = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(',')[1]);
-        r.onerror = () => rej(new Error('Read failed'));
-        r.readAsDataURL(file);
-      });
-      files.push({ name: file.name, type: file.type, size: file.size, data, csvText: null, sourceFile: file });
+      clearError();
     }
+  } catch (e) {
+    showError(e.message);
   }
   renderFileList();
   document.getElementById('analyzeBtn').disabled = files.length === 0;
@@ -766,6 +887,9 @@ async function buildAbstractMessages(batchFiles, globalStartIdx) {
 
   const docList = batchFiles.map((f, i) => 'Document #' + (globalStartIdx + i + 1) + ' (' + f.name + ')').join(', ');
   let textPrompt = 'Abstract each of the following documents in order: ' + docList + '. Label each section clearly as DOCUMENT #' + (globalStartIdx + 1) + ':, DOCUMENT #' + (globalStartIdx + 2) + ':, etc. Extract every relevant fact. Do not guess at anything illegible.';
+  if (batchFiles.some(f => f.splitFrom || /\(pp\s+\d+/i.test(f.name))) {
+    textPrompt += ' Some files are consecutive page ranges from the same original PDF (names include pp X-Y). Abstract each part fully; note they belong to the same source document.';
+  }
 
   if (csvFiles.length > 0) {
     csvFiles.forEach(function(f) {
@@ -975,31 +1099,21 @@ function hideAddDocs() {
 let additionalFiles = [];
 
 async function handleAdditionalFiles(newFiles) {
-  const available = MAX_FILES - additionalFiles.length;
-  if (available <= 0) return;
-  const toAdd = Array.from(newFiles).slice(0, available);
+  if (MAX_FILES - additionalFiles.length <= 0) return;
   document.getElementById('addDocsBtn').disabled = true;
-  if (toAdd.length > 5) {
-    document.getElementById('fileList2').innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${toAdd.length} files...</div>`;
+  const statusEl = document.getElementById('fileList2');
+  if (newFiles.length > 2) {
+    statusEl.innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${newFiles.length} files...</div>`;
   }
-  for (const file of toAdd) {
-    if (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv')) {
-      const text = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result);
-        r.onerror = () => rej(new Error('Read failed'));
-        r.readAsText(file);
-      });
-      additionalFiles.push({ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file });
+  try {
+    const splitParts = await ingestUploadedFiles(Array.from(newFiles), additionalFiles, statusEl);
+    if (splitParts > 0) {
+      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay under Vercel's 4.5 MB upload limit. Each segment is abstracted separately; synthesis connects them by filename.`);
     } else {
-      const data = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result.split(',')[1]);
-        r.onerror = () => rej(new Error('Read failed'));
-        r.readAsDataURL(file);
-      });
-      additionalFiles.push({ name: file.name, type: file.type, size: file.size, data, csvText: null, sourceFile: file });
+      clearError();
     }
+  } catch (e) {
+    showError(e.message);
   }
   renderAdditionalFileList();
   document.getElementById('addDocsBtn').disabled = additionalFiles.length === 0;
