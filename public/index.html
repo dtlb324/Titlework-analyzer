@@ -139,6 +139,7 @@
     <div id="progressSection" style="display:none">
       <div class="progress-card">
         <div class="progress-status" id="progressStatus">Starting...</div>
+        <div class="progress-eta" id="progressEta"></div>
         <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
         <div class="progress-list" id="progressList"></div>
       </div>
@@ -208,6 +209,75 @@ const SYNTHESIS_MAX_TOKENS = 8000;
 
 let requestTimestamps = [];
 let requestSlotQueue = Promise.resolve();
+let activeProgressTimer = null;
+
+function estimateBatchTimeMs(batch) {
+  let payload = 0;
+  for (const f of batch.files) payload += estimateFilePayload(f);
+  const docMs = batch.files.length * 4000;
+  const sizeMs = Math.min(payload / 40000, 25) * 1000;
+  return 10000 + docMs + sizeMs;
+}
+
+function estimateAbstractionTimeMs(batches) {
+  const times = batches.map(estimateBatchTimeMs);
+  let total = 0;
+  while (times.length) {
+    const wave = times.splice(0, ABSTRACT_CONCURRENCY);
+    total += Math.max(...wave);
+  }
+  return total;
+}
+
+function estimateSynthesisTimeMs(docCount) {
+  if (docCount <= SYNTHESIS_CHUNK_SIZE) return 45000;
+  const segments = Math.ceil(docCount / SYNTHESIS_CHUNK_SIZE);
+  return segments * 55000 + 70000;
+}
+
+function createProgressTimer(abstractFiles, synthesisDocCount) {
+  const batches = buildAdaptiveBatches(abstractFiles);
+  const abstractMs = estimateAbstractionTimeMs(batches);
+  const synthesisMs = estimateSynthesisTimeMs(synthesisDocCount);
+  return {
+    startedAt: Date.now(),
+    totalMs: abstractMs + synthesisMs,
+    docCount: abstractFiles.length,
+    synthesisDocCount,
+  };
+}
+
+function formatDuration(ms) {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return `~${sec} sec`;
+  if (sec < 3600) {
+    const m = Math.max(1, Math.round(sec / 60));
+    return m === 1 ? '~1 min' : `~${m} min`;
+  }
+  const h = Math.floor(sec / 3600);
+  const m = Math.max(1, Math.round((sec % 3600) / 60));
+  return `~${h} hr ${m} min`;
+}
+
+function formatEtaRemaining(timer, completedFraction) {
+  const elapsed = Date.now() - timer.startedAt;
+  const frac = Math.max(0.02, Math.min(0.98, completedFraction));
+  const projected = elapsed / frac;
+  const remaining = Math.max(0, projected - elapsed);
+  if (remaining < 8000) return 'Finishing up...';
+  return `${formatDuration(remaining)} remaining`;
+}
+
+function setProgressEta(text) {
+  const el = document.getElementById('progressEta');
+  if (el) el.textContent = text || '';
+}
+
+function clearProgressTimer() {
+  activeProgressTimer = null;
+  setProgressEta('');
+}
+
 
 const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
@@ -614,6 +684,11 @@ function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 function updateProgress(pct, status, items) {
   document.getElementById('progressFill').style.width = pct + '%';
   document.getElementById('progressStatus').textContent = status;
+  if (activeProgressTimer && pct < 100) {
+    setProgressEta(formatEtaRemaining(activeProgressTimer, pct / 100));
+  } else if (pct >= 100) {
+    setProgressEta('');
+  }
   if (items) {
     document.getElementById('progressList').innerHTML = items.map(it => {
       const cls = 'pi' + (it.status === 'done' ? ' done' : it.status === 'active' ? ' active' : '');
@@ -794,7 +869,7 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
         items[0].label = `Abstracted ${completedDocs} of ${fileList.length} documents (${batches.length} batches, ${ABSTRACT_CONCURRENCY} parallel)...`;
       }
 
-      const pct = Math.round(completedDocs / (fileList.length + 1) * 100);
+      const pct = Math.round(Math.min(85, (completedDocs / fileList.length) * 85));
       updateProgress(pct, `Abstracted ${completedDocs} of ${fileList.length} documents...`, items);
     } catch (e) {
       firstError = new Error(`Batch failed (${batchFiles.map(f => f.name).join(', ')}): ${e.message}`);
@@ -964,10 +1039,15 @@ async function analyze() {
 
   documentAbstracts = [];
 
+  activeProgressTimer = createProgressTimer(files, files.length);
+  setProgressEta(`Estimated total: ${formatDuration(activeProgressTimer.totalMs)}`);
+  updateProgress(0, `Starting analysis of ${files.length} document${files.length === 1 ? '' : 's'}...`, items);
+
   try {
     documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress);
   } catch (e) {
     showError(e.message);
+    clearProgressTimer();
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
@@ -976,7 +1056,7 @@ async function analyze() {
 
   // Synthesis
   items[items.length - 1].status = 'active';
-  updateProgress(Math.round(files.length / (files.length + 1) * 100), 'Synthesizing chain of title and final ownership...', items);
+  updateProgress(88, 'Synthesizing chain of title and final ownership...', items);
 
   const synthesisInput = buildAbstractInput(
     documentAbstracts,
@@ -986,11 +1066,16 @@ async function analyze() {
   );
 
   try {
+    let synthStep = 0;
+    const synthSteps = Math.max(1, Math.ceil(documentAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
     const synthesis = await hierarchicalSynthesis(documentAbstracts, tract, ctx, status => {
-      updateProgress(Math.round(files.length / (files.length + 1) * 100), status, items);
+      synthStep += 1;
+      const pct = 88 + Math.round((synthStep / synthSteps) * 10);
+      updateProgress(Math.min(99, pct), status, items);
     });
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${files.length} documents processed`, items);
+    clearProgressTimer();
     files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)` },
@@ -1003,6 +1088,7 @@ async function analyze() {
     }, 600);
   } catch (e) {
     showError('Synthesis failed: ' + e.message);
+    clearProgressTimer();
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
@@ -1156,12 +1242,18 @@ async function analyzeAdditional() {
     : [{ label: `Abstracting ${additionalFiles.length} additional documents...`, status: 'pending' }, { label: 'Update chain of title with all documents', status: 'pending' }];
 
   const globalOffset = documentAbstracts.length;
+  const totalAfter = documentAbstracts.length + additionalFiles.length;
   let newAbstracts = [];
+
+  activeProgressTimer = createProgressTimer(additionalFiles, totalAfter);
+  setProgressEta(`Estimated total: ${formatDuration(activeProgressTimer.totalMs)}`);
+  updateProgress(0, `Starting analysis of ${additionalFiles.length} additional document${additionalFiles.length === 1 ? '' : 's'}...`, items);
 
   try {
     newAbstracts = await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress);
   } catch (e) {
     showError(e.message);
+    clearProgressTimer();
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('addDocsSection').style.display = 'block';
     document.getElementById('addDocsBtn').disabled = false;
@@ -1171,7 +1263,7 @@ async function analyzeAdditional() {
   // Combine all abstracts
   const allAbstracts = [...documentAbstracts, ...newAbstracts];
   items[items.length - 1].status = 'active';
-  updateProgress(Math.round(additionalFiles.length / (additionalFiles.length + 1) * 100), 'Updating chain of title with all documents combined...', items);
+  updateProgress(88, 'Updating chain of title with all documents combined...', items);
 
   const synthesisInput = buildAbstractInput(
     allAbstracts,
@@ -1181,14 +1273,20 @@ async function analyzeAdditional() {
   );
 
   try {
+    let synthStep = 0;
+    const synthSteps = Math.max(1, Math.ceil(allAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
     const synthesis = await hierarchicalSynthesis(
       allAbstracts,
       document.getElementById('tractDescription').value,
       document.getElementById('contextNotes').value,
-      status => updateProgress(Math.round(additionalFiles.length / (additionalFiles.length + 1) * 100), status, items)
+      status => {
+        synthStep += 1;
+        updateProgress(Math.min(99, 88 + Math.round((synthStep / synthSteps) * 10)), status, items);
+      }
     );
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
+    clearProgressTimer();
 
     // Update global state
     documentAbstracts = allAbstracts;
