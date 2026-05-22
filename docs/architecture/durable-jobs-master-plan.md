@@ -22,6 +22,19 @@ That design is workable for smaller projects and is now safer than before, but 2
 - Preserve privacy by making storage, retention, and deletion explicit.
 - Enable future model routing and cost controls.
 
+## Source design documents
+
+Six phase-specific design documents were produced by separate planning agents and imported into this branch. They should be treated as detailed references under this master plan:
+
+- [Phase 1: Durable Job Architecture](../job-architecture-phase-1.md)
+- [Phase 2: Durable File & Chunk Storage](../phase-2-durable-storage.md)
+- [Phase 3: Server-Side Document Abstraction](../phase-3-server-side-abstraction.md)
+- [Phase 4: Background Workflow / Queue Processing](../phase-4-background-workflow-design.md)
+- [Phase 5: Durable Server-Side Synthesis](../phase-5-durable-server-side-synthesis.md)
+- [Phase 6: Durable Job UI](../phase-6-durable-jobs-ui.md)
+
+If a phase document conflicts with this master plan, this master plan is the source of truth for implementation prompts. The phase docs contain deeper rationale, schemas, and test cases that implementation agents should still read.
+
 ## Non-goals for the first phase
 
 - Do not move raw file storage server-side in phase 1.
@@ -35,9 +48,9 @@ This project is a small Vercel app with a static frontend and API functions. The
 
 Recommended components:
 
-- Job metadata/result database: Neon Postgres or Vercel Postgres.
+- Job metadata/result database: Neon Postgres or Vercel Postgres for the long-term architecture.
 - File/chunk storage: Vercel Blob.
-- Background workflow: Vercel Workflow if available for the project, otherwise Inngest or a simple DB-backed queue as a fallback.
+- Background workflow: Inngest for fan-out/fan-in job execution, with Vercel Workflow as the preferred fallback if the deployment should stay entirely within Vercel products.
 - Progress UI: polling first; Server-Sent Events can be considered later if polling becomes insufficient.
 
 Rationale:
@@ -46,6 +59,60 @@ Rationale:
 - Blob storage avoids putting large documents in the database and avoids routing big uploads through API functions.
 - A workflow/queue makes long jobs durable across browser refreshes and function restarts.
 - Polling keeps the frontend simple and fits the current single-file UI.
+
+## Reconciled architecture decisions
+
+The phase documents intentionally explored different tradeoffs. Use these decisions when implementing:
+
+### Persistence
+
+- **Target architecture:** Postgres for durable job/document/chunk/abstract/synthesis/result state.
+- **Phase 1 fallback:** Vercel KV / Upstash Redis is acceptable only if the project does not yet have a database provisioned and the implementation is explicitly scoped to temporary metadata with TTL.
+- **Implementation rule:** if neither Postgres nor KV is already configured, the phase 1 implementation agent should stop and present storage options instead of silently choosing or adding a paid service.
+
+### Canonical job statuses
+
+Use these externally visible job statuses:
+
+- `created`
+- `uploading`
+- `ready`
+- `queued`
+- `planning`
+- `abstracting`
+- `synthesizing`
+- `complete`
+- `partial_failed`
+- `failed`
+- `canceled`
+
+Phase 1 may use the smaller subset `created`, `abstracting`, `synthesizing`, `complete`, and `failed` while files still process in the browser. Later phases should add `uploading`, `ready`, `queued`, `planning`, `partial_failed`, and `canceled` as the pipeline becomes server-owned.
+
+Avoid alternate public status names like `draft`, `processing`, `completed`, or `completed_with_errors` in API responses. If a workflow tool uses those names internally, map them to the canonical statuses before returning data to the frontend.
+
+### Chunk and worker model
+
+- The durable unit of abstraction work is a single `document_chunk`, not an original upload and not a permanent two-document batch.
+- The worker may use temporary micro-batching for efficiency, but completion, failure, retry, and checkpoint state should be tracked at chunk level.
+- PDF splits should stay in the browser for the first durable storage phase to reuse existing `pdf-lib` behavior. A later server-side ingest splitter can become the canonical splitter once Blob storage and workers are stable.
+
+### Workflow tool
+
+- Prefer **Inngest** when the project needs robust fan-out/fan-in, concurrency controls, retries, and cancellation for hundreds of chunks.
+- Prefer **Vercel Workflow** if keeping the stack within Vercel is more important than Inngest's mature event model.
+- Do not build a custom DB-backed queue unless third-party workflow tools are unavailable; otherwise the app will quickly recreate leases, retry scheduling, stale-worker recovery, and fan-in barriers.
+
+### Retention
+
+- Phase 1 stores metadata only; use short TTL if KV is used.
+- Phase 2 and later must define retention for Blob files and stored result artifacts before implementation.
+- Default recommendation: 7 days for abandoned uploads; 30-90 days for completed jobs, configurable by environment.
+
+### Follow-ups
+
+- Durable follow-ups should use the latest stored title opinion as the primary context.
+- Do not send raw analysis inputs or every abstract by default.
+- Optionally retrieve a small number of relevant abstracts when the question references document numbers, filenames, or specific instruments.
 
 ## Core data model
 
@@ -56,7 +123,7 @@ Tracks one analysis run.
 Suggested fields:
 
 - `id`
-- `status`: `created`, `uploading`, `abstracting`, `synthesizing`, `complete`, `failed`, `partial_failed`, `canceled`
+- `status`: `created`, `uploading`, `ready`, `queued`, `planning`, `abstracting`, `synthesizing`, `complete`, `partial_failed`, `failed`, `canceled`
 - `subject_tract`
 - `context_notes`
 - `total_documents`
@@ -303,6 +370,9 @@ Fetches final title opinion and warnings.
 ```text
 created
   -> uploading
+  -> ready
+  -> queued
+  -> planning
   -> abstracting
   -> synthesizing
   -> complete
@@ -317,6 +387,9 @@ Rules:
 
 - `created` means metadata exists but no processing has started.
 - `uploading` means file/chunk storage is in progress.
+- `ready` means all required uploads/chunks are registered and the job can start.
+- `queued` means processing has been requested and is waiting for the planner or worker.
+- `planning` means the server is building abstraction/synthesis work units.
 - `abstracting` means chunks are being converted into abstracts.
 - `synthesizing` means abstracts are being merged into a title opinion.
 - `complete` means final title opinion exists.
@@ -583,6 +656,12 @@ Use this prompt for the first coding agent:
 ```text
 Implement phase 1 of docs/architecture/durable-jobs-master-plan.md.
 
+Before coding, read:
+- docs/architecture/durable-jobs-master-plan.md
+- docs/job-architecture-phase-1.md
+
+The master plan is the source of truth if there is a conflict.
+
 Scope:
 - Add durable job metadata and progress polling.
 - Add POST /api/jobs, GET /api/jobs/:id, and PATCH /api/jobs/:id.
@@ -607,4 +686,77 @@ Tests:
 - Add tests for job create/fetch/update.
 - Add tests that frontend code creates jobs, polls status, and reports failures.
 - Run npm test.
+```
+
+## Coordinator notes for later implementation agents
+
+Use these prompts after phase 1 is complete and merged:
+
+### Phase 2 implementation prompt
+
+```text
+Implement phase 2 durable file/chunk storage using docs/architecture/durable-jobs-master-plan.md and docs/phase-2-durable-storage.md.
+
+Scope:
+- Add durable upload metadata for documents and chunks.
+- Add Vercel Blob direct-upload flow if Blob is configured.
+- Store blob keys, media type, size, page range, split source, checksum/fingerprint, and upload status.
+- Keep existing browser PDF splitting for this phase.
+- Do not move model calls server-side yet.
+
+If Blob or the chosen database is not configured, stop and document setup options instead of silently adding a dependency.
+```
+
+### Phase 3 implementation prompt
+
+```text
+Implement phase 3 server-side abstraction using docs/architecture/durable-jobs-master-plan.md and docs/phase-3-server-side-abstraction.md.
+
+Scope:
+- Process stored document_chunks server-side.
+- Fetch chunks from Blob.
+- Build model-compatible requests under the safe request-envelope budget.
+- Save every completed abstract durably.
+- Retry 413/504 failures and split PDF chunks smaller when possible.
+- Preserve completed chunks when other chunks fail.
+- Keep synthesis on the existing path until phase 5.
+```
+
+### Phase 4 implementation prompt
+
+```text
+Implement phase 4 workflow/queue durability using docs/architecture/durable-jobs-master-plan.md and docs/phase-4-background-workflow-design.md.
+
+Scope:
+- Add the selected workflow tool or queue.
+- Add chunk claiming, leases, stale-lease recovery, retry/backoff, cancellation, and concurrency limits.
+- Keep Postgres/job state as the source of truth.
+- Record payload bytes, latency, token usage, retry count, model, and error type per attempt.
+```
+
+### Phase 5 implementation prompt
+
+```text
+Implement phase 5 durable server-side synthesis using docs/architecture/durable-jobs-master-plan.md and docs/phase-5-durable-server-side-synthesis.md.
+
+Scope:
+- Synthesize from saved abstracts.
+- Plan dynamic synthesis segments under the safe request-envelope budget.
+- Save each segment summary as a checkpoint.
+- Retry/split failed segments.
+- Save final title opinion, warnings, failed-document list, model, token usage, and cost metadata.
+- Move follow-ups to job-scoped durable context using the latest title opinion.
+```
+
+### Phase 6 implementation prompt
+
+```text
+Implement phase 6 durable job UI using docs/architecture/durable-jobs-master-plan.md and docs/phase-6-durable-jobs-ui.md.
+
+Scope:
+- Add hash-route job views in the existing single-page app.
+- Poll server job state.
+- Render job progress, terminal results, failed document lists, and retry actions.
+- Add recent jobs in browser localStorage.
+- Keep visual patterns close to the existing app; do not introduce a frontend framework unless explicitly requested.
 ```
