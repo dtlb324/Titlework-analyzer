@@ -7,7 +7,7 @@ import handler from '../api/analyze.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const indexHtml = readFileSync(join(root, 'public/index.html'), 'utf8');
-const scriptStart = indexHtml.lastIndexOf('<script>');
+const scriptStart = indexHtml.lastIndexOf('<script>\nconst MAX_FILES');
 const script = indexHtml.slice(scriptStart + 8, indexHtml.indexOf('</script>', scriptStart));
 
 function mockReq(body, headers = {}) {
@@ -49,15 +49,24 @@ test('index.html JavaScript parses', () => {
   assert(result.status === 0, `Syntax error: ${result.stderr}`);
 });
 
-test('uses Sonnet 4.6 as default model', () => {
-  assert(script.includes("'claude-sonnet-4-6'"), 'Expected claude-sonnet-4-6 in callBackend');
+test('uses Haiku for abstraction and Sonnet for synthesis', () => {
+  assert(script.includes("ABSTRACT_MODEL = 'claude-haiku-4-5'"), 'Expected Haiku for abstraction');
+  assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-4-6'"), 'Expected Sonnet for synthesis');
   assert(!script.includes("'claude-opus-4-7'"), 'Opus 4.7 should not be hardcoded');
+});
+
+test('uses adaptive batching and parallel abstraction', () => {
+  assert(script.includes('buildAdaptiveBatches'), 'Missing adaptive batching');
+  assert(script.includes('runDocumentAbstraction'), 'Missing shared abstraction runner');
+  assert(script.includes('ABSTRACT_CONCURRENCY = 3'), 'Missing parallel pool');
+  assert(script.includes('MAX_DOCS_PER_BATCH = 8'), 'Missing max docs per batch');
+  assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
 });
 
 test('supports 400-document bulk upload', () => {
   assert(script.includes('const MAX_FILES = 400'), 'MAX_FILES should be 400');
   assert(script.includes('hierarchicalSynthesis'), 'Missing hierarchical synthesis');
-  assert(script.includes('SYNTHESIS_CHUNK_SIZE = 25'), 'Missing synthesis chunk size');
+  assert(script.includes('SYNTHESIS_CHUNK_SIZE = 50'), 'Synthesis chunk size should be 50');
   assert(script.includes('throttleRequest'), 'Missing request throttling');
 });
 
@@ -102,18 +111,17 @@ test('API rejects unknown model', async () => {
   assert(String(res.body?.error).includes('model'), 'Should reject unknown model');
 });
 
-test('API accepts claude-sonnet-4-6 model in validation', async () => {
+test('API accepts claude-haiku-4-5 and claude-sonnet-4-6', async () => {
   const prev = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
-  const req = mockReq({
-    model: 'claude-sonnet-4-6',
-    messages: [{ role: 'user', content: 'hello' }],
-  });
-  const res = mockRes();
-  await handler(req, res);
+  for (const model of ['claude-haiku-4-5', 'claude-sonnet-4-6']) {
+    const req = mockReq({ model, messages: [{ role: 'user', content: 'hello' }] });
+    const res = mockRes();
+    await handler(req, res);
+    assert(res.statusCode !== 400 || !String(res.body?.error).includes('model'), `${model} should pass model validation`);
+  }
   if (prev) process.env.ANTHROPIC_API_KEY = prev;
   else delete process.env.ANTHROPIC_API_KEY;
-  assert(res.statusCode !== 400 || !String(res.body?.error).includes('model'), 'Sonnet 4.6 should pass model validation');
 });
 
 test('rate limit default allows bulk throughput', () => {

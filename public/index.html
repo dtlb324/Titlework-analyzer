@@ -187,11 +187,19 @@
 
 <script>
 const MAX_FILES = 400;
-const BATCH_SIZE = 2;
-const SYNTHESIS_CHUNK_SIZE = 25;
+const MAX_PAYLOAD_BYTES = 3_000_000;
+const MAX_DOCS_PER_BATCH = 8;
+const LARGE_FILE_BYTES = 2_000_000;
+const ABSTRACT_CONCURRENCY = 3;
+const SYNTHESIS_CHUNK_SIZE = 50;
 const MAX_FILE_LIST_DISPLAY = 8;
-const REQUEST_MIN_INTERVAL_MS = 1100;
+const REQUEST_MIN_INTERVAL_MS = 900;
 const MAX_RETRIES = 4;
+
+const ABSTRACT_MODEL = 'claude-haiku-4-5';
+const SYNTHESIS_MODEL = 'claude-sonnet-4-6';
+const ABSTRACT_MAX_TOKENS = 2000;
+const SYNTHESIS_MAX_TOKENS = 8000;
 
 let requestTimestamps = [];
 
@@ -434,14 +442,16 @@ function updateProgress(pct, status, items) {
   }
 }
 
-async function callBackend(messages, system, retryCount = 0) {
+async function callBackend(messages, system, options = {}, retryCount = 0) {
+  const model = options.model || SYNTHESIS_MODEL;
+  const max_tokens = options.max_tokens || SYNTHESIS_MAX_TOKENS;
   await throttleRequest();
   let response;
   try {
     response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4000, system, messages }),
+      body: JSON.stringify({ model, max_tokens, system, messages }),
     });
   } catch (networkErr) {
     // Fetch itself failed — network level problem
@@ -481,7 +491,7 @@ async function callBackend(messages, system, retryCount = 0) {
     if (response.status === 429 || errMsg.includes('rate limit') || errMsg.includes('overloaded')) {
       if (retryCount < MAX_RETRIES) {
         await sleep(3000 * (retryCount + 1));
-        return callBackend(messages, system, retryCount + 1);
+        return callBackend(messages, system, options, retryCount + 1);
       }
       throw new Error("Rate limit exceeded after retries. Wait a minute and try again.");
     }
@@ -498,6 +508,108 @@ async function callBackend(messages, system, retryCount = 0) {
 }
 
 
+function estimateFilePayload(file) {
+  if (file.csvText) return file.csvText.length + 500;
+  if (file.data) return Math.ceil(file.data.length * 0.75);
+  return file.size || 100000;
+}
+
+function buildAdaptiveBatches(fileList) {
+  const batches = [];
+  let current = [];
+  let currentPayload = 0;
+  let globalStart = 0;
+
+  for (const file of fileList) {
+    const filePayload = estimateFilePayload(file);
+    const oversized = filePayload > LARGE_FILE_BYTES;
+
+    if (oversized && !current.length) {
+      batches.push({ files: [file], globalStart });
+      globalStart += 1;
+      continue;
+    }
+
+    if (current.length && (current.length >= MAX_DOCS_PER_BATCH || currentPayload + filePayload > MAX_PAYLOAD_BYTES)) {
+      batches.push({ files: current, globalStart });
+      globalStart += current.length;
+      current = [];
+      currentPayload = 0;
+    }
+
+    if (oversized) {
+      batches.push({ files: [file], globalStart });
+      globalStart += 1;
+      continue;
+    }
+
+    current.push(file);
+    currentPayload += filePayload;
+  }
+
+  if (current.length) batches.push({ files: current, globalStart });
+  return batches;
+}
+
+async function runWithConcurrency(taskFns, limit) {
+  const executing = new Set();
+  for (const fn of taskFns) {
+    const p = Promise.resolve().then(fn).finally(() => executing.delete(p));
+    executing.add(p);
+    if (executing.size >= limit) await Promise.race(executing);
+  }
+  await Promise.all(executing);
+}
+
+async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgress) {
+  const batches = buildAdaptiveBatches(fileList);
+  const results = new Array(batches.length);
+  let completedDocs = 0;
+  let firstError = null;
+
+  const tasks = batches.map((batch, bi) => async () => {
+    if (firstError) return;
+    const batchFiles = batch.files;
+    const globalStart = batch.globalStart + indexOffset;
+    const localStart = batch.globalStart;
+
+    if (showAllProgress) {
+      for (let j = 0; j < batchFiles.length; j++) {
+        const itemIdx = localStart + j;
+        if (items[itemIdx]) items[itemIdx].status = 'active';
+      }
+    }
+
+    try {
+      const result = await abstractBatch(batchFiles, globalStart);
+      const parsed = parseBatchResult(result, batchFiles, globalStart);
+      batchFiles.forEach(freeFileMemory);
+      results[bi] = parsed;
+      completedDocs += batchFiles.length;
+
+      if (showAllProgress) {
+        for (let j = 0; j < batchFiles.length; j++) {
+          const itemIdx = localStart + j;
+          if (items[itemIdx]) items[itemIdx].status = 'done';
+        }
+      } else if (items[0]) {
+        items[0].status = 'active';
+        items[0].label = `Abstracted ${completedDocs} of ${fileList.length} documents (${batches.length} batches, ${ABSTRACT_CONCURRENCY} parallel)...`;
+      }
+
+      const pct = Math.round(completedDocs / (fileList.length + 1) * 100);
+      updateProgress(pct, `Abstracted ${completedDocs} of ${fileList.length} documents...`, items);
+    } catch (e) {
+      firstError = new Error(`Batch failed (${batchFiles.map(f => f.name).join(', ')}): ${e.message}`);
+    }
+  });
+
+  await runWithConcurrency(tasks, ABSTRACT_CONCURRENCY);
+  if (firstError) throw firstError;
+  return results.flat();
+}
+
+
 function buildAbstractInput(abstracts, tract, ctx, preamble) {
   let input = preamble + '\n\n';
   if (tract) input += `**Subject Tract:** ${tract}\n\n`;
@@ -509,7 +621,7 @@ function buildAbstractInput(abstracts, tract, ctx, preamble) {
 
 async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt) {
   const input = buildAbstractInput(abstracts, tract, ctx, preamble);
-  return await callBackend([{ role: 'user', content: input }], systemPrompt || SYNTHESIS_PROMPT);
+  return await callBackend([{ role: 'user', content: input }], systemPrompt || SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
 }
 
 async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
@@ -550,7 +662,7 @@ async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
   segmentSummaries.forEach(s => {
     mergeInput += `## Segment ${s.segment} (Documents ${s.start}–${s.end})\n\n${s.summary}\n\n---\n\n`;
   });
-  return await callBackend([{ role: 'user', content: mergeInput }], SYNTHESIS_PROMPT);
+  return await callBackend([{ role: 'user', content: mergeInput }], SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
 }
 
 // Send a batch of files in one API call — handles PDF, image, and CSV
@@ -579,7 +691,7 @@ async function abstractBatch(batchFiles, globalStartIdx) {
   }
 
   content.push({ type: 'text', text: textPrompt });
-  return await callBackend([{ role: 'user', content }], ABSTRACT_PROMPT);
+  return await callBackend([{ role: 'user', content }], ABSTRACT_PROMPT, { model: ABSTRACT_MODEL, max_tokens: ABSTRACT_MAX_TOKENS });
 }
 
 // Parse batch result into per-document abstracts
@@ -606,12 +718,6 @@ async function analyze() {
   const tract = document.getElementById('tractDescription').value;
   const ctx = document.getElementById('contextNotes').value;
 
-  // Build progress items — one per batch + synthesis
-  const batches = [];
-  for (let i = 0; i < files.length; i += BATCH_SIZE) {
-    batches.push(files.slice(i, i + BATCH_SIZE));
-  }
-
   const showAllProgress = files.length <= 50;
   const items = showAllProgress
     ? [...files.map(f => ({ label: f.name, status: 'pending' })), { label: 'Synthesize chain of title & ownership', status: 'pending' }]
@@ -619,47 +725,14 @@ async function analyze() {
 
   documentAbstracts = [];
 
-  for (let bi = 0; bi < batches.length; bi++) {
-    const batch = batches[bi];
-    const globalStart = bi * BATCH_SIZE;
-
-    const batchEnd = Math.min(globalStart + batch.length, files.length);
-    const pct = Math.round(bi / (batches.length + 1) * 100);
-    const statusMsg = batch.length === 1
-      ? `Reading document ${globalStart + 1} of ${files.length}: ${batch[0].name}...`
-      : `Reading documents ${globalStart + 1}–${batchEnd} of ${files.length}...`;
-    if (showAllProgress) {
-      for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'active';
-    } else {
-      items[0].status = 'active';
-      items[0].label = statusMsg;
-    }
-    updateProgress(pct, statusMsg, items);
-
-    try {
-      const result = await abstractBatch(batch, globalStart);
-      const parsed = parseBatchResult(result, batch, globalStart);
-      documentAbstracts.push(...parsed);
-      batch.forEach(freeFileMemory);
-      if (showAllProgress) {
-        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'done';
-      } else {
-        items[0].status = 'done';
-        items[0].label = `Abstracted ${batchEnd} of ${files.length} documents`;
-      }
-    } catch (e) {
-      if (showAllProgress) {
-        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'pending';
-      } else {
-        items[0].status = 'pending';
-      }
-      const failedNames = batch.map(f => f.name).join(', ');
-      showError(`Batch ${bi + 1} failed (${failedNames}): ${e.message}`);
-      document.getElementById('progressSection').style.display = 'none';
-      document.getElementById('uploadSection').style.display = 'block';
-      document.getElementById('analyzeBtn').disabled = false;
-      return;
-    }
+  try {
+    documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress);
+  } catch (e) {
+    showError(e.message);
+    document.getElementById('progressSection').style.display = 'none';
+    document.getElementById('uploadSection').style.display = 'block';
+    document.getElementById('analyzeBtn').disabled = false;
+    return;
   }
 
   // Synthesis
@@ -704,7 +777,7 @@ async function askFollowup() {
   conversationHistory.push({ role: 'user', content: q });
   renderResults();
   try {
-    const reply = await callBackend(conversationHistory, SYNTHESIS_PROMPT);
+    const reply = await callBackend(conversationHistory, SYNTHESIS_PROMPT, { model: SYNTHESIS_MODEL, max_tokens: SYNTHESIS_MAX_TOKENS });
     conversationHistory.push({ role: 'assistant', content: reply });
   } catch (e) {
     showError('Error: ' + e.message);
@@ -846,56 +919,22 @@ async function analyzeAdditional() {
   document.getElementById('addDocsSection').style.display = 'none';
   document.getElementById('progressSection').style.display = 'block';
 
-  const batches = [];
-  for (let i = 0; i < additionalFiles.length; i += BATCH_SIZE) {
-    batches.push(additionalFiles.slice(i, i + BATCH_SIZE));
-  }
-
   const showAllProgress = additionalFiles.length <= 50;
   const items = showAllProgress
     ? [...additionalFiles.map(f => ({ label: f.name, status: 'pending' })), { label: 'Update chain of title with all documents', status: 'pending' }]
     : [{ label: `Abstracting ${additionalFiles.length} additional documents...`, status: 'pending' }, { label: 'Update chain of title with all documents', status: 'pending' }];
 
-  const newAbstracts = [];
   const globalOffset = documentAbstracts.length;
+  let newAbstracts = [];
 
-  for (let bi = 0; bi < batches.length; bi++) {
-    const batch = batches[bi];
-    const globalStart = bi * BATCH_SIZE;
-    const batchEnd = Math.min(globalStart + batch.length, additionalFiles.length);
-    const statusMsg = `Reading additional document${batch.length > 1 ? 's' : ''} ${globalStart + 1}${batch.length > 1 ? '–' + batchEnd : ''} of ${additionalFiles.length}...`;
-
-    if (showAllProgress) {
-      for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'active';
-    } else {
-      items[0].status = 'active';
-      items[0].label = statusMsg;
-    }
-    updateProgress(Math.round(bi / (batches.length + 1) * 100), statusMsg, items);
-
-    try {
-      const result = await abstractBatch(batch, globalOffset + globalStart);
-      const parsed = parseBatchResult(result, batch, globalOffset + globalStart);
-      newAbstracts.push(...parsed);
-      batch.forEach(freeFileMemory);
-      if (showAllProgress) {
-        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'done';
-      } else {
-        items[0].status = 'done';
-        items[0].label = `Abstracted ${batchEnd} of ${additionalFiles.length} additional documents`;
-      }
-    } catch (e) {
-      if (showAllProgress) {
-        for (let j = 0; j < batch.length; j++) items[globalStart + j].status = 'pending';
-      } else {
-        items[0].status = 'pending';
-      }
-      showError(`Failed on batch: ${e.message}`);
-      document.getElementById('progressSection').style.display = 'none';
-      document.getElementById('addDocsSection').style.display = 'block';
-      document.getElementById('addDocsBtn').disabled = false;
-      return;
-    }
+  try {
+    newAbstracts = await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress);
+  } catch (e) {
+    showError(e.message);
+    document.getElementById('progressSection').style.display = 'none';
+    document.getElementById('addDocsSection').style.display = 'block';
+    document.getElementById('addDocsBtn').disabled = false;
+    return;
   }
 
   // Combine all abstracts
