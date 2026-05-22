@@ -441,7 +441,7 @@ async function callBackend(messages, system, retryCount = 0) {
     response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ model: 'claude-opus-4-7', max_tokens: 4000, system, messages }),
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4000, system, messages }),
     });
   } catch (networkErr) {
     // Fetch itself failed — network level problem

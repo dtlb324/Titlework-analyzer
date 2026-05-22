@@ -113,7 +113,7 @@ The app runs one API call per pair of documents (abstraction) plus one call to s
 
 ### Claude Opus 4.7 — cost estimates (single-page documents at standard resolution)
 
-Best for complex chains of title with ambiguous or multi-party documents. Default model.
+Best for complex chains of title with ambiguous or multi-party documents where maximum accuracy is required.
 
 | Run size | Estimated cost |
 |----------|----------------|
@@ -322,7 +322,7 @@ Wrong password or the password was changed. Check the `APP_PASSWORD` value in Ve
 Your Anthropic account has no credit balance. Add credit at `console.anthropic.com/settings/billing`. A minimum top-up of $5 is required.
 
 **"Rate limit exceeded"**
-More than 60 requests were made from the same IP within 60 seconds (default limit). For very large runs (400 documents), processing is throttled automatically — wait for it to finish. To raise the limit, set `ANALYZE_RATE_LIMIT_MAX` in Vercel environment variables.
+More than 20 requests were made from the same IP within 60 seconds. Wait 60 seconds and try again.
 
 **"Too many failed attempts"**
 5 incorrect password attempts were made from the same IP. Wait 60 seconds and try again with the correct password.
