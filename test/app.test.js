@@ -118,7 +118,7 @@ test('API accepts claude-sonnet-4-6 model in validation', async () => {
 
 test('rate limit default allows bulk throughput', () => {
   const analyzeJs = readFileSync(join(root, 'api/analyze.js'), 'utf8');
-  assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '60'"), 'Rate limit should default to 60');
+  assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '200'"), 'Rate limit should default to 200');
 });
 
 let passed = 0;
