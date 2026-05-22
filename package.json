@@ -5,10 +5,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js"
+    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/abstraction.test.js"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
-    "@vercel/blob": "^2.4.0"
+    "@vercel/blob": "^2.4.0",
+    "pdf-lib": "^1.17.1"
   }
 }

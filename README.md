@@ -62,7 +62,7 @@ Vercel runs the actual web app.
 | `ANTHROPIC_API_KEY` | Your Anthropic API key (starts with `sk-ant-...`) | Yes |
 | `APP_PASSWORD` | A password to restrict access (recommended) | Recommended |
 | `DATABASE_URL` or `POSTGRES_URL` | Neon/Postgres connection string for durable job, document, and chunk metadata | Required for durable jobs/uploads |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token for private durable file/chunk uploads | Required for durable file resume |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob token for private durable file/chunk uploads and server-side abstraction reads | Required for durable file resume and server abstraction |
 | `ANALYZE_RATE_LIMIT_MAX` | Max API requests per IP per minute (default `300`, max `600`). Raise for large bulk runs (200+ documents). | Optional |
 | `BLOB_MAX_UPLOAD_BYTES` | Max size for each direct Blob upload (default `52428800`, 50 MB) | Optional |
 | `JOB_RETENTION_DAYS` | Planned retention window for durable job uploads/results; operators should align this with their cleanup policy | Optional |
@@ -195,7 +195,8 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 - **Parallel processing:** 2 abstraction batches run concurrently for faster throughput
 - **Hierarchical synthesis:** runs over 50 documents are synthesized in 50-document segments, then merged into one title opinion
 - **Client throttling:** automatic request pacing (~120 req/min) to stay within server rate limits during bulk runs
-- **Durable upload metadata:** when Postgres and Vercel Blob are configured, each job records document/chunk metadata and uploads chunks directly from the browser to private Blob storage before analysis starts
+- **Server-side durable abstraction:** when Postgres and Vercel Blob are configured, uploaded chunks are abstracted server-side from stored Blob objects, saved per chunk, and then passed into the existing browser-driven synthesis flow
+- **Browser fallback:** if durable storage, Blob, or server abstraction is unavailable, the app warns the user and keeps the existing browser abstraction path
 - Progress bar and per-document status (for runs ≤50 files); summary progress for larger runs
 
 ### Supported File Types
@@ -250,9 +251,11 @@ Upload (up to 400 files)
    Title opinion + follow-ups
 ```
 
-When `BLOB_READ_WRITE_TOKEN` and the job database are configured, uploaded files/chunks are registered under the Phase 1 job ID and sent directly from the browser to private Vercel Blob storage. The app stores metadata and Blob keys/URLs only; it does not store base64 document bodies, CSV text, or generated title opinions in the metadata database. PDF splitting still happens in the browser, and `/api/analyze` remains the model-call path for this phase.
+When `DATABASE_URL`/`POSTGRES_URL`, `BLOB_READ_WRITE_TOKEN`, and `ANTHROPIC_API_KEY` are configured, uploaded files/chunks are registered under the Phase 1 job ID and sent directly from the browser to private Vercel Blob storage. The app then calls `POST /api/jobs/:id/abstraction/start`, polls `GET /api/jobs/:id/abstraction/status`, fetches ordered saved abstracts from `GET /api/jobs/:id/abstracts`, and passes those abstracts into the existing browser-driven synthesis flow.
 
-If Blob storage is not configured or the upload adapter is unavailable, the app warns that **durable file resume is unavailable** and falls back to the existing browser-only analysis path. In that fallback mode, keep the tab open until the run completes because file bytes remain local to the browser.
+Phase 3 stores abstract checkpoints in Postgres (`document_abstracts`) with chunk/job/document IDs, model, payload bytes, latency, token usage, status, attempts, and sanitized errors. It stores metadata and Blob references only for source chunks; it does not store raw PDF bytes, image bytes, base64 payloads, CSV text, or generated final title opinions in Postgres. PDF splitting still happens in the browser before upload. Final synthesis remains browser-driven for now.
+
+If the database, Blob token, or server abstraction setup is unavailable, the app returns a clear setup error, shows a warning that it is **falling back to browser abstraction**, and continues through the existing browser-only path. In that fallback mode, keep the tab open until the run completes because file bytes remain local to the browser.
 
 ---
 
