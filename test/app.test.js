@@ -59,7 +59,9 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('buildAdaptiveBatches'), 'Missing adaptive batching');
   assert(script.includes('runDocumentAbstraction'), 'Missing shared abstraction runner');
   assert(script.includes('ABSTRACT_CONCURRENCY = 2'), 'Missing parallel pool');
-  assert(script.includes('MAX_DOCS_PER_BATCH = 4'), 'Max docs per batch should be 4 for Vercel payload limit');
+  assert(script.includes('MAX_DOCS_PER_BATCH = 2'), 'Max docs per batch should be 2 for timeout safety');
+  assert(script.includes('isTimeoutError'), 'Missing timeout error detection');
+  assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing timeout PDF split retry');
   assert(script.includes('VERCEL_MAX_REQUEST_BYTES'), 'Missing Vercel payload guard');
   assert(script.includes('buildAbstractMessages'), 'Missing abstract message builder');
   assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
