@@ -195,6 +195,7 @@ const MAX_DOCS_PER_BATCH = 2;
 const LARGE_FILE_BYTES = 1_000_000;
 const TIMEOUT_SAFE_FILE_BYTES = 500_000;
 const TIMEOUT_SPLIT_CHUNK_RAW = 600_000;
+const VERCEL_FUNCTION_TIMEOUT_MS = 55_000;
 const ABSTRACT_CONCURRENCY = 2;
 const SYNTHESIS_CHUNK_SIZE = 50;
 const MAX_FILE_LIST_DISPLAY = 8;
@@ -214,11 +215,41 @@ let requestSlotQueue = Promise.resolve();
 let activeProgressTimer = null;
 
 function estimateBatchTimeMs(batch) {
+  const files = batch.files || batch;
   let payload = 0;
-  for (const f of batch.files) payload += estimateFilePayload(f);
-  const docs = batch.files.length;
-  const payloadSec = Math.min(payload / 180000, 40);
-  return 7000 + docs * 5500 + payloadSec * 1000;
+  for (const f of files) payload += estimateFilePayload(f);
+  const docs = files.length;
+  const payloadMs = Math.min(payload / 80, 45_000);
+  return 8000 + docs * 6000 + payloadMs;
+}
+
+function batchExceedsTimeoutLimit(files) {
+  return files.length > 0 && estimateBatchTimeMs({ files }) > VERCEL_FUNCTION_TIMEOUT_MS;
+}
+
+function splitFilesForTimeout(files) {
+  if (!files.length) return [];
+  if (files.length === 1 || !batchExceedsTimeoutLimit(files)) return [files];
+  const mid = Math.ceil(files.length / 2);
+  return [
+    ...splitFilesForTimeout(files.slice(0, mid)),
+    ...splitFilesForTimeout(files.slice(mid)),
+  ];
+}
+
+function finalizeBatchesForTimeout(batches) {
+  const split = [];
+  for (const batch of batches) {
+    for (const files of splitFilesForTimeout(batch.files)) {
+      split.push({ files, globalStart: 0 });
+    }
+  }
+  let globalStart = 0;
+  for (const batch of split) {
+    batch.globalStart = globalStart;
+    globalStart += batch.files.length;
+  }
+  return split;
 }
 
 function sumParallelWaves(batchTimes, concurrency) {
@@ -929,7 +960,12 @@ function buildAdaptiveBatches(fileList) {
       continue;
     }
 
-    if (current.length && (current.length >= docLimit || current.length >= MAX_DOCS_PER_BATCH || currentPayload + filePayload > MAX_PAYLOAD_BYTES)) {
+    if (current.length && (
+      current.length >= docLimit ||
+      current.length >= MAX_DOCS_PER_BATCH ||
+      currentPayload + filePayload > MAX_PAYLOAD_BYTES ||
+      batchExceedsTimeoutLimit([...current, file])
+    )) {
       batches.push({ files: [...current], globalStart });
       globalStart += current.length;
       current = [];
@@ -947,7 +983,7 @@ function buildAdaptiveBatches(fileList) {
   }
 
   if (current.length) batches.push({ files: [...current], globalStart });
-  return batches;
+  return finalizeBatchesForTimeout(batches);
 }
 
 async function runWithConcurrency(taskFns, limit) {
@@ -1111,6 +1147,18 @@ async function buildAbstractMessages(batchFiles, globalStartIdx) {
 // Send a batch of files in one API call — handles PDF, image, and CSV
 async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
   if (!batchFiles.length) return '';
+
+  if (allowSplit && batchExceedsTimeoutLimit(batchFiles)) {
+    if (batchFiles.length > 1) {
+      const mid = Math.ceil(batchFiles.length / 2);
+      const part1 = await abstractBatch(batchFiles.slice(0, mid), globalStartIdx, true);
+      const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
+      return part1 + '\n\n' + part2;
+    }
+    if (batchFiles.length === 1 && isPdfFile(batchFiles[0])) {
+      return await abstractSinglePdfOnTimeout(batchFiles[0], globalStartIdx);
+    }
+  }
 
   const messages = await buildAbstractMessages(batchFiles, globalStartIdx);
   const requestBytes = estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, messages);

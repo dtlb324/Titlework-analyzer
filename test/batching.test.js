@@ -64,4 +64,29 @@ const mixed = buildAdaptiveBatches([
 ]);
 assert(mixed.some(b => b.files.length === 1 && b.files[0].name === 'huge.pdf'), 'Oversized file gets its own batch');
 
+
+function estimateBatchTimeMs(batch) {
+  const files = batch.files || batch;
+  let payload = 0;
+  for (const f of files) payload += estimateFilePayload(f);
+  const docs = files.length;
+  const payloadMs = Math.min(payload / 80, 45_000);
+  return 8000 + docs * 6000 + payloadMs;
+}
+
+function batchExceedsTimeoutLimit(files) {
+  return files.length > 0 && estimateBatchTimeMs({ files }) > 55_000;
+}
+
+function splitFilesForTimeout(files) {
+  if (!files.length) return [];
+  if (files.length === 1 || !batchExceedsTimeoutLimit(files)) return [files];
+  const mid = Math.ceil(files.length / 2);
+  return [...splitFilesForTimeout(files.slice(0, mid)), ...splitFilesForTimeout(files.slice(mid))];
+}
+
+const heavy = (n, size = 2000000) => ({ name: `heavy-${n}.pdf`, size, data: 'x'.repeat(size) });
+const heavyPair = splitFilesForTimeout([heavy(1), heavy(2)]);
+assert(heavyPair.length >= 2, 'Heavy pair should split proactively for timeout');
+
 console.log('✓ batching tests passed');
