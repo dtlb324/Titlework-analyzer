@@ -5,10 +5,10 @@ function estimateFilePayload(file) {
 }
 
 function buildAdaptiveBatches(fileList) {
-  const MAX_PAYLOAD_BYTES = 4_100_000;
+  const MAX_PAYLOAD_BYTES = 3_550_000;
   const MAX_DOCS_PER_BATCH = 2;
-  const LARGE_FILE_BYTES = 1_000_000;
-  const TIMEOUT_SAFE_FILE_BYTES = 500_000;
+  const LARGE_FILE_BYTES = 800_000;
+  const TIMEOUT_SAFE_FILE_BYTES = 350_000;
   const batches = [];
   let current = [];
   let currentPayload = 0;
@@ -17,8 +17,9 @@ function buildAdaptiveBatches(fileList) {
   for (const file of fileList) {
     const filePayload = estimateFilePayload(file);
     const oversized = filePayload > LARGE_FILE_BYTES;
+    const timeoutRisk = filePayload > TIMEOUT_SAFE_FILE_BYTES;
 
-    if (oversized && !current.length) {
+    if ((oversized || timeoutRisk) && !current.length) {
       batches.push({ files: [file], globalStart });
       globalStart += 1;
       continue;
@@ -31,7 +32,7 @@ function buildAdaptiveBatches(fileList) {
       currentPayload = 0;
     }
 
-    if (oversized) {
+    if (oversized || timeoutRisk) {
       batches.push({ files: [file], globalStart });
       globalStart += 1;
       continue;
@@ -75,7 +76,7 @@ function estimateBatchTimeMs(batch) {
 }
 
 function batchExceedsTimeoutLimit(files) {
-  return files.length > 0 && estimateBatchTimeMs({ files }) > 55_000;
+  return files.length > 0 && estimateBatchTimeMs({ files }) > 45_000;
 }
 
 function splitFilesForTimeout(files) {

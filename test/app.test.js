@@ -64,7 +64,8 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing timeout PDF split retry');
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
   assert(script.includes('finalizeBatchesForTimeout'), 'Missing timeout batch finalizer');
-  assert(script.includes('VERCEL_FUNCTION_TIMEOUT_MS = 55_000'), 'Missing Vercel timeout constant');
+  assert(script.includes('VERCEL_FUNCTION_TIMEOUT_MS = 45_000'), 'Vercel timeout budget should leave platform margin');
+  assert(script.includes('REQUEST_ENVELOPE_SAFE_BYTES = 3_900_000'), 'Missing safe request envelope budget');
   assert(script.includes('VERCEL_MAX_REQUEST_BYTES'), 'Missing Vercel payload guard');
   assert(script.includes('buildAbstractMessages'), 'Missing abstract message builder');
   assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
@@ -106,13 +107,19 @@ test('API rejects unknown model', async () => {
 
 test('API accepts claude-haiku-4-5 and claude-sonnet-4-6', async () => {
   const prev = process.env.ANTHROPIC_API_KEY;
+  const prevFetch = global.fetch;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+  global.fetch = async () => ({
+    status: 200,
+    json: async () => ({ content: [{ text: 'ok' }], model: 'test-model', stop_reason: 'end_turn', usage: {} }),
+  });
   for (const model of ['claude-haiku-4-5', 'claude-sonnet-4-6']) {
     const req = mockReq({ model, messages: [{ role: 'user', content: 'hello' }] });
     const res = mockRes();
     await handler(req, res);
     assert(res.statusCode !== 400 || !String(res.body?.error).includes('model'), `${model} should pass model validation`);
   }
+  global.fetch = prevFetch;
   if (prev) process.env.ANTHROPIC_API_KEY = prev;
   else delete process.env.ANTHROPIC_API_KEY;
 });
@@ -142,7 +149,7 @@ test('shows estimated processing time during runs', () => {
 
 
 test('proactively splits batches before timeout', () => {
-  assert(script.includes('VERCEL_FUNCTION_TIMEOUT_MS = 55_000'), 'Missing Vercel timeout constant');
+  assert(script.includes('VERCEL_FUNCTION_TIMEOUT_MS = 45_000'), 'Missing safer Vercel timeout budget');
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
   assert(script.includes('finalizeBatchesForTimeout'), 'Missing timeout batch finalizer');
   assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing single-PDF timeout split');
