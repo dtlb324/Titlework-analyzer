@@ -129,7 +129,9 @@ test('auto-splits large PDFs client-side', () => {
 test('shows estimated processing time during runs', () => {
   assert(indexHtml.includes('id="progressEta"'), 'Missing progress ETA element');
   assert(script.includes('createProgressTimer'), 'Missing progress timer');
-  assert(script.includes('formatDuration'), 'Missing duration formatter');
+  assert(script.includes('formatDurationPrecise'), 'Missing precise duration formatter');
+  assert(script.includes('buildProcessingPlan'), 'Missing processing plan builder');
+  assert(script.includes('formatInitialEstimate'), 'Missing initial estimate formatter');
   assert(script.includes('formatEtaRemaining'), 'Missing ETA formatter');
 });
 
