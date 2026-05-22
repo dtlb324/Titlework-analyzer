@@ -6,8 +6,9 @@ function estimateFilePayload(file) {
 
 function buildAdaptiveBatches(fileList) {
   const MAX_PAYLOAD_BYTES = 4_100_000;
-  const MAX_DOCS_PER_BATCH = 4;
+  const MAX_DOCS_PER_BATCH = 2;
   const LARGE_FILE_BYTES = 1_000_000;
+  const TIMEOUT_SAFE_FILE_BYTES = 500_000;
   const batches = [];
   let current = [];
   let currentPayload = 0;
@@ -51,8 +52,8 @@ function assert(condition, message) {
 const small = (n, size = 100000) => ({ name: `doc-${n}.pdf`, size, data: 'x'.repeat(size) });
 
 const smallBatch = buildAdaptiveBatches(Array.from({ length: 10 }, (_, i) => small(i)));
-assert(smallBatch.length === 3, `10 small docs should pack into 3 batches (max 4 docs each), got ${smallBatch.length}`);
-assert(smallBatch[0].files.length === 4, 'First batch should pack up to 4 small docs');
+assert(smallBatch.length === 5, `10 small docs should pack into 5 batches (max 2 docs each), got ${smallBatch.length}`);
+assert(smallBatch[0].files.length === 2, 'First batch should pack up to 2 small docs');
 
 const large = buildAdaptiveBatches([{ name: 'big.pdf', size: 3_000_000, data: 'x'.repeat(3_000_000) }]);
 assert(large.length === 1 && large[0].files.length === 1, 'Large file should batch alone');
@@ -62,5 +63,30 @@ const mixed = buildAdaptiveBatches([
   { name: 'huge.pdf', size: 3_000_000, data: 'x'.repeat(3_000_000) },
 ]);
 assert(mixed.some(b => b.files.length === 1 && b.files[0].name === 'huge.pdf'), 'Oversized file gets its own batch');
+
+
+function estimateBatchTimeMs(batch) {
+  const files = batch.files || batch;
+  let payload = 0;
+  for (const f of files) payload += estimateFilePayload(f);
+  const docs = files.length;
+  const payloadMs = Math.min(payload / 80, 45_000);
+  return 8000 + docs * 6000 + payloadMs;
+}
+
+function batchExceedsTimeoutLimit(files) {
+  return files.length > 0 && estimateBatchTimeMs({ files }) > 55_000;
+}
+
+function splitFilesForTimeout(files) {
+  if (!files.length) return [];
+  if (files.length === 1 || !batchExceedsTimeoutLimit(files)) return [files];
+  const mid = Math.ceil(files.length / 2);
+  return [...splitFilesForTimeout(files.slice(0, mid)), ...splitFilesForTimeout(files.slice(mid))];
+}
+
+const heavy = (n, size = 2000000) => ({ name: `heavy-${n}.pdf`, size, data: 'x'.repeat(size) });
+const heavyPair = splitFilesForTimeout([heavy(1), heavy(2)]);
+assert(heavyPair.length >= 2, 'Heavy pair should split proactively for timeout');
 
 console.log('✓ batching tests passed');
