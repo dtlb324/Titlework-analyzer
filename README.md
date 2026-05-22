@@ -57,10 +57,11 @@ Vercel runs the actual web app.
 2. Find your `Titlework-analyzer` repository and click **Import**
 3. **Before clicking Deploy**, expand **Environment Variables** and add:
 
-| Name | Value |
-|------|-------|
-| `ANTHROPIC_API_KEY` | Your Anthropic API key (starts with `sk-ant-...`) |
-| `APP_PASSWORD` | A password to restrict access (recommended) |
+| Name | Value | Required |
+|------|-------|----------|
+| `ANTHROPIC_API_KEY` | Your Anthropic API key (starts with `sk-ant-...`) | Yes |
+| `APP_PASSWORD` | A password to restrict access (recommended) | Recommended |
+| `ANALYZE_RATE_LIMIT_MAX` | Max API requests per IP per minute (default `300`, max `600`). Raise for large bulk runs (200+ documents). | Optional |
 
 4. Click **Deploy**
 5. Wait ~30 seconds — Vercel builds and deploys automatically
@@ -100,40 +101,33 @@ By default Vercel locks your deployment behind a Vercel login screen. Turn that 
 
 **The Anthropic API is completely separate from any Claude.ai subscription.** A Claude.ai Pro subscription ($20/month) does not cover API usage. API charges are billed separately per use to a credit card on file at `console.anthropic.com`.
 
-**Recommended:** Set a monthly spending limit at `console.anthropic.com/settings/limits` to cap costs. A $50/month limit is a reasonable starting point for light use with Opus 4.7; $10/month covers light use with Sonnet 4.6.
+**Recommended:** Set a monthly spending limit at `console.anthropic.com/settings/limits` to cap costs. A $25–50/month limit is a reasonable starting point for regular title work; $10/month covers light use.
 
-The app runs one API call per pair of documents (abstraction) plus one call to synthesize everything, plus one call per follow-up question. Each call sends document content as tokens, so larger or higher-resolution scans cost more.
+The app uses a **two-model pipeline** optimized for cost and quality on bulk runs:
+
+- **Claude Haiku 4.5** — reads and abstracts each document (fast, low cost)
+- **Claude Sonnet 4.6** — synthesizes chain of title and ownership (higher quality reasoning)
+
+API calls scale with document count. Abstraction uses adaptive batching (up to 8 documents per call). Synthesis uses hierarchical merging for runs over 50 documents. Follow-up questions use Sonnet 4.6.
 
 ### Per-token pricing
 
-| Model | Input | Output |
-|-------|-------|--------|
-| Claude Opus 4.7 | $15.00 / million tokens | $75.00 / million tokens |
-| Claude Sonnet 4.6 | $3.00 / million tokens | $15.00 / million tokens |
+| Model | Role | Input | Output |
+|-------|------|-------|--------|
+| Claude Haiku 4.5 | Document abstraction | $0.80 / million tokens | $4.00 / million tokens |
+| Claude Sonnet 4.6 | Synthesis & follow-ups | $3.00 / million tokens | $15.00 / million tokens |
 
-### Claude Opus 4.7 — cost estimates (single-page documents at standard resolution)
-
-Best for complex chains of title with ambiguous or multi-party documents where maximum accuracy is required.
+### Cost estimates (single-page documents at standard resolution)
 
 | Run size | Estimated cost |
 |----------|----------------|
-| Small — 3–5 documents | ~$0.50–$1.00 |
-| Medium — 10 documents | ~$1.00–$1.75 |
-| Large — 20+ documents | ~$2.00–$3.50 |
-| Per follow-up question | ~$0.05–$0.15 |
+| Small — 3–5 documents | ~$0.05–$0.15 |
+| Medium — 10 documents | ~$0.15–$0.35 |
+| Large — 50 documents | ~$0.50–$1.25 |
+| Bulk — 200–400 documents | ~$2.00–$6.00 |
+| Per follow-up question | ~$0.01–$0.05 |
 
-### Claude Sonnet 4.6 — cost estimates (single-page documents at standard resolution)
-
-Good for straightforward title work. Costs roughly 5× less than Opus 4.7.
-
-| Run size | Estimated cost |
-|----------|----------------|
-| Small — 3–5 documents | ~$0.10–$0.20 |
-| Medium — 10 documents | ~$0.20–$0.35 |
-| Large — 20+ documents | ~$0.40–$0.70 |
-| Per follow-up question | ~$0.01–$0.03 |
-
-Switch models using the model picker before running an analysis.
+Actual cost depends on page count, scan resolution, and document complexity. Large scanned PDFs at 300 DPI cost significantly more than single-page deeds.
 
 ---
 
@@ -191,11 +185,13 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 ## Features
 
 ### Document Analysis
-- Two-stage analysis: individual document abstraction followed by full synthesis
-- Documents processed in batches of 2 to balance speed and server reliability
-- Animated spinner on each document row while it is actively being processed
-- Each document gets its own progress row so you can see exactly which files are being read
-- Progress bar tracks overall completion from start to finish
+- **Two-stage pipeline:** Haiku 4.5 abstracts each document, then Sonnet 4.6 synthesizes chain of title and ownership
+- **Bulk upload:** up to **400 documents** per run (PDF, images, or CSV)
+- **Adaptive batching:** groups up to 8 documents per API call, capped at ~3 MB payload — large files batch alone
+- **Parallel processing:** 2 abstraction batches run concurrently for faster throughput
+- **Hierarchical synthesis:** runs over 50 documents are synthesized in 50-document segments, then merged into one title opinion
+- **Client throttling:** automatic request pacing (~120 req/min) to stay within server rate limits during bulk runs
+- Progress bar and per-document status (for runs ≤50 files); summary progress for larger runs
 
 ### Supported File Types
 
@@ -206,9 +202,9 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 | CSV | Converted to plain text — useful for division order schedules, ownership tables, lease summaries |
 
 ### Add More Documents
-- After the initial analysis, click **Add More Documents** to upload additional batches
-- The AI re-synthesizes the entire chain of title using all documents combined
-- Use this when a chain of title spans more documents than fit in one upload
+- After the initial analysis, click **Add More Documents** to upload additional batches (up to 400 files per upload)
+- New documents are abstracted and the AI re-synthesizes the entire chain of title using all documents combined
+- Use this when a chain of title spans more documents than fit in one upload, or when new courthouse records arrive after the first run
 
 ### Download PDF
 - Click **Download PDF** after the analysis completes to save a formatted copy
@@ -218,6 +214,38 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 ### Follow-up Questions
 - After the analysis, ask any follow-up question in plain language
 - Examples: "What curative document do I need for the 1962 gap?", "What happens to the mineral interest if the 1987 deed is invalid?"
+
+---
+
+## How Bulk Processing Works
+
+For large title projects (dozens to hundreds of documents), the app optimizes API usage automatically:
+
+```
+Upload (up to 400 files)
+        │
+        ▼
+┌───────────────────────────────┐
+│  Abstraction (Haiku 4.5)      │
+│  • Adaptive batches (≤8 docs) │
+│  • ~3 MB payload cap per call │
+│  • 2 parallel batches         │
+│  • Client throttle ~120/min   │
+└───────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────┐
+│  Synthesis (Sonnet 4.6)       │
+│  • ≤50 docs: single pass      │
+│  • >50 docs: 50-doc segments  │
+│    merged into final opinion  │
+└───────────────────────────────┘
+        │
+        ▼
+   Title opinion + follow-ups
+```
+
+Each uploaded file is kept in browser memory until the run completes successfully, so a failed batch can be retried without re-uploading.
 
 ---
 
@@ -240,7 +268,7 @@ The AI follows strict rules for accuracy and caution:
 | Password gate | Access restricted to users with the correct password |
 | Brute-force protection | 5 failed password attempts locks the IP for 60 seconds |
 | Constant-time password comparison | Prevents timing attacks |
-| Rate limiting | 20 requests per IP per minute maximum |
+| Rate limiting | Configurable via `ANALYZE_RATE_LIMIT_MAX` (default 300 req/min per IP, max 600). Health-check pings are exempt. |
 | Input validation | All requests validated before reaching the Anthropic API |
 | Model whitelist | Only approved Claude models accepted |
 | XSS protection headers | On every server response |
@@ -256,13 +284,13 @@ The AI follows strict rules for accuracy and caution:
 
 The following models are whitelisted in `api/analyze.js`:
 
+- `claude-haiku-4-5` — **used for document abstraction** (default)
+- `claude-sonnet-4-6` — **used for synthesis and follow-up questions** (default)
 - `claude-sonnet-4-5`
-- `claude-sonnet-4-6`
 - `claude-opus-4-6`
 - `claude-opus-4-7`
-- `claude-haiku-4-5`
 
-To add a new model, update the `allowedModels` array in `api/analyze.js`.
+To change which models the app uses, edit `ABSTRACT_MODEL` and `SYNTHESIS_MODEL` in `public/index.html`. To allow additional models on the server, update the `allowedModels` array in `api/analyze.js`.
 
 ---
 
@@ -274,10 +302,20 @@ Titlework-analyzer/
 │   └── analyze.js        # Vercel serverless function — proxies to Anthropic API with security hardening
 ├── public/
 │   └── index.html        # Entire frontend — single HTML file, no build step
+├── test/
+│   ├── app.test.js       # Integration tests (API handler, frontend constants, syntax)
+│   └── batching.test.js  # Unit tests for adaptive batching logic
 ├── vercel.json           # Vercel config — sets function timeout to 60 seconds
 ├── package.json          # Project metadata — type: module
 ├── SECURITY.md           # Security policy and vulnerability reporting
 └── README.md             # This file
+```
+
+Run tests locally (requires Node.js):
+
+```bash
+node test/app.test.js
+node test/batching.test.js
 ```
 
 ---
@@ -321,14 +359,23 @@ Wrong password or the password was changed. Check the `APP_PASSWORD` value in Ve
 **"Insufficient API credits"**
 Your Anthropic account has no credit balance. Add credit at `console.anthropic.com/settings/billing`. A minimum top-up of $5 is required.
 
-**"Rate limit exceeded"**
-More than 20 requests were made from the same IP within 60 seconds. Wait 60 seconds and try again.
+**"Rate limit reached" / "Rate limit exceeded"**
+Too many API requests were made in a short window during a bulk run. The app automatically retries after a 60-second pause. If this persists on large runs (200+ documents), add or raise `ANALYZE_RATE_LIMIT_MAX` in Vercel environment variables (try `400` or `600`), redeploy, and run again.
+
+**"Input should be a valid string" (base64 error)**
+A PDF was sent to the API without file data — usually caused by a failed batch mid-run on an older deployment. Refresh the page, re-upload your files, and run again. Current versions retain the original file and re-read data automatically if a batch fails.
 
 **"Too many failed attempts"**
 5 incorrect password attempts were made from the same IP. Wait 60 seconds and try again with the correct password.
 
 **"File too large"**
-The documents in the batch exceed the server size limit. Try uploading fewer documents at a time. For large scanned PDFs, try scanning at 150 DPI instead of 300 DPI to reduce file size.
+The documents in the batch exceed the server size limit (~3 MB per batch). Oversized files are batched alone automatically, but very large scans may still fail. Scan at 150 DPI instead of 300 DPI to reduce file size, or split multi-page PDFs by page range.
+
+**Bulk run tips (100–400 documents)**
+- Scan at 150 DPI where legibility allows — this cuts API cost and avoids timeout errors
+- Set `ANALYZE_RATE_LIMIT_MAX=400` (or `600`) in Vercel for large client workloads
+- A single run may take 30–60+ minutes for 400 documents; keep the browser tab open
+- Progress shows a summary view for runs over 50 files
 
 **"Forbidden" on the live URL**
 Vercel's Deployment Protection is enabled. Go to project → Settings → Deployment Protection → set to Disabled or Only Preview Deployments.
