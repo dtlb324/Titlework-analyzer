@@ -240,7 +240,7 @@ The AI follows strict rules for accuracy and caution:
 | Password gate | Access restricted to users with the correct password |
 | Brute-force protection | 5 failed password attempts locks the IP for 60 seconds |
 | Constant-time password comparison | Prevents timing attacks |
-| Rate limiting | 60 requests per IP per minute (configurable via `ANALYZE_RATE_LIMIT_MAX`) |
+| Rate limiting | 20 requests per IP per minute maximum |
 | Input validation | All requests validated before reaching the Anthropic API |
 | Model whitelist | Only approved Claude models accepted |
 | XSS protection headers | On every server response |
@@ -322,7 +322,7 @@ Wrong password or the password was changed. Check the `APP_PASSWORD` value in Ve
 Your Anthropic account has no credit balance. Add credit at `console.anthropic.com/settings/billing`. A minimum top-up of $5 is required.
 
 **"Rate limit exceeded"**
-More than 20 requests were made from the same IP within 60 seconds. Wait 60 seconds and try again.
+More than 60 requests were made from the same IP within 60 seconds (default limit). For very large runs (400 documents), processing is throttled automatically — wait for it to finish. To raise the limit, set `ANALYZE_RATE_LIMIT_MAX` in Vercel environment variables.
 
 **"Too many failed attempts"**
 5 incorrect password attempts were made from the same IP. Wait 60 seconds and try again with the correct password.
