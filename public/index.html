@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://esm.sh; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.blob.vercel-storage.com https://blob.vercel-storage.com https://esm.sh; img-src 'self' data:; font-src 'self';">
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -722,6 +722,9 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
       data,
       csvText: null,
       sourceFile: chunkFile,
+      sourceOriginalFile: file,
+      originalSizeBytes: file.size,
+      originalMediaType: file.type || 'application/pdf',
       splitFrom: file.name,
       pageRange: [from, to],
     };
@@ -740,7 +743,7 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
 async function prepareFileEntries(file, slotsAvailable) {
   if (isCsvFile(file)) {
     const text = await readFileAsText(file);
-    return [{ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file }];
+    return [{ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file, originalSizeBytes: file.size, originalMediaType: 'text/csv' }];
   }
   if (isPdfFile(file) && file.size > PDF_SPLIT_RAW_THRESHOLD) {
     return await splitPdfIntoEntries(file, slotsAvailable);
@@ -753,6 +756,8 @@ async function prepareFileEntries(file, slotsAvailable) {
     data,
     csvText: null,
     sourceFile: file,
+    originalSizeBytes: file.size,
+    originalMediaType: file.type || (isPdfFile(file) ? 'application/pdf' : file.type),
   }];
 }
 
@@ -982,6 +987,183 @@ async function patchAnalysisJob(jobId, patch) {
   saveActiveJob(data.job);
   renderJobMeta(data.job);
   return data.job;
+}
+
+async function durableJsonFetch(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...getJobHeaders(),
+      ...(options.headers || {}),
+    },
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch {}
+  if (!response.ok) {
+    const error = new Error(data.error || `Durable upload request failed (HTTP ${response.status}).`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+async function getDurableStorageStatus() {
+  try {
+    return await durableJsonFetch('/api/blob/upload', { method: 'GET' });
+  } catch (err) {
+    console.warn('Durable file storage status unavailable', err);
+    return { available: false, error: err.message };
+  }
+}
+
+let blobClientModulePromise = null;
+async function loadVercelBlobClient() {
+  if (!blobClientModulePromise) {
+    blobClientModulePromise = import('https://esm.sh/@vercel/blob/client');
+  }
+  return blobClientModulePromise;
+}
+
+function arrayBufferToHex(buffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function computeFileChecksum(file) {
+  if (!file || typeof crypto === 'undefined' || !crypto.subtle) return null;
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return arrayBufferToHex(digest);
+}
+
+function durableUploadWarning(reason) {
+  const suffix = reason ? ` ${reason}` : '';
+  return `Durable file resume unavailable.${suffix} Continuing with browser-only analysis; keep this tab open until the run finishes.`;
+}
+
+async function registerDocumentForUpload(jobId, entry) {
+  const sourceName = entry.splitFrom || entry.name;
+  const checksum = await computeFileChecksum(entry.sourceOriginalFile || entry.sourceFile).catch(() => null);
+  const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/documents`, {
+    method: 'POST',
+    body: JSON.stringify({
+      originalFilename: sourceName,
+      mediaType: entry.originalMediaType || entry.type,
+      sizeBytes: entry.originalSizeBytes || entry.size || 0,
+      fingerprint: `${sourceName}:${entry.originalSizeBytes || entry.size || 0}`,
+      checksumSha256: checksum,
+    }),
+  });
+  return data.document;
+}
+
+async function registerChunkForUpload(jobId, documentId, entry, chunkOrder) {
+  const checksum = await computeFileChecksum(entry.sourceFile).catch(() => null);
+  const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/documents/${encodeURIComponent(documentId)}/chunks`, {
+    method: 'POST',
+    body: JSON.stringify({
+      chunkOrder,
+      originalFilename: entry.name,
+      mediaType: entry.type || entry.originalMediaType,
+      sizeBytes: entry.size || entry.sourceFile?.size || 0,
+      pageStart: entry.pageRange?.[0] || null,
+      pageEnd: entry.pageRange?.[1] || null,
+      splitFrom: entry.splitFrom || null,
+      fingerprint: getFileFingerprint(entry),
+      checksumSha256: checksum,
+    }),
+  });
+  return data.chunk;
+}
+
+async function patchChunkUploadStatus(jobId, chunkId, patch) {
+  const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/chunks/${encodeURIComponent(chunkId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+  return data.chunk;
+}
+
+async function uploadChunkToBlob(jobId, documentId, chunk, entry, onProgress) {
+  const { upload } = await loadVercelBlobClient();
+  const blob = await upload(chunk.blobKey, entry.sourceFile, {
+    access: 'private',
+    handleUploadUrl: '/api/blob/upload',
+    headers: getJobHeaders(),
+    clientPayload: JSON.stringify({
+      jobId,
+      documentId,
+      chunkId: chunk.id,
+      mediaType: entry.type || entry.originalMediaType,
+    }),
+    onUploadProgress: event => {
+      if (onProgress && event?.percentage !== undefined) onProgress(event.percentage);
+    },
+  });
+  await patchChunkUploadStatus(jobId, chunk.id, {
+    uploadStatus: 'uploaded',
+    blobKey: blob.pathname || chunk.blobKey,
+    blobUrl: blob.url,
+  });
+  entry.documentId = documentId;
+  entry.chunkId = chunk.id;
+  entry.blobKey = blob.pathname || chunk.blobKey;
+  entry.blobUrl = blob.url;
+  entry.uploadStatus = 'uploaded';
+  return blob;
+}
+
+async function finalizeJobUploads(jobId) {
+  const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/finalize-uploads`, {
+    method: 'POST',
+  });
+  return data.job;
+}
+
+async function registerJobUploads(jobId, fileList) {
+  const status = await getDurableStorageStatus();
+  if (!status.available) {
+    return { durable: false, warning: durableUploadWarning(status.error || 'Set BLOB_READ_WRITE_TOKEN to enable durable file resume.') };
+  }
+  const maxUploadBytes = status.maxUploadBytes || Infinity;
+  const documentIdsBySource = new Map();
+  let completed = 0;
+  const total = fileList.length;
+
+  await safePatchAnalysisJob(jobId, {
+    status: 'uploading',
+    completedDocuments: 0,
+    failedDocuments: 0,
+    currentPhase: `Uploading ${total} document chunk${total === 1 ? '' : 's'}`,
+  });
+
+  for (let i = 0; i < fileList.length; i++) {
+    const entry = fileList[i];
+    if ((entry.size || entry.sourceFile?.size || 0) > maxUploadBytes) {
+      throw new Error(`${entry.name}: exceeds durable upload limit of ${formatMegabytes(maxUploadBytes)} MB.`);
+    }
+    const sourceKey = entry.splitFrom || entry.name;
+    let documentId = documentIdsBySource.get(sourceKey);
+    if (!documentId) {
+      const document = await registerDocumentForUpload(jobId, entry);
+      documentId = document.id;
+      documentIdsBySource.set(sourceKey, documentId);
+    }
+    const chunk = await registerChunkForUpload(jobId, documentId, entry, i);
+    entry.uploadStatus = 'uploading';
+    await uploadChunkToBlob(jobId, documentId, chunk, entry, percentage => {
+      const pct = Math.round(((completed + (percentage / 100)) / total) * 8);
+      updateProgress(pct, `Uploading source files to durable storage (${completed + 1} of ${total})...`, null);
+    });
+    completed += 1;
+    updateProgress(Math.round((completed / total) * 8), `Uploaded ${completed} of ${total} document chunk${total === 1 ? '' : 's'}...`, null);
+  }
+
+  const job = await finalizeJobUploads(jobId);
+  renderJobMeta(job);
+  return { durable: true, job };
 }
 
 async function safePatchAnalysisJob(jobId, patch) {
@@ -1719,6 +1901,17 @@ async function analyze() {
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
     return;
+  }
+
+  updateProgress(0, 'Checking durable file storage...', null);
+  const uploadRegistration = await registerJobUploads(job.id, files).catch(err => ({
+    durable: false,
+    warning: durableUploadWarning(err.message),
+  }));
+  if (uploadRegistration.warning) {
+    showError(uploadRegistration.warning);
+  } else if (uploadRegistration.durable) {
+    updateProgress(8, 'Durable uploads complete; starting browser-driven analysis...', null);
   }
 
   const showAllProgress = files.length <= 50;

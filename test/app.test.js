@@ -163,6 +163,18 @@ test('preserves PDF data for retries via sourceFile', () => {
   assert(script.includes('files.forEach(freeFileMemory)'), 'Should free memory only after successful run');
 });
 
+test('registers job-linked durable uploads before browser-driven analysis', () => {
+  assert(script.includes('async function getDurableStorageStatus'), 'Missing durable storage availability check');
+  assert(script.includes('async function registerJobUploads'), 'Missing job-linked upload registration helper');
+  assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/documents'), 'Missing document registration endpoint call');
+  assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/documents/${encodeURIComponent(documentId)}/chunks'), 'Missing chunk registration endpoint call');
+  assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/chunks/${encodeURIComponent(chunkId)}'), 'Missing chunk upload status patch endpoint call');
+  assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/finalize-uploads'), 'Missing finalize uploads endpoint call');
+  assert(script.includes("handleUploadUrl: '/api/blob/upload'"), 'Missing direct browser-to-Blob upload configuration');
+  assert(script.includes('headers: getJobHeaders()'), 'Blob client upload token request should include app auth headers');
+  assert(script.includes('Durable file resume unavailable'), 'Missing graceful fallback warning copy');
+});
+
 
 let passed = 0;
 let failed = 0;

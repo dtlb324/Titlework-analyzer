@@ -5,9 +5,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js"
+    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.1.0"
+    "@neondatabase/serverless": "^1.1.0",
+    "@vercel/blob": "^2.4.0"
   }
 }
