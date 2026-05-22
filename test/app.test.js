@@ -58,7 +58,7 @@ test('uses Haiku for abstraction and Sonnet for synthesis', () => {
 test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('buildAdaptiveBatches'), 'Missing adaptive batching');
   assert(script.includes('runDocumentAbstraction'), 'Missing shared abstraction runner');
-  assert(script.includes('ABSTRACT_CONCURRENCY = 3'), 'Missing parallel pool');
+  assert(script.includes('ABSTRACT_CONCURRENCY = 2'), 'Missing parallel pool');
   assert(script.includes('MAX_DOCS_PER_BATCH = 8'), 'Missing max docs per batch');
   assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
 });
@@ -67,28 +67,14 @@ test('supports 400-document bulk upload', () => {
   assert(script.includes('const MAX_FILES = 400'), 'MAX_FILES should be 400');
   assert(script.includes('hierarchicalSynthesis'), 'Missing hierarchical synthesis');
   assert(script.includes('SYNTHESIS_CHUNK_SIZE = 50'), 'Synthesis chunk size should be 50');
-  assert(script.includes('throttleRequest'), 'Missing request throttling');
+  assert(script.includes('acquireRequestSlot'), 'Missing request throttling');
 });
 
 test('UI copy reflects 400-file limit', () => {
   assert(indexHtml.includes('up to 400 files'), 'Upload hint should mention 400 files');
 });
 
-test('API ping without key returns 500 (expected in CI)', async () => {
-  if (process.env.ANTHROPIC_API_KEY) {
-    throw new Error('SKIP');
-  }
-  const req = mockReq({ ping: true });
-  const res = mockRes();
-  await handler(req, res);
-  assert(res.statusCode === 500, `Without API key ping should 500, got ${res.statusCode}`);
-  assert(res.body?.error?.includes('API key'), 'Should report missing API key');
-});
-
-test('API ping with key returns ok', async () => {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('SKIP');
-  }
+test('API ping works without API key (health check)', async () => {
   const req = mockReq({ ping: true });
   const res = mockRes();
   await handler(req, res);
@@ -126,7 +112,7 @@ test('API accepts claude-haiku-4-5 and claude-sonnet-4-6', async () => {
 
 test('rate limit default allows bulk throughput', () => {
   const analyzeJs = readFileSync(join(root, 'api/analyze.js'), 'utf8');
-  assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '200'"), 'Rate limit should default to 200');
+  assert(analyzeJs.includes("process.env.ANALYZE_RATE_LIMIT_MAX || '300'"), 'Rate limit should default to 300');
 });
 
 let passed = 0;

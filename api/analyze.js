@@ -12,8 +12,8 @@ const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // Default 200 req/min supports bulk runs (~400 docs). Override via ANALYZE_RATE_LIMIT_MAX env var.
 const RATE_LIMIT_MAX_REQUESTS = Math.min(
-  Math.max(parseInt(process.env.ANALYZE_RATE_LIMIT_MAX || '200', 10) || 200, 10),
-  200
+  Math.max(parseInt(process.env.ANALYZE_RATE_LIMIT_MAX || '300', 10) || 300, 10),
+  600
 );
 const PASSWORD_RATE_LIMIT_MAX = 5;
 
@@ -117,32 +117,6 @@ export default async function handler(req, res) {
     || req.socket?.remoteAddress
     || 'unknown';
 
-  cleanupRateLimitMap();
-  const rateEntry = getRateLimitEntry(ip);
-
-  rateEntry.count++;
-  if (rateEntry.count > RATE_LIMIT_MAX_REQUESTS) {
-    return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.' });
-  }
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: 'API key not configured on server.' });
-  }
-
-  const requiredPassword = process.env.APP_PASSWORD;
-  if (requiredPassword) {
-    const providedPassword = req.headers['x-app-password'];
-    if (rateEntry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) {
-      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.' });
-    }
-    if (!secureCompare(providedPassword || '', requiredPassword)) {
-      rateEntry.failedAuth++,
-      await new Promise(r => setTimeout(r, 500));
-      return res.status(401).json({ error: 'Invalid password.' });
-    }
-  }
-
   let body = req.body;
   if (typeof body === 'string') {
     try { body = JSON.parse(body); }
@@ -156,6 +130,34 @@ export default async function handler(req, res) {
 
   if (validation.isPing) {
     return res.status(200).json({ ok: true });
+  }
+
+  cleanupRateLimitMap();
+  const rateEntry = getRateLimitEntry(ip);
+
+  rateEntry.count++;
+  if (rateEntry.count > RATE_LIMIT_MAX_REQUESTS) {
+    res.setHeader('Retry-After', '60');
+    return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.' });
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'API key not configured on server.' });
+  }
+
+  const requiredPassword = process.env.APP_PASSWORD;
+  if (requiredPassword) {
+    const providedPassword = req.headers['x-app-password'];
+    if (rateEntry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) {
+      res.setHeader('Retry-After', '60');
+      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.' });
+    }
+    if (!secureCompare(providedPassword || '', requiredPassword)) {
+      rateEntry.failedAuth++,
+      await new Promise(r => setTimeout(r, 500));
+      return res.status(401).json({ error: 'Invalid password.' });
+    }
   }
 
   const safeBody = {
