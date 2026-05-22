@@ -1,16 +1,40 @@
 import { randomUUID } from 'crypto';
 import { neon } from '@neondatabase/serverless';
 
-const ALLOWED_STATUSES = new Set(['created', 'abstracting', 'synthesizing', 'complete', 'failed']);
-const TERMINAL_STATUSES = new Set(['complete', 'failed']);
+const ALLOWED_STATUSES = new Set([
+  'created',
+  'uploading',
+  'ready',
+  'queued',
+  'planning',
+  'abstracting',
+  'synthesizing',
+  'complete',
+  'partial_failed',
+  'failed',
+  'canceled',
+]);
+const TERMINAL_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canceled']);
 const VALID_TRANSITIONS = {
-  created: new Set(['created', 'abstracting', 'failed']),
+  created: new Set(['created', 'uploading', 'abstracting', 'failed', 'canceled']),
+  uploading: new Set(['uploading', 'ready', 'abstracting', 'failed', 'canceled']),
+  ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'failed', 'canceled']),
+  queued: new Set(['queued', 'planning', 'abstracting', 'failed', 'canceled']),
+  planning: new Set(['planning', 'abstracting', 'failed', 'canceled']),
   abstracting: new Set(['abstracting', 'synthesizing', 'failed']),
-  synthesizing: new Set(['synthesizing', 'complete', 'failed']),
+  synthesizing: new Set(['synthesizing', 'complete', 'partial_failed', 'failed']),
   complete: new Set(['complete']),
+  partial_failed: new Set(['partial_failed']),
   failed: new Set(['failed']),
+  canceled: new Set(['canceled']),
 };
 const MAX_TOTAL_DOCUMENTS = 400;
+const MAX_FILENAME_LENGTH = 255;
+const MAX_MEDIA_TYPE_LENGTH = 100;
+const MAX_FINGERPRINT_LENGTH = 512;
+const MAX_BLOB_REF_LENGTH = 2048;
+const DOCUMENT_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed', 'skipped']);
+const CHUNK_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed']);
 const JOB_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const JOB_RATE_LIMIT_MAX_REQUESTS = 120;
 const RAW_PAYLOAD_KEYS = new Set([
@@ -122,6 +146,43 @@ function toInteger(value, fallback = null) {
   return parsed;
 }
 
+function isSafeMetadataString(value, maxLength) {
+  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= maxLength;
+}
+
+function isAllowedMediaType(value) {
+  return value === 'application/pdf' || value === 'text/csv' || /^image\/[-+.a-z0-9]+$/i.test(value || '');
+}
+
+function normalizeMediaType(value, filename = '') {
+  const provided = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (provided) return provided;
+  if (/\.pdf$/i.test(filename)) return 'application/pdf';
+  if (/\.csv$/i.test(filename)) return 'text/csv';
+  return 'application/octet-stream';
+}
+
+function normalizeChecksum(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^[a-f0-9]{32,128}$/i.test(value.trim())) return false;
+  return value.trim().toLowerCase();
+}
+
+function sanitizeFilenameForBlob(name) {
+  const base = String(name || 'document')
+    .normalize('NFKD')
+    .replace(/[^\w.\- ()]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 120);
+  return base || 'document';
+}
+
+export function buildChunkBlobKey(jobId, chunkId, originalFilename) {
+  return `jobs/${jobId}/chunks/${chunkId}/${sanitizeFilenameForBlob(originalFilename)}`;
+}
+
 export function validateCreateJobInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { valid: false, reason: 'Invalid job request body.' };
@@ -186,6 +247,137 @@ export function validatePatchJobInput(input, existingJob) {
   return { valid: true, patch };
 }
 
+export function validateCreateDocumentInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, reason: 'Invalid document request body.' };
+  }
+  if (hasRawPayloadFields(input)) {
+    return { valid: false, reason: 'Durable document metadata must not include raw document contents, base64 payloads, CSV text, abstracts, or title opinions.' };
+  }
+  if (!isSafeMetadataString(input.originalFilename, MAX_FILENAME_LENGTH)) {
+    return { valid: false, reason: 'originalFilename is required.' };
+  }
+  const mediaType = normalizeMediaType(input.mediaType, input.originalFilename);
+  if (!isAllowedMediaType(mediaType) || mediaType.length > MAX_MEDIA_TYPE_LENGTH) {
+    return { valid: false, reason: 'mediaType must be application/pdf, text/csv, or image/*.' };
+  }
+  const sizeBytes = toInteger(input.sizeBytes);
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 0) {
+    return { valid: false, reason: 'sizeBytes must be a non-negative integer.' };
+  }
+  const pageStart = toInteger(input.pageStart, null);
+  const pageEnd = toInteger(input.pageEnd, null);
+  if ((pageStart !== null || pageEnd !== null) && (!Number.isInteger(pageStart) || !Number.isInteger(pageEnd) || pageStart < 1 || pageEnd < pageStart)) {
+    return { valid: false, reason: 'pageStart and pageEnd must be a valid 1-based range.' };
+  }
+  const checksumSha256 = normalizeChecksum(input.checksumSha256 ?? input.checksum);
+  if (checksumSha256 === false) {
+    return { valid: false, reason: 'checksumSha256 must be a hex checksum string.' };
+  }
+  return {
+    valid: true,
+    value: {
+      originalFilename: truncateText(input.originalFilename, MAX_FILENAME_LENGTH),
+      mediaType,
+      sizeBytes,
+      pageStart,
+      pageEnd,
+      splitFrom: truncateText(input.splitFrom, MAX_FILENAME_LENGTH),
+      fingerprint: truncateText(input.fingerprint, MAX_FINGERPRINT_LENGTH),
+      checksumSha256,
+      uploadStatus: DOCUMENT_UPLOAD_STATUSES.has(input.uploadStatus) ? input.uploadStatus : 'pending',
+    },
+  };
+}
+
+export function validateCreateChunkInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, reason: 'Invalid chunk request body.' };
+  }
+  if (hasRawPayloadFields(input)) {
+    return { valid: false, reason: 'Durable chunk metadata must not include raw document contents, base64 payloads, CSV text, abstracts, or title opinions.' };
+  }
+  const chunkOrder = toInteger(input.chunkOrder ?? input.sequenceIndex, 0);
+  if (!Number.isInteger(chunkOrder) || chunkOrder < 0 || chunkOrder >= MAX_TOTAL_DOCUMENTS * 20) {
+    return { valid: false, reason: 'chunkOrder must be a non-negative integer.' };
+  }
+  if (!isSafeMetadataString(input.originalFilename, MAX_FILENAME_LENGTH)) {
+    return { valid: false, reason: 'originalFilename is required.' };
+  }
+  const mediaType = normalizeMediaType(input.mediaType, input.originalFilename);
+  if (!isAllowedMediaType(mediaType) || mediaType.length > MAX_MEDIA_TYPE_LENGTH) {
+    return { valid: false, reason: 'mediaType must be application/pdf, text/csv, or image/*.' };
+  }
+  const sizeBytes = toInteger(input.sizeBytes);
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 0) {
+    return { valid: false, reason: 'sizeBytes must be a non-negative integer.' };
+  }
+  const pageStart = toInteger(input.pageStart, null);
+  const pageEnd = toInteger(input.pageEnd, null);
+  if ((pageStart !== null || pageEnd !== null) && (!Number.isInteger(pageStart) || !Number.isInteger(pageEnd) || pageStart < 1 || pageEnd < pageStart)) {
+    return { valid: false, reason: 'pageStart and pageEnd must be a valid 1-based range.' };
+  }
+  if (!isSafeMetadataString(input.fingerprint, MAX_FINGERPRINT_LENGTH)) {
+    return { valid: false, reason: 'fingerprint is required.' };
+  }
+  const checksumSha256 = normalizeChecksum(input.checksumSha256 ?? input.checksum);
+  if (checksumSha256 === false) {
+    return { valid: false, reason: 'checksumSha256 must be a hex checksum string.' };
+  }
+  return {
+    valid: true,
+    value: {
+      chunkOrder,
+      originalFilename: truncateText(input.originalFilename, MAX_FILENAME_LENGTH),
+      mediaType,
+      sizeBytes,
+      pageStart,
+      pageEnd,
+      splitFrom: truncateText(input.splitFrom, MAX_FILENAME_LENGTH),
+      fingerprint: truncateText(input.fingerprint, MAX_FINGERPRINT_LENGTH),
+      checksumSha256,
+      uploadStatus: CHUNK_UPLOAD_STATUSES.has(input.uploadStatus) ? input.uploadStatus : 'pending',
+    },
+  };
+}
+
+export function validatePatchChunkInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, reason: 'Invalid chunk update body.' };
+  }
+  if (hasRawPayloadFields(input)) {
+    return { valid: false, reason: 'Durable chunk updates must not include raw document contents, base64 payloads, CSV text, abstracts, or title opinions.' };
+  }
+  const patch = {};
+  if (input.uploadStatus !== undefined) {
+    if (!CHUNK_UPLOAD_STATUSES.has(input.uploadStatus)) {
+      return { valid: false, reason: 'Invalid chunk uploadStatus.' };
+    }
+    patch.uploadStatus = input.uploadStatus;
+  }
+  if (input.blobKey !== undefined) {
+    if (!isSafeMetadataString(input.blobKey, MAX_BLOB_REF_LENGTH) || input.blobKey.includes('..')) {
+      return { valid: false, reason: 'Invalid blobKey.' };
+    }
+    patch.blobKey = input.blobKey;
+  }
+  if (input.blobUrl !== undefined) {
+    if (!isSafeMetadataString(input.blobUrl, MAX_BLOB_REF_LENGTH) || !/^https:\/\//i.test(input.blobUrl)) {
+      return { valid: false, reason: 'Invalid blobUrl.' };
+    }
+    patch.blobUrl = input.blobUrl;
+  }
+  const checksumSha256 = normalizeChecksum(input.checksumSha256 ?? input.checksum);
+  if (checksumSha256 === false) {
+    return { valid: false, reason: 'checksumSha256 must be a hex checksum string.' };
+  }
+  if (checksumSha256) patch.checksumSha256 = checksumSha256;
+  if (input.lastErrorMessage !== undefined || input.errorMessage !== undefined) {
+    patch.lastErrorMessage = truncateText(input.lastErrorMessage ?? input.errorMessage, 1000);
+  }
+  return { valid: true, patch };
+}
+
 export function isValidStatusTransition(fromStatus, toStatus) {
   return Boolean(VALID_TRANSITIONS[fromStatus]?.has(toStatus));
 }
@@ -204,13 +396,64 @@ function rowToJob(row) {
     subjectTract: row.subject_tract,
     contextNotes: row.context_notes,
     totalDocuments: row.total_documents,
+    totalChunks: row.total_chunks ?? 0,
     completedDocuments: row.completed_documents,
     failedDocuments: row.failed_documents,
+    completedChunks: row.completed_chunks ?? 0,
+    failedChunks: row.failed_chunks ?? 0,
     currentPhase: row.current_phase,
     errorMessage: row.error_message,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
     startedAt: row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at,
+    completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+  };
+}
+
+function rowToDocument(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    originalFilename: row.original_filename,
+    mediaType: row.media_type,
+    sizeBytes: row.size_bytes,
+    pageStart: row.page_start,
+    pageEnd: row.page_end,
+    splitFrom: row.split_from,
+    fingerprint: row.fingerprint,
+    checksumSha256: row.checksum_sha256,
+    uploadStatus: row.upload_status,
+    chunkCount: row.chunk_count,
+    completedChunkCount: row.completed_chunk_count,
+    failedChunkCount: row.failed_chunk_count,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+  };
+}
+
+function rowToChunk(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    documentId: row.document_id,
+    chunkOrder: row.chunk_order,
+    originalFilename: row.original_filename,
+    blobKey: row.blob_key,
+    blobUrl: row.blob_url,
+    mediaType: row.media_type,
+    sizeBytes: row.size_bytes,
+    pageStart: row.page_start,
+    pageEnd: row.page_end,
+    splitFrom: row.split_from,
+    fingerprint: row.fingerprint,
+    checksumSha256: row.checksum_sha256,
+    uploadStatus: row.upload_status,
+    uploadAttempts: row.upload_attempts,
+    lastErrorMessage: row.last_error_message,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
     completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
   };
 }
@@ -229,25 +472,124 @@ function createPostgresJobStore() {
 
   async function ensureSchema() {
     if (!initialized) {
-      initialized = sql`
-        CREATE TABLE IF NOT EXISTS analysis_jobs (
-          id text PRIMARY KEY,
-          status text NOT NULL,
-          subject_tract text,
-          context_notes text,
-          total_documents integer NOT NULL CHECK (total_documents >= 0),
-          completed_documents integer NOT NULL DEFAULT 0 CHECK (completed_documents >= 0),
-          failed_documents integer NOT NULL DEFAULT 0 CHECK (failed_documents >= 0),
-          current_phase text NOT NULL,
-          error_message text,
-          created_at timestamptz NOT NULL DEFAULT now(),
-          updated_at timestamptz NOT NULL DEFAULT now(),
-          started_at timestamptz,
-          completed_at timestamptz
-        )
-      `;
+      initialized = (async () => {
+        await sql`
+          CREATE TABLE IF NOT EXISTS analysis_jobs (
+            id text PRIMARY KEY,
+            status text NOT NULL,
+            subject_tract text,
+            context_notes text,
+            total_documents integer NOT NULL CHECK (total_documents >= 0),
+            total_chunks integer NOT NULL DEFAULT 0 CHECK (total_chunks >= 0),
+            completed_documents integer NOT NULL DEFAULT 0 CHECK (completed_documents >= 0),
+            failed_documents integer NOT NULL DEFAULT 0 CHECK (failed_documents >= 0),
+            completed_chunks integer NOT NULL DEFAULT 0 CHECK (completed_chunks >= 0),
+            failed_chunks integer NOT NULL DEFAULT 0 CHECK (failed_chunks >= 0),
+            current_phase text NOT NULL,
+            error_message text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            started_at timestamptz,
+            completed_at timestamptz
+          )
+        `;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS total_chunks integer NOT NULL DEFAULT 0 CHECK (total_chunks >= 0)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS completed_chunks integer NOT NULL DEFAULT 0 CHECK (completed_chunks >= 0)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS failed_chunks integer NOT NULL DEFAULT 0 CHECK (failed_chunks >= 0)`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS job_documents (
+            id text PRIMARY KEY,
+            job_id text NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            original_filename text NOT NULL,
+            media_type text NOT NULL,
+            size_bytes integer NOT NULL CHECK (size_bytes >= 0),
+            page_start integer,
+            page_end integer,
+            split_from text,
+            fingerprint text,
+            checksum_sha256 text,
+            upload_status text NOT NULL DEFAULT 'pending',
+            chunk_count integer NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
+            completed_chunk_count integer NOT NULL DEFAULT 0 CHECK (completed_chunk_count >= 0),
+            failed_chunk_count integer NOT NULL DEFAULT 0 CHECK (failed_chunk_count >= 0),
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+          )
+        `;
+        await sql`
+          CREATE TABLE IF NOT EXISTS document_chunks (
+            id text PRIMARY KEY,
+            job_id text NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            document_id text NOT NULL REFERENCES job_documents(id) ON DELETE CASCADE,
+            chunk_order integer NOT NULL CHECK (chunk_order >= 0),
+            original_filename text NOT NULL,
+            blob_key text NOT NULL,
+            blob_url text,
+            media_type text NOT NULL,
+            size_bytes integer NOT NULL CHECK (size_bytes >= 0),
+            page_start integer,
+            page_end integer,
+            split_from text,
+            fingerprint text NOT NULL,
+            checksum_sha256 text,
+            upload_status text NOT NULL DEFAULT 'pending',
+            upload_attempts integer NOT NULL DEFAULT 0 CHECK (upload_attempts >= 0),
+            last_error_message text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            completed_at timestamptz
+          )
+        `;
+        await sql`CREATE INDEX IF NOT EXISTS idx_job_documents_job_status ON job_documents(job_id, upload_status)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_status ON document_chunks(job_id, upload_status)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_order ON document_chunks(job_id, chunk_order)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_document ON document_chunks(document_id)`;
+      })();
     }
     await initialized;
+  }
+
+  async function refreshUploadCounts(jobId) {
+    const jobRows = await sql`
+      UPDATE analysis_jobs
+      SET
+        total_chunks = (SELECT COUNT(*)::integer FROM document_chunks WHERE job_id = ${jobId}),
+        completed_chunks = (SELECT COUNT(*)::integer FROM document_chunks WHERE job_id = ${jobId} AND upload_status = 'uploaded'),
+        failed_chunks = (SELECT COUNT(*)::integer FROM document_chunks WHERE job_id = ${jobId} AND upload_status = 'failed'),
+        updated_at = now()
+      WHERE id = ${jobId}
+      RETURNING *
+    `;
+    return rowToJob(jobRows[0]);
+  }
+
+  async function refreshDocumentCounts(jobId, documentId) {
+    const rows = await sql`
+      WITH counts AS (
+        SELECT
+          COUNT(*)::integer AS total,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded')::integer AS uploaded,
+          COUNT(*) FILTER (WHERE upload_status = 'failed')::integer AS failed
+        FROM document_chunks
+        WHERE document_id = ${documentId} AND job_id = ${jobId}
+      )
+      UPDATE job_documents
+      SET
+        chunk_count = counts.total,
+        completed_chunk_count = counts.uploaded,
+        failed_chunk_count = counts.failed,
+        upload_status = CASE
+          WHEN counts.total > 0 AND counts.uploaded = counts.total THEN 'uploaded'
+          WHEN counts.failed > 0 THEN 'failed'
+          WHEN counts.total > 0 THEN 'uploading'
+          ELSE upload_status
+        END,
+        updated_at = now()
+      FROM counts
+      WHERE id = ${documentId} AND job_id = ${jobId}
+      RETURNING job_documents.*
+    `;
+    return rowToDocument(rows[0]);
   }
 
   return {
@@ -299,6 +641,129 @@ function createPostgresJobStore() {
         RETURNING *
       `;
       return rowToJob(rows[0]);
+    },
+
+    async createDocument(jobId, input) {
+      await ensureSchema();
+      const existingJob = await this.getJob(jobId);
+      if (!existingJob) return null;
+      const id = `doc_${randomUUID()}`;
+      const rows = await sql`
+        INSERT INTO job_documents (
+          id, job_id, original_filename, media_type, size_bytes,
+          page_start, page_end, split_from, fingerprint, checksum_sha256, upload_status
+        )
+        VALUES (
+          ${id}, ${jobId}, ${input.originalFilename}, ${input.mediaType}, ${input.sizeBytes},
+          ${input.pageStart}, ${input.pageEnd}, ${input.splitFrom}, ${input.fingerprint}, ${input.checksumSha256}, ${input.uploadStatus}
+        )
+        RETURNING *
+      `;
+      if (existingJob.status === 'created') {
+        await sql`
+          UPDATE analysis_jobs
+          SET status = 'uploading', current_phase = 'Uploading document chunks', updated_at = now()
+          WHERE id = ${jobId}
+        `;
+      }
+      return rowToDocument(rows[0]);
+    },
+
+    async getDocument(jobId, documentId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT * FROM job_documents
+        WHERE job_id = ${jobId} AND id = ${documentId}
+        LIMIT 1
+      `;
+      return rowToDocument(rows[0]);
+    },
+
+    async createChunk(jobId, documentId, input) {
+      await ensureSchema();
+      const document = await this.getDocument(jobId, documentId);
+      if (!document) return null;
+      const id = `chk_${randomUUID()}`;
+      const blobKey = buildChunkBlobKey(jobId, id, input.originalFilename);
+      const rows = await sql`
+        INSERT INTO document_chunks (
+          id, job_id, document_id, chunk_order, original_filename, blob_key,
+          media_type, size_bytes, page_start, page_end, split_from,
+          fingerprint, checksum_sha256, upload_status
+        )
+        VALUES (
+          ${id}, ${jobId}, ${documentId}, ${input.chunkOrder}, ${input.originalFilename}, ${blobKey},
+          ${input.mediaType}, ${input.sizeBytes}, ${input.pageStart}, ${input.pageEnd}, ${input.splitFrom},
+          ${input.fingerprint}, ${input.checksumSha256}, ${input.uploadStatus}
+        )
+        RETURNING *
+      `;
+      await refreshDocumentCounts(jobId, documentId);
+      await refreshUploadCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async updateChunk(jobId, chunkId, patch) {
+      await ensureSchema();
+      const existingRows = await sql`
+        SELECT * FROM document_chunks
+        WHERE job_id = ${jobId} AND id = ${chunkId}
+        LIMIT 1
+      `;
+      const existing = rowToChunk(existingRows[0]);
+      if (!existing) return null;
+      const nextStatus = patch.uploadStatus ?? existing.uploadStatus;
+      const nextAttempts = patch.uploadStatus && patch.uploadStatus !== existing.uploadStatus
+        ? existing.uploadAttempts + 1
+        : existing.uploadAttempts;
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          upload_status = ${nextStatus},
+          blob_key = ${patch.blobKey ?? existing.blobKey},
+          blob_url = ${patch.blobUrl === undefined ? existing.blobUrl : patch.blobUrl},
+          checksum_sha256 = ${patch.checksumSha256 === undefined ? existing.checksumSha256 : patch.checksumSha256},
+          upload_attempts = ${nextAttempts},
+          last_error_message = ${patch.lastErrorMessage === undefined ? existing.lastErrorMessage : patch.lastErrorMessage},
+          completed_at = ${nextStatus === 'uploaded' ? (existing.completedAt || new Date().toISOString()) : null},
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${chunkId}
+        RETURNING *
+      `;
+      await refreshDocumentCounts(jobId, existing.documentId);
+      await refreshUploadCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async listChunks(jobId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT * FROM document_chunks
+        WHERE job_id = ${jobId}
+        ORDER BY chunk_order ASC, created_at ASC
+      `;
+      return rows.map(rowToChunk);
+    },
+
+    async finalizeUploads(jobId) {
+      await ensureSchema();
+      const chunks = await this.listChunks(jobId);
+      const pendingChunks = chunks.filter(chunk => chunk.uploadStatus !== 'uploaded').length;
+      if (!chunks.length || pendingChunks > 0) {
+        return { ready: false, job: await refreshUploadCounts(jobId), pendingChunks: pendingChunks || 1 };
+      }
+      const existing = await this.getJob(jobId);
+      if (!existing) return null;
+      if (existing.status !== 'ready') {
+        assertValidStatusTransition(existing.status, 'ready');
+      }
+      const rows = await sql`
+        UPDATE analysis_jobs
+        SET status = 'ready', current_phase = 'ready', updated_at = now()
+        WHERE id = ${jobId}
+        RETURNING *
+      `;
+      return { ready: true, job: rowToJob(rows[0]), pendingChunks: 0 };
     },
   };
 }
