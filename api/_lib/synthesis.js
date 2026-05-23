@@ -112,6 +112,77 @@ export function buildAbstractInput(abstracts, tract, ctx, preamble) {
   return input;
 }
 
+function compareNullableNumber(a, b) {
+  const aMissing = a == null;
+  const bMissing = b == null;
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return a - b;
+}
+
+export function groupAbstractsByDocument(abstracts) {
+  const orderedGroups = [];
+  const byId = new Map();
+
+  for (const abstract of abstracts || []) {
+    const key = abstract.documentId || abstract.chunkId || abstract.id;
+    if (!key) continue;
+
+    let group = byId.get(key);
+    if (!group) {
+      group = {
+        id: key,
+        documentId: abstract.documentId || null,
+        filename: abstract.sourceFilename || abstract.filename || abstract.originalFilename || abstract.chunkId || key,
+        chunks: [],
+      };
+      byId.set(key, group);
+      orderedGroups.push(group);
+    }
+
+    group.chunks.push(abstract);
+  }
+
+  return orderedGroups.map(group => {
+    const chunks = [...group.chunks].sort((a, b) => {
+      const byOrder = compareNullableNumber(a.chunkOrder, b.chunkOrder);
+      if (byOrder !== 0) return byOrder;
+      const byPage = compareNullableNumber(a.pageStart, b.pageStart);
+      if (byPage !== 0) return byPage;
+      return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+    });
+
+    if (chunks.length === 1) {
+      return {
+        id: group.id,
+        documentId: group.documentId,
+        filename: group.filename,
+        abstract: chunks[0].abstract || chunks[0].abstractText || '',
+        chunkIds: chunks.map(chunk => chunk.chunkId).filter(Boolean),
+      };
+    }
+
+    const abstract = chunks
+      .map((chunk, index) => {
+        const text = chunk.abstract || chunk.abstractText || '';
+        const range = chunk.pageStart != null && chunk.pageEnd != null
+          ? `Pages ${chunk.pageStart}-${chunk.pageEnd}`
+          : `Chunk ${chunk.chunkOrder != null ? chunk.chunkOrder + 1 : index + 1}`;
+        return `**${range}:**\n\n${text}`;
+      })
+      .join('\n\n');
+
+    return {
+      id: group.id,
+      documentId: group.documentId,
+      filename: group.filename,
+      abstract,
+      chunkIds: chunks.map(chunk => chunk.chunkId).filter(Boolean),
+    };
+  });
+}
+
 export function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemPrompt, configOverrides = {}) {
   const config = getSynthesisConfig(configOverrides);
   const chunks = [];
@@ -152,7 +223,7 @@ export function computePlanId({ jobId, tract, contextNotes, documentIds, abstrac
 
 function computeAbstractDigest(item) {
   const hash = createHash('sha256');
-  hash.update(String(item.chunkId || item.documentId || item.id || ''));
+  hash.update(String(item.documentId || item.chunkId || item.id || ''));
   hash.update('|');
   hash.update(String(item.abstract || item.abstractText || ''));
   return hash.digest('hex').slice(0, 16);
@@ -190,7 +261,7 @@ export function planSynthesisSegments(abstracts, tract, contextNotes, configOver
       segmentIndex: index,
       startSequenceIndex: start,
       endSequenceIndex: end,
-      documentIds: chunk.map(item => item.chunkId || item.documentId || item.id),
+      documentIds: chunk.map(item => item.documentId || item.chunkId || item.id),
       filenames: chunk.map(item => item.filename),
       estimatedBytes,
     };
@@ -447,15 +518,27 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   }
 
   // Build the abstracts list for this segment in stable order.
-  const byChunkId = new Map(abstracts.map(item => [item.chunkId, item]));
+  const byDocumentId = new Map(
+    abstracts
+      .filter(item => item.documentId)
+      .map(item => [item.documentId, item]),
+  );
+  const byChunkId = new Map();
+  for (const item of abstracts) {
+    if (item.chunkId) byChunkId.set(item.chunkId, item);
+    for (const chunkId of item.chunkIds || []) {
+      byChunkId.set(chunkId, item);
+    }
+  }
   const segmentAbstracts = (segment.documentIds || [])
-    .map(id => byChunkId.get(id))
+    .map(id => byDocumentId.get(id) || byChunkId.get(id))
     .filter(Boolean)
     .map(record => ({
-      filename: record.filename || record.originalFilename || record.chunkId,
+      filename: record.filename || record.originalFilename || record.documentId || record.chunkId,
       abstract: record.abstract || record.abstractText || '',
-      chunkId: record.chunkId,
       documentId: record.documentId,
+      chunkId: record.chunkId,
+      chunkIds: record.chunkIds || (record.chunkId ? [record.chunkId] : []),
     }))
     .filter(item => item.abstract.trim().length > 0);
 
@@ -713,14 +796,22 @@ export async function planJobSynthesis(jobId, options = {}) {
     }
   }
   const abstracts = await store.listDocumentAbstracts(jobId);
-  const orderedAbstracts = abstracts
+  const normalizedAbstracts = abstracts
     .filter(item => (item.abstractText || item.abstract || '').trim().length > 0)
     .map(item => ({
+      id: item.id,
       chunkId: item.chunkId,
       documentId: item.documentId,
-      filename: item.originalFilename || item.filename || item.chunkId,
+      chunkOrder: item.chunkOrder,
+      pageStart: item.pageStart,
+      pageEnd: item.pageEnd,
+      createdAt: item.createdAt,
+      filename: item.sourceFilename || item.originalFilename || item.filename || item.chunkId,
+      originalFilename: item.originalFilename,
+      sourceFilename: item.sourceFilename,
       abstract: item.abstractText || item.abstract || '',
     }));
+  const orderedAbstracts = groupAbstractsByDocument(normalizedAbstracts);
   if (!orderedAbstracts.length) {
     const err = new Error('No abstracts available for synthesis.');
     err.statusCode = 409;
@@ -730,7 +821,7 @@ export async function planJobSynthesis(jobId, options = {}) {
     jobId,
     tract: job.subjectTract || options.tract || '',
     contextNotes: job.contextNotes || options.contextNotes || '',
-    documentIds: orderedAbstracts.map(item => item.chunkId),
+    documentIds: orderedAbstracts.map(item => item.documentId || item.id),
     abstractDigests: orderedAbstracts.map(computeAbstractDigest),
   });
 

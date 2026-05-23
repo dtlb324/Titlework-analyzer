@@ -575,6 +575,10 @@ function rowToAbstract(row) {
     chunkId: row.chunk_id,
     chunkOrder: row.chunk_order,
     originalFilename: row.original_filename,
+    pageStart: row.page_start,
+    pageEnd: row.page_end,
+    splitFrom: row.split_from,
+    sourceFilename: row.source_filename,
     abstractText: row.abstract_text,
     modelUsed: row.model_used,
     payloadBytes: row.payload_bytes,
@@ -1581,10 +1585,16 @@ function createPostgresJobStore() {
       const rows = await sql`
         SELECT
           da.*,
+          dc.document_id,
           dc.chunk_order,
-          dc.original_filename
+          dc.page_start,
+          dc.page_end,
+          dc.split_from,
+          dc.original_filename,
+          COALESCE(jd.original_filename, dc.original_filename) AS source_filename
         FROM document_abstracts da
         JOIN document_chunks dc ON dc.id = da.chunk_id
+        LEFT JOIN job_documents jd ON jd.id = dc.document_id
         WHERE da.job_id = ${jobId}
         ORDER BY dc.chunk_order ASC, dc.page_start ASC NULLS LAST, da.created_at ASC
       `;
