@@ -1142,10 +1142,104 @@ function renderJobDetail(job) {
     </div>`;
 }
 
+let actionInFlight = false;
+
+async function runJobAction(job, endpointPath, opts = {}) {
+  if (actionInFlight) return;
+  actionInFlight = true;
+  const buttons = document.querySelectorAll('#jobActions button');
+  buttons.forEach(b => { b.disabled = true; });
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`, {
+      method: 'POST',
+      headers: getJobHeaders(),
+      body: opts.body ? JSON.stringify(opts.body) : '{}',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data.error || `Action failed (HTTP ${res.status}).`);
+      return;
+    }
+    if (activeJobPollState) {
+      activeJobPollState.consecutiveUnchanged = 0;
+      activeJobPollState.lastChangeAt = Date.now();
+      scheduleJobPoll(activeJobPollState, 0);
+    } else {
+      await loadJobView(job.id);
+    }
+  } catch (err) {
+    alert(err.message || 'Action failed.');
+  } finally {
+    actionInFlight = false;
+    buttons.forEach(b => { b.disabled = false; });
+  }
+}
+
 function renderJobActions(job) {
-  // Filled in by Task 5
   const el = document.getElementById('jobActions');
-  if (el) el.innerHTML = '';
+  if (!el || !job) return;
+  const isTerminal = TERMINAL_STATUSES.has(job.status);
+  const failedDocs = Array.isArray(job.failedDocuments) ? job.failedDocuments.length : 0;
+  const buttons = [];
+
+  if (!isTerminal) {
+    buttons.push({
+      label: 'Cancel job',
+      class: 'btn-secondary',
+      onClick: () => {
+        if (confirm('Cancel this job? Work in progress will be stopped.')) {
+          runJobAction(job, '/cancel');
+        }
+      },
+    });
+  }
+  if (job.status === 'abstracting' || job.status === 'queued' || job.status === 'planning') {
+    buttons.push({
+      label: 'Kick abstraction',
+      class: 'btn-secondary',
+      onClick: () => runJobAction(job, '/abstraction/process'),
+    });
+  }
+  if (failedDocs > 0 && (job.status === 'abstracting' || job.status === 'partial_failed' || job.status === 'failed')) {
+    buttons.push({
+      label: `Retry ${failedDocs} failed`,
+      class: 'btn-primary',
+      onClick: () => runJobAction(job, '/retry-failed'),
+    });
+  }
+  if (job.status === 'partial_failed') {
+    buttons.push({
+      label: 'Synthesize with warnings',
+      class: 'btn-primary',
+      onClick: () => {
+        if (confirm('Synthesize without retrying the failed documents? The opinion may be incomplete.')) {
+          runJobAction(job, '/synthesis/start');
+        }
+      },
+    });
+  }
+  if (job.status === 'synthesizing') {
+    buttons.push({
+      label: 'Kick synthesis',
+      class: 'btn-secondary',
+      onClick: () => runJobAction(job, '/synthesis/process'),
+    });
+  }
+  if (job.status === 'failed') {
+    buttons.push({
+      label: 'Retry synthesis',
+      class: 'btn-secondary',
+      onClick: () => runJobAction(job, '/synthesis/start'),
+    });
+  }
+
+  el.innerHTML = buttons.map((b, i) =>
+    `<button class="${b.class}" data-action-idx="${i}" type="button">${esc(b.label)}</button>`
+  ).join('');
+  el.querySelectorAll('button[data-action-idx]').forEach(btn => {
+    const i = Number(btn.getAttribute('data-action-idx'));
+    btn.addEventListener('click', () => buttons[i].onClick());
+  });
 }
 
 function renderJobResults(job, result) {

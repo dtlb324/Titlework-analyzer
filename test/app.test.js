@@ -251,6 +251,26 @@ test('Phase 6: terminal job hydrates result via /result', () => {
     'Job view must fetch /result on terminal status');
 });
 
+test('Phase 6: job actions wire to existing API endpoints', () => {
+  // Path components passed to runJobAction(job, '/<endpoint>') — URL is composed
+  // inside runJobAction as `/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`.
+  assert(script.includes('/api/jobs/${encodeURIComponent(job.id)}${endpointPath}'),
+    'runJobAction must compose /api/jobs/:id<endpointPath>');
+  assert(script.includes("runJobAction(job, '/cancel')"),
+    'Cancel button must POST /cancel');
+  assert(script.includes("runJobAction(job, '/retry-failed')"),
+    'Retry-failed button must POST /retry-failed');
+  assert(script.includes("runJobAction(job, '/abstraction/process')"),
+    'Kick abstraction must POST /abstraction/process');
+  assert(script.includes("runJobAction(job, '/synthesis/process')"),
+    'Kick synthesis must POST /synthesis/process');
+  assert(script.includes("runJobAction(job, '/synthesis/start')"),
+    'Retry/skip-failed synthesis must POST /synthesis/start');
+  assert(script.includes('actionInFlight'), 'Must guard against concurrent actions');
+  assert(script.includes("confirm('Cancel this job"),
+    'Cancel action must confirm');
+});
+
 
 let passed = 0;
 let failed = 0;
