@@ -51,6 +51,9 @@ const RAW_PAYLOAD_KEYS = new Set([
 const SYNTHESIS_SEGMENT_STATUSES = new Set(['pending', 'processing', 'complete', 'failed', 'retry_wait']);
 const JOB_RESULT_STATUSES = new Set(['complete', 'partial_failed', 'failed']);
 const MAX_FOLLOWUP_QUESTION_CHARS = 2000;
+const MAX_RESULT_WARNINGS = 100;
+const MAX_RESULT_FAILED_DOCUMENTS = 1000;
+const MAX_TITLE_OPINION_CHARS = 4_000_000;
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 let cachedStore = null;
@@ -264,6 +267,64 @@ export function validatePatchJobInput(input, existingJob) {
   if (input.currentPhase !== undefined) patch.currentPhase = truncateText(input.currentPhase, 200) || existingJob.currentPhase;
   if (input.errorMessage !== undefined) patch.errorMessage = truncateText(input.errorMessage, 1000);
   return { valid: true, patch };
+}
+
+function sanitizeResultWarning(value) {
+  if (typeof value === 'string') return truncateText(value, 1000);
+  if (value && typeof value === 'object') return truncateText(value.message || value.error || JSON.stringify(value), 1000);
+  return null;
+}
+
+function sanitizeResultFailedDocument(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const label = truncateText(String(value || ''), MAX_FILENAME_LENGTH);
+    return label ? { name: label } : null;
+  }
+  return {
+    id: truncateText(value.id, 200),
+    documentId: truncateText(value.documentId || value.document_id, 200),
+    originalFilename: truncateText(value.originalFilename || value.filename || value.name, MAX_FILENAME_LENGTH),
+    errorMessage: truncateText(value.errorMessage || value.lastError || value.error, 1000),
+  };
+}
+
+export function validateSaveJobResultInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, statusCode: 400, reason: 'Invalid job result body.' };
+  }
+  const finalTitleOpinion = truncateText(
+    input.finalTitleOpinion ?? input.titleOpinion ?? input.opinion,
+    MAX_TITLE_OPINION_CHARS
+  );
+  if (!finalTitleOpinion) {
+    return { valid: false, statusCode: 400, reason: 'finalTitleOpinion is required.' };
+  }
+  const status = JOB_RESULT_STATUSES.has(input.status) ? input.status : 'complete';
+  const warnings = Array.isArray(input.warnings)
+    ? input.warnings.map(sanitizeResultWarning).filter(Boolean).slice(0, MAX_RESULT_WARNINGS)
+    : [];
+  const failedDocuments = Array.isArray(input.failedDocuments)
+    ? input.failedDocuments.map(sanitizeResultFailedDocument).filter(Boolean).slice(0, MAX_RESULT_FAILED_DOCUMENTS)
+    : [];
+  const inputTokens = toInteger(input.inputTokens, null);
+  const outputTokens = toInteger(input.outputTokens, null);
+  const payloadBytes = toInteger(input.payloadBytes, null);
+  const synthesisDurationMs = toInteger(input.synthesisDurationMs, null);
+  return {
+    valid: true,
+    payload: {
+      planId: truncateText(input.planId, 200),
+      status,
+      finalTitleOpinion,
+      warnings,
+      failedDocuments,
+      modelUsed: truncateText(input.modelUsed, 100),
+      inputTokens: Number.isInteger(inputTokens) && inputTokens >= 0 ? inputTokens : null,
+      outputTokens: Number.isInteger(outputTokens) && outputTokens >= 0 ? outputTokens : null,
+      payloadBytes: Number.isInteger(payloadBytes) && payloadBytes >= 0 ? payloadBytes : null,
+      synthesisDurationMs: Number.isInteger(synthesisDurationMs) && synthesisDurationMs >= 0 ? synthesisDurationMs : null,
+    },
+  };
 }
 
 export function validateCreateDocumentInput(input) {

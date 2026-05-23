@@ -11,6 +11,7 @@ import {
   validateFollowupRequestInput,
   validatePatchChunkInput,
   validatePatchJobInput,
+  validateSaveJobResultInput,
   validateSynthesisRequestInput,
 } from '../_lib/jobs.js';
 import {
@@ -538,11 +539,32 @@ async function handleSynthesisProcess(req, res, requestId, store, jobId) {
 }
 
 async function handleJobResult(req, res, requestId, store, jobId) {
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!['GET', 'POST'].includes(req.method)) return res.status(405).json({ error: 'Method not allowed.', requestId });
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (req.method === 'POST') {
+    if (job.status === 'canceled') {
+      return res.status(409).json({ error: 'Cannot save a result for a canceled job.', requestId });
+    }
+    if (!store.saveJobResult) {
+      return res.status(503).json({ error: 'Job result storage is not available.', requestId });
+    }
+    const body = parseBody(req, res, requestId);
+    if (!body) return;
+    const validation = validateSaveJobResultInput(body);
+    if (!validation.valid) {
+      return res.status(validation.statusCode).json({ error: validation.reason, requestId });
+    }
+    const result = await store.saveJobResult(jobId, validation.payload);
+    if (!result) return res.status(404).json({ error: 'Job not found.', requestId });
+    const updatedJob = await store.getJob(jobId);
+    return res.status(200).json({
+      result: publicJobResult(result),
+      job: updatedJob || job,
+      requestId,
+    });
+  }
   const result = store.getJobResult ? await store.getJobResult(jobId) : null;
   if (!result) {
     return res.status(404).json({ error: 'Final title opinion is not available yet for this job.', requestId, job });

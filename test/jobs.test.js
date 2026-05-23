@@ -39,6 +39,7 @@ function mockRes() {
 
 function createMemoryJobStore() {
   const jobs = new Map();
+  const results = new Map();
   return {
     async createJob(input) {
       const now = new Date('2026-05-22T21:49:00.000Z').toISOString();
@@ -74,11 +75,43 @@ function createMemoryJobStore() {
       jobs.set(id, updated);
       return updated;
     },
+    async saveJobResult(id, payload) {
+      const existing = jobs.get(id);
+      if (!existing) return null;
+      const status = payload.status || 'complete';
+      const result = {
+        jobId: id,
+        planId: payload.planId || null,
+        status,
+        finalTitleOpinion: payload.finalTitleOpinion || '',
+        warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+        failedDocuments: Array.isArray(payload.failedDocuments) ? payload.failedDocuments : [],
+        modelUsed: payload.modelUsed || null,
+        inputTokens: payload.inputTokens ?? null,
+        outputTokens: payload.outputTokens ?? null,
+        payloadBytes: payload.payloadBytes ?? null,
+        synthesisDurationMs: payload.synthesisDurationMs ?? null,
+        generatedAt: new Date('2026-05-22T21:51:00.000Z').toISOString(),
+      };
+      results.set(id, result);
+      jobs.set(id, {
+        ...existing,
+        status,
+        currentPhase: status === 'complete' ? 'complete' : status,
+        completedAt: new Date('2026-05-22T21:51:00.000Z').toISOString(),
+        updatedAt: new Date('2026-05-22T21:51:00.000Z').toISOString(),
+      });
+      return result;
+    },
+    async getJobResult(id) {
+      return results.get(id) || null;
+    },
   };
 }
 
 async function runClientScript(assertions) {
   const fetchCalls = [];
+  const storage = new Map();
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) {
@@ -90,6 +123,7 @@ async function runClientScript(assertions) {
         disabled: false,
         value: '',
         addEventListener() {},
+        querySelectorAll() { return []; },
         focus() {},
       });
     }
@@ -113,10 +147,14 @@ async function runClientScript(assertions) {
     String,
     Number,
     URLSearchParams,
+    encodeURIComponent,
+    alert() {},
+    confirm() { return true; },
     location: { search: '', hash: '' },
     document: {
       addEventListener() {},
       getElementById: element,
+      querySelectorAll() { return []; },
       createElement() {
         return {
           _text: '',
@@ -130,15 +168,19 @@ async function runClientScript(assertions) {
       },
     },
     window: { location: { origin: 'https://example.test', pathname: '/' } },
+    history: {
+      replaced: '',
+      replaceState(_state, _title, url) { this.replaced = url; },
+    },
     sessionStorage: {
       getItem() { return ''; },
       setItem() {},
       removeItem() {},
     },
     localStorage: {
-      getItem() { return null; },
-      setItem() {},
-      removeItem() {},
+      getItem(key) { return storage.has(key) ? storage.get(key) : null; },
+      setItem(key, value) { storage.set(key, String(value)); },
+      removeItem(key) { storage.delete(key); },
     },
     fetch: async (url, options = {}) => {
       fetchCalls.push({ url, options });
@@ -275,6 +317,77 @@ test('PATCH /api/jobs/:id rejects invalid status transitions', async () => {
   assert(invalidRes.statusCode === 409, `Expected 409, got ${invalidRes.statusCode}`);
 });
 
+test('POST /api/jobs/:id/result saves browser synthesis fallback output', async () => {
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
+  const previousPassword = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'pw';
+  try {
+    await jobsHandler(mockReq('POST', { totalDocuments: 1 }, { 'x-app-password': 'pw' }), mockRes());
+    await jobHandler(mockReq('PATCH', {
+      status: 'abstracting',
+      completedDocuments: 1,
+      currentPhase: 'abstracting',
+    }, { 'x-app-password': 'pw' }, { id: 'job_test_1' }), mockRes());
+    await jobHandler(mockReq('PATCH', {
+      status: 'synthesizing',
+      completedDocuments: 1,
+      currentPhase: 'synthesizing',
+    }, { 'x-app-password': 'pw' }, { id: 'job_test_1' }), mockRes());
+
+    const saveRes = mockRes();
+    await jobHandler(mockReq('POST', {
+      status: 'complete',
+      finalTitleOpinion: 'Browser synthesized title opinion',
+      warnings: ['browser fallback'],
+    }, { 'x-app-password': 'pw' }, { path: ['job_test_1', 'result'] }), saveRes);
+
+    assert(saveRes.statusCode === 200, `Expected result save to succeed, got ${saveRes.statusCode}: ${JSON.stringify(saveRes.body)}`);
+    assert(saveRes.body.result.finalTitleOpinion === 'Browser synthesized title opinion', 'Expected saved title opinion in response');
+
+    const getRes = mockRes();
+    await jobHandler(mockReq('GET', null, { 'x-app-password': 'pw' }, { path: ['job_test_1', 'result'] }), getRes);
+    assert(getRes.statusCode === 200, `Expected result fetch to succeed, got ${getRes.statusCode}`);
+    assert(getRes.body.result.finalTitleOpinion === 'Browser synthesized title opinion', 'Expected persisted browser title opinion');
+  } finally {
+    if (previousPassword) process.env.APP_PASSWORD = previousPassword;
+    else delete process.env.APP_PASSWORD;
+  }
+});
+
+test('POST /api/jobs/:id/result works without APP_PASSWORD in passwordless mode', async () => {
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
+  const previousPassword = process.env.APP_PASSWORD;
+  delete process.env.APP_PASSWORD;
+  try {
+    await jobsHandler(mockReq('POST', { totalDocuments: 1 }), mockRes());
+    await jobHandler(mockReq('PATCH', {
+      status: 'abstracting',
+      completedDocuments: 1,
+      currentPhase: 'abstracting',
+    }, {}, { id: 'job_test_1' }), mockRes());
+    await jobHandler(mockReq('PATCH', {
+      status: 'synthesizing',
+      completedDocuments: 1,
+      currentPhase: 'synthesizing',
+    }, {}, { id: 'job_test_1' }), mockRes());
+
+    const saveRes = mockRes();
+    await jobHandler(mockReq('POST', {
+      status: 'complete',
+      finalTitleOpinion: 'Passwordless browser result',
+    }, {}, { path: ['job_test_1', 'result'] }), saveRes);
+    assert(saveRes.statusCode === 200, `Expected passwordless result save, got ${saveRes.statusCode}: ${JSON.stringify(saveRes.body)}`);
+
+    const getRes = mockRes();
+    await jobHandler(mockReq('GET', null, {}, { path: ['job_test_1', 'result'] }), getRes);
+    assert(getRes.statusCode === 200, `Expected passwordless result fetch, got ${getRes.statusCode}`);
+    assert(getRes.body.result.finalTitleOpinion === 'Passwordless browser result', 'Expected persisted passwordless browser result');
+  } finally {
+    if (previousPassword) process.env.APP_PASSWORD = previousPassword;
+    else delete process.env.APP_PASSWORD;
+  }
+});
+
 test('frontend creates jobs, patches progress, and polls status', async () => {
   await runClientScript(`
     const job = await createAnalysisJob({
@@ -291,6 +404,107 @@ test('frontend creates jobs, patches progress, and polls status', async () => {
     });
     const polled = await pollAnalysisJobOnce(job.id);
     assert(polled.status === 'complete', 'Expected polling to fetch latest job status');
+  `);
+});
+
+test('frontend migrates ?job= links before defaulting to home', async () => {
+  await runClientScript(`
+    location.search = '?job=job_legacy_1';
+    location.hash = '';
+    const route = parseRoute();
+    assert(route.name === 'job' && route.jobId === 'job_legacy_1', 'Expected ?job= link to route to the job view');
+    assert(history.replaced.endsWith('#/job/job_legacy_1'), 'Expected legacy URL to be replaced with hash job route');
+  `);
+});
+
+test('frontend renders retry controls from numeric failedDocuments', async () => {
+  await runClientScript(`
+    renderJobActions({ id: 'job_failed_1', status: 'failed', failedDocuments: 2 });
+    assert(document.getElementById('jobActions').innerHTML.includes('Retry 2 failed'), 'Expected retry control for numeric failed document count');
+    renderJobDetail({ id: 'job_failed_1', status: 'failed', failedDocuments: 2 });
+    assert(document.getElementById('jobDetail').innerHTML.includes('2 documents failed'), 'Expected failed document summary for numeric count');
+  `);
+});
+
+test('frontend reloads after job action when active poller is canceled', async () => {
+  await runClientScript(`
+    let loadCalled = false;
+    loadJobView = async function(jobId) {
+      loadCalled = jobId === 'job_action_1';
+    };
+    activeJobPollState = { jobId: 'job_action_1', cancelled: true, timer: null };
+    fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ job: { id: 'job_action_1', status: 'abstracting' } }),
+    });
+    await runJobAction({ id: 'job_action_1' }, '/retry-failed');
+    assert(loadCalled, 'Expected action completion to reload when active poller is canceled');
+  `);
+});
+
+test('frontend applies hidden-tab multiplier to error retry backoff', async () => {
+  await runClientScript(`
+    let scheduledDelay = 0;
+    setTimeout = function(_fn, delay) {
+      scheduledDelay = delay;
+      return 1;
+    };
+    clearTimeout = function() {};
+    document.hidden = true;
+    fetch = async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'busy' }),
+    });
+    await runJobPollTick({
+      jobId: 'job_poll_1',
+      timer: null,
+      cancelled: false,
+      consecutiveUnchanged: 0,
+      lastKey: '',
+      lastChangeAt: Date.now(),
+      errorBackoffMs: 0,
+    });
+    assert(scheduledDelay === JOB_POLL_INTERVALS.backoffMin * 2 * JOB_POLL_INTERVALS.hiddenMultiplier,
+      'Expected 503 retry delay to include hidden-tab multiplier');
+  `);
+});
+
+test('frontend guards authenticated initial job route until password succeeds', async () => {
+  await runClientScript(`
+    assert(typeof checkPasswordRequired === 'function', 'Expected password gate helper');
+    assert(scriptIncludesInitialRouteGuard(), 'Expected initial route guard after password gate');
+
+    function scriptIncludesInitialRouteGuard() {
+      return ${JSON.stringify(script)}.includes('const canLoadInitialRoute = await checkPasswordRequired()')
+        && ${JSON.stringify(script)}.includes('if (canLoadInitialRoute) applyRoute(parseRoute())')
+        && ${JSON.stringify(script)}.includes('showMain();\\n      applyRoute(parseRoute());');
+    }
+  `);
+});
+
+test('frontend saves browser synthesis fallback before terminal status', async () => {
+  await runClientScript(`
+    const source = ${JSON.stringify(script)};
+    assert(source.includes('async function saveBrowserJobResult'), 'Missing browser result persistence helper');
+    assert(source.includes('await saveBrowserJobResult(job.id'), 'Browser synthesis fallback must save /result before marking complete');
+  `);
+});
+
+test('frontend job-view follow-up falls back to browser synthesis on 503', async () => {
+  await runClientScript(`
+    const source = ${JSON.stringify(script)};
+    assert(source.includes('Server follow-up unavailable') && source.includes('buildFollowupMessages(q, result.finalTitleOpinion'),
+      'Job result follow-up should use browser fallback when /followup returns 503');
+  `);
+});
+
+test('frontend job route ignores stale async job responses', async () => {
+  await runClientScript(`
+    const source = ${JSON.stringify(script)};
+    assert(source.includes('jobViewLoadSeq') && source.includes('isCurrentJobRoute(jobId)'),
+      'loadJobView must guard async fetch/result responses against stale route changes');
   `);
 });
 

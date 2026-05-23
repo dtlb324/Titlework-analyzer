@@ -590,7 +590,10 @@ let conversationHistory = [];
 let documentAbstracts = [];
 
 document.addEventListener('DOMContentLoaded', async () => {
-  await checkPasswordRequired();
+  const canLoadInitialRoute = await checkPasswordRequired();
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H5,H6',location:'public/index.html:DOMContentLoaded',message:'after password gate check before initial route apply',data:{hash:location.hash,search:location.search,route:parseRoute(),hasPassword:Boolean(appPassword),gateDisplay:document.getElementById('passwordGate')?.style.display||'',mainDisplay:document.getElementById('mainApp')?.style.display||''},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   setupDragDrop();
   document.getElementById('fileInput').addEventListener('change', async e => {
     await handleFiles(Array.from(e.target.files));
@@ -599,7 +602,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('followupInput').addEventListener('keydown', e => { if (e.key === 'Enter') askFollowup(); });
   document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') checkPassword(); });
   window.addEventListener('hashchange', () => applyRoute(parseRoute()));
-  applyRoute(parseRoute());
+  if (canLoadInitialRoute) applyRoute(parseRoute());
 });
 
 async function checkPasswordRequired() {
@@ -611,16 +614,21 @@ async function checkPasswordRequired() {
     });
     if (r.status === 401) {
       document.getElementById('passwordGate').style.display = 'block';
+      return false;
     } else {
       showMain();
+      return true;
     }
-  } catch { showMain(); }
+  } catch { showMain(); return true; }
 }
 
 function showMain() {
   document.getElementById('mainApp').style.display = 'block';
   document.getElementById('disclaimer').style.display = 'block';
-  resumeLastAnalysisJob();
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1',location:'public/index.html:showMain',message:'showMain called',data:{hash:location.hash,search:location.search,route:parseRoute(),hasPassword:Boolean(appPassword),mainDisplay:document.getElementById('mainApp')?.style.display||'',gateDisplay:document.getElementById('passwordGate')?.style.display||''},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  if (parseRoute().name === 'home') resumeLastAnalysisJob();
 }
 
 function checkPassword() {
@@ -640,6 +648,7 @@ function checkPassword() {
     } else {
       document.getElementById('passwordGate').style.display = 'none';
       showMain();
+      applyRoute(parseRoute());
     }
   });
 }
@@ -957,7 +966,6 @@ function parseRoute() {
       return id ? { name: 'job', jobId: id } : { name: 'home' };
     }
     if (hash === '#/jobs' || hash.startsWith('#/jobs?')) return { name: 'history' };
-    if (hash === '' || hash === '#' || hash === '#/') return { name: 'home' };
     // Legacy migration: ?job= or #job_* -> #/job/{id}
     const legacy = getRequestedJobId();
     if (legacy) {
@@ -965,6 +973,7 @@ function parseRoute() {
       history.replaceState({}, '', clean);
       return { name: 'job', jobId: legacy };
     }
+    if (hash === '' || hash === '#' || hash === '#/') return { name: 'home' };
     return { name: 'home' };
   } catch {
     return { name: 'home' };
@@ -985,6 +994,9 @@ function applyRoute(route) {
   const job = document.getElementById('view-job');
   const history = document.getElementById('view-history');
   if (!home || !job || !history) return;
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H5,H6',location:'public/index.html:applyRoute',message:'applying route',data:{route,hash:location.hash,activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   home.style.display = route.name === 'home' ? '' : 'none';
   job.style.display = route.name === 'job' ? '' : 'none';
   history.style.display = route.name === 'history' ? '' : 'none';
@@ -1017,6 +1029,16 @@ const TERMINAL_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canc
 
 function statusInfo(status) {
   return JOB_STATUS_LABELS[status] || { label: status || 'Unknown', badge: 'status-badge' };
+}
+
+function failedDocumentCount(value) {
+  if (Array.isArray(value)) return value.length;
+  const count = Number(value || 0);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+function failedDocumentList(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function shortJobId(id) {
@@ -1135,14 +1157,15 @@ function renderJobStepper(job) {
 function renderJobDetail(job) {
   const el = document.getElementById('jobDetail');
   if (!el || !job) return;
-  const failed = Array.isArray(job.failedDocuments) ? job.failedDocuments : [];
-  if (!failed.length) { el.innerHTML = ''; return; }
+  const failed = failedDocumentList(job.failedDocuments);
+  const failedCount = failed.length || failedDocumentCount(job.failedDocuments);
+  if (!failedCount) { el.innerHTML = ''; return; }
   el.innerHTML = `
     <div class="verify-note" style="margin-top:.8rem">
-      <strong>${failed.length} document${failed.length === 1 ? '' : 's'} failed to read.</strong>
-      <ul style="margin:.4rem 0 0 1.2rem">
-        ${failed.map(d => `<li>${esc(d.originalFilename || d.name || d.id)}${d.lastError ? ` — ${esc(d.lastError)}` : ''}</li>`).join('')}
-      </ul>
+      <strong>${failedCount} document${failedCount === 1 ? '' : 's'} failed to read.</strong>
+      ${failed.length ? `<ul style="margin:.4rem 0 0 1.2rem">
+        ${failed.map(d => `<li>${esc(d.originalFilename || d.name || d.id)}${d.lastError || d.errorMessage ? ` — ${esc(d.lastError || d.errorMessage)}` : ''}</li>`).join('')}
+      </ul>` : ''}
     </div>`;
 }
 
@@ -1160,11 +1183,14 @@ async function runJobAction(job, endpointPath, opts = {}) {
       body: opts.body ? JSON.stringify(opts.body) : '{}',
     });
     const data = await res.json().catch(() => ({}));
+    // #region agent log
+    fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H4',location:'public/index.html:runJobAction:response',message:'job action response received',data:{jobId:job.id,endpointPath,status:res.status,ok:res.ok,activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (!res.ok) {
       alert(data.error || `Action failed (HTTP ${res.status}).`);
       return;
     }
-    if (activeJobPollState) {
+    if (activeJobPollState && !activeJobPollState.cancelled && activeJobPollState.jobId === job.id) {
       activeJobPollState.consecutiveUnchanged = 0;
       activeJobPollState.lastChangeAt = Date.now();
       scheduleJobPoll(activeJobPollState, 0);
@@ -1183,8 +1209,11 @@ function renderJobActions(job) {
   const el = document.getElementById('jobActions');
   if (!el || !job) return;
   const isTerminal = TERMINAL_STATUSES.has(job.status);
-  const failedDocs = Array.isArray(job.failedDocuments) ? job.failedDocuments.length : 0;
+  const failedDocs = failedDocumentCount(job.failedDocuments);
   const buttons = [];
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H3',location:'public/index.html:renderJobActions',message:'job actions derived from failedDocuments',data:{jobId:job.id,status:job.status,failedDocumentsType:Array.isArray(job.failedDocuments)?'array':typeof job.failedDocuments,failedDocumentsValue:Array.isArray(job.failedDocuments)?job.failedDocuments.length:job.failedDocuments,derivedFailedDocs:failedDocs,isTerminal},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
 
   if (!isTerminal) {
     buttons.push({
@@ -1282,15 +1311,31 @@ function renderJobResults(job, result) {
       const prevLabel = btn.textContent;
       btn.textContent = 'Asking…';
       try {
+        let answer = '';
         const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/followup`, {
           method: 'POST',
           headers: getJobHeaders(),
           body: JSON.stringify({ question: q }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          answer = data.followup?.answer || '';
+          if (data.truncationWarning) showError(data.truncationWarning);
+        } else if (res.status === 503) {
+          showError(`Server follow-up unavailable (${data.error || `HTTP ${res.status}`}); using browser fallback.`);
+          const priorPairs = jobFollowupHistoryByJob.get(job.id) || [];
+          answer = await callBackend(buildFollowupMessages(q, result.finalTitleOpinion, priorPairs), SYNTHESIS_PROMPT, {
+            model: SYNTHESIS_MODEL,
+            max_tokens: SYNTHESIS_MAX_TOKENS,
+            phase: 'followup',
+            docCount: job.totalDocuments || 0,
+            label: 'Follow-up request',
+          });
+        } else {
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
         const list = jobFollowupHistoryByJob.get(job.id) || [];
-        list.push({ question: q, answer: data.followup?.answer || '' });
+        list.push({ question: q, answer });
         jobFollowupHistoryByJob.set(job.id, list);
         if (input) input.value = '';
         renderJobResults(job, result);
@@ -1312,49 +1357,81 @@ function renderJobResults(job, result) {
   }
 }
 
+let jobViewLoadSeq = 0;
+
+function isCurrentJobRoute(jobId) {
+  const route = parseRoute();
+  return route.name === 'job' && route.jobId === jobId;
+}
+
 async function loadJobView(jobId) {
+  const loadSeq = ++jobViewLoadSeq;
+  const stillCurrent = () => loadSeq === jobViewLoadSeq && isCurrentJobRoute(jobId);
   const headerEl = document.getElementById('jobHeader');
   if (!jobId) {
+    stopJobPoller();
     if (headerEl) headerEl.innerHTML = '<div class="error-msg"><strong>No job specified.</strong></div>';
     return;
   }
+  if (activeJobPollState && activeJobPollState.jobId !== jobId) stopJobPoller();
   if (headerEl) headerEl.innerHTML = '<div style="color:#8a6f4a">Loading job…</div>';
+  // #region agent log
+  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H4,H5',location:'public/index.html:loadJobView:start',message:'loading job view',data:{jobId,hash:location.hash,routeJobId:parseRoute().jobId||null,hasPassword:Boolean(appPassword),activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   let res;
   try {
     res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
       method: 'GET',
       headers: getJobHeaders(),
     });
+    // #region agent log
+    fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H4,H5',location:'public/index.html:loadJobView:response',message:'job fetch response received',data:{jobId,status:res.status,ok:res.ok,hash:location.hash,routeJobId:parseRoute().jobId||null,activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
   } catch (err) {
-    headerEl.innerHTML = `<div class="error-msg"><strong>Network error</strong><br>${esc(err.message || 'Could not reach server.')}</div>`;
+    if (!stillCurrent()) return;
+    stopJobPoller();
+    if (headerEl) headerEl.innerHTML = `<div class="error-msg"><strong>Network error</strong><br>${esc(err.message || 'Could not reach server.')}</div>`;
     return;
   }
+  if (!stillCurrent()) return;
   if (res.status === 401) {
+    stopJobPoller();
     document.getElementById('mainApp').style.display = 'none';
     document.getElementById('passwordGate').style.display = 'block';
     return;
   }
   if (res.status === 404) {
-    headerEl.innerHTML = '<div class="error-msg"><strong>Job not found.</strong> It may have expired or the link is wrong.</div>';
+    stopJobPoller();
+    if (headerEl) headerEl.innerHTML = '<div class="error-msg"><strong>Job not found.</strong> It may have expired or the link is wrong.</div>';
     return;
   }
   const data = await res.json();
   if (!res.ok) {
-    headerEl.innerHTML = `<div class="error-msg"><strong>Could not load job</strong><br>${esc(data.error || `HTTP ${res.status}`)}</div>`;
+    if (!stillCurrent()) return;
+    stopJobPoller();
+    if (headerEl) headerEl.innerHTML = `<div class="error-msg"><strong>Could not load job</strong><br>${esc(data.error || `HTTP ${res.status}`)}</div>`;
     return;
   }
+  if (!stillCurrent()) return;
   const job = data.job;
   rememberRecentJob(job);
-  await applyJobToView(job);
+  await applyJobToView(job, stillCurrent);
+  if (!stillCurrent()) return;
   if (!TERMINAL_STATUSES.has(job.status)) {
-    startJobPoller(jobId, applyJobToView, async terminalJob => {
+    startJobPoller(jobId, jobUpdate => {
+      if (isCurrentJobRoute(jobId)) return applyJobToView(jobUpdate, () => isCurrentJobRoute(jobId));
+    }, async terminalJob => {
+      if (!isCurrentJobRoute(jobId)) return;
       rememberRecentJob(terminalJob);
-      await applyJobToView(terminalJob);
+      await applyJobToView(terminalJob, () => isCurrentJobRoute(jobId));
     });
+  } else {
+    stopJobPoller();
   }
 }
 
-async function applyJobToView(job) {
+async function applyJobToView(job, isCurrent = () => true) {
+  if (!isCurrent()) return;
   renderJobHeader(job);
   renderJobProgressView(job);
   renderJobStepper(job);
@@ -1371,11 +1448,16 @@ async function applyJobToView(job) {
         const payload = await r.json();
         result = payload.result || null;
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H2,H5',location:'public/index.html:applyJobToView:result',message:'terminal job durable result fetch completed',data:{jobId:job.id,status:job.status,resultStatus:r.status,resultOk:r.ok,hasFinalTitleOpinion:Boolean(result?.finalTitleOpinion),hash:location.hash,routeJobId:parseRoute().jobId||null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     } catch (err) {
       console.warn('Could not fetch durable job result', err);
     }
+    if (!isCurrent()) return;
     renderJobResults(job, result);
   } else {
+    if (!isCurrent()) return;
     renderJobResults(job, null);
   }
 }
@@ -1390,7 +1472,13 @@ function loadRecentJobs() {
     const raw = storage.getItem(RECENT_JOBS_KEY);
     if (!raw) return [];
     const data = JSON.parse(raw);
-    return Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) return [];
+    return data.filter(entry =>
+      entry
+      && typeof entry.id === 'string'
+      && entry.id
+      && Number.isFinite(Date.parse(entry.lastViewedAt))
+    ).slice(0, RECENT_JOBS_LIMIT);
   } catch {
     return [];
   }
@@ -1438,11 +1526,13 @@ function renderRecentJobsView() {
       ${list.map(entry => {
         const info = statusInfo(entry.status);
         const title = entry.tractDescription || `Job ${shortJobId(entry.id)}`;
+        const lastViewed = formatRelative(entry.lastViewedAt);
+        const documentCount = Number.isFinite(Number(entry.documentCount)) ? Number(entry.documentCount) : 0;
         return `
           <a class="recent-jobs-row" href="#/job/${encodeURIComponent(entry.id)}" style="text-decoration:none;color:inherit">
             <div>
               <div style="font-weight:600">${esc(title)}</div>
-              <div style="color:#8a6f4a;font-size:.82rem">${esc(shortJobId(entry.id))} · ${esc(formatRelative(new Date(entry.lastViewedAt).toISOString()))} · ${entry.documentCount} document${entry.documentCount === 1 ? '' : 's'}</div>
+              <div style="color:#8a6f4a;font-size:.82rem">${esc(shortJobId(entry.id))}${lastViewed ? ` · ${esc(lastViewed)}` : ''} · ${documentCount} document${documentCount === 1 ? '' : 's'}</div>
             </div>
             <span class="status-badge ${info.badge}">${esc(info.label)}</span>
           </a>`;
@@ -1497,18 +1587,20 @@ async function runJobPollTick(state) {
       method: 'GET',
       headers: getJobHeaders(),
     });
+    if (state.cancelled) return;
     if (res.status === 429 || res.status === 503) {
       state.errorBackoffMs = Math.min(
         JOB_POLL_INTERVALS.backoffMax,
         Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
       );
       renderPollerBanner('Connection issue — retrying…');
-      scheduleJobPoll(state, state.errorBackoffMs);
+      scheduleJobPoll(state, nextPollDelay(state));
       return;
     }
     state.errorBackoffMs = 0;
     renderPollerBanner('');
     const data = await res.json();
+    if (state.cancelled) return;
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     const job = data.job;
     const key = pollerKey(job);
@@ -1524,7 +1616,11 @@ async function runJobPollTick(state) {
       try { state.onUpdate(job); } catch (err) { console.warn('poller onUpdate failed', err); }
     }
     if (TERMINAL_STATUSES.has(job.status)) {
+      // #region agent log
+      fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H4,H5',location:'public/index.html:runJobPollTick:terminal',message:'poller reached terminal job status',data:{jobId:state.jobId,terminalJobId:job.id,status:job.status,hash:location.hash,routeJobId:parseRoute().jobId||null,activePollJobId:activeJobPollState?.jobId||null,activePollIsCurrent:activeJobPollState===state,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       state.cancelled = true;
+      if (activeJobPollState === state) activeJobPollState = null;
       if (typeof state.onTerminal === 'function') {
         try { await state.onTerminal(job); } catch (err) { console.warn('poller onTerminal failed', err); }
       }
@@ -1538,7 +1634,7 @@ async function runJobPollTick(state) {
       Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
     );
     renderPollerBanner('Connection issue — retrying…');
-    scheduleJobPoll(state, state.errorBackoffMs);
+    scheduleJobPoll(state, nextPollDelay(state));
   }
 }
 
@@ -1964,6 +2060,13 @@ async function fetchServerSynthesisStatus(jobId) {
 async function fetchServerJobResult(jobId) {
   return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/result`, {
     method: 'GET',
+  });
+}
+
+async function saveBrowserJobResult(jobId, result) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/result`, {
+    method: 'POST',
+    body: JSON.stringify(result),
   });
 }
 
@@ -2947,14 +3050,19 @@ async function analyze() {
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${documentAbstracts.length} document abstracts synthesized${serverAbstractionFailedCount ? ` (${serverAbstractionFailedCount} failed chunk(s) omitted)` : ''}`, items);
     if (!usedServerSynthesis) {
-      // The server-synthesis branch already updates analysis_jobs via saveJobResult.
-      await safePatchAnalysisJob(job.id, {
-        status: serverAbstractionFailedCount ? 'partial_failed' : 'complete',
-        completedDocuments: documentAbstracts.length,
-        failedDocuments: serverAbstractionFailedCount,
-        currentPhase: serverAbstractionFailedCount ? 'complete with abstraction warnings' : 'complete',
-        errorMessage: null,
+      const browserResultStatus = serverAbstractionFailedCount ? 'partial_failed' : 'complete';
+      await saveBrowserJobResult(job.id, {
+        status: browserResultStatus,
+        finalTitleOpinion: synthesis,
+        warnings: serverAbstractionFailedCount
+          ? [`${serverAbstractionFailedCount} abstraction chunk(s) failed and were omitted from browser synthesis.`]
+          : [],
+        failedDocuments: [],
+        modelUsed: SYNTHESIS_MODEL,
       });
+      // #region agent log
+      fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H2',location:'public/index.html:analyze:browser-synthesis-complete',message:'browser synthesis completed after server fallback',data:{jobId:job.id,usedServerAbstraction,usedServerSynthesis,documentAbstractCount:documentAbstracts.length,serverAbstractionFailedCount,hasSynthesis:Boolean(synthesis)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     }
     clearProgressTimer();
     stopJobPolling();
@@ -2985,14 +3093,19 @@ async function analyze() {
   }
 }
 
-function buildFollowupMessages(question) {
-  const titleOpinion = conversationHistory
+function buildFollowupMessages(question, titleOpinionOverride = null, priorPairs = null) {
+  const titleOpinion = titleOpinionOverride || conversationHistory
     .slice()
     .reverse()
     .find(m => m.role === 'assistant' && (m.kind === 'title-opinion' || !m.kind))?.content || '';
-  const followupOnly = conversationHistory
-    .slice(2, -1)
-    .filter(m => m.kind === 'followup' && typeof m.content === 'string');
+  const followupOnly = Array.isArray(priorPairs)
+    ? priorPairs.flatMap(pair => ([
+        { role: 'user', content: pair.question, kind: 'followup' },
+        { role: 'assistant', content: pair.answer, kind: 'followup' },
+      ])).filter(m => typeof m.content === 'string')
+    : conversationHistory
+        .slice(2, -1)
+        .filter(m => m.kind === 'followup' && typeof m.content === 'string');
   for (let turns = FOLLOWUP_HISTORY_TURNS; turns >= 0; turns--) {
     const recent = followupOnly.slice(-turns * 2);
     const recentText = recent.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
