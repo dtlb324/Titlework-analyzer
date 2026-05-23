@@ -279,6 +279,20 @@ test('Phase 6: analyze() navigates to #/job/{id} when durable storage is availab
   assert(script.includes('navigate(`#/job/'), 'analyze() must navigate to #/job/{id} when durable');
 });
 
+test('Phase 6: job results render title opinion when complete', () => {
+  assert(script.includes('function renderJobResults'),
+    'renderJobResults must exist');
+  assert(script.includes('finalTitleOpinion'),
+    'renderJobResults must render finalTitleOpinion');
+});
+
+test('Phase 6: job follow-up posts to /followup endpoint', () => {
+  assert(script.includes('/followup'),
+    'Follow-up must POST /api/jobs/:id/followup');
+  assert(script.includes('jobFollowupHistory'),
+    'Follow-up must render Q&A history');
+});
+
 
 let passed = 0;
 let failed = 0;

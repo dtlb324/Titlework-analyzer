@@ -1246,10 +1246,70 @@ function renderJobActions(job) {
   });
 }
 
+const jobFollowupHistoryByJob = new Map();
+
 function renderJobResults(job, result) {
-  // Filled in by Task 7
   const el = document.getElementById('jobResults');
-  if (el) el.innerHTML = '';
+  const followupWrap = document.getElementById('jobFollowup');
+  if (!el || !job) return;
+  if (!result || !result.finalTitleOpinion) {
+    el.innerHTML = '';
+    if (followupWrap) followupWrap.style.display = 'none';
+    return;
+  }
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const failedDocs = Array.isArray(result.failedDocuments) ? result.failedDocuments : [];
+  el.innerHTML = `
+    ${warnings.length ? `<div class="verify-note"><strong>Warnings:</strong><ul style="margin:.4rem 0 0 1.2rem">${warnings.map(w => `<li>${esc(typeof w === 'string' ? w : (w.message || ''))}</li>`).join('')}</ul></div>` : ''}
+    ${failedDocs.length ? `<div class="verify-note"><strong>Excluded ${failedDocs.length} failed document${failedDocs.length === 1 ? '' : 's'}.</strong></div>` : ''}
+    <div class="analysis-card"><div class="ac">${md(String(result.finalTitleOpinion))}</div></div>`;
+  if (followupWrap) {
+    followupWrap.style.display = '';
+    const input = document.getElementById('jobFollowupInput');
+    const btn = document.getElementById('jobFollowupBtn');
+    const historyEl = document.getElementById('jobFollowupHistory');
+    if (historyEl) {
+      const list = jobFollowupHistoryByJob.get(job.id) || [];
+      historyEl.innerHTML = list.map(pair => `
+        <div class="analysis-card" style="margin-top:.7rem">
+          <div class="ac"><strong>Q:</strong> ${esc(pair.question)}<br><br><strong>A:</strong> ${md(String(pair.answer || ''))}</div>
+        </div>`).join('');
+    }
+    const submit = async () => {
+      const q = (input?.value || '').trim();
+      if (!q || !btn) return;
+      btn.disabled = true;
+      const prevLabel = btn.textContent;
+      btn.textContent = 'Asking…';
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/followup`, {
+          method: 'POST',
+          headers: getJobHeaders(),
+          body: JSON.stringify({ question: q }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const list = jobFollowupHistoryByJob.get(job.id) || [];
+        list.push({ question: q, answer: data.followup?.answer || '' });
+        jobFollowupHistoryByJob.set(job.id, list);
+        if (input) input.value = '';
+        renderJobResults(job, result);
+      } catch (err) {
+        alert(err.message || 'Follow-up failed.');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = prevLabel;
+        }
+      }
+    };
+    if (btn) {
+      btn.onclick = submit;
+    }
+    if (input) {
+      input.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+    }
+  }
 }
 
 async function loadJobView(jobId) {
