@@ -271,6 +271,14 @@ test('Phase 6: job actions wire to existing API endpoints', () => {
     'Cancel action must confirm');
 });
 
+test('Phase 6: home view exposes a recent-jobs link', () => {
+  assert(indexHtml.includes('href="#/jobs"'), 'Home view must link to #/jobs');
+});
+
+test('Phase 6: analyze() navigates to #/job/{id} when durable storage is available', () => {
+  assert(script.includes('navigate(`#/job/'), 'analyze() must navigate to #/job/{id} when durable');
+});
+
 
 let passed = 0;
 let failed = 0;

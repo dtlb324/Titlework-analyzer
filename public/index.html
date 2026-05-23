@@ -207,6 +207,10 @@
       </div>
     </div>
 
+    <div style="margin-top:1rem;text-align:right">
+      <a href="#/jobs" class="btn-secondary" style="text-decoration:none;display:inline-block;padding:.45rem .9rem">Recent jobs</a>
+    </div>
+
     </div> <!-- /#view-home -->
 
     <div id="view-job" data-view="job" style="display:none">
@@ -2698,6 +2702,13 @@ async function analyze() {
     showError(uploadRegistration.warning);
   } else if (uploadRegistration.durable) {
     updateProgress(8, 'Durable uploads complete; starting browser-driven analysis...', null);
+    if (job?.id) {
+      try {
+        navigate(`#/job/${encodeURIComponent(job.id)}`);
+      } catch (err) {
+        console.warn('Could not navigate to durable job view', err);
+      }
+    }
   }
 
   const showAllProgress = files.length <= 50;
