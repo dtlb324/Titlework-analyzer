@@ -176,6 +176,133 @@ test('registers job-linked durable uploads before browser-driven analysis', () =
 });
 
 
+// === Phase 6 ===
+
+test('Phase 6: HTML defines view-home, view-job, view-history shells', () => {
+  assert(indexHtml.includes('id="view-home"'), 'Missing #view-home wrapper');
+  assert(indexHtml.includes('id="view-job"'), 'Missing #view-job wrapper');
+  assert(indexHtml.includes('id="view-history"'), 'Missing #view-history wrapper');
+});
+
+test('Phase 6: hash router exposes parseHash and navigate', () => {
+  assert(script.includes('function parseRoute'), 'Missing parseRoute() helper');
+  assert(script.includes('function applyRoute'), 'Missing applyRoute() helper');
+  assert(script.includes("window.addEventListener('hashchange'"), 'Router must listen for hashchange');
+  assert(script.includes("'#/job/'") || script.includes('`#/job/'), 'Router must emit #/job/ links');
+});
+
+test('Phase 6: getJobLink emits hash route, getRequestedJobId reads it', () => {
+  assert(script.includes('`${window.location.origin}${window.location.pathname}#/job/'),
+    'getJobLink must emit hash route');
+  assert(script.includes("hash.startsWith('#/job/')") || script.includes("startsWith('/job/')"),
+    'getRequestedJobId must parse #/job/{id}');
+});
+
+test('Phase 6: #view-job contains required job page subsections', () => {
+  assert(indexHtml.includes('id="jobHeader"'), 'Missing #jobHeader');
+  assert(indexHtml.includes('id="jobProgress"'), 'Missing #jobProgress');
+  assert(indexHtml.includes('id="jobStepper"'), 'Missing #jobStepper');
+  assert(indexHtml.includes('id="jobDetail"'), 'Missing #jobDetail');
+  assert(indexHtml.includes('id="jobActions"'), 'Missing #jobActions');
+  assert(indexHtml.includes('id="jobResults"'), 'Missing #jobResults');
+});
+
+test('Phase 6: status badge CSS classes exist', () => {
+  assert(indexHtml.includes('.status-badge'), 'Missing .status-badge style');
+  assert(indexHtml.includes('.status-badge--complete'), 'Missing complete badge style');
+  assert(indexHtml.includes('.status-badge--failed'), 'Missing failed badge style');
+  assert(indexHtml.includes('.status-badge--partial'), 'Missing partial badge style');
+});
+
+test('Phase 6: job view renderers exist', () => {
+  for (const fn of ['renderJobHeader', 'renderJobProgressView', 'renderJobStepper',
+                    'renderJobDetail', 'renderJobActions', 'renderJobResults']) {
+    assert(script.includes(`function ${fn}`), `Missing ${fn}()`);
+  }
+  assert(script.includes('JOB_STATUS_LABELS'), 'Missing canonical status label map');
+});
+
+test('Phase 6: adaptive polling helper exists with documented intervals', () => {
+  assert(script.includes('JOB_POLL_INTERVALS'), 'Missing JOB_POLL_INTERVALS table');
+  assert(script.includes('function scheduleJobPoll'), 'Missing scheduleJobPoll()');
+  assert(script.includes("document.addEventListener('visibilitychange'"),
+    'Adaptive poller must respond to visibilitychange');
+  assert(script.includes('429') && script.includes('503'),
+    'Adaptive poller must back off on 429/503');
+});
+
+test('Phase 6: stopJobPoller cancels any pending poll', () => {
+  assert(script.includes('function stopJobPoller'), 'Missing stopJobPoller()');
+});
+
+test('Phase 6: loadJobView fetches the job and hydrates the view', () => {
+  assert(script.includes('async function loadJobView'), 'Missing loadJobView()');
+  assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}`'),
+    'loadJobView must call GET /api/jobs/:id');
+  assert(script.includes('renderJobHeader(job)') &&
+         script.includes('renderJobProgressView(job)') &&
+         script.includes('renderJobStepper(job)'),
+    'loadJobView must invoke header/progress/stepper renderers');
+  assert(script.includes('Job not found'), 'loadJobView must handle 404 with friendly copy');
+});
+
+test('Phase 6: terminal job hydrates result via /result', () => {
+  assert(script.includes('/api/jobs/${encodeURIComponent(job.id)}/result'),
+    'Job view must fetch /result on terminal status');
+});
+
+test('Phase 6: job actions wire to existing API endpoints', () => {
+  // Path components passed to runJobAction(job, '/<endpoint>') — URL is composed
+  // inside runJobAction as `/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`.
+  assert(script.includes('/api/jobs/${encodeURIComponent(job.id)}${endpointPath}'),
+    'runJobAction must compose /api/jobs/:id<endpointPath>');
+  assert(script.includes("runJobAction(job, '/cancel')"),
+    'Cancel button must POST /cancel');
+  assert(script.includes("runJobAction(job, '/retry-failed')"),
+    'Retry-failed button must POST /retry-failed');
+  assert(script.includes("runJobAction(job, '/abstraction/process')"),
+    'Kick abstraction must POST /abstraction/process');
+  assert(script.includes("runJobAction(job, '/synthesis/process')"),
+    'Kick synthesis must POST /synthesis/process');
+  assert(script.includes("runJobAction(job, '/synthesis/start')"),
+    'Retry/skip-failed synthesis must POST /synthesis/start');
+  assert(script.includes('actionInFlight'), 'Must guard against concurrent actions');
+  assert(script.includes("confirm('Cancel this job"),
+    'Cancel action must confirm');
+});
+
+test('Phase 6: home view exposes a recent-jobs link', () => {
+  assert(indexHtml.includes('href="#/jobs"'), 'Home view must link to #/jobs');
+});
+
+test('Phase 6: analyze() navigates to #/job/{id} when durable storage is available', () => {
+  assert(script.includes('navigate(`#/job/'), 'analyze() must navigate to #/job/{id} when durable');
+});
+
+test('Phase 6: job results render title opinion when complete', () => {
+  assert(script.includes('function renderJobResults'),
+    'renderJobResults must exist');
+  assert(script.includes('finalTitleOpinion'),
+    'renderJobResults must render finalTitleOpinion');
+});
+
+test('Phase 6: job follow-up posts to /followup endpoint', () => {
+  assert(script.includes('/followup'),
+    'Follow-up must POST /api/jobs/:id/followup');
+  assert(script.includes('jobFollowupHistory'),
+    'Follow-up must render Q&A history');
+});
+
+test('Phase 6: recent jobs store caps at 20 entries', () => {
+  assert(script.includes('title-analyzer:recent-jobs:v1'),
+    'Must use a versioned localStorage key for recent jobs');
+  assert(script.includes('RECENT_JOBS_LIMIT = 20') || script.includes('RECENT_JOBS_LIMIT=20'),
+    'Must cap recent jobs at 20');
+  assert(script.includes('function rememberRecentJob'), 'Missing rememberRecentJob()');
+  assert(script.includes('function renderRecentJobsView'), 'Missing renderRecentJobsView()');
+});
+
+
 let passed = 0;
 let failed = 0;
 let skipped = 0;
