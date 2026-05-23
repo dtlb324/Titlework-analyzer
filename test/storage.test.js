@@ -34,6 +34,8 @@ function mockRes() {
 
 function createMemoryJobStore() {
   const now = '2026-05-22T22:15:00.000Z';
+  let documentCount = 0;
+  let chunkCount = 0;
   const jobs = new Map([[
     'job_test_1',
     {
@@ -54,6 +56,10 @@ function createMemoryJobStore() {
   const chunks = new Map();
 
   return {
+    __setJobStatus(jobId, status) {
+      const job = jobs.get(jobId);
+      jobs.set(jobId, { ...job, status, updatedAt: now });
+    },
     async getJob(id) {
       return jobs.get(id) || null;
     },
@@ -65,8 +71,9 @@ function createMemoryJobStore() {
       return updated;
     },
     async createDocument(jobId, input) {
+      documentCount += 1;
       const document = {
-        id: 'doc_test_1',
+        id: `doc_test_${documentCount}`,
         jobId,
         originalFilename: input.originalFilename,
         mediaType: input.mediaType,
@@ -86,18 +93,22 @@ function createMemoryJobStore() {
       documents.set(document.id, document);
       return document;
     },
+    async findDocumentByFingerprint(jobId, fingerprint) {
+      return [...documents.values()].find(document => document.jobId === jobId && document.fingerprint === fingerprint) || null;
+    },
     async getDocument(jobId, documentId) {
       const document = documents.get(documentId);
       return document?.jobId === jobId ? document : null;
     },
     async createChunk(jobId, documentId, input) {
+      chunkCount += 1;
       const chunk = {
-        id: 'chk_test_1',
+        id: `chk_test_${chunkCount}`,
         jobId,
         documentId,
         chunkOrder: input.chunkOrder,
         originalFilename: input.originalFilename,
-        blobKey: input.blobKey || `jobs/${jobId}/chunks/chk_test_1/deed.pdf`,
+        blobKey: input.blobKey || `jobs/${jobId}/chunks/chk_test_${chunkCount}/deed.pdf`,
         blobUrl: null,
         mediaType: input.mediaType,
         sizeBytes: input.sizeBytes,
@@ -116,6 +127,14 @@ function createMemoryJobStore() {
       const document = documents.get(documentId);
       documents.set(documentId, { ...document, chunkCount: (document.chunkCount || 0) + 1 });
       return chunk;
+    },
+    async findChunkByFingerprint(jobId, documentId, fingerprint, chunkOrder) {
+      return [...chunks.values()].find(chunk =>
+        chunk.jobId === jobId
+        && chunk.documentId === documentId
+        && chunk.fingerprint === fingerprint
+        && chunk.chunkOrder === chunkOrder
+      ) || null;
     },
     async updateChunk(jobId, chunkId, patch) {
       const existing = chunks.get(chunkId);
@@ -234,7 +253,134 @@ test('PATCH /api/jobs/:id/chunks/:chunkId updates upload status and GET lists ch
   assert(listRes.body.chunks[0].uploadStatus === 'uploaded', 'Expected list to include updated status');
 });
 
+test('PATCH /api/jobs/:id/chunks/:chunkId rejects uploaded status without a valid Blob pointer', async () => {
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.createDocument('job_test_1', {
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-fingerprint',
+    checksumSha256: 'a'.repeat(64),
+  });
+  await store.createChunk('job_test_1', 'doc_test_1', {
+    chunkOrder: 0,
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-chunk-fingerprint',
+    checksumSha256: 'b'.repeat(64),
+  });
+
+  const missingBlobRes = mockRes();
+  await jobsRouteHandler(mockReq('PATCH', {
+    uploadStatus: 'uploaded',
+  }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), missingBlobRes);
+  assert(missingBlobRes.statusCode === 400, `Expected missing Blob URL rejection, got ${missingBlobRes.statusCode}`);
+
+  const wrongKeyRes = mockRes();
+  await jobsRouteHandler(mockReq('PATCH', {
+    uploadStatus: 'uploaded',
+    blobKey: 'jobs/other_job/chunks/chk_test_1/deed.pdf',
+    blobUrl: 'https://blob.vercel-storage.com/private/deed.pdf',
+  }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), wrongKeyRes);
+  assert(wrongKeyRes.statusCode === 400, `Expected wrong Blob key rejection, got ${wrongKeyRes.statusCode}`);
+});
+
+test('POST durable document and chunk registration is idempotent by fingerprint', async () => {
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+
+  const documentPayload = {
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-fingerprint',
+    checksumSha256: 'a'.repeat(64),
+  };
+  const firstDocRes = mockRes();
+  await jobsRouteHandler(mockReq('POST', documentPayload, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/documents'), firstDocRes);
+  const secondDocRes = mockRes();
+  await jobsRouteHandler(mockReq('POST', documentPayload, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/documents'), secondDocRes);
+  assert(firstDocRes.statusCode === 201, `Expected first document create, got ${firstDocRes.statusCode}`);
+  assert(secondDocRes.statusCode === 200, `Expected duplicate document reuse, got ${secondDocRes.statusCode}`);
+  assert(secondDocRes.body.document.id === firstDocRes.body.document.id, 'Expected duplicate document registration to return existing id');
+
+  const chunkPayload = {
+    chunkOrder: 0,
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-chunk-fingerprint',
+    checksumSha256: 'b'.repeat(64),
+  };
+  const firstChunkRes = mockRes();
+  await jobsRouteHandler(mockReq('POST', chunkPayload, {}, { id: 'job_test_1', documentId: firstDocRes.body.document.id }, `/api/jobs/job_test_1/documents/${firstDocRes.body.document.id}/chunks`), firstChunkRes);
+  const secondChunkRes = mockRes();
+  await jobsRouteHandler(mockReq('POST', chunkPayload, {}, { id: 'job_test_1', documentId: firstDocRes.body.document.id }, `/api/jobs/job_test_1/documents/${firstDocRes.body.document.id}/chunks`), secondChunkRes);
+  assert(firstChunkRes.statusCode === 201, `Expected first chunk create, got ${firstChunkRes.statusCode}`);
+  assert(secondChunkRes.statusCode === 200, `Expected duplicate chunk reuse, got ${secondChunkRes.statusCode}`);
+  assert(secondChunkRes.body.chunk.id === firstChunkRes.body.chunk.id, 'Expected duplicate chunk registration to return existing id');
+});
+
+test('durable upload routes reject terminal jobs and unsupported TIFF metadata', async () => {
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  store.__setJobStatus('job_test_1', 'complete');
+
+  const terminalRes = mockRes();
+  await jobsRouteHandler(mockReq('POST', {
+    originalFilename: 'After-complete.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'late-fingerprint',
+  }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/documents'), terminalRes);
+  assert(terminalRes.statusCode === 409, `Expected terminal job upload mutation rejection, got ${terminalRes.statusCode}`);
+
+  store.__setJobStatus('job_test_1', 'created');
+  const tiffRes = mockRes();
+  await jobsRouteHandler(mockReq('POST', {
+    originalFilename: 'Scan.tiff',
+    mediaType: 'image/tiff',
+    sizeBytes: 123456,
+    fingerprint: 'tiff-fingerprint',
+  }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/documents'), tiffRes);
+  assert(tiffRes.statusCode === 400, `Expected TIFF rejection, got ${tiffRes.statusCode}`);
+});
+
 test('POST /api/jobs/:id/finalize-uploads marks job ready after all chunks upload', async () => {
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.createDocument('job_test_1', {
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-fingerprint',
+    checksumSha256: 'a'.repeat(64),
+  });
+  await store.createChunk('job_test_1', 'doc_test_1', {
+    chunkOrder: 0,
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-chunk-fingerprint',
+    checksumSha256: 'b'.repeat(64),
+  });
+  await store.updateChunk('job_test_1', 'chk_test_1', {
+    uploadStatus: 'uploaded',
+    blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+    blobUrl: 'https://blob.vercel-storage.com/private/deed.pdf',
+  });
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
+
+  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
+  assert(res.body.job.status === 'ready', 'Expected job ready after finalize');
+  assert(res.body.pendingChunks === 0, 'Expected no pending chunks');
+});
+
+test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable Blob metadata', async () => {
   const store = createMemoryJobStore();
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   await store.createDocument('job_test_1', {
@@ -257,9 +403,8 @@ test('POST /api/jobs/:id/finalize-uploads marks job ready after all chunks uploa
   const res = mockRes();
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
 
-  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
-  assert(res.body.job.status === 'ready', 'Expected job ready after finalize');
-  assert(res.body.pendingChunks === 0, 'Expected no pending chunks');
+  assert(res.statusCode === 409, `Expected invalid uploaded chunk rejection, got ${res.statusCode}`);
+  assert(res.body.error.includes('Blob'), `Expected Blob metadata error, got ${res.body.error}`);
 });
 
 test('durable upload endpoints reject raw base64 and document contents', async () => {
@@ -289,8 +434,10 @@ test('durable upload endpoints reject raw base64 and document contents', async (
 
 test('Blob upload endpoint keeps APP_PASSWORD for token requests but allows signed completion callbacks', () => {
   const source = readFileSync(join(root, 'api/blob/upload.js'), 'utf8');
+  assert(source.includes('enforceJobRateLimit'), 'Blob upload token requests should use the job write rate limiter');
   assert(source.includes("uploadEventType === 'blob.upload-completed'"), 'Expected Blob completion callback detection');
   assert(source.includes('!isBlobCompletionCallback && !requireJobPassword'), 'Token requests should require APP_PASSWORD while completion callbacks reach handleUpload signature verification');
+  assert(!source.includes("'image/tiff'"), 'Blob upload content types should not include TIFF when analyze API cannot process TIFF images');
 });
 
 let passed = 0;

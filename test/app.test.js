@@ -82,6 +82,11 @@ test('UI copy reflects 400-file limit', () => {
   assert(indexHtml.includes('up to 400 files'), 'Upload hint should mention 400 files');
 });
 
+test('UI accepted file copy matches backend-supported image types', () => {
+  assert(!indexHtml.includes('TIFF'), 'Upload hint should not advertise TIFF when backend rejects image/tiff');
+  assert(indexHtml.includes('accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp"'), 'File input accept list should match supported image types');
+});
+
 test('API ping works without API key (health check)', async () => {
   const req = mockReq({ ping: true });
   const res = mockRes();

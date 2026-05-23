@@ -25,7 +25,7 @@ const VALID_TRANSITIONS = {
   synthesizing: new Set(['synthesizing', 'complete', 'partial_failed', 'failed', 'canceled']),
   complete: new Set(['complete']),
   partial_failed: new Set(['partial_failed', 'abstracting', 'synthesizing', 'complete', 'failed', 'canceled']),
-  failed: new Set(['failed', 'abstracting', 'canceled']),
+  failed: new Set(['failed', 'abstracting', 'synthesizing', 'canceled']),
   canceled: new Set(['canceled']),
 };
 const MAX_TOTAL_DOCUMENTS = 400;
@@ -51,6 +51,7 @@ const RAW_PAYLOAD_KEYS = new Set([
 const SYNTHESIS_SEGMENT_STATUSES = new Set(['pending', 'processing', 'complete', 'failed', 'retry_wait']);
 const JOB_RESULT_STATUSES = new Set(['complete', 'partial_failed', 'failed']);
 const MAX_FOLLOWUP_QUESTION_CHARS = 2000;
+const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 let cachedStore = null;
 const jobRateLimitMap = new Map();
@@ -155,7 +156,7 @@ function isSafeMetadataString(value, maxLength) {
 }
 
 function isAllowedMediaType(value) {
-  return value === 'application/pdf' || value === 'text/csv' || /^image\/[-+.a-z0-9]+$/i.test(value || '');
+  return value === 'application/pdf' || value === 'text/csv' || ALLOWED_IMAGE_MEDIA_TYPES.has(value || '');
 }
 
 function normalizeMediaType(value, filename = '') {
@@ -194,7 +195,11 @@ function sanitizeFilenameForBlob(name) {
 }
 
 export function buildChunkBlobKey(jobId, chunkId, originalFilename) {
-  return `jobs/${jobId}/chunks/${chunkId}/${sanitizeFilenameForBlob(originalFilename)}`;
+  return `${buildChunkBlobPrefix(jobId, chunkId)}${sanitizeFilenameForBlob(originalFilename)}`;
+}
+
+function buildChunkBlobPrefix(jobId, chunkId) {
+  return `jobs/${jobId}/chunks/${chunkId}/`;
 }
 
 export function validateCreateJobInput(input) {
@@ -273,7 +278,7 @@ export function validateCreateDocumentInput(input) {
   }
   const mediaType = normalizeMediaType(input.mediaType, input.originalFilename);
   if (!isAllowedMediaType(mediaType) || mediaType.length > MAX_MEDIA_TYPE_LENGTH) {
-    return { valid: false, reason: 'mediaType must be application/pdf, text/csv, or image/*.' };
+    return { valid: false, reason: 'mediaType must be application/pdf, text/csv, image/jpeg, image/png, image/gif, or image/webp.' };
   }
   const sizeBytes = toInteger(input.sizeBytes);
   if (!Number.isInteger(sizeBytes) || sizeBytes < 0) {
@@ -320,7 +325,7 @@ export function validateCreateChunkInput(input) {
   }
   const mediaType = normalizeMediaType(input.mediaType, input.originalFilename);
   if (!isAllowedMediaType(mediaType) || mediaType.length > MAX_MEDIA_TYPE_LENGTH) {
-    return { valid: false, reason: 'mediaType must be application/pdf, text/csv, or image/*.' };
+    return { valid: false, reason: 'mediaType must be application/pdf, text/csv, image/jpeg, image/png, image/gif, or image/webp.' };
   }
   const sizeBytes = toInteger(input.sizeBytes);
   if (!Number.isInteger(sizeBytes) || sizeBytes < 0) {
@@ -355,7 +360,7 @@ export function validateCreateChunkInput(input) {
   };
 }
 
-export function validatePatchChunkInput(input) {
+export function validatePatchChunkInput(input, context = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { valid: false, reason: 'Invalid chunk update body.' };
   }
@@ -367,11 +372,17 @@ export function validatePatchChunkInput(input) {
     if (!CHUNK_UPLOAD_STATUSES.has(input.uploadStatus)) {
       return { valid: false, reason: 'Invalid chunk uploadStatus.' };
     }
+    if (input.uploadStatus === 'uploaded' && (!input.blobUrl || !input.blobKey)) {
+      return { valid: false, reason: 'Uploaded chunks must include blobKey and blobUrl.' };
+    }
     patch.uploadStatus = input.uploadStatus;
   }
   if (input.blobKey !== undefined) {
     if (!isSafeMetadataString(input.blobKey, MAX_BLOB_REF_LENGTH) || input.blobKey.includes('..')) {
       return { valid: false, reason: 'Invalid blobKey.' };
+    }
+    if (context.jobId && context.chunkId && !input.blobKey.startsWith(buildChunkBlobPrefix(context.jobId, context.chunkId))) {
+      return { valid: false, reason: 'blobKey must match the job and chunk upload prefix.' };
     }
     patch.blobKey = input.blobKey;
   }
@@ -669,6 +680,21 @@ function createPostgresJobStore() {
             updated_at timestamptz NOT NULL DEFAULT now()
           )
         `;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS original_filename text`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS job_id text`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS media_type text`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS size_bytes integer CHECK (size_bytes IS NULL OR size_bytes >= 0)`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS page_start integer`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS page_end integer`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS split_from text`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS fingerprint text`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS checksum_sha256 text`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS upload_status text NOT NULL DEFAULT 'pending'`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS chunk_count integer NOT NULL DEFAULT 0 CHECK (chunk_count >= 0)`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS completed_chunk_count integer NOT NULL DEFAULT 0 CHECK (completed_chunk_count >= 0)`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS failed_chunk_count integer NOT NULL DEFAULT 0 CHECK (failed_chunk_count >= 0)`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`ALTER TABLE job_documents ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`;
         await sql`
           CREATE TABLE IF NOT EXISTS document_chunks (
             id text PRIMARY KEY,
@@ -693,6 +719,25 @@ function createPostgresJobStore() {
             completed_at timestamptz
           )
         `;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_order integer CHECK (chunk_order IS NULL OR chunk_order >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS job_id text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS document_id text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS original_filename text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS blob_key text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS blob_url text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS media_type text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS size_bytes integer CHECK (size_bytes IS NULL OR size_bytes >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS page_start integer`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS page_end integer`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS split_from text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS fingerprint text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS checksum_sha256 text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS upload_status text NOT NULL DEFAULT 'pending'`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS upload_attempts integer NOT NULL DEFAULT 0 CHECK (upload_attempts >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS last_error_message text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS completed_at timestamptz`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_status text NOT NULL DEFAULT 'pending'`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_attempts integer NOT NULL DEFAULT 0 CHECK (abstraction_attempts >= 0)`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_type text`;
@@ -729,6 +774,22 @@ function createPostgresJobStore() {
             updated_at timestamptz NOT NULL DEFAULT now()
           )
         `;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS abstract_text text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS job_id text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS document_id text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS chunk_id text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS model_used text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS payload_bytes integer CHECK (payload_bytes IS NULL OR payload_bytes >= 0)`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS latency_ms integer CHECK (latency_ms IS NULL OR latency_ms >= 0)`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS input_tokens integer`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS output_tokens integer`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS status text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 1 CHECK (attempt_count >= 0)`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS error_type text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS error_message text`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`ALTER TABLE document_abstracts ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_abstracts_chunk_unique ON document_abstracts(chunk_id)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_job_documents_job_status ON job_documents(job_id, upload_status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_status ON document_chunks(job_id, upload_status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_abstraction_status ON document_chunks(job_id, abstraction_status)`;
@@ -770,6 +831,33 @@ function createPostgresJobStore() {
             UNIQUE (job_id, plan_id, segment_index)
           )
         `;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS job_id text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS plan_id text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS segment_index integer CHECK (segment_index IS NULL OR segment_index >= 0)`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS start_sequence_index integer CHECK (start_sequence_index IS NULL OR start_sequence_index >= 0)`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS end_sequence_index integer`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS document_ids jsonb`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS filenames jsonb`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS estimated_bytes integer`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS summary_text text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS model_used text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS input_tokens integer`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS output_tokens integer`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS payload_bytes integer`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS latency_ms integer`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS error_type text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS error_message text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS warnings jsonb`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS claimed_at timestamptz`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS worker_id text`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS retry_at timestamptz`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS completed_at timestamptz`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_synthesis_segments_job_plan_segment_unique ON synthesis_segments(job_id, plan_id, segment_index)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_job_plan ON synthesis_segments(job_id, plan_id, segment_index)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_job_status ON synthesis_segments(job_id, status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_lease ON synthesis_segments(job_id, status, lease_expires_at)`;
@@ -791,6 +879,19 @@ function createPostgresJobStore() {
             generated_at timestamptz NOT NULL DEFAULT now()
           )
         `;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS job_id text`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS plan_id text`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS status text`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS final_title_opinion text`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS warnings_json jsonb`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS failed_documents_json jsonb`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS model_used text`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS input_tokens integer`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS output_tokens integer`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS payload_bytes integer`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS synthesis_duration_ms integer`;
+        await sql`ALTER TABLE job_results ADD COLUMN IF NOT EXISTS generated_at timestamptz NOT NULL DEFAULT now()`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_results_job_unique ON job_results(job_id)`;
         await sql`
           CREATE TABLE IF NOT EXISTS followup_messages (
             id text PRIMARY KEY,
@@ -806,6 +907,16 @@ function createPostgresJobStore() {
             created_at timestamptz NOT NULL DEFAULT now()
           )
         `;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS job_id text`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS question text`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS answer text`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS model_used text`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS input_tokens integer`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS output_tokens integer`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS payload_bytes integer`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS retrieved_document_ids jsonb`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS truncation_warning text`;
+        await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`;
         await sql`CREATE INDEX IF NOT EXISTS idx_followup_messages_job ON followup_messages(job_id, created_at)`;
       })();
     }
@@ -952,6 +1063,9 @@ function createPostgresJobStore() {
       await ensureSchema();
       const existingJob = await this.getJob(jobId);
       if (!existingJob) return null;
+      if (TERMINAL_STATUSES.has(existingJob.status)) {
+        throw new JobApiError('Cannot add documents to a terminal job.', 409);
+      }
       const id = `doc_${randomUUID()}`;
       const rows = await sql`
         INSERT INTO job_documents (
@@ -974,6 +1088,18 @@ function createPostgresJobStore() {
       return rowToDocument(rows[0]);
     },
 
+    async findDocumentByFingerprint(jobId, fingerprint) {
+      await ensureSchema();
+      if (!fingerprint) return null;
+      const rows = await sql`
+        SELECT * FROM job_documents
+        WHERE job_id = ${jobId} AND fingerprint = ${fingerprint}
+        ORDER BY created_at ASC
+        LIMIT 1
+      `;
+      return rowToDocument(rows[0]);
+    },
+
     async getDocument(jobId, documentId) {
       await ensureSchema();
       const rows = await sql`
@@ -988,6 +1114,11 @@ function createPostgresJobStore() {
       await ensureSchema();
       const document = await this.getDocument(jobId, documentId);
       if (!document) return null;
+      const job = await this.getJob(jobId);
+      if (!job) return null;
+      if (TERMINAL_STATUSES.has(job.status)) {
+        throw new JobApiError('Cannot add chunks to a terminal job.', 409);
+      }
       const id = `chk_${randomUUID()}`;
       const blobKey = buildChunkBlobKey(jobId, id, input.originalFilename);
       const rows = await sql`
@@ -1005,6 +1136,21 @@ function createPostgresJobStore() {
       `;
       await refreshDocumentCounts(jobId, documentId);
       await refreshUploadCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async findChunkByFingerprint(jobId, documentId, fingerprint, chunkOrder) {
+      await ensureSchema();
+      if (!fingerprint) return null;
+      const rows = await sql`
+        SELECT * FROM document_chunks
+        WHERE job_id = ${jobId}
+          AND document_id = ${documentId}
+          AND fingerprint = ${fingerprint}
+          AND chunk_order = ${chunkOrder}
+        ORDER BY created_at ASC
+        LIMIT 1
+      `;
       return rowToChunk(rows[0]);
     },
 
@@ -1687,6 +1833,12 @@ function createPostgresJobStore() {
       return rowToJobResult(rows[0]);
     },
 
+    async clearJobResult(jobId) {
+      await ensureSchema();
+      const rows = await sql`DELETE FROM job_results WHERE job_id = ${jobId} RETURNING id`;
+      return rows.length > 0;
+    },
+
     async getJobResult(jobId) {
       await ensureSchema();
       const rows = await sql`SELECT * FROM job_results WHERE job_id = ${jobId} LIMIT 1`;
@@ -1754,6 +1906,13 @@ function createPostgresJobStore() {
     async finalizeUploads(jobId) {
       await ensureSchema();
       const chunks = await this.listChunks(jobId);
+      const invalidUploaded = chunks.filter(chunk => {
+        if (chunk.uploadStatus !== 'uploaded') return false;
+        return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(buildChunkBlobPrefix(jobId, chunk.id));
+      });
+      if (invalidUploaded.length) {
+        throw new JobApiError('Uploaded chunks must include valid Vercel Blob metadata before finalization.', 409);
+      }
       const pendingChunks = chunks.filter(chunk => chunk.uploadStatus !== 'uploaded').length;
       if (!chunks.length || pendingChunks > 0) {
         return { ready: false, job: await refreshUploadCounts(jobId), pendingChunks: pendingChunks || 1 };

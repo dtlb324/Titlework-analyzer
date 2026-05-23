@@ -337,7 +337,16 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
   }
   // Plan (or reuse plan) and persist segments before the worker picks them up.
-  await planJobSynthesis(jobId, options);
+  const planResult = await planJobSynthesis(jobId, options);
+  const planId = planResult?.plan?.planId;
+  if (job.status === 'failed') {
+    if (planId && store.resetFailedSynthesisSegments) {
+      await store.resetFailedSynthesisSegments(jobId, planId);
+    }
+    if (store.clearJobResult) {
+      await store.clearJobResult(jobId);
+    }
+  }
   if (store.updateJob && !['synthesizing', 'complete', 'partial_failed', 'failed'].includes(job.status)) {
     try {
       await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Queued for server-side synthesis' });

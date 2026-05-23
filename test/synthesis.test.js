@@ -360,6 +360,9 @@ function createMemoryPhase5Store(initialState = {}) {
     async getJobResult(jobId) {
       return results.has(jobId) ? { ...results.get(jobId) } : null;
     },
+    async clearJobResult(jobId) {
+      return results.delete(jobId);
+    },
     async appendFollowupMessage(jobId, payload) {
       const id = `flw_${followups.length + 1}`;
       const row = {
@@ -656,6 +659,89 @@ test('Resume: completed segments are not re-run on a second process pass', async
   assert(callsAfterPass2 - callsBeforePass2 <= segmentsCount, `Expected at most ${segmentsCount} model calls in pass 2, got ${callsAfterPass2 - callsBeforePass2}`);
   const finalSegments = await store.listSynthesisSegments('job_test_1');
   assert(finalSegments.every(s => s.status === 'complete'), 'Expected all segments complete after resume');
+});
+
+test('Synthesis retryable errors schedule durable retry_wait instead of terminal failure', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  let calls = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    calls += 1;
+    const err = new Error('rate limit');
+    err.status = 429;
+    err.retryAfterMs = 1;
+    throw err;
+  };
+
+  const result = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 2 },
+  });
+  const segments = await store.listSynthesisSegments('job_test_1');
+
+  assert(calls === 1, `Expected one model call before durable backoff, got ${calls}`);
+  assert(result.retryScheduledInBatch === 1, `Expected one retry_wait segment, got ${result.retryScheduledInBatch}`);
+  assert(segments[0].status === 'retry_wait', `Expected segment retry_wait, got ${segments[0].status}`);
+  assert(!result.result, 'Retry-waiting synthesis should not persist a terminal result');
+});
+
+test('Mixed synthesis segment failures persist partial_failed result instead of stranding the job', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(2) });
+  let partialCalls = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      partialCalls += 1;
+      if (partialCalls === 1) {
+        return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+      }
+      const err = new Error('bad segment');
+      err.status = 400;
+      throw err;
+    }
+    return { text: goodFinalOpinion('One synthesis segment failed.'), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  const result = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { chunkSize: 1, maxAttempts: 1 },
+  });
+
+  assert(result.result?.status === 'partial_failed', `Expected partial_failed result, got ${result.result?.status}`);
+  assert(result.result.finalTitleOpinion.includes('CHAIN OF TITLE'), 'Expected a persisted degraded final opinion');
+  assert(result.result.warnings.some(w => /segment_2_failed/i.test(w)), `Expected failed segment warning, got ${JSON.stringify(result.result.warnings)}`);
+  assert(result.hasMore === false, 'Mixed terminal segment state should not report more work');
+});
+
+test('Retry synthesis clears failed result and requeues failed segments', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1), jobStatus: 'failed' });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    const err = new Error('first synthesis failed');
+    err.status = 400;
+    throw err;
+  };
+  await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 1 },
+  });
+  const failedResult = await store.getJobResult('job_test_1');
+  assert(failedResult?.status === 'failed', 'Expected initial failed result');
+
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
+    text: goodFinalOpinion(),
+    model: 'claude-sonnet-4-6',
+    usage: {},
+  });
+  await enqueueSynthesisJob('job_test_1', { store });
+  const retry = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 1 },
+  });
+
+  assert(retry.result?.status === 'complete', `Expected retry to save complete result, got ${retry.result?.status}`);
+  assert(retry.result.finalTitleOpinion.includes('CHAIN OF TITLE'), 'Expected retry to replace failed result with final opinion');
 });
 
 test('Cancellation during synthesis stops further segment work', async () => {

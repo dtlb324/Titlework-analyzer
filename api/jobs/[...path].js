@@ -54,6 +54,30 @@ function validPrefixedId(id, prefix) {
   return typeof id === 'string' && id.startsWith(prefix) && id.length > prefix.length;
 }
 
+const TERMINAL_JOB_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canceled']);
+
+function isTerminalJob(job) {
+  return TERMINAL_JOB_STATUSES.has(job?.status);
+}
+
+function expectedChunkBlobPrefix(jobId, chunkId) {
+  return `jobs/${jobId}/chunks/${chunkId}/`;
+}
+
+function chunkHasUsableBlobMetadata(chunk) {
+  if (!chunk || chunk.uploadStatus !== 'uploaded') return true;
+  if (typeof chunk.blobKey !== 'string' || !chunk.blobKey.startsWith(expectedChunkBlobPrefix(chunk.jobId, chunk.id))) {
+    return false;
+  }
+  try {
+    const parsed = new URL(chunk.blobUrl);
+    const host = parsed.hostname.toLowerCase();
+    return parsed.protocol === 'https:' && (host === 'blob.vercel-storage.com' || host.endsWith('.blob.vercel-storage.com'));
+  } catch {
+    return false;
+  }
+}
+
 function parseBody(req, res, requestId) {
   try {
     return parseJsonBody(req.body);
@@ -140,11 +164,18 @@ async function handleCreateDocument(req, res, requestId, store, jobId) {
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const existingJob = await store.getJob(jobId);
   if (!existingJob) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (isTerminalJob(existingJob)) {
+    return res.status(409).json({ error: 'Cannot add documents to a terminal job.', requestId });
+  }
 
   const body = parseBody(req, res, requestId);
   if (!body) return;
   const validation = validateCreateDocumentInput(body);
   if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  if (validation.value.fingerprint && store.findDocumentByFingerprint) {
+    const existingDocument = await store.findDocumentByFingerprint(jobId, validation.value.fingerprint);
+    if (existingDocument) return res.status(200).json({ document: existingDocument, requestId });
+  }
 
   const document = await store.createDocument(jobId, validation.value);
   if (!document) return res.status(404).json({ error: 'Job not found.', requestId });
@@ -161,8 +192,17 @@ async function handleCreateChunk(req, res, requestId, store, jobId, documentId) 
   const validation = validateCreateChunkInput(body);
   if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
 
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (isTerminalJob(job)) {
+    return res.status(409).json({ error: 'Cannot add chunks to a terminal job.', requestId });
+  }
   const document = await store.getDocument(jobId, documentId);
   if (!document) return res.status(404).json({ error: 'Document not found.', requestId });
+  if (validation.value.fingerprint && store.findChunkByFingerprint) {
+    const existingChunk = await store.findChunkByFingerprint(jobId, documentId, validation.value.fingerprint, validation.value.chunkOrder);
+    if (existingChunk) return res.status(200).json({ chunk: existingChunk, requestId });
+  }
   const chunk = await store.createChunk(jobId, documentId, validation.value);
   if (!chunk) return res.status(404).json({ error: 'Document not found.', requestId });
   return res.status(201).json({ chunk, requestId });
@@ -184,7 +224,7 @@ async function handleChunkPatch(req, res, requestId, store, jobId, chunkId) {
   }
   const body = parseBody(req, res, requestId);
   if (!body) return;
-  const validation = validatePatchChunkInput(body);
+  const validation = validatePatchChunkInput(body, { jobId, chunkId });
   if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
 
   const chunk = await store.updateChunk(jobId, chunkId, validation.patch);
@@ -195,6 +235,15 @@ async function handleChunkPatch(req, res, requestId, store, jobId, chunkId) {
 async function handleFinalizeUploads(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const chunks = await store.listChunks(jobId);
+  const invalidUploaded = chunks.filter(chunk => !chunkHasUsableBlobMetadata(chunk));
+  if (invalidUploaded.length) {
+    return res.status(409).json({
+      error: 'Uploaded chunks must include valid Vercel Blob metadata before finalization.',
+      invalidChunks: invalidUploaded.map(chunk => chunk.id),
+      requestId,
+    });
+  }
   const result = await store.finalizeUploads(jobId);
   if (!result) return res.status(404).json({ error: 'Job not found.', requestId });
   if (!result.ready) {

@@ -517,21 +517,21 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       lastError = err;
       const errorType = classifyError(err);
       const isRetryable = ['rate_limit', 'upstream_timeout', 'provider_error'].includes(errorType);
+      const failure = {
+        errorType,
+        errorMessage: sanitizeErrorMessage(err),
+        modelUsed: config.model,
+        latencyMs: Date.now() - startedAt,
+      };
+      if (isRetryable && attempt < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
+        const retryAtMs = Date.now() + computeRetryBackoff(attempt, extractRetryAfter(err));
+        await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
+          ...failure,
+          retryAtIso: new Date(retryAtMs).toISOString(),
+        });
+        return { status: 'retry_wait', segmentId: segment.id, failure };
+      }
       if (!isRetryable || attempt >= config.maxAttempts) {
-        const failure = {
-          errorType,
-          errorMessage: sanitizeErrorMessage(err),
-          modelUsed: config.model,
-          latencyMs: Date.now() - startedAt,
-        };
-        if (isRetryable && attempt < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
-          const retryAtMs = Date.now() + computeRetryBackoff(attempt, extractRetryAfter(err));
-          await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
-            ...failure,
-            retryAtIso: new Date(retryAtMs).toISOString(),
-          });
-          return { status: 'retry_wait', segmentId: segment.id, failure };
-        }
         await store.markSynthesisSegmentFailed(jobId, segment.id, failure);
         return { status: 'failed', segmentId: segment.id, failure };
       }
@@ -818,8 +818,48 @@ export async function processSynthesisJob(jobId, options = {}) {
       }
     }
   } else if (!existingResult && failedSegments.length && !stillPending.length) {
-    // All work finished but at least one segment failed and we have no completed segments to merge.
-    if (!completedSegments.length) {
+    // All work finished with at least one failed segment. Preserve any completed
+    // segment work as a degraded result instead of stranding the job with no result.
+    const failureWarnings = failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`);
+    if (completedSegments.length) {
+      const warningsAccum = [...failureWarnings];
+      const tokensAccum = { inputTokens: 0, outputTokens: 0 };
+      completedSegments.forEach(segment => {
+        tokensAccum.inputTokens += segment.inputTokens || 0;
+        tokensAccum.outputTokens += segment.outputTokens || 0;
+        (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
+      });
+      try {
+        const merged = await mergeSegmentsIntoOpinion({
+          segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
+          totalAbstracts: abstracts.length,
+          tract,
+          contextNotes,
+          config,
+          options,
+          warningsAccum,
+          tokensAccum,
+        });
+        const validation = validateFinalOpinion(merged.text);
+        if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
+        if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
+        result = await store.saveJobResult(jobId, {
+          planId,
+          status: 'partial_failed',
+          finalTitleOpinion: merged.text,
+          warnings: warningsAccum,
+          failedDocuments: failedDocumentRefs,
+          modelUsed: merged.model,
+          inputTokens: tokensAccum.inputTokens,
+          outputTokens: tokensAccum.outputTokens,
+          payloadBytes: merged.payloadBytes,
+          synthesisDurationMs: Date.now() - startedAt,
+        });
+        mergeRanInThisBatch = true;
+      } catch (err) {
+        lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+      }
+    } else {
       const failureWarnings = [
         'all_segments_failed',
         ...failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`),

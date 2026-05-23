@@ -1,5 +1,6 @@
 import {
   createRequestId,
+  enforceJobRateLimit,
   getJobStore,
   parseJsonBody,
   requireJobPassword,
@@ -12,7 +13,7 @@ export const config = {
 };
 
 const DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-const ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/csv', 'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/tiff'];
+const ALLOWED_CONTENT_TYPES = ['application/pdf', 'text/csv', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 function getMaxUploadBytes() {
   const configured = Number(process.env.BLOB_MAX_UPLOAD_BYTES || DEFAULT_MAX_UPLOAD_BYTES);
@@ -72,6 +73,7 @@ export default async function handler(req, res) {
 
   const uploadEventType = body?.type || body?.event || body?.action;
   const isBlobCompletionCallback = uploadEventType === 'blob.upload-completed';
+  if (!isBlobCompletionCallback && !enforceJobRateLimit(req, res, requestId)) return;
   if (!isBlobCompletionCallback && !requireJobPassword(req, res, requestId)) return;
 
   if (!blobIsConfigured()) {

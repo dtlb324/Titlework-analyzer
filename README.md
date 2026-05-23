@@ -212,7 +212,7 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 | Type | Notes |
 |------|-------|
 | PDF | Most common — deeds, probate, assignments, leases |
-| JPG / PNG / TIFF / GIF / WEBP | Scanned document images |
+| JPG / PNG / GIF / WEBP | Scanned document images |
 | CSV | Converted to plain text — useful for division order schedules, ownership tables, lease summaries |
 
 ### Add More Documents

@@ -145,14 +145,14 @@
         <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em> &nbsp;·&nbsp; large PDFs auto-split by page
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em> &nbsp;·&nbsp; large PDFs auto-split by page
           </span>
           <div id="fileList"></div>
         </div>
         <p style="color:#8a6f4a;font-size:.83rem;margin-top:.6rem;line-height:1.5">
           <strong style="color:#6b3410">Tip:</strong> Large runs (100+ documents) process automatically in batches — keep this tab open until complete. You can add more documents after the initial analysis.
         </p>
-        <input type="file" id="fileInput" multiple accept=".pdf,.csv,image/*" style="display:none" />
+        <input type="file" id="fileInput" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
       </div>
       <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title</button>
     </div>
@@ -195,11 +195,11 @@
         <div class="upload-zone" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; TIFF &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
+            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
           </span>
           <div id="fileList2"></div>
         </div>
-        <input type="file" id="fileInput2" multiple accept=".pdf,.csv,image/*" style="display:none" />
+        <input type="file" id="fileInput2" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
         <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
           <button class="btn-primary" id="addDocsBtn" onclick="analyzeAdditional()" disabled style="margin-top:0">→ Analyze Additional Documents</button>
           <button class="btn-secondary" onclick="hideAddDocs()">Cancel</button>
