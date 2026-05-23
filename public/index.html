@@ -108,6 +108,8 @@
 
   <div id="mainApp" style="display:none">
 
+    <div id="view-home" data-view="home">
+
     <div class="card" id="uploadSection">
       <div class="field">
         <label class="field-label">Subject Tract Description (optional)</label>
@@ -183,6 +185,11 @@
         </div>
       </div>
     </div>
+
+    </div> <!-- /#view-home -->
+
+    <div id="view-job" data-view="job" style="display:none"></div>
+    <div id="view-history" data-view="history" style="display:none"></div>
 
   </div>
 </div>
@@ -538,6 +545,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('followupInput').addEventListener('keydown', e => { if (e.key === 'Enter') askFollowup(); });
   document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') checkPassword(); });
+  window.addEventListener('hashchange', () => applyRoute(parseRoute()));
+  applyRoute(parseRoute());
 });
 
 async function checkPasswordRequired() {
@@ -886,6 +895,70 @@ function clearAbstractionCheckpoint(key) {
   if (storage && key) storage.removeItem(key);
 }
 
+// === Phase 6: hash router ===
+function parseRoute() {
+  try {
+    const hash = String(location.hash || '');
+    if (hash.startsWith('#/job/')) {
+      const id = decodeURIComponent(hash.slice('#/job/'.length).split(/[?&/]/)[0] || '');
+      return id ? { name: 'job', jobId: id } : { name: 'home' };
+    }
+    if (hash === '#/jobs' || hash.startsWith('#/jobs?')) return { name: 'history' };
+    if (hash === '' || hash === '#' || hash === '#/') return { name: 'home' };
+    // Legacy migration: ?job= or #job_* -> #/job/{id}
+    const legacy = getRequestedJobId();
+    if (legacy) {
+      const clean = `${location.origin}${location.pathname}#/job/${encodeURIComponent(legacy)}`;
+      history.replaceState({}, '', clean);
+      return { name: 'job', jobId: legacy };
+    }
+    return { name: 'home' };
+  } catch {
+    return { name: 'home' };
+  }
+}
+
+function navigate(route) {
+  const next = route && route.startsWith('#') ? route : `#${route || '/'}`;
+  if (location.hash === next) {
+    applyRoute(parseRoute());
+  } else {
+    location.hash = next;
+  }
+}
+
+function applyRoute(route) {
+  const home = document.getElementById('view-home');
+  const job = document.getElementById('view-job');
+  const history = document.getElementById('view-history');
+  if (!home || !job || !history) return;
+  home.style.display = route.name === 'home' ? '' : 'none';
+  job.style.display = route.name === 'job' ? '' : 'none';
+  history.style.display = route.name === 'history' ? '' : 'none';
+  if (route.name === 'job') {
+    loadJobView(route.jobId).catch(err => console.warn('Job view load failed', err));
+  } else if (route.name === 'history') {
+    renderRecentJobsView();
+  } else {
+    stopJobPoller();
+  }
+}
+
+// Placeholder until later tasks fill them in
+async function loadJobView(jobId) {
+  console.log('loadJobView stub', jobId);
+}
+function renderRecentJobsView() {
+  // Filled in by Task 8
+}
+function stopJobPoller() {
+  if (typeof activeJobPollTimer !== 'undefined' && activeJobPollTimer) {
+    clearTimeout(activeJobPollTimer);
+    clearInterval(activeJobPollTimer);
+    activeJobPollTimer = null;
+  }
+}
+
 function getJobStorageKey() {
   return 'title-analyzer:last-job';
 }
@@ -896,16 +969,21 @@ function getJobHeaders() {
 
 function getJobLink(jobId) {
   if (!jobId || typeof window === 'undefined' || !window.location) return '';
-  return `${window.location.origin}${window.location.pathname}?job=${encodeURIComponent(jobId)}`;
+  return `${window.location.origin}${window.location.pathname}#/job/${encodeURIComponent(jobId)}`;
 }
 
 function getRequestedJobId() {
   try {
+    const hash = String(location.hash || '');
+    if (hash.startsWith('#/job/')) {
+      const id = decodeURIComponent(hash.slice('#/job/'.length).split(/[?&/]/)[0] || '');
+      if (id) return id;
+    }
     const params = new URLSearchParams(location.search || '');
     const fromQuery = params.get('job');
     if (fromQuery) return fromQuery;
-    const hash = String(location.hash || '').replace(/^#/, '');
-    return hash.startsWith('job_') ? hash : '';
+    const raw = hash.replace(/^#/, '');
+    return raw.startsWith('job_') ? raw : '';
   } catch {
     return '';
   }

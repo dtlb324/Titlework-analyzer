@@ -176,6 +176,29 @@ test('registers job-linked durable uploads before browser-driven analysis', () =
 });
 
 
+// === Phase 6 ===
+
+test('Phase 6: HTML defines view-home, view-job, view-history shells', () => {
+  assert(indexHtml.includes('id="view-home"'), 'Missing #view-home wrapper');
+  assert(indexHtml.includes('id="view-job"'), 'Missing #view-job wrapper');
+  assert(indexHtml.includes('id="view-history"'), 'Missing #view-history wrapper');
+});
+
+test('Phase 6: hash router exposes parseHash and navigate', () => {
+  assert(script.includes('function parseRoute'), 'Missing parseRoute() helper');
+  assert(script.includes('function applyRoute'), 'Missing applyRoute() helper');
+  assert(script.includes("window.addEventListener('hashchange'"), 'Router must listen for hashchange');
+  assert(script.includes("'#/job/'") || script.includes('`#/job/'), 'Router must emit #/job/ links');
+});
+
+test('Phase 6: getJobLink emits hash route, getRequestedJobId reads it', () => {
+  assert(script.includes('`${window.location.origin}${window.location.pathname}#/job/'),
+    'getJobLink must emit hash route');
+  assert(script.includes("hash.startsWith('#/job/')") || script.includes("startsWith('/job/')"),
+    'getRequestedJobId must parse #/job/{id}');
+});
+
+
 let passed = 0;
 let failed = 0;
 let skipped = 0;
