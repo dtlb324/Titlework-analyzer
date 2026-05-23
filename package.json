@@ -1,6 +1,6 @@
 {
   "name": "title-analyzer",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Mineral Title Chain Analyzer for landmen",
   "type": "module",
   "private": true,

@@ -94,18 +94,14 @@
   .job-actions button[disabled] { opacity:.55; cursor:not-allowed; }
   .job-leave-banner { background:#fce8d4; color:#6b3410; padding:.6rem .9rem;
     border-radius:8px; margin:.4rem 0 1rem; font-size:.88rem; }
-  .home-start-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
-    gap:.9rem; margin-bottom:1rem; }
-  .home-start-card { display:block; text-decoration:none; color:inherit; border:1px solid #e5d6b8;
-    border-radius:12px; padding:1rem; background:#fffaf0; transition:background .15s,border-color .15s,transform .15s; }
-  .home-start-card:hover { background:#fbf2dc; border-color:#d7c2a2; transform:translateY(-1px); }
-  .home-start-card--primary { border-color:#d7c2a2; background:#fbf2dc; }
-  .home-start-card--disabled { background:#eee8dc; border-color:#d8cbb6; color:#9a8c7a;
-    cursor:not-allowed; opacity:.85; pointer-events:none; }
-  .home-start-card-title { display:block; font-weight:700; color:#6b3410; margin-bottom:.35rem; }
-  .home-start-card--disabled .home-start-card-title { color:#817463; }
-  .home-start-card-text { display:block; color:#8a6f4a; font-size:.88rem; line-height:1.45; }
-  .home-start-card--disabled .home-start-card-text { color:#9a8c7a; }
+  .recent-jobs-toolbar { display:flex; justify-content:flex-end; align-items:center;
+    gap:.65rem; margin-bottom:.75rem; color:#8a6f4a; font-size:.84rem; }
+  .recent-jobs-toolbar-button { text-decoration:none; display:inline-block; padding:.42rem .85rem;
+    border-radius:8px; border:1px solid #d7c2a2; background:#fbf2dc; color:#6b3410;
+    font-weight:600; cursor:pointer; }
+  .recent-jobs-toolbar-button:hover { background:#f5e7c4; }
+  .recent-jobs-toolbar-button--disabled { background:#eee8dc; border-color:#d8cbb6;
+    color:#9a8c7a; cursor:not-allowed; pointer-events:none; }
   .recent-jobs-row { display:flex; justify-content:space-between; padding:.7rem .9rem;
     border:1px solid #e5d6b8; border-radius:8px; margin-bottom:.55rem; cursor:pointer;
     background:#fbf2dc; }
@@ -143,15 +139,9 @@
 
     <div id="view-home" data-view="home">
 
-    <div class="home-start-options" id="homeStartOptions">
-      <a href="#uploadSection" class="home-start-card home-start-card--primary">
-        <span class="home-start-card-title">Start new analysis</span>
-        <span class="home-start-card-text">Upload title documents and build a new chain of title.</span>
-      </a>
-      <a id="recentJobsCard" class="home-start-card home-start-card--disabled" aria-disabled="true" tabindex="-1">
-        <span class="home-start-card-title">Open recent jobs</span>
-        <span class="home-start-card-text" id="recentJobsCardHint">Available after your first completed analysis.</span>
-      </a>
+    <div class="recent-jobs-toolbar" id="recentJobsToolbar">
+      <span id="recentJobsToolbarHint">Recent jobs available after your first completed analysis.</span>
+      <a id="recentJobsButton" class="recent-jobs-toolbar-button recent-jobs-toolbar-button--disabled" aria-disabled="true" tabindex="-1">Recent jobs</a>
     </div>
 
     <div class="card" id="uploadSection">
@@ -647,7 +637,7 @@ function showMain() {
   // #region agent log
   fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1',location:'public/index.html:showMain',message:'showMain called',data:{hash:location.hash,search:location.search,route:parseRoute(),hasPassword:Boolean(appPassword),mainDisplay:document.getElementById('mainApp')?.style.display||'',gateDisplay:document.getElementById('passwordGate')?.style.display||''},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
-  renderHomeStartOptions();
+  renderRecentJobsToolbar();
   if (parseRoute().name === 'home') resumeLastAnalysisJob();
 }
 
@@ -1025,7 +1015,7 @@ function applyRoute(route) {
   } else if (route.name === 'history') {
     renderRecentJobsView();
   } else {
-    renderHomeStartOptions();
+    renderRecentJobsToolbar();
     stopJobPoller();
   }
 }
@@ -1533,28 +1523,30 @@ function rememberRecentJob(job) {
     lastViewedAt: Date.now(),
   });
   saveRecentJobs(list);
-  renderHomeStartOptions();
+  renderRecentJobsToolbar();
 }
 
 function hasCompletedRecentJob() {
   return loadRecentJobs().some(entry => COMPLETED_RECENT_JOB_STATUSES.has(entry.status));
 }
 
-function renderHomeStartOptions() {
-  const card = document.getElementById('recentJobsCard');
-  const hint = document.getElementById('recentJobsCardHint');
-  if (!card) return;
+function renderRecentJobsToolbar() {
+  const button = document.getElementById('recentJobsButton');
+  const hint = document.getElementById('recentJobsToolbarHint');
+  if (!button) return;
   const enabled = hasCompletedRecentJob();
-  card.className = enabled ? 'home-start-card' : 'home-start-card home-start-card--disabled';
-  card.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  button.className = enabled
+    ? 'recent-jobs-toolbar-button'
+    : 'recent-jobs-toolbar-button recent-jobs-toolbar-button--disabled';
+  button.setAttribute('aria-disabled', enabled ? 'false' : 'true');
   if (enabled) {
-    card.setAttribute('href', '#/jobs');
-    card.setAttribute('tabindex', '0');
-    if (hint) hint.textContent = 'Resume or review previous completed analyses.';
+    button.setAttribute('href', '#/jobs');
+    button.setAttribute('tabindex', '0');
+    if (hint) hint.textContent = 'Resume or review a completed run.';
   } else {
-    card.removeAttribute('href');
-    card.setAttribute('tabindex', '-1');
-    if (hint) hint.textContent = 'Available after your first completed analysis.';
+    button.removeAttribute('href');
+    button.setAttribute('tabindex', '-1');
+    if (hint) hint.textContent = 'Recent jobs available after your first completed analysis.';
   }
 }
 

@@ -512,28 +512,28 @@ test('frontend job route ignores stale async job responses', async () => {
   `);
 });
 
-test('frontend disables recent jobs card until a completed local job exists', async () => {
+test('frontend disables recent jobs toolbar until a completed local job exists', async () => {
   await runClientScript(`
-    const card = document.getElementById('recentJobsCard');
-    const hint = document.getElementById('recentJobsCardHint');
+    const button = document.getElementById('recentJobsButton');
+    const hint = document.getElementById('recentJobsToolbarHint');
 
-    renderHomeStartOptions();
-    assert(card.getAttribute('aria-disabled') === 'true', 'Expected recent jobs card disabled before completed jobs');
-    assert(card.getAttribute('href') === null, 'Disabled recent jobs card should not link to history');
-    assert(hint.textContent.includes('Available after'), 'Expected disabled card to explain when it unlocks');
+    renderRecentJobsToolbar();
+    assert(button.getAttribute('aria-disabled') === 'true', 'Expected recent jobs toolbar button disabled before completed jobs');
+    assert(button.getAttribute('href') === null, 'Disabled recent jobs toolbar button should not link to history');
+    assert(hint.textContent.includes('available after'), 'Expected disabled toolbar to explain when it unlocks');
 
     localStorage.setItem(RECENT_JOBS_KEY, JSON.stringify([
       { id: 'job_failed_1', status: 'failed', lastViewedAt: Date.now(), documentCount: 1 }
     ]));
-    renderHomeStartOptions();
-    assert(card.getAttribute('aria-disabled') === 'true', 'Failed jobs should not unlock recent jobs card');
+    renderRecentJobsToolbar();
+    assert(button.getAttribute('aria-disabled') === 'true', 'Failed jobs should not unlock recent jobs toolbar');
 
     localStorage.setItem(RECENT_JOBS_KEY, JSON.stringify([
       { id: 'job_complete_1', status: 'complete', lastViewedAt: Date.now(), documentCount: 2 }
     ]));
-    renderHomeStartOptions();
-    assert(card.getAttribute('aria-disabled') === 'false', 'Completed job should enable recent jobs card');
-    assert(card.getAttribute('href') === '#/jobs', 'Enabled recent jobs card should link to history');
+    renderRecentJobsToolbar();
+    assert(button.getAttribute('aria-disabled') === 'false', 'Completed job should enable recent jobs toolbar');
+    assert(button.getAttribute('href') === '#/jobs', 'Enabled recent jobs toolbar button should link to history');
     assert(hint.textContent.includes('Resume'), 'Expected enabled card copy to invite resuming jobs');
   `);
 });
