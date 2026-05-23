@@ -21,11 +21,11 @@ const VALID_TRANSITIONS = {
   ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'failed', 'canceled']),
   queued: new Set(['queued', 'planning', 'abstracting', 'failed', 'canceled']),
   planning: new Set(['planning', 'abstracting', 'failed', 'canceled']),
-  abstracting: new Set(['abstracting', 'synthesizing', 'partial_failed', 'failed']),
-  synthesizing: new Set(['synthesizing', 'complete', 'partial_failed', 'failed']),
+  abstracting: new Set(['abstracting', 'synthesizing', 'partial_failed', 'failed', 'canceled']),
+  synthesizing: new Set(['synthesizing', 'complete', 'partial_failed', 'failed', 'canceled']),
   complete: new Set(['complete']),
-  partial_failed: new Set(['partial_failed', 'synthesizing', 'complete', 'failed']),
-  failed: new Set(['failed']),
+  partial_failed: new Set(['partial_failed', 'abstracting', 'synthesizing', 'complete', 'failed', 'canceled']),
+  failed: new Set(['failed', 'abstracting', 'canceled']),
   canceled: new Set(['canceled']),
 };
 const MAX_TOTAL_DOCUMENTS = 400;
@@ -35,7 +35,7 @@ const MAX_FINGERPRINT_LENGTH = 512;
 const MAX_BLOB_REF_LENGTH = 2048;
 const DOCUMENT_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed', 'skipped']);
 const CHUNK_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed']);
-const CHUNK_ABSTRACTION_STATUSES = new Set(['pending', 'processing', 'completed', 'failed', 'split_superseded']);
+const CHUNK_ABSTRACTION_STATUSES = new Set(['pending', 'processing', 'completed', 'failed', 'split_superseded', 'retry_wait']);
 const JOB_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const JOB_RATE_LIMIT_MAX_REQUESTS = 120;
 const RAW_PAYLOAD_KEYS = new Set([
@@ -470,6 +470,10 @@ function rowToChunk(row) {
     abstractionAttempts: row.abstraction_attempts ?? 0,
     abstractionErrorType: row.abstraction_error_type,
     abstractionErrorMessage: row.abstraction_error_message,
+    abstractionClaimedAt: row.abstraction_claimed_at instanceof Date ? row.abstraction_claimed_at.toISOString() : row.abstraction_claimed_at,
+    abstractionLeaseExpiresAt: row.abstraction_lease_expires_at instanceof Date ? row.abstraction_lease_expires_at.toISOString() : row.abstraction_lease_expires_at,
+    abstractionWorkerId: row.abstraction_worker_id,
+    abstractionRetryAt: row.abstraction_retry_at instanceof Date ? row.abstraction_retry_at.toISOString() : row.abstraction_retry_at,
     payloadBytes: row.payload_bytes,
     latencyMs: row.latency_ms,
     modelUsed: row.model_used,
@@ -603,6 +607,10 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_completed_at timestamptz`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS split_parent_chunk_id text`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS split_reason text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_claimed_at timestamptz`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_lease_expires_at timestamptz`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_worker_id text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_retry_at timestamptz`;
         await sql`
           CREATE TABLE IF NOT EXISTS document_abstracts (
             id text PRIMARY KEY,
@@ -626,6 +634,8 @@ function createPostgresJobStore() {
         await sql`CREATE INDEX IF NOT EXISTS idx_job_documents_job_status ON job_documents(job_id, upload_status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_status ON document_chunks(job_id, upload_status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_abstraction_status ON document_chunks(job_id, abstraction_status)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_abstraction_lease ON document_chunks(job_id, abstraction_status, abstraction_lease_expires_at)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_abstraction_retry ON document_chunks(job_id, abstraction_status, abstraction_retry_at)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_order ON document_chunks(job_id, chunk_order)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_document ON document_chunks(document_id)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_abstracts_job_chunk_order ON document_abstracts(job_id, chunk_id)`;
@@ -683,7 +693,10 @@ function createPostgresJobStore() {
         SELECT
           COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status <> 'split_superseded')::integer AS total,
           COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'completed')::integer AS completed,
-          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'failed')::integer AS failed
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'failed')::integer AS failed,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'retry_wait')::integer AS retry_wait,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'processing')::integer AS processing,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'pending')::integer AS pending
         FROM document_chunks
         WHERE job_id = ${jobId}
       )
@@ -697,9 +710,12 @@ function createPostgresJobStore() {
         current_phase = CASE
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total
             THEN 'Server abstraction finished: ' || counts.completed || ' completed, ' || counts.failed || ' failed'
+          WHEN counts.total > 0 AND counts.processing + counts.pending + counts.retry_wait > 0
+            THEN 'Server abstraction ' || counts.completed || '/' || counts.total || ' (' || counts.processing || ' running, ' || counts.retry_wait || ' awaiting retry)'
           ELSE 'Server abstraction ' || counts.completed || '/' || counts.total
         END,
         status = CASE
+          WHEN status = 'canceled' THEN 'canceled'
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed > 0 AND counts.failed > 0 THEN 'partial_failed'
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed > 0 THEN 'synthesizing'
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed = 0 THEN 'failed'
@@ -895,6 +911,126 @@ function createPostgresJobStore() {
       return rowToChunk(rows[0]);
     },
 
+    async claimChunkForAbstraction(jobId, chunkId, options = {}) {
+      await ensureSchema();
+      const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 90000) / 1000));
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'processing',
+          abstraction_attempts = abstraction_attempts + 1,
+          abstraction_error_type = NULL,
+          abstraction_error_message = NULL,
+          abstraction_claimed_at = now(),
+          abstraction_lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
+          abstraction_worker_id = ${workerId},
+          abstraction_retry_at = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND upload_status = 'uploaded'
+          AND (
+            abstraction_status = 'pending'
+            OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
+            OR (abstraction_status = 'processing' AND (abstraction_lease_expires_at IS NULL OR abstraction_lease_expires_at <= now()))
+          )
+        RETURNING *
+      `;
+      return rowToChunk(rows[0]);
+    },
+
+    async markChunkAbstractionRetryWait(jobId, chunkId, failure) {
+      await ensureSchema();
+      const retryAt = failure?.retryAtIso ? new Date(failure.retryAtIso) : null;
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'retry_wait',
+          abstraction_error_type = ${failure.errorType},
+          abstraction_error_message = ${failure.errorMessage},
+          abstraction_retry_at = ${retryAt},
+          abstraction_claimed_at = NULL,
+          abstraction_lease_expires_at = NULL,
+          abstraction_worker_id = NULL,
+          payload_bytes = ${failure.payloadBytes ?? null},
+          latency_ms = ${failure.latencyMs ?? null},
+          model_used = ${failure.modelUsed ?? null},
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${chunkId}
+        RETURNING *
+      `;
+      await refreshAbstractionCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async listReadyAbstractionChunks(jobId, limit = 8) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 8, 64));
+      const rows = await sql`
+        SELECT * FROM document_chunks
+        WHERE job_id = ${jobId}
+          AND upload_status = 'uploaded'
+          AND (
+            abstraction_status = 'pending'
+            OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
+            OR (abstraction_status = 'processing' AND (abstraction_lease_expires_at IS NULL OR abstraction_lease_expires_at <= now()))
+          )
+        ORDER BY chunk_order ASC, created_at ASC
+        LIMIT ${safeLimit}
+      `;
+      return rows.map(rowToChunk);
+    },
+
+    async refreshAbstractionRollup(jobId) {
+      await ensureSchema();
+      return await refreshAbstractionCounts(jobId);
+    },
+
+    async cancelJob(jobId, reason = null) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE analysis_jobs
+        SET status = 'canceled',
+            current_phase = 'canceled',
+            error_message = ${reason || 'Job canceled by user.'},
+            completed_at = COALESCE(completed_at, now()),
+            updated_at = now()
+        WHERE id = ${jobId}
+        RETURNING *
+      `;
+      await sql`
+        UPDATE document_chunks
+        SET abstraction_claimed_at = NULL,
+            abstraction_lease_expires_at = NULL,
+            abstraction_worker_id = NULL,
+            updated_at = now()
+        WHERE job_id = ${jobId}
+          AND abstraction_status = 'processing'
+      `;
+      return rowToJob(rows[0]);
+    },
+
+    async retryFailedChunks(jobId) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE document_chunks
+        SET abstraction_status = 'pending',
+            abstraction_error_type = NULL,
+            abstraction_error_message = NULL,
+            abstraction_retry_at = NULL,
+            abstraction_claimed_at = NULL,
+            abstraction_lease_expires_at = NULL,
+            abstraction_worker_id = NULL,
+            updated_at = now()
+        WHERE job_id = ${jobId}
+          AND abstraction_status IN ('failed', 'retry_wait')
+        RETURNING id
+      `;
+      if (rows.length) await refreshAbstractionCounts(jobId);
+      return rows.length;
+    },
+
     async markChunkAbstractionFailed(jobId, chunkId, failure) {
       await ensureSchema();
       const rows = await sql`
@@ -906,6 +1042,10 @@ function createPostgresJobStore() {
           payload_bytes = ${failure.payloadBytes ?? null},
           latency_ms = ${failure.latencyMs ?? null},
           model_used = ${failure.modelUsed ?? null},
+          abstraction_claimed_at = NULL,
+          abstraction_lease_expires_at = NULL,
+          abstraction_worker_id = NULL,
+          abstraction_retry_at = NULL,
           updated_at = now()
         WHERE job_id = ${jobId} AND id = ${chunkId}
         RETURNING *
@@ -994,6 +1134,10 @@ function createPostgresJobStore() {
           input_tokens = ${record.inputTokens},
           output_tokens = ${record.outputTokens},
           abstraction_completed_at = now(),
+          abstraction_claimed_at = NULL,
+          abstraction_lease_expires_at = NULL,
+          abstraction_worker_id = NULL,
+          abstraction_retry_at = NULL,
           updated_at = now()
         WHERE job_id = ${record.jobId} AND id = ${record.chunkId}
       `;
@@ -1024,12 +1168,17 @@ function createPostgresJobStore() {
           abstraction_status = 'pending',
           abstraction_error_type = NULL,
           abstraction_error_message = NULL,
+          abstraction_retry_at = NULL,
+          abstraction_claimed_at = NULL,
+          abstraction_lease_expires_at = NULL,
+          abstraction_worker_id = NULL,
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND abstraction_status = 'failed'
+          AND abstraction_status IN ('failed', 'retry_wait')
         RETURNING *
       `;
+      if (rows.length) await refreshAbstractionCounts(jobId);
       return rowToChunk(rows[0]);
     },
 
@@ -1047,6 +1196,7 @@ function createPostgresJobStore() {
         processing: counts.processing || 0,
         completed: counts.completed || 0,
         failed: counts.failed || 0,
+        retry_wait: counts.retry_wait || 0,
         failedChunks: chunks.filter(chunk => chunk.abstractionStatus === 'failed'),
         job: await this.getJob(jobId),
       };
@@ -1061,10 +1211,16 @@ function createPostgresJobStore() {
           abstraction_status = 'pending',
           abstraction_error_type = 'stale_processing_recovered',
           abstraction_error_message = 'Previous server-side abstraction attempt was interrupted and has been requeued.',
+          abstraction_claimed_at = NULL,
+          abstraction_lease_expires_at = NULL,
+          abstraction_worker_id = NULL,
           updated_at = now()
         WHERE job_id = ${jobId}
           AND abstraction_status = 'processing'
-          AND updated_at < now() - make_interval(secs => ${staleSeconds})
+          AND (
+            (abstraction_lease_expires_at IS NOT NULL AND abstraction_lease_expires_at <= now())
+            OR (abstraction_lease_expires_at IS NULL AND updated_at < now() - make_interval(secs => ${staleSeconds}))
+          )
         RETURNING *
       `;
       if (rows.length) await refreshAbstractionCounts(jobId);

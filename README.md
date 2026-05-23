@@ -66,6 +66,13 @@ Vercel runs the actual web app.
 | `ANALYZE_RATE_LIMIT_MAX` | Max API requests per IP per minute (default `300`, max `600`). Raise for large bulk runs (200+ documents). | Optional |
 | `BLOB_MAX_UPLOAD_BYTES` | Max size for each direct Blob upload (default `52428800`, 50 MB) | Optional |
 | `JOB_RETENTION_DAYS` | Planned retention window for durable job uploads/results; operators should align this with their cleanup policy | Optional |
+| `WORKFLOW_DRIVER` | Background workflow driver: `inprocess` (default, uses Postgres-backed leases) or `inngest` (requires `INNGEST_EVENT_KEY` + `INNGEST_SIGNING_KEY`; not implemented in this build) | Optional |
+| `WORKFLOW_BATCH_LIMIT` | Max chunks the worker claims per pass (default `6`, max `32`) | Optional |
+| `WORKFLOW_CONCURRENCY` | Concurrent in-flight chunks per worker pass (default `3`, max `12`) | Optional |
+| `WORKFLOW_BUDGET_MS` | Max time the worker spends draining chunks per invocation (default `45000`, max `55000` — stays under Vercel's 60s function ceiling) | Optional |
+| `WORKFLOW_LEASE_MS` | Per-chunk lease duration; expired leases are automatically requeued (default `90000`) | Optional |
+| `WORKFLOW_STALE_LEASE_MS` | Fallback stale-lease window when a lease is missing (default `120000`) | Optional |
+| `ABSTRACTION_MAX_ATTEMPTS` | Max abstraction attempts before a chunk is marked `failed` (default `5`) | Optional |
 
 4. Click **Deploy**
 5. Wait ~30 seconds — Vercel builds and deploys automatically
@@ -196,6 +203,7 @@ The AI is instructed never to guess on illegible content — it writes **ILLEGIB
 - **Hierarchical synthesis:** runs over 50 documents are synthesized in 50-document segments, then merged into one title opinion
 - **Client throttling:** automatic request pacing (~120 req/min) to stay within server rate limits during bulk runs
 - **Server-side durable abstraction:** when Postgres and Vercel Blob are configured, uploaded chunks are abstracted server-side from stored Blob objects, saved per chunk, and then passed into the existing browser-driven synthesis flow
+- **Durable background workflow:** abstraction runs as a Postgres-backed queue with per-chunk leases, bounded concurrency, automatic retry/backoff, and stale-lease recovery — large jobs continue independently of the browser tab and survive function timeouts
 - **Browser fallback:** if durable storage, Blob, or server abstraction is unavailable, the app warns the user and keeps the existing browser abstraction path
 - Progress bar and per-document status (for runs ≤50 files); summary progress for larger runs
 
@@ -255,7 +263,23 @@ When `DATABASE_URL`/`POSTGRES_URL`, `BLOB_READ_WRITE_TOKEN`, and `ANTHROPIC_API_
 
 Phase 3 stores abstract checkpoints in Postgres (`document_abstracts`) with chunk/job/document IDs, model, payload bytes, latency, token usage, status, attempts, and sanitized errors. It stores metadata and Blob references only for source chunks; it does not store raw PDF bytes, image bytes, base64 payloads, CSV text, or generated final title opinions in Postgres. PDF splitting still happens in the browser before upload. Final synthesis remains browser-driven for now.
 
-If the database, Blob token, or server abstraction setup is unavailable, the app returns a clear setup error, shows a warning that it is **falling back to browser abstraction**, and continues through the existing browser-only path. In that fallback mode, keep the tab open until the run completes because file bytes remain local to the browser.
+### Phase 4 — durable background workflow
+
+`POST /api/jobs/:id/abstraction/start` no longer blocks until every chunk finishes. Instead it returns `202 Accepted` after marking the job as `abstracting` and scheduling background work. The worker then claims one chunk at a time under a 90-second Postgres lease (`document_chunks.abstraction_lease_expires_at` + `abstraction_worker_id`), processes it under bounded concurrency (default 3 in-flight, up to 6 per pass), and persists the result before releasing the lease. Each pass runs up to ~45s so it stays well under Vercel's 60-second function ceiling.
+
+Chunk status transitions are durable: `pending → processing → completed`, with `retry_wait` and `split_superseded` paths for transient errors and 413/504 PDF splits. Rate-limit, upstream timeout, provider, and storage errors are retried with exponential backoff (`Retry-After` respected); when attempts are exhausted, the chunk becomes `failed` so the rest of the run is preserved. If a worker dies mid-flight, the next caller (status poll, start, or process) automatically resets stale leases back to `pending` so the chunk gets another worker. Completed chunks are never re-processed unless explicitly retried.
+
+The frontend polls `/abstraction/status` (counts now include `retry_wait`/`processing`). When progress stalls — for example because the previous worker invocation hit its 45s budget — the frontend re-issues `/abstraction/start`, which kicks another bounded pass. Cron, scripts, or external workflow tools can drain a batch synchronously with `POST /api/jobs/:id/abstraction/process` instead.
+
+Three additional endpoints round out Phase 4:
+
+- `POST /api/jobs/:id/cancel` — marks the job `canceled` (idempotent). The worker checks job status before each chunk and exits cleanly. Existing completed abstracts remain readable.
+- `POST /api/jobs/:id/retry-failed` — resets every `failed`/`retry_wait` chunk back to `pending` and kicks the worker. Completed abstracts are preserved.
+- `POST /api/jobs/:id/chunks/:chunkId/retry` — Phase 3 endpoint, still available for retrying a single chunk.
+
+Workflow tuning: see `WORKFLOW_*` env vars in [Step 4](#step-4--deploy-to-vercel). To plug in a different workflow driver (e.g. Inngest) later, set `WORKFLOW_DRIVER=inngest`; until that adapter ships, requests with that driver return a 503 setup error rather than silently regressing.
+
+If the database, Blob token, or workflow setup is unavailable, the app returns a clear setup error (`503` with `fallback: "browser_abstraction"`), the frontend shows a warning that it is **falling back to browser abstraction**, and the run continues through the existing browser-only path. In that fallback mode, keep the tab open until the run completes because file bytes remain local to the browser.
 
 ---
 
