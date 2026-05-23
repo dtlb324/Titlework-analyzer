@@ -1154,9 +1154,75 @@ function renderJobResults(job, result) {
   if (el) el.innerHTML = '';
 }
 
-// Placeholder until Task 4 fills it in
 async function loadJobView(jobId) {
-  console.log('loadJobView stub', jobId);
+  const headerEl = document.getElementById('jobHeader');
+  if (!jobId) {
+    if (headerEl) headerEl.innerHTML = '<div class="error-msg"><strong>No job specified.</strong></div>';
+    return;
+  }
+  if (headerEl) headerEl.innerHTML = '<div style="color:#8a6f4a">Loading job…</div>';
+  let res;
+  try {
+    res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: 'GET',
+      headers: getJobHeaders(),
+    });
+  } catch (err) {
+    headerEl.innerHTML = `<div class="error-msg"><strong>Network error</strong><br>${esc(err.message || 'Could not reach server.')}</div>`;
+    return;
+  }
+  if (res.status === 401) {
+    document.getElementById('mainApp').style.display = 'none';
+    document.getElementById('passwordGate').style.display = 'block';
+    return;
+  }
+  if (res.status === 404) {
+    headerEl.innerHTML = '<div class="error-msg"><strong>Job not found.</strong> It may have expired or the link is wrong.</div>';
+    return;
+  }
+  const data = await res.json();
+  if (!res.ok) {
+    headerEl.innerHTML = `<div class="error-msg"><strong>Could not load job</strong><br>${esc(data.error || `HTTP ${res.status}`)}</div>`;
+    return;
+  }
+  const job = data.job;
+  rememberRecentJob(job);
+  await applyJobToView(job);
+  if (!TERMINAL_STATUSES.has(job.status)) {
+    startJobPoller(jobId, applyJobToView, async terminalJob => {
+      rememberRecentJob(terminalJob);
+      await applyJobToView(terminalJob);
+    });
+  }
+}
+
+async function applyJobToView(job) {
+  renderJobHeader(job);
+  renderJobProgressView(job);
+  renderJobStepper(job);
+  renderJobDetail(job);
+  renderJobActions(job);
+  if (job.status === 'complete' || job.status === 'partial_failed') {
+    let result = null;
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/result`, {
+        method: 'GET',
+        headers: getJobHeaders(),
+      });
+      if (r.ok) {
+        const payload = await r.json();
+        result = payload.result || null;
+      }
+    } catch (err) {
+      console.warn('Could not fetch durable job result', err);
+    }
+    renderJobResults(job, result);
+  } else {
+    renderJobResults(job, null);
+  }
+}
+function rememberRecentJob(job) {
+  // Filled in by Task 8
 }
 function renderRecentJobsView() {
   // Filled in by Task 8

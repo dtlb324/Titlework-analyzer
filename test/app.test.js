@@ -235,6 +235,22 @@ test('Phase 6: stopJobPoller cancels any pending poll', () => {
   assert(script.includes('function stopJobPoller'), 'Missing stopJobPoller()');
 });
 
+test('Phase 6: loadJobView fetches the job and hydrates the view', () => {
+  assert(script.includes('async function loadJobView'), 'Missing loadJobView()');
+  assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}`'),
+    'loadJobView must call GET /api/jobs/:id');
+  assert(script.includes('renderJobHeader(job)') &&
+         script.includes('renderJobProgressView(job)') &&
+         script.includes('renderJobStepper(job)'),
+    'loadJobView must invoke header/progress/stepper renderers');
+  assert(script.includes('Job not found'), 'loadJobView must handle 404 with friendly copy');
+});
+
+test('Phase 6: terminal job hydrates result via /result', () => {
+  assert(script.includes('/api/jobs/${encodeURIComponent(job.id)}/result'),
+    'Job view must fetch /result on terminal status');
+});
+
 
 let passed = 0;
 let failed = 0;
