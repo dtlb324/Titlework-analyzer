@@ -1,8 +1,4 @@
-import documentsHandler from '../api/jobs/[id]/documents.js';
-import chunksHandler from '../api/jobs/[id]/documents/[documentId]/chunks.js';
-import chunkHandler from '../api/jobs/[id]/chunks/[chunkId].js';
-import chunkListHandler from '../api/jobs/[id]/chunks/index.js';
-import finalizeUploadsHandler from '../api/jobs/[id]/finalize-uploads.js';
+import jobsRouteHandler from '../api/jobs/[...path].js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -14,14 +10,14 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-function mockReq(method, body = null, headers = {}, query = {}) {
+function mockReq(method, body = null, headers = {}, query = {}, url = '/api/jobs/job_test_1') {
   return {
     method,
     body,
     query,
     headers: { 'x-forwarded-for': '203.0.113.45', ...headers },
     socket: { remoteAddress: '127.0.0.1' },
-    url: '/api/jobs/job_test_1',
+    url,
   };
 }
 
@@ -152,13 +148,13 @@ test('POST /api/jobs/:id/documents registers durable document metadata', async (
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
   const res = mockRes();
 
-  await documentsHandler(mockReq('POST', {
+  await jobsRouteHandler(mockReq('POST', {
     originalFilename: 'Deed.pdf',
     mediaType: 'application/pdf',
     sizeBytes: 123456,
     fingerprint: 'deed-fingerprint',
     checksumSha256: 'a'.repeat(64),
-  }, {}, { id: 'job_test_1' }), res);
+  }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/documents'), res);
 
   assert(res.statusCode === 201, `Expected 201, got ${res.statusCode}`);
   assert(res.body.document.id === 'doc_test_1', 'Expected document id');
@@ -180,7 +176,7 @@ test('POST /api/jobs/:id/documents/:documentId/chunks registers durable chunk me
   });
   const res = mockRes();
 
-  await chunksHandler(mockReq('POST', {
+  await jobsRouteHandler(mockReq('POST', {
     chunkOrder: 0,
     originalFilename: 'Deed (pp 1-3).pdf',
     mediaType: 'application/pdf',
@@ -190,7 +186,7 @@ test('POST /api/jobs/:id/documents/:documentId/chunks registers durable chunk me
     splitFrom: 'Deed.pdf',
     fingerprint: 'deed-chunk-fingerprint',
     checksumSha256: 'b'.repeat(64),
-  }, {}, { id: 'job_test_1', documentId: 'doc_test_1' }), res);
+  }, {}, { id: 'job_test_1', documentId: 'doc_test_1' }, '/api/jobs/job_test_1/documents/doc_test_1/chunks'), res);
 
   assert(res.statusCode === 201, `Expected 201, got ${res.statusCode}`);
   assert(res.body.chunk.id === 'chk_test_1', 'Expected chunk id');
@@ -220,18 +216,18 @@ test('PATCH /api/jobs/:id/chunks/:chunkId updates upload status and GET lists ch
   });
 
   const patchRes = mockRes();
-  await chunkHandler(mockReq('PATCH', {
+  await jobsRouteHandler(mockReq('PATCH', {
     uploadStatus: 'uploaded',
     blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
     blobUrl: 'https://blob.vercel-storage.com/private/deed.pdf',
-  }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }), patchRes);
+  }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), patchRes);
 
   assert(patchRes.statusCode === 200, `Expected 200, got ${patchRes.statusCode}`);
   assert(patchRes.body.chunk.uploadStatus === 'uploaded', 'Expected uploaded status');
   assert(patchRes.body.chunk.blobUrl.includes('blob.vercel-storage.com'), 'Expected blob URL');
 
   const listRes = mockRes();
-  await chunkListHandler(mockReq('GET', null, {}, { id: 'job_test_1' }), listRes);
+  await jobsRouteHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/chunks'), listRes);
 
   assert(listRes.statusCode === 200, `Expected 200, got ${listRes.statusCode}`);
   assert(listRes.body.chunks.length === 1, 'Expected one chunk');
@@ -259,7 +255,7 @@ test('POST /api/jobs/:id/finalize-uploads marks job ready after all chunks uploa
   await store.updateChunk('job_test_1', 'chk_test_1', { uploadStatus: 'uploaded' });
 
   const res = mockRes();
-  await finalizeUploadsHandler(mockReq('POST', null, {}, { id: 'job_test_1' }), res);
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
 
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.job.status === 'ready', 'Expected job ready after finalize');
@@ -270,24 +266,24 @@ test('durable upload endpoints reject raw base64 and document contents', async (
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
 
   const documentRes = mockRes();
-  await documentsHandler(mockReq('POST', {
+  await jobsRouteHandler(mockReq('POST', {
     originalFilename: 'Deed.pdf',
     mediaType: 'application/pdf',
     sizeBytes: 123456,
     fingerprint: 'deed-fingerprint',
     data: 'JVBERi0xLjQ=',
-  }, {}, { id: 'job_test_1' }), documentRes);
+  }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/documents'), documentRes);
   assert(documentRes.statusCode === 400, `Expected document rejection, got ${documentRes.statusCode}`);
 
   const chunkRes = mockRes();
-  await chunksHandler(mockReq('POST', {
+  await jobsRouteHandler(mockReq('POST', {
     chunkOrder: 0,
     originalFilename: 'Deed.pdf',
     mediaType: 'application/pdf',
     sizeBytes: 123456,
     fingerprint: 'deed-chunk-fingerprint',
     base64: 'JVBERi0xLjQ=',
-  }, {}, { id: 'job_test_1', documentId: 'doc_test_1' }), chunkRes);
+  }, {}, { id: 'job_test_1', documentId: 'doc_test_1' }, '/api/jobs/job_test_1/documents/doc_test_1/chunks'), chunkRes);
   assert(chunkRes.statusCode === 400, `Expected chunk rejection, got ${chunkRes.statusCode}`);
 });
 

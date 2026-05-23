@@ -21,10 +21,10 @@ const VALID_TRANSITIONS = {
   ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'failed', 'canceled']),
   queued: new Set(['queued', 'planning', 'abstracting', 'failed', 'canceled']),
   planning: new Set(['planning', 'abstracting', 'failed', 'canceled']),
-  abstracting: new Set(['abstracting', 'synthesizing', 'failed']),
+  abstracting: new Set(['abstracting', 'synthesizing', 'partial_failed', 'failed']),
   synthesizing: new Set(['synthesizing', 'complete', 'partial_failed', 'failed']),
   complete: new Set(['complete']),
-  partial_failed: new Set(['partial_failed']),
+  partial_failed: new Set(['partial_failed', 'synthesizing', 'complete', 'failed']),
   failed: new Set(['failed']),
   canceled: new Set(['canceled']),
 };
@@ -35,6 +35,7 @@ const MAX_FINGERPRINT_LENGTH = 512;
 const MAX_BLOB_REF_LENGTH = 2048;
 const DOCUMENT_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed', 'skipped']);
 const CHUNK_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed']);
+const CHUNK_ABSTRACTION_STATUSES = new Set(['pending', 'processing', 'completed', 'failed', 'split_superseded']);
 const JOB_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const JOB_RATE_LIMIT_MAX_REQUESTS = 120;
 const RAW_PAYLOAD_KEYS = new Set([
@@ -166,6 +167,16 @@ function normalizeChecksum(value) {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string' || !/^[a-f0-9]{32,128}$/i.test(value.trim())) return false;
   return value.trim().toLowerCase();
+}
+
+function isAllowedBlobUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return parsed.protocol === 'https:' && (host === 'blob.vercel-storage.com' || host.endsWith('.blob.vercel-storage.com'));
+  } catch {
+    return false;
+  }
 }
 
 function sanitizeFilenameForBlob(name) {
@@ -362,7 +373,7 @@ export function validatePatchChunkInput(input) {
     patch.blobKey = input.blobKey;
   }
   if (input.blobUrl !== undefined) {
-    if (!isSafeMetadataString(input.blobUrl, MAX_BLOB_REF_LENGTH) || !/^https:\/\//i.test(input.blobUrl)) {
+    if (!isSafeMetadataString(input.blobUrl, MAX_BLOB_REF_LENGTH) || !isAllowedBlobUrl(input.blobUrl)) {
       return { valid: false, reason: 'Invalid blobUrl.' };
     }
     patch.blobUrl = input.blobUrl;
@@ -401,6 +412,9 @@ function rowToJob(row) {
     failedDocuments: row.failed_documents,
     completedChunks: row.completed_chunks ?? 0,
     failedChunks: row.failed_chunks ?? 0,
+    abstractChunkTotal: row.abstract_chunk_total ?? row.total_chunks ?? 0,
+    abstractChunkCompleted: row.abstract_chunk_completed ?? 0,
+    abstractChunkFailed: row.abstract_chunk_failed ?? 0,
     currentPhase: row.current_phase,
     errorMessage: row.error_message,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
@@ -452,9 +466,43 @@ function rowToChunk(row) {
     uploadStatus: row.upload_status,
     uploadAttempts: row.upload_attempts,
     lastErrorMessage: row.last_error_message,
+    abstractionStatus: row.abstraction_status || 'pending',
+    abstractionAttempts: row.abstraction_attempts ?? 0,
+    abstractionErrorType: row.abstraction_error_type,
+    abstractionErrorMessage: row.abstraction_error_message,
+    payloadBytes: row.payload_bytes,
+    latencyMs: row.latency_ms,
+    modelUsed: row.model_used,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
     completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+    abstractionCompletedAt: row.abstraction_completed_at instanceof Date ? row.abstraction_completed_at.toISOString() : row.abstraction_completed_at,
+  };
+}
+
+function rowToAbstract(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    documentId: row.document_id,
+    chunkId: row.chunk_id,
+    chunkOrder: row.chunk_order,
+    originalFilename: row.original_filename,
+    abstractText: row.abstract_text,
+    modelUsed: row.model_used,
+    payloadBytes: row.payload_bytes,
+    latencyMs: row.latency_ms,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    errorType: row.error_type,
+    errorMessage: row.error_message,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
   };
 }
 
@@ -496,6 +544,9 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS total_chunks integer NOT NULL DEFAULT 0 CHECK (total_chunks >= 0)`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS completed_chunks integer NOT NULL DEFAULT 0 CHECK (completed_chunks >= 0)`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS failed_chunks integer NOT NULL DEFAULT 0 CHECK (failed_chunks >= 0)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS abstract_chunk_total integer NOT NULL DEFAULT 0 CHECK (abstract_chunk_total >= 0)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS abstract_chunk_completed integer NOT NULL DEFAULT 0 CHECK (abstract_chunk_completed >= 0)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS abstract_chunk_failed integer NOT NULL DEFAULT 0 CHECK (abstract_chunk_failed >= 0)`;
         await sql`
           CREATE TABLE IF NOT EXISTS job_documents (
             id text PRIMARY KEY,
@@ -540,10 +591,44 @@ function createPostgresJobStore() {
             completed_at timestamptz
           )
         `;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_status text NOT NULL DEFAULT 'pending'`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_attempts integer NOT NULL DEFAULT 0 CHECK (abstraction_attempts >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_type text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_message text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS payload_bytes integer CHECK (payload_bytes IS NULL OR payload_bytes >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS latency_ms integer CHECK (latency_ms IS NULL OR latency_ms >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS model_used text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS input_tokens integer CHECK (input_tokens IS NULL OR input_tokens >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS output_tokens integer CHECK (output_tokens IS NULL OR output_tokens >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_completed_at timestamptz`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS split_parent_chunk_id text`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS split_reason text`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS document_abstracts (
+            id text PRIMARY KEY,
+            job_id text NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            document_id text NOT NULL REFERENCES job_documents(id) ON DELETE CASCADE,
+            chunk_id text NOT NULL REFERENCES document_chunks(id) ON DELETE CASCADE UNIQUE,
+            abstract_text text NOT NULL,
+            model_used text,
+            payload_bytes integer NOT NULL CHECK (payload_bytes >= 0),
+            latency_ms integer NOT NULL CHECK (latency_ms >= 0),
+            input_tokens integer,
+            output_tokens integer,
+            status text NOT NULL,
+            attempt_count integer NOT NULL DEFAULT 1 CHECK (attempt_count >= 0),
+            error_type text,
+            error_message text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+          )
+        `;
         await sql`CREATE INDEX IF NOT EXISTS idx_job_documents_job_status ON job_documents(job_id, upload_status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_status ON document_chunks(job_id, upload_status)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_abstraction_status ON document_chunks(job_id, abstraction_status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_order ON document_chunks(job_id, chunk_order)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_document ON document_chunks(document_id)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_document_abstracts_job_chunk_order ON document_abstracts(job_id, chunk_id)`;
       })();
     }
     await initialized;
@@ -590,6 +675,42 @@ function createPostgresJobStore() {
       RETURNING job_documents.*
     `;
     return rowToDocument(rows[0]);
+  }
+
+  async function refreshAbstractionCounts(jobId) {
+    const rows = await sql`
+      WITH counts AS (
+        SELECT
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status <> 'split_superseded')::integer AS total,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'completed')::integer AS completed,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'failed')::integer AS failed
+        FROM document_chunks
+        WHERE job_id = ${jobId}
+      )
+      UPDATE analysis_jobs
+      SET
+        abstract_chunk_total = counts.total,
+        abstract_chunk_completed = counts.completed,
+        abstract_chunk_failed = counts.failed,
+        completed_documents = counts.completed,
+        failed_documents = counts.failed,
+        current_phase = CASE
+          WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total
+            THEN 'Server abstraction finished: ' || counts.completed || ' completed, ' || counts.failed || ' failed'
+          ELSE 'Server abstraction ' || counts.completed || '/' || counts.total
+        END,
+        status = CASE
+          WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed > 0 AND counts.failed > 0 THEN 'partial_failed'
+          WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed > 0 THEN 'synthesizing'
+          WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed = 0 THEN 'failed'
+          ELSE 'abstracting'
+        END,
+        updated_at = now()
+      FROM counts
+      WHERE id = ${jobId}
+      RETURNING analysis_jobs.*
+    `;
+    return rowToJob(rows[0]);
   }
 
   return {
@@ -742,6 +863,211 @@ function createPostgresJobStore() {
         WHERE job_id = ${jobId}
         ORDER BY chunk_order ASC, created_at ASC
       `;
+      return rows.map(rowToChunk);
+    },
+
+    async getChunk(jobId, chunkId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT * FROM document_chunks
+        WHERE job_id = ${jobId} AND id = ${chunkId}
+        LIMIT 1
+      `;
+      return rowToChunk(rows[0]);
+    },
+
+    async markChunkAbstractionProcessing(jobId, chunkId) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'processing',
+          abstraction_attempts = abstraction_attempts + 1,
+          abstraction_error_type = NULL,
+          abstraction_error_message = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND upload_status = 'uploaded'
+          AND abstraction_status = 'pending'
+        RETURNING *
+      `;
+      return rowToChunk(rows[0]);
+    },
+
+    async markChunkAbstractionFailed(jobId, chunkId, failure) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'failed',
+          abstraction_error_type = ${failure.errorType},
+          abstraction_error_message = ${failure.errorMessage},
+          payload_bytes = ${failure.payloadBytes ?? null},
+          latency_ms = ${failure.latencyMs ?? null},
+          model_used = ${failure.modelUsed ?? null},
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${chunkId}
+        RETURNING *
+      `;
+      await refreshAbstractionCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async markChunkAbstractionSplitSuperseded(jobId, chunkId, reason) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'split_superseded',
+          abstraction_error_type = ${reason},
+          abstraction_error_message = 'PDF chunk was split into smaller child chunks for retry.',
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${chunkId}
+        RETURNING *
+      `;
+      await refreshAbstractionCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async createSplitChunk(jobId, documentId, input) {
+      await ensureSchema();
+      const id = `chk_${randomUUID()}`;
+      const rows = await sql`
+        INSERT INTO document_chunks (
+          id, job_id, document_id, chunk_order, original_filename, blob_key,
+          blob_url, media_type, size_bytes, page_start, page_end, split_from,
+          fingerprint, checksum_sha256, upload_status, abstraction_status,
+          split_parent_chunk_id, split_reason
+        )
+        VALUES (
+          ${id}, ${jobId}, ${documentId}, ${input.chunkOrder}, ${input.originalFilename}, ${input.blobKey},
+          ${input.blobUrl}, ${input.mediaType}, ${input.sizeBytes}, ${input.pageStart}, ${input.pageEnd}, ${input.splitFrom},
+          ${input.fingerprint}, ${input.checksumSha256}, 'uploaded', 'pending',
+          ${input.splitParentChunkId}, ${input.splitReason}
+        )
+        RETURNING *
+      `;
+      await refreshDocumentCounts(jobId, documentId);
+      await refreshUploadCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
+    async saveDocumentAbstract(record) {
+      await ensureSchema();
+      const id = `abs_${randomUUID()}`;
+      const rows = await sql`
+        INSERT INTO document_abstracts (
+          id, job_id, document_id, chunk_id, abstract_text, model_used,
+          payload_bytes, latency_ms, input_tokens, output_tokens,
+          status, attempt_count, error_type, error_message
+        )
+        VALUES (
+          ${id}, ${record.jobId}, ${record.documentId}, ${record.chunkId}, ${record.abstractText}, ${record.modelUsed},
+          ${record.payloadBytes}, ${record.latencyMs}, ${record.inputTokens}, ${record.outputTokens},
+          ${record.status}, ${record.attemptCount}, ${record.errorType ?? null}, ${record.errorMessage ?? null}
+        )
+        ON CONFLICT (chunk_id) DO UPDATE
+        SET
+          abstract_text = EXCLUDED.abstract_text,
+          model_used = EXCLUDED.model_used,
+          payload_bytes = EXCLUDED.payload_bytes,
+          latency_ms = EXCLUDED.latency_ms,
+          input_tokens = EXCLUDED.input_tokens,
+          output_tokens = EXCLUDED.output_tokens,
+          status = EXCLUDED.status,
+          attempt_count = EXCLUDED.attempt_count,
+          error_type = EXCLUDED.error_type,
+          error_message = EXCLUDED.error_message,
+          updated_at = now()
+        RETURNING *
+      `;
+      await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'completed',
+          abstraction_error_type = NULL,
+          abstraction_error_message = NULL,
+          payload_bytes = ${record.payloadBytes},
+          latency_ms = ${record.latencyMs},
+          model_used = ${record.modelUsed},
+          input_tokens = ${record.inputTokens},
+          output_tokens = ${record.outputTokens},
+          abstraction_completed_at = now(),
+          updated_at = now()
+        WHERE job_id = ${record.jobId} AND id = ${record.chunkId}
+      `;
+      await refreshAbstractionCounts(record.jobId);
+      return rowToAbstract(rows[0]);
+    },
+
+    async listDocumentAbstracts(jobId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT
+          da.*,
+          dc.chunk_order,
+          dc.original_filename
+        FROM document_abstracts da
+        JOIN document_chunks dc ON dc.id = da.chunk_id
+        WHERE da.job_id = ${jobId}
+        ORDER BY dc.chunk_order ASC, da.created_at ASC
+      `;
+      return rows.map(rowToAbstract);
+    },
+
+    async resetChunkAbstraction(jobId, chunkId) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'pending',
+          abstraction_error_type = NULL,
+          abstraction_error_message = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND abstraction_status = 'failed'
+        RETURNING *
+      `;
+      return rowToChunk(rows[0]);
+    },
+
+    async getAbstractionStatus(jobId) {
+      await ensureSchema();
+      const chunks = (await this.listChunks(jobId)).filter(chunk => chunk.abstractionStatus !== 'split_superseded');
+      const counts = chunks.reduce((acc, chunk) => {
+        const status = chunk.abstractionStatus || 'pending';
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      }, {});
+      return {
+        total: chunks.length,
+        pending: counts.pending || 0,
+        processing: counts.processing || 0,
+        completed: counts.completed || 0,
+        failed: counts.failed || 0,
+        failedChunks: chunks.filter(chunk => chunk.abstractionStatus === 'failed'),
+        job: await this.getJob(jobId),
+      };
+    },
+
+    async resetStaleProcessingChunks(jobId, staleMs = 120000) {
+      await ensureSchema();
+      const staleSeconds = Math.max(1, Math.ceil(Number(staleMs) / 1000));
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_status = 'pending',
+          abstraction_error_type = 'stale_processing_recovered',
+          abstraction_error_message = 'Previous server-side abstraction attempt was interrupted and has been requeued.',
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND abstraction_status = 'processing'
+          AND updated_at < now() - make_interval(secs => ${staleSeconds})
+        RETURNING *
+      `;
+      if (rows.length) await refreshAbstractionCounts(jobId);
       return rows.map(rowToChunk);
     },
 

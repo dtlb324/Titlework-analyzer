@@ -1122,6 +1122,75 @@ async function finalizeJobUploads(jobId) {
   return data.job;
 }
 
+async function startServerAbstraction(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/abstraction/start`, {
+    method: 'POST',
+  });
+}
+
+async function fetchServerAbstractionStatus(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/abstraction/status`, {
+    method: 'GET',
+  });
+}
+
+async function fetchServerAbstracts(jobId) {
+  const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/abstracts`, {
+    method: 'GET',
+  });
+  return (data.abstracts || []).map(item => ({
+    filename: item.filename || item.originalFilename || item.chunkId,
+    abstract: item.abstract || item.abstractText || '',
+    chunkId: item.chunkId,
+    documentId: item.documentId,
+  }));
+}
+
+function isServerAbstractionTerminal(status) {
+  if (!status) return false;
+  const total = status.total || 0;
+  return total > 0 && (status.completed || 0) + (status.failed || 0) >= total;
+}
+
+async function pollServerAbstraction(jobId, items, totalDocuments) {
+  let latest = null;
+  for (let attempt = 0; attempt < 240; attempt++) {
+    latest = await fetchServerAbstractionStatus(jobId);
+    const status = latest.status || {};
+    const completed = status.completed || 0;
+    const failed = status.failed || 0;
+    const total = status.total || totalDocuments || 0;
+    const pct = total ? Math.round(Math.min(85, ((completed + failed) / total) * 85)) : 8;
+    if (items?.[0] && items.length <= 2) {
+      items[0].status = isServerAbstractionTerminal(status) ? 'done' : 'active';
+      items[0].label = `Server abstracted ${completed} of ${total} chunks${failed ? `; ${failed} failed` : ''}...`;
+    }
+    updateProgress(pct, `Server-side abstraction ${completed}/${total}${failed ? ` (${failed} failed)` : ''}...`, items);
+    if (isServerAbstractionTerminal(status)) return latest;
+    await sleep(1000);
+  }
+  throw new Error('Server-side abstraction did not finish polling in this browser session.');
+}
+
+async function runServerDocumentAbstraction(jobId, fileList, items) {
+  updateProgress(8, 'Starting server-side abstraction from durable chunks...', items);
+  const start = await startServerAbstraction(jobId);
+  const latest = isServerAbstractionTerminal(start.status)
+    ? start
+    : await pollServerAbstraction(jobId, items, fileList.length);
+  const status = latest.status || {};
+  const abstracts = await fetchServerAbstracts(jobId);
+  if (!abstracts.length) {
+    throw new Error('Server-side abstraction failed before saving any abstracts; falling back to browser abstraction.');
+  }
+  if ((status.failed || 0) > 0) {
+    showError(`Server-side abstraction completed with ${status.failed} failed chunk(s); continuing synthesis with ${abstracts.length} saved abstract(s). Retry failed chunks from the job status API before final use if needed.`);
+  }
+  activeJobCompletedDocuments = Math.max(activeJobCompletedDocuments, abstracts.length);
+  updateProgress(85, `Loaded ${abstracts.length} saved server abstract${abstracts.length === 1 ? '' : 's'}...`, items);
+  return abstracts;
+}
+
 async function registerJobUploads(jobId, fileList) {
   const status = await getDurableStorageStatus();
   if (!status.available) {
@@ -1924,30 +1993,45 @@ async function analyze() {
   activeProgressTimer = createProgressTimer(files, files.length);
   setProgressEta(formatInitialEstimate(activeProgressTimer));
   updateProgress(0, `Starting analysis of ${files.length} document${files.length === 1 ? '' : 's'}...`, items);
-  await safePatchAnalysisJob(job.id, {
-    status: 'abstracting',
-    completedDocuments: 0,
-    failedDocuments: 0,
-    currentPhase: `Starting analysis of ${files.length} document${files.length === 1 ? '' : 's'}`,
-  });
+  let usedServerAbstraction = false;
+  let serverAbstractionFailedCount = 0;
 
-  try {
-    documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id);
-  } catch (e) {
+  if (uploadRegistration.durable) {
+    try {
+      documentAbstracts = await runServerDocumentAbstraction(job.id, files, items);
+      usedServerAbstraction = true;
+      serverAbstractionFailedCount = Math.max(0, files.length - documentAbstracts.length);
+    } catch (serverErr) {
+      showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);
+    }
+  }
+
+  if (!usedServerAbstraction) {
     await safePatchAnalysisJob(job.id, {
-      status: 'failed',
-      completedDocuments: activeJobCompletedDocuments,
-      failedDocuments: Math.max(0, files.length - activeJobCompletedDocuments),
-      currentPhase: 'abstracting',
-      errorMessage: e.message,
+      status: 'abstracting',
+      completedDocuments: 0,
+      failedDocuments: 0,
+      currentPhase: `Starting analysis of ${files.length} document${files.length === 1 ? '' : 's'}`,
     });
-    showError(e.message);
-    clearProgressTimer();
-    stopJobPolling();
-    document.getElementById('progressSection').style.display = 'none';
-    document.getElementById('uploadSection').style.display = 'block';
-    document.getElementById('analyzeBtn').disabled = false;
-    return;
+
+    try {
+      documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id);
+    } catch (e) {
+      await safePatchAnalysisJob(job.id, {
+        status: 'failed',
+        completedDocuments: activeJobCompletedDocuments,
+        failedDocuments: Math.max(0, files.length - activeJobCompletedDocuments),
+        currentPhase: 'abstracting',
+        errorMessage: e.message,
+      });
+      showError(e.message);
+      clearProgressTimer();
+      stopJobPolling();
+      document.getElementById('progressSection').style.display = 'none';
+      document.getElementById('uploadSection').style.display = 'block';
+      document.getElementById('analyzeBtn').disabled = false;
+      return;
+    }
   }
 
   // Synthesis
@@ -1957,7 +2041,7 @@ async function analyze() {
   await safePatchAnalysisJob(job.id, {
     status: 'synthesizing',
     completedDocuments: documentAbstracts.length,
-    failedDocuments: 0,
+    failedDocuments: serverAbstractionFailedCount,
     currentPhase: 'Synthesizing chain of title and final ownership',
   });
 
@@ -1979,17 +2063,17 @@ async function analyze() {
       safePatchAnalysisJob(job.id, {
         status: 'synthesizing',
         completedDocuments: documentAbstracts.length,
-        failedDocuments: 0,
+        failedDocuments: serverAbstractionFailedCount,
         currentPhase: status,
       });
     });
     items[items.length - 1].status = 'done';
-    updateProgress(100, `Analysis complete — ${files.length} documents processed`, items);
+    updateProgress(100, `Analysis complete — ${documentAbstracts.length} document abstracts synthesized${serverAbstractionFailedCount ? ` (${serverAbstractionFailedCount} failed chunk(s) omitted)` : ''}`, items);
     await safePatchAnalysisJob(job.id, {
-      status: 'complete',
-      completedDocuments: files.length,
-      failedDocuments: 0,
-      currentPhase: 'complete',
+      status: serverAbstractionFailedCount ? 'partial_failed' : 'complete',
+      completedDocuments: documentAbstracts.length,
+      failedDocuments: serverAbstractionFailedCount,
+      currentPhase: serverAbstractionFailedCount ? 'complete with abstraction warnings' : 'complete',
       errorMessage: null,
     });
     clearProgressTimer();

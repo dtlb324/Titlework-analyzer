@@ -7,7 +7,7 @@ import {
   sendStorageNotConfigured,
   setJobSecurityHeaders,
   validateCreateJobInput,
-} from '../_lib/jobs.js';
+} from './_lib/jobs.js';
 
 export const config = {
   runtime: 'nodejs',

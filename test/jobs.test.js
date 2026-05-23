@@ -1,5 +1,5 @@
-import jobsHandler from '../api/jobs/index.js';
-import jobHandler from '../api/jobs/[id].js';
+import jobsHandler from '../api/jobs.js';
+import jobHandler from '../api/jobs/[...path].js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -22,6 +22,7 @@ function mockReq(method, body = null, headers = {}, query = {}) {
     query,
     headers: { 'x-forwarded-for': '203.0.113.25', ...headers },
     socket: { remoteAddress: '127.0.0.1' },
+    url: query.id ? `/api/jobs/${query.id}` : '/api/jobs',
   };
 }
 
