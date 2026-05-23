@@ -64,9 +64,9 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing timeout PDF split retry');
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
   assert(script.includes('finalizeBatchesForTimeout'), 'Missing timeout batch finalizer');
-  assert(script.includes('VERCEL_FUNCTION_TIMEOUT_MS = 45_000'), 'Vercel timeout budget should leave platform margin');
-  assert(script.includes('REQUEST_ENVELOPE_SAFE_BYTES = 3_900_000'), 'Missing safe request envelope budget');
-  assert(script.includes('VERCEL_MAX_REQUEST_BYTES'), 'Missing Vercel payload guard');
+  assert(script.includes('CLOUD_RUN_REQUEST_TIMEOUT_MS = 240_000'), 'Missing Cloud Run request timeout budget');
+  assert(script.includes('REQUEST_ENVELOPE_SAFE_BYTES = 12_000_000'), 'Missing larger Cloud Run request envelope budget');
+  assert(script.includes('CLOUD_RUN_MAX_REQUEST_BYTES'), 'Missing Cloud Run payload guard');
   assert(script.includes('buildAbstractMessages'), 'Missing abstract message builder');
   assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
 });
@@ -154,7 +154,7 @@ test('shows estimated processing time during runs', () => {
 
 
 test('proactively splits batches before timeout', () => {
-  assert(script.includes('VERCEL_FUNCTION_TIMEOUT_MS = 45_000'), 'Missing safer Vercel timeout budget');
+  assert(script.includes('CLOUD_RUN_REQUEST_TIMEOUT_MS = 240_000'), 'Missing Cloud Run timeout budget');
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
   assert(script.includes('finalizeBatchesForTimeout'), 'Missing timeout batch finalizer');
   assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing single-PDF timeout split');
@@ -175,8 +175,8 @@ test('registers job-linked durable uploads before browser-driven analysis', () =
   assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/documents/${encodeURIComponent(documentId)}/chunks'), 'Missing chunk registration endpoint call');
   assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/chunks/${encodeURIComponent(chunkId)}'), 'Missing chunk upload status patch endpoint call');
   assert(script.includes('/api/jobs/${encodeURIComponent(jobId)}/finalize-uploads'), 'Missing finalize uploads endpoint call');
-  assert(script.includes("handleUploadUrl: '/api/blob/upload'"), 'Missing direct browser-to-Blob upload configuration');
-  assert(script.includes('headers: getJobHeaders()'), 'Blob client upload token request should include app auth headers');
+  assert(script.includes("durableJsonFetch('/api/blob/upload'"), 'Missing signed GCS upload request');
+  assert(script.includes('fetch(upload.uploadUrl'), 'Missing direct browser-to-GCS upload call');
   assert(script.includes('Durable file resume unavailable'), 'Missing graceful fallback warning copy');
 });
 

@@ -238,12 +238,12 @@ test('PATCH /api/jobs/:id/chunks/:chunkId updates upload status and GET lists ch
   await jobsRouteHandler(mockReq('PATCH', {
     uploadStatus: 'uploaded',
     blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
-    blobUrl: 'https://blob.vercel-storage.com/private/deed.pdf',
+    blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
   }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), patchRes);
 
   assert(patchRes.statusCode === 200, `Expected 200, got ${patchRes.statusCode}`);
   assert(patchRes.body.chunk.uploadStatus === 'uploaded', 'Expected uploaded status');
-  assert(patchRes.body.chunk.blobUrl.includes('blob.vercel-storage.com'), 'Expected blob URL');
+  assert(patchRes.body.chunk.blobUrl.startsWith('gs://titlework-test/'), 'Expected GCS object URL');
 
   const listRes = mockRes();
   await jobsRouteHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/chunks'), listRes);
@@ -282,9 +282,28 @@ test('PATCH /api/jobs/:id/chunks/:chunkId rejects uploaded status without a vali
   await jobsRouteHandler(mockReq('PATCH', {
     uploadStatus: 'uploaded',
     blobKey: 'jobs/other_job/chunks/chk_test_1/deed.pdf',
-    blobUrl: 'https://blob.vercel-storage.com/private/deed.pdf',
+    blobUrl: 'gs://titlework-test/jobs/other_job/chunks/chk_test_1/deed.pdf',
   }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), wrongKeyRes);
   assert(wrongKeyRes.statusCode === 400, `Expected wrong Blob key rejection, got ${wrongKeyRes.statusCode}`);
+});
+
+test('storage adapter validates GCS object refs and rejects Vercel Blob refs', async () => {
+  const storage = await import('../api/_lib/storage.js');
+  assert(storage.isAllowedStorageUrl('gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf'), 'Expected gs:// object URL to be allowed');
+  assert(storage.isAllowedStorageUrl('https://storage.googleapis.com/titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf'), 'Expected storage.googleapis.com object URL to be allowed');
+  assert(!storage.isAllowedStorageUrl('https://blob.vercel-storage.com/private/deed.pdf'), 'Expected Vercel Blob URL to be rejected');
+  assert(storage.validateObjectRef({
+    jobId: 'job_test_1',
+    chunkId: 'chk_test_1',
+    objectKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+    objectUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+  }).valid, 'Expected job-scoped GCS object ref to validate');
+  assert(!storage.validateObjectRef({
+    jobId: 'job_test_1',
+    chunkId: 'chk_test_1',
+    objectKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+    objectUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_other/deed.pdf',
+  }).valid, 'Expected object URL/key mismatch to be rejected');
 });
 
 test('POST durable document and chunk registration is idempotent by fingerprint', async () => {
@@ -369,7 +388,7 @@ test('POST /api/jobs/:id/finalize-uploads marks job ready after all chunks uploa
   await store.updateChunk('job_test_1', 'chk_test_1', {
     uploadStatus: 'uploaded',
     blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
-    blobUrl: 'https://blob.vercel-storage.com/private/deed.pdf',
+    blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
   });
 
   const res = mockRes();
@@ -380,7 +399,7 @@ test('POST /api/jobs/:id/finalize-uploads marks job ready after all chunks uploa
   assert(res.body.pendingChunks === 0, 'Expected no pending chunks');
 });
 
-test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable Blob metadata', async () => {
+test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable storage metadata', async () => {
   const store = createMemoryJobStore();
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   await store.createDocument('job_test_1', {
@@ -404,7 +423,7 @@ test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
 
   assert(res.statusCode === 409, `Expected invalid uploaded chunk rejection, got ${res.statusCode}`);
-  assert(res.body.error.includes('Blob'), `Expected Blob metadata error, got ${res.body.error}`);
+  assert(res.body.error.includes('storage'), `Expected storage metadata error, got ${res.body.error}`);
 });
 
 test('durable upload endpoints reject raw base64 and document contents', async () => {
@@ -432,12 +451,12 @@ test('durable upload endpoints reject raw base64 and document contents', async (
   assert(chunkRes.statusCode === 400, `Expected chunk rejection, got ${chunkRes.statusCode}`);
 });
 
-test('Blob upload endpoint keeps APP_PASSWORD for token requests but allows signed completion callbacks', () => {
+test('storage upload endpoint signs GCS uploads without Vercel Blob client code', () => {
   const source = readFileSync(join(root, 'api/blob/upload.js'), 'utf8');
-  assert(source.includes('enforceJobRateLimit'), 'Blob upload token requests should use the job write rate limiter');
-  assert(source.includes("uploadEventType === 'blob.upload-completed'"), 'Expected Blob completion callback detection');
-  assert(source.includes('!isBlobCompletionCallback && !requireJobPassword'), 'Token requests should require APP_PASSWORD while completion callbacks reach handleUpload signature verification');
-  assert(!source.includes("'image/tiff'"), 'Blob upload content types should not include TIFF when analyze API cannot process TIFF images');
+  assert(source.includes('createSignedUpload'), 'Upload endpoint should create signed GCS upload metadata');
+  assert(!source.includes('@vercel/blob'), 'Upload endpoint should not import the Vercel Blob client');
+  assert(!source.includes('blob.upload-completed'), 'Upload endpoint should not depend on Vercel Blob completion callbacks');
+  assert(!source.includes("'image/tiff'"), 'Storage upload content types should not include TIFF when analyze API cannot process TIFF images');
 });
 
 let passed = 0;

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://esm.sh; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.blob.vercel-storage.com https://blob.vercel-storage.com https://esm.sh; img-src 'self' data:; font-src 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self';">
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -163,7 +163,7 @@
           <div id="fileList"></div>
         </div>
         <p style="color:#8a6f4a;font-size:.83rem;margin-top:.6rem;line-height:1.5">
-          <strong style="color:#6b3410">Tip:</strong> Large runs (100+ documents) process automatically in batches — keep this tab open until complete. You can add more documents after the initial analysis.
+          <strong style="color:#6b3410">Tip:</strong> Large runs (100+ documents) process in the background after upload. You can close this tab and return to the job link later.
         </p>
         <input type="file" id="fileInput" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
       </div>
@@ -258,15 +258,15 @@
 
 <script>
 const MAX_FILES = 400;
-const VERCEL_MAX_REQUEST_BYTES = 4_500_000;
-const REQUEST_ENVELOPE_SAFE_BYTES = 3_900_000;
+const CLOUD_RUN_MAX_REQUEST_BYTES = 20_000_000;
+const REQUEST_ENVELOPE_SAFE_BYTES = 12_000_000;
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const MAX_PAYLOAD_BYTES = REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES;
 const MAX_DOCS_PER_BATCH = 2;
 const LARGE_FILE_BYTES = 800_000;
 const TIMEOUT_SAFE_FILE_BYTES = 350_000;
 const TIMEOUT_SPLIT_CHUNK_RAW = 400_000;
-const VERCEL_FUNCTION_TIMEOUT_MS = 45_000;
+const CLOUD_RUN_REQUEST_TIMEOUT_MS = 240_000;
 const ABSTRACT_CONCURRENCY = 2;
 const SYNTHESIS_CHUNK_SIZE = 50;
 const FOLLOWUP_HISTORY_TURNS = 4;
@@ -321,7 +321,7 @@ function serializeBackendPayload(model, max_tokens, system, messages) {
 function assertRequestEnvelope(model, max_tokens, system, messages, label = 'Request') {
   const serialized = serializeBackendPayload(model, max_tokens, system, messages);
   if (serialized.bytes > REQUEST_ENVELOPE_SAFE_BYTES) {
-    throw new Error(`${label} too large: ${(serialized.bytes / 1024 / 1024).toFixed(1)} MB exceeds the app's ${(REQUEST_ENVELOPE_SAFE_BYTES / 1024 / 1024).toFixed(1)} MB safety budget under Vercel's 4.5 MB request limit. Split the documents or reduce scan resolution.`);
+    throw new Error(`${label} too large: ${(serialized.bytes / 1024 / 1024).toFixed(1)} MB exceeds the app's ${(REQUEST_ENVELOPE_SAFE_BYTES / 1024 / 1024).toFixed(1)} MB request safety budget. Split the documents or reduce scan resolution.`);
   }
   return serialized;
 }
@@ -344,7 +344,7 @@ function estimateBatchTimeMs(batch, model = ABSTRACT_MODEL) {
 }
 
 function batchExceedsTimeoutLimit(files) {
-  return files.length > 0 && estimateBatchTimeMs({ files }) > VERCEL_FUNCTION_TIMEOUT_MS;
+  return files.length > 0 && estimateBatchTimeMs({ files }) > CLOUD_RUN_REQUEST_TIMEOUT_MS;
 }
 
 function recordBatchLatency(files, elapsedMs) {
@@ -600,9 +600,6 @@ let documentAbstracts = [];
 
 document.addEventListener('DOMContentLoaded', async () => {
   const canLoadInitialRoute = await checkPasswordRequired();
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H5,H6',location:'public/index.html:DOMContentLoaded',message:'after password gate check before initial route apply',data:{hash:location.hash,search:location.search,route:parseRoute(),hasPassword:Boolean(appPassword),gateDisplay:document.getElementById('passwordGate')?.style.display||'',mainDisplay:document.getElementById('mainApp')?.style.display||''},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   setupDragDrop();
   document.getElementById('fileInput').addEventListener('change', async e => {
     await handleFiles(Array.from(e.target.files));
@@ -634,9 +631,6 @@ async function checkPasswordRequired() {
 function showMain() {
   document.getElementById('mainApp').style.display = 'block';
   document.getElementById('disclaimer').style.display = 'block';
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1',location:'public/index.html:showMain',message:'showMain called',data:{hash:location.hash,search:location.search,route:parseRoute(),hasPassword:Boolean(appPassword),mainDisplay:document.getElementById('mainApp')?.style.display||'',gateDisplay:document.getElementById('passwordGate')?.style.display||''},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   renderRecentJobsToolbar();
   if (parseRoute().name === 'home') resumeLastAnalysisJob();
 }
@@ -1004,9 +998,6 @@ function applyRoute(route) {
   const job = document.getElementById('view-job');
   const history = document.getElementById('view-history');
   if (!home || !job || !history) return;
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H5,H6',location:'public/index.html:applyRoute',message:'applying route',data:{route,hash:location.hash,activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   home.style.display = route.name === 'home' ? '' : 'none';
   job.style.display = route.name === 'job' ? '' : 'none';
   history.style.display = route.name === 'history' ? '' : 'none';
@@ -1194,9 +1185,6 @@ async function runJobAction(job, endpointPath, opts = {}) {
       body: opts.body ? JSON.stringify(opts.body) : '{}',
     });
     const data = await res.json().catch(() => ({}));
-    // #region agent log
-    fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H4',location:'public/index.html:runJobAction:response',message:'job action response received',data:{jobId:job.id,endpointPath,status:res.status,ok:res.ok,activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (!res.ok) {
       alert(data.error || `Action failed (HTTP ${res.status}).`);
       return;
@@ -1222,9 +1210,6 @@ function renderJobActions(job) {
   const isTerminal = TERMINAL_STATUSES.has(job.status);
   const failedDocs = failedDocumentCount(job.failedDocuments);
   const buttons = [];
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H3',location:'public/index.html:renderJobActions',message:'job actions derived from failedDocuments',data:{jobId:job.id,status:job.status,failedDocumentsType:Array.isArray(job.failedDocuments)?'array':typeof job.failedDocuments,failedDocumentsValue:Array.isArray(job.failedDocuments)?job.failedDocuments.length:job.failedDocuments,derivedFailedDocs:failedDocs,isTerminal},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 
   if (!isTerminal) {
     buttons.push({
@@ -1386,18 +1371,12 @@ async function loadJobView(jobId) {
   }
   if (activeJobPollState && activeJobPollState.jobId !== jobId) stopJobPoller();
   if (headerEl) headerEl.innerHTML = '<div style="color:#8a6f4a">Loading job…</div>';
-  // #region agent log
-  fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H4,H5',location:'public/index.html:loadJobView:start',message:'loading job view',data:{jobId,hash:location.hash,routeJobId:parseRoute().jobId||null,hasPassword:Boolean(appPassword),activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   let res;
   try {
     res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
       method: 'GET',
       headers: getJobHeaders(),
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H1,H4,H5',location:'public/index.html:loadJobView:response',message:'job fetch response received',data:{jobId,status:res.status,ok:res.ok,hash:location.hash,routeJobId:parseRoute().jobId||null,activePollJobId:activeJobPollState?.jobId||null,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   } catch (err) {
     if (!stillCurrent()) return;
     stopJobPoller();
@@ -1459,9 +1438,6 @@ async function applyJobToView(job, isCurrent = () => true) {
         const payload = await r.json();
         result = payload.result || null;
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H2,H5',location:'public/index.html:applyJobToView:result',message:'terminal job durable result fetch completed',data:{jobId:job.id,status:job.status,resultStatus:r.status,resultOk:r.ok,hasFinalTitleOpinion:Boolean(result?.finalTitleOpinion),hash:location.hash,routeJobId:parseRoute().jobId||null},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     } catch (err) {
       console.warn('Could not fetch durable job result', err);
     }
@@ -1659,9 +1635,6 @@ async function runJobPollTick(state) {
       try { state.onUpdate(job); } catch (err) { console.warn('poller onUpdate failed', err); }
     }
     if (TERMINAL_STATUSES.has(job.status)) {
-      // #region agent log
-      fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H4,H5',location:'public/index.html:runJobPollTick:terminal',message:'poller reached terminal job status',data:{jobId:state.jobId,terminalJobId:job.id,status:job.status,hash:location.hash,routeJobId:parseRoute().jobId||null,activePollJobId:activeJobPollState?.jobId||null,activePollIsCurrent:activeJobPollState===state,activePollCancelled:Boolean(activeJobPollState?.cancelled)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       state.cancelled = true;
       if (activeJobPollState === state) activeJobPollState = null;
       if (typeof state.onTerminal === 'function') {
@@ -1879,14 +1852,6 @@ async function getDurableStorageStatus() {
   }
 }
 
-let blobClientModulePromise = null;
-async function loadVercelBlobClient() {
-  if (!blobClientModulePromise) {
-    blobClientModulePromise = import('https://esm.sh/@vercel/blob/client');
-  }
-  return blobClientModulePromise;
-}
-
 function arrayBufferToHex(buffer) {
   return Array.from(new Uint8Array(buffer))
     .map(byte => byte.toString(16).padStart(2, '0'))
@@ -1948,32 +1913,37 @@ async function patchChunkUploadStatus(jobId, chunkId, patch) {
 }
 
 async function uploadChunkToBlob(jobId, documentId, chunk, entry, onProgress) {
-  const { upload } = await loadVercelBlobClient();
-  const blob = await upload(chunk.blobKey, entry.sourceFile, {
-    access: 'private',
-    handleUploadUrl: '/api/blob/upload',
-    headers: getJobHeaders(),
-    clientPayload: JSON.stringify({
+  if (onProgress) onProgress(0);
+  const signed = await durableJsonFetch('/api/blob/upload', {
+    method: 'POST',
+    body: JSON.stringify({
       jobId,
       documentId,
       chunkId: chunk.id,
       mediaType: entry.type || entry.originalMediaType,
     }),
-    onUploadProgress: event => {
-      if (onProgress && event?.percentage !== undefined) onProgress(event.percentage);
-    },
   });
+  const upload = signed.upload;
+  const uploadResponse = await fetch(upload.uploadUrl, {
+    method: upload.method || 'PUT',
+    headers: upload.headers || { 'content-type': entry.type || entry.originalMediaType || 'application/octet-stream' },
+    body: entry.sourceFile,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(`Durable storage upload failed (HTTP ${uploadResponse.status}).`);
+  }
+  if (onProgress) onProgress(100);
   await patchChunkUploadStatus(jobId, chunk.id, {
     uploadStatus: 'uploaded',
-    blobKey: blob.pathname || chunk.blobKey,
-    blobUrl: blob.url,
+    blobKey: upload.blobKey || upload.objectKey || chunk.blobKey,
+    blobUrl: upload.blobUrl || upload.objectUrl,
   });
   entry.documentId = documentId;
   entry.chunkId = chunk.id;
-  entry.blobKey = blob.pathname || chunk.blobKey;
-  entry.blobUrl = blob.url;
+  entry.blobKey = upload.blobKey || upload.objectKey || chunk.blobKey;
+  entry.blobUrl = upload.blobUrl || upload.objectUrl;
   entry.uploadStatus = 'uploaded';
-  return blob;
+  return upload;
 }
 
 async function finalizeJobUploads(jobId) {
@@ -2073,10 +2043,7 @@ async function pollServerAbstraction(jobId, items, totalDocuments) {
       stallPolls = 0;
       lastTerminalCount = terminalCount;
     }
-    if (stallPolls >= STALL_THRESHOLD && (pending + processing + retryWait) > 0) {
-      try { await startServerAbstraction(jobId); } catch (kickErr) { console.warn('Could not kick server worker', kickErr); }
-      stallPolls = 0;
-    }
+    if (stallPolls >= STALL_THRESHOLD && (pending + processing + retryWait) > 0) stallPolls = 0;
     await sleep(1000);
   }
   throw new Error('Server-side abstraction did not finish polling in this browser session.');
@@ -2154,10 +2121,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
     const signature = `${complete}|${failed}|${processing}|${retryWait}`;
     if (signature === lastSignature) stallPolls += 1;
     else { stallPolls = 0; lastSignature = signature; }
-    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait) > 0) {
-      try { await processServerSynthesisBatch(jobId); } catch (kickErr) { console.warn('Could not kick synthesis worker', kickErr); }
-      stallPolls = 0;
-    }
+    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait) > 0) stallPolls = 0;
     await sleep(1000);
   }
   throw new Error('Server-side synthesis did not finish polling in this browser session.');
@@ -2199,7 +2163,7 @@ async function runServerDocumentAbstraction(jobId, fileList, items) {
 async function registerJobUploads(jobId, fileList) {
   const status = await getDurableStorageStatus();
   if (!status.available) {
-    return { durable: false, warning: durableUploadWarning(status.error || 'Set BLOB_READ_WRITE_TOKEN to enable durable file resume.') };
+    return { durable: false, warning: durableUploadWarning(status.error || 'Set GCS_BUCKET to enable durable file resume.') };
   }
   const maxUploadBytes = status.maxUploadBytes || Infinity;
   const documentIdsBySource = new Map();
@@ -2291,7 +2255,7 @@ async function handleFiles(newFiles) {
   try {
     const splitParts = await ingestUploadedFiles(Array.from(newFiles), files, statusEl);
     if (splitParts > 0) {
-      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay under Vercel's 4.5 MB upload limit. Each segment is abstracted separately; synthesis connects them by filename.`);
+      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis connects them by filename.`);
     } else {
       clearError();
     }
@@ -2399,7 +2363,7 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   } catch (networkErr) {
     // Fetch itself failed — network level problem
     if (networkErr.message.includes('Failed to fetch')) {
-      throw new Error('Network error: Could not reach the server. Check your internet connection and make sure you are using the Vercel URL (not a local file). If the problem persists, the server may be temporarily unavailable.');
+      throw new Error('Network error: Could not reach the server. Check your internet connection and make sure you are using the deployed Cloud Run URL (not a local file). If the problem persists, the server may be temporarily unavailable.');
     }
     throw new Error('Network error: ' + networkErr.message);
   }
@@ -2420,13 +2384,13 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   try { data = JSON.parse(text); }
   catch {
     if (response.status === 413) {
-      throw new Error('File too large (HTTP 413): This batch exceeds Vercel\'s 4.5 MB upload limit. The app will retry with smaller batches automatically; if the error persists, scan at 150 DPI or split large PDFs by page range.');
+      throw new Error('File too large (HTTP 413): This batch exceeds the configured server request limit. The app will retry with smaller batches automatically; if the error persists, scan at 150 DPI or split large PDFs by page range.');
     }
     if (response.status === 504 || response.status === 524) {
       throw new Error('Timeout error (HTTP ' + response.status + '): The server took too long to process this batch. Retrying with smaller batches automatically...');
     }
     if (response.status === 403) {
-      throw new Error('Access denied (HTTP 403): Deployment protection may be enabled on Vercel. Go to Vercel → Project → Settings → Deployment Protection and disable it.');
+      throw new Error('Access denied (HTTP 403): Check Cloud Run ingress/IAM settings and confirm this app is available to your users.');
     }
     if (response.status === 401) {
       throw new Error('Incorrect password (HTTP 401): The access password is wrong or was not entered. Please refresh and try again.');
@@ -2440,7 +2404,7 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   if (!response.ok || data.error) {
     const errMsg = data.error?.message || data.error || '';
     if (response.status === 401 || errMsg.includes('authentication') || errMsg.includes('api key') || errMsg.includes('x-api-key')) {
-      throw new Error('API key error: The Anthropic API key is missing or invalid. Check that ANTHROPIC_API_KEY is set correctly in Vercel → Project → Settings → Environment Variables, then redeploy.');
+      throw new Error('API key error: The Anthropic API key is missing or invalid. Check that ANTHROPIC_API_KEY is set correctly in Cloud Run environment variables, then redeploy.');
     }
     if (response.status === 429 || errMsg.includes('rate limit') || errMsg.includes('overloaded')) {
       if (retryCount < MAX_RETRIES) {
@@ -2493,7 +2457,7 @@ function isTimeoutError(err) {
     || msg.includes('timeout')
     || msg.includes('aborted')
     || msg.includes('too long to process')
-    || msg.includes('FUNCTION_INVOCATION_TIMEOUT')
+    || msg.includes('Cloud Run request timeout')
     || name.includes('Abort')
     || name.includes('Timeout');
 }
@@ -2728,7 +2692,7 @@ async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt
 
 function isEnvelopeError(err) {
   const msg = String(err?.message || err || '');
-  return msg.includes('413') || msg.includes('too large') || msg.includes('Payload') || msg.includes('request budget') || msg.includes('4.5 MB');
+  return msg.includes('413') || msg.includes('too large') || msg.includes('Payload') || msg.includes('request budget') || msg.includes('configured server request limit');
 }
 
 async function synthesizeSplitAndMerge(abstracts, tract, ctx, preamble, systemPrompt, reason) {
@@ -2896,7 +2860,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       return part1 + '\n\n' + part2;
     }
     const names = batchFiles.map(f => f.name).join(', ');
-    throw new Error(`File too large: ${names} (${formatMegabytes(requestBytes)} MB) exceeds the app's safe ${formatMegabytes(REQUEST_ENVELOPE_SAFE_BYTES)} MB request budget under Vercel's 4.5 MB limit. Scan at 150 DPI black and white or split into about 10-page sections.`);
+    throw new Error(`File too large: ${names} (${formatMegabytes(requestBytes)} MB) exceeds the app's safe ${formatMegabytes(REQUEST_ENVELOPE_SAFE_BYTES)} MB request budget. Scan at 150 DPI black and white or split into about 10-page sections.`);
   }
 
   try {
@@ -3103,9 +3067,6 @@ async function analyze() {
         failedDocuments: [],
         modelUsed: SYNTHESIS_MODEL,
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7658/ingest/882a5946-35ca-4677-959a-d5290b145917',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'33c3ef'},body:JSON.stringify({sessionId:'33c3ef',runId:'initial',hypothesisId:'H2',location:'public/index.html:analyze:browser-synthesis-complete',message:'browser synthesis completed after server fallback',data:{jobId:job.id,usedServerAbstraction,usedServerSynthesis,documentAbstractCount:documentAbstracts.length,serverAbstractionFailedCount,hasSynthesis:Boolean(synthesis)},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     }
     clearProgressTimer();
     stopJobPolling();
@@ -3309,7 +3270,7 @@ async function handleAdditionalFiles(newFiles) {
   try {
     const splitParts = await ingestUploadedFiles(Array.from(newFiles), additionalFiles, statusEl);
     if (splitParts > 0) {
-      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay under Vercel's 4.5 MB upload limit. Each segment is abstracted separately; synthesis connects them by filename.`);
+      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis connects them by filename.`);
     } else {
       clearError();
     }
@@ -3630,6 +3591,5 @@ function resetAll() {
   clearError();
 }
 </script>
-  <script defer src="/_vercel/insights/script.js"></script>
 </body>
 </html>

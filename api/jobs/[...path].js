@@ -28,8 +28,6 @@ import {
   processAbstractionBatch,
   processSynthesisBatch,
   retryFailedAbstractionChunks,
-  scheduleBackgroundProcessing,
-  scheduleBackgroundSynthesis,
   synthesisSnapshot,
   workflowSetupError,
 } from '../_lib/queue.js';
@@ -37,6 +35,7 @@ import {
   answerFollowupQuestion,
   synthesisSetupError,
 } from '../_lib/synthesis.js';
+import { isAllowedStorageUrl, objectExists, validateObjectRef } from '../_lib/storage.js';
 
 export const config = {
   runtime: 'nodejs',
@@ -65,18 +64,23 @@ function expectedChunkBlobPrefix(jobId, chunkId) {
   return `jobs/${jobId}/chunks/${chunkId}/`;
 }
 
-function chunkHasUsableBlobMetadata(chunk) {
+async function chunkHasUsableBlobMetadata(chunk) {
   if (!chunk || chunk.uploadStatus !== 'uploaded') return true;
   if (typeof chunk.blobKey !== 'string' || !chunk.blobKey.startsWith(expectedChunkBlobPrefix(chunk.jobId, chunk.id))) {
     return false;
   }
-  try {
-    const parsed = new URL(chunk.blobUrl);
-    const host = parsed.hostname.toLowerCase();
-    return parsed.protocol === 'https:' && (host === 'blob.vercel-storage.com' || host.endsWith('.blob.vercel-storage.com'));
-  } catch {
-    return false;
+  if (!isAllowedStorageUrl(chunk.blobUrl)) return false;
+  const ref = validateObjectRef({
+    jobId: chunk.jobId,
+    chunkId: chunk.id,
+    objectKey: chunk.blobKey,
+    objectUrl: chunk.blobUrl,
+  });
+  if (!ref.valid) return false;
+  if (process.env.VERIFY_GCS_OBJECTS === 'true') {
+    return await objectExists(chunk);
   }
+  return true;
 }
 
 function parseBody(req, res, requestId) {
@@ -237,10 +241,14 @@ async function handleFinalizeUploads(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const chunks = await store.listChunks(jobId);
-  const invalidUploaded = chunks.filter(chunk => !chunkHasUsableBlobMetadata(chunk));
+  const checks = await Promise.all(chunks.map(async chunk => ({
+    chunk,
+    usable: await chunkHasUsableBlobMetadata(chunk),
+  })));
+  const invalidUploaded = checks.filter(item => !item.usable).map(item => item.chunk);
   if (invalidUploaded.length) {
     return res.status(409).json({
-      error: 'Uploaded chunks must include valid Vercel Blob metadata before finalization.',
+      error: 'Uploaded chunks must include valid durable storage metadata before finalization.',
       invalidChunks: invalidUploaded.map(chunk => chunk.id),
       requestId,
     });
@@ -286,9 +294,6 @@ async function handleAbstractionStart(req, res, requestId, store, jobId) {
     return res.status(409).json({ error: 'Job has been canceled.', requestId });
   }
   const snapshot = await enqueueAbstractionJob(jobId, { store });
-  // Fire-and-forget background work: drain pending chunks within this function's
-  // remaining maxDuration window. Returns immediately so the client can poll.
-  scheduleBackgroundProcessing(jobId, { store });
   const config = getWorkflowConfig();
   return res.status(202).json({
     status: publicStatus(snapshot),
@@ -359,7 +364,6 @@ async function handleRetryFailedChunks(req, res, requestId, store, jobId) {
     return res.status(503).json({ error: setupError, fallback: 'browser_abstraction', requestId });
   }
   const result = await retryFailedAbstractionChunks(jobId, { store });
-  scheduleBackgroundProcessing(jobId, { store });
   return res.status(200).json({
     reset: result.reset,
     status: publicStatus(result.snapshot),
@@ -473,7 +477,6 @@ async function handleSynthesisStart(req, res, requestId, store, jobId) {
     }
     throw err;
   }
-  scheduleBackgroundSynthesis(jobId, { store });
   const workflow = getWorkflowConfig();
   return res.status(202).json({
     status: publicSynthesisStatusBody(snapshot),

@@ -517,7 +517,7 @@ test('buildSynthesisChunks respects 50-doc cap and byte cap', () => {
   // Single huge abstract gets its own chunk (b > safe envelope means [a,b] and [b,c] both blow budget).
   const big = [
     { filename: 'a.pdf', abstract: 'a'.repeat(10) },
-    { filename: 'b.pdf', abstract: 'x'.repeat(3_950_000) },
+    { filename: 'b.pdf', abstract: 'x'.repeat(13_000_000) },
     { filename: 'c.pdf', abstract: 'short' },
   ];
   const bigChunks = buildSynthesisChunks(big, '', '', 'pre', SYNTHESIS_PROMPT);
@@ -776,7 +776,7 @@ test('Merge too large triggers tree merge of segment summaries', async () => {
         };
       }
       // Original segment: return a huge summary so the merge step blows past budget
-      const big = 'a'.repeat(1_400_000);
+      const big = 'a'.repeat(5_000_000);
       return { text: 'CHAIN big section ' + big, model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
     }
     mergeCalls += 1;
@@ -1038,7 +1038,7 @@ test('Synthesis status reports segment progress and warnings', async () => {
   assert(res.body.status.hasResult === true, 'Expected hasResult true');
 });
 
-test('Synthesis /start enqueues quickly and schedules background work', async () => {
+test('Synthesis /start enqueues quickly for the Cloud Run worker', async () => {
   const abstracts = manyAbstracts(4);
   const store = createMemoryPhase5Store({ abstracts });
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
@@ -1053,9 +1053,9 @@ test('Synthesis /start enqueues quickly and schedules background work', async ()
   const elapsed = Date.now() - startedAt;
   assert(res.statusCode === 202, `Expected 202, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
   assert(elapsed < 2000, `Expected /synthesis/start to return quickly, took ${elapsed}ms`);
-  // Background drain should produce a result.
-  const bg = getSynthesisBackgroundPromise('job_test_1');
-  if (bg) await bg;
+  assert(!getSynthesisBackgroundPromise('job_test_1'), 'Expected route not to schedule an in-request synthesis drain');
+  assert(!(await store.getJobResult('job_test_1')), 'Expected no result before the worker drains synthesis');
+  await processSynthesisBatch('job_test_1', { store });
   const result = await store.getJobResult('job_test_1');
   assert(result?.finalTitleOpinion?.includes('FINAL OWNERSHIP'), 'Expected background work to save final opinion');
 });
@@ -1100,7 +1100,7 @@ test('buildFollowupMessages prefers full title opinion + recent turns and trunca
   assert(messages[0].content.includes('final question'), 'Expected current question included');
   assert(!truncationWarning, 'Did not expect truncation for small opinion');
   // Oversized opinion: ensure truncation kicks in
-  const big = 'x'.repeat(5_000_000);
+  const big = 'x'.repeat(14_000_000);
   const oversized = buildFollowupMessages({
     question: 'q',
     finalTitleOpinion: big,

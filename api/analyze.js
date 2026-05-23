@@ -1,4 +1,4 @@
-// Vercel Serverless Function — hardened for production use
+// Cloud Run API handler — hardened for production use
 // Protections: rate limiting, input validation, secure password comparison,
 // request size limiting, XSS headers, data leakage prevention
 
@@ -16,8 +16,21 @@ const RATE_LIMIT_MAX_REQUESTS = Math.min(
   600
 );
 const PASSWORD_RATE_LIMIT_MAX = 5;
-const MAX_REQUEST_BYTES = 4_500_000;
-const UPSTREAM_TIMEOUT_MS = 52_000;
+const DEFAULT_MAX_REQUEST_BYTES = 20_000_000;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 240_000;
+
+function clampInt(raw, fallback, min, max) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function getAnalyzeConfig() {
+  return {
+    maxRequestBytes: clampInt(process.env.ANALYZE_MAX_REQUEST_BYTES || process.env.CLOUD_RUN_MAX_REQUEST_BYTES, DEFAULT_MAX_REQUEST_BYTES, 1, 32_000_000),
+    upstreamTimeoutMs: clampInt(process.env.ANALYZE_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, DEFAULT_UPSTREAM_TIMEOUT_MS, 10_000, 300_000),
+  };
+}
 
 function createRequestId() {
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -214,7 +227,8 @@ export default async function handler(req, res) {
 
   const serializedBody = JSON.stringify(safeBody);
   const payloadSize = Buffer.byteLength(serializedBody, 'utf8');
-  if (payloadSize > MAX_REQUEST_BYTES) {
+  const analyzeConfig = getAnalyzeConfig();
+  if (payloadSize > analyzeConfig.maxRequestBytes) {
     logRequestEvent('api_reject', {
       requestId,
       status: 413,
@@ -224,7 +238,7 @@ export default async function handler(req, res) {
       latencyMs: Date.now() - startedAt,
     });
     return res.status(413).json({
-      error: `Request too large (${(payloadSize / 1024 / 1024).toFixed(1)} MB). Vercel limit is 4.5 MB. Scan at 150 DPI black and white or split into about 10-page sections.`,
+      error: `Request too large (${(payloadSize / 1024 / 1024).toFixed(1)} MB). This exceeds the configured server request limit of ${(analyzeConfig.maxRequestBytes / 1024 / 1024).toFixed(1)} MB. Split very large PDFs or reduce scan resolution before retrying.`,
       requestId,
     });
   }
@@ -236,7 +250,7 @@ export default async function handler(req, res) {
       payloadBytes: payloadSize,
       messageCount: safeBody.messages.length,
     });
-    const timeout = createTimeoutSignal(UPSTREAM_TIMEOUT_MS);
+    const timeout = createTimeoutSignal(analyzeConfig.upstreamTimeoutMs);
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -283,7 +297,7 @@ export default async function handler(req, res) {
     });
     if (status === 504) {
       return res.status(504).json({
-        error: `Timeout error: Anthropic did not respond within ${Math.round(UPSTREAM_TIMEOUT_MS / 1000)} seconds. The app will retry smaller batches when possible.`,
+        error: `Timeout error: Anthropic did not respond within ${Math.round(analyzeConfig.upstreamTimeoutMs / 1000)} seconds. The app will retry smaller batches when possible.`,
         requestId,
       });
     }

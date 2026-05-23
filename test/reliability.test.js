@@ -113,24 +113,28 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-test('server returns 413 for oversized request envelopes', async () => {
+test('server returns 413 for requests over the configured Cloud Run envelope', async () => {
   const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevLimit = process.env.ANALYZE_MAX_REQUEST_BYTES;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+  process.env.ANALYZE_MAX_REQUEST_BYTES = '1000';
   const req = mockReq({
     model: 'claude-haiku-4-5',
     max_tokens: 100,
-    messages: [{ role: 'user', content: 'x'.repeat(4_600_000) }],
+    messages: [{ role: 'user', content: 'x'.repeat(2000) }],
   });
   const res = mockRes();
   await handler(req, res);
   if (prevKey) process.env.ANTHROPIC_API_KEY = prevKey;
   else delete process.env.ANTHROPIC_API_KEY;
+  if (prevLimit) process.env.ANALYZE_MAX_REQUEST_BYTES = prevLimit;
+  else delete process.env.ANALYZE_MAX_REQUEST_BYTES;
 
   assert(res.statusCode === 413, `Expected 413, got ${res.statusCode}`);
-  assert(String(res.body?.error).includes('4.5 MB'), 'Expected Vercel limit guidance');
+  assert(String(res.body?.error).includes('configured'), 'Expected configured limit guidance');
 });
 
-test('server maps upstream aborts to 504 before Vercel kills the function', async () => {
+test('server maps upstream aborts to 504 before Cloud Run request timeout', async () => {
   const prevKey = process.env.ANTHROPIC_API_KEY;
   const prevFetch = global.fetch;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
@@ -155,11 +159,12 @@ test('server maps upstream aborts to 504 before Vercel kills the function', asyn
   assert(res.headers['X-Request-Id'] === 'test-timeout', 'Expected request id header');
 });
 
-test('client keeps a safe request envelope below the Vercel hard limit', async () => {
+test('client keeps a safe request envelope below the Cloud Run proxy limit', async () => {
   await runClientScript(`
-    assert(REQUEST_ENVELOPE_SAFE_BYTES <= 4_000_000, 'Envelope safety budget should stay below 4 MB');
+    assert(CLOUD_RUN_MAX_REQUEST_BYTES >= 20_000_000, 'Cloud Run request ceiling should be above the old Vercel limit');
+    assert(REQUEST_ENVELOPE_SAFE_BYTES <= CLOUD_RUN_MAX_REQUEST_BYTES, 'Envelope safety budget should stay below Cloud Run max request bytes');
     assert(MAX_PAYLOAD_BYTES < REQUEST_ENVELOPE_SAFE_BYTES, 'File payload budget should reserve request overhead');
-    assert(VERCEL_FUNCTION_TIMEOUT_MS <= 45_000, 'Client timeout budget should leave at least 15s of platform margin');
+    assert(CLOUD_RUN_REQUEST_TIMEOUT_MS >= 240_000, 'Client timeout budget should reflect longer Cloud Run requests');
   `);
 });
 
@@ -247,7 +252,7 @@ test('synthesis recursively splits oversized request envelopes', async () => {
     };
     const abstracts = Array.from({ length: 6 }, (_, i) => ({
       filename: 'doc-' + (i + 1) + '.pdf',
-      abstract: 'x'.repeat(900_000),
+      abstract: 'x'.repeat(3_000_000),
     }));
     const result = await synthesizeAbstracts(
       abstracts,
@@ -261,9 +266,9 @@ test('synthesis recursively splits oversized request envelopes', async () => {
   `);
 });
 
-test('timeout classifier catches Vercel and Anthropic timeout shapes', async () => {
+test('timeout classifier catches platform and Anthropic timeout shapes', async () => {
   await runClientScript(`
-    assert(isTimeoutError(new Error('FUNCTION_INVOCATION_TIMEOUT')), 'Expected Vercel timeout match');
+    assert(isTimeoutError(new Error('Cloud Run request timeout')), 'Expected Cloud Run timeout match');
     assert(isTimeoutError(new Error('Timeout error (HTTP 504)')), 'Expected HTTP 504 match');
     assert(isTimeoutError(new Error('The operation was aborted after upstream timeout')), 'Expected abort timeout match');
   `);
@@ -312,7 +317,7 @@ test('checkpoint signatures include content fingerprints', async () => {
 test('README bulk-processing constants match code', async () => {
   await runClientScript(`
     assert(MAX_DOCS_PER_BATCH === 2, 'Expected production max docs per batch to be 2');
-    assert(Math.round(MAX_PAYLOAD_BYTES / 100_000) / 10 <= 3.6, 'Expected payload cap to reflect safer envelope budget');
+    assert(MAX_PAYLOAD_BYTES > 10_000_000, 'Expected payload cap to reflect Cloud Run envelope budget');
   `);
   assert(!readme.includes('up to 8 documents per call'), 'README should not advertise stale 8-document batching');
   assert(!readme.includes('≤8 docs'), 'README diagram should not advertise stale 8-document batching');
