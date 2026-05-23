@@ -1,9 +1,10 @@
-const REQUEST_ENVELOPE_SAFE_BYTES = 3_900_000;
+import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
+
+const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 12_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'claude-haiku-4-5';
 const ABSTRACT_MAX_TOKENS = 2000;
-const UPSTREAM_TIMEOUT_MS = 52_000;
-const BLOB_FETCH_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_BLOB_FETCH_TIMEOUT_MS, 10_000, 1_000, 30_000);
+const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
 const DEFAULT_MAX_ATTEMPTS = 5;
 const STALE_PROCESSING_MS = 2 * 60 * 1000;
@@ -222,13 +223,12 @@ export function assertSafeBlobUrl(blobUrl) {
   try {
     parsed = new URL(blobUrl);
   } catch {
-    const error = new Error('Invalid Blob URL.');
+    const error = new Error('Invalid storage URL.');
     error.statusCode = 400;
     throw error;
   }
-  const host = parsed.hostname.toLowerCase();
-  if (parsed.protocol !== 'https:' || !(host === 'blob.vercel-storage.com' || host.endsWith('.blob.vercel-storage.com'))) {
-    const error = new Error('Chunk Blob URL must be a Vercel Blob storage URL.');
+  if (!isAllowedStorageUrl(blobUrl)) {
+    const error = new Error('Chunk storage URL must be a Google Cloud Storage object URL.');
     error.statusCode = 400;
     throw error;
   }
@@ -236,40 +236,16 @@ export function assertSafeBlobUrl(blobUrl) {
 }
 
 export async function defaultBlobLoader(chunk) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    const error = new Error('Vercel Blob storage is not configured. Set BLOB_READ_WRITE_TOKEN to enable server-side abstraction.');
-    error.statusCode = 503;
-    throw error;
-  }
   if (!chunk.blobUrl) {
-    const error = new Error(`Chunk ${chunk.id} is missing a Blob URL.`);
+    const error = new Error(`Chunk ${chunk.id} is missing a storage URL.`);
     error.statusCode = 500;
     throw error;
   }
   assertSafeBlobUrl(chunk.blobUrl);
   assertBlobSizeWithinBudget(chunk, chunk.sizeBytes);
-  const timeout = createTimeoutSignal(BLOB_FETCH_TIMEOUT_MS);
-  let response;
-  try {
-    response = await fetch(chunk.blobUrl, {
-      headers: { Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}` },
-      signal: timeout.signal,
-    });
-    if (!response.ok) {
-      const error = new Error(`Could not load chunk from Blob (HTTP ${response.status}).`);
-      error.status = response.status;
-      throw error;
-    }
-    assertBlobSizeWithinBudget(chunk, response.headers.get('content-length'));
-    const bytes = Buffer.from(await response.arrayBuffer());
-    assertBlobSizeWithinBudget(chunk, bytes.byteLength);
-    return {
-      bytes,
-      mediaType: response.headers.get('content-type') || chunk.mediaType,
-    };
-  } finally {
-    timeout.cleanup();
-  }
+  const payload = await readObject(chunk);
+  assertBlobSizeWithinBudget(chunk, payload.bytes.byteLength);
+  return payload;
 }
 
 async function defaultModelClient(request) {
@@ -321,18 +297,7 @@ function getModelClient(options) {
 }
 
 async function defaultBlobWriter(parentChunk, childName, bytes) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    const error = new Error('Vercel Blob storage is not configured. Set BLOB_READ_WRITE_TOKEN to enable PDF split uploads.');
-    error.statusCode = 503;
-    throw error;
-  }
-  const { put } = await import('@vercel/blob');
-  const pathname = `jobs/${parentChunk.jobId}/chunks/${parentChunk.id}-split-${Date.now()}-${Math.random().toString(36).slice(2, 8)}/${childName.replace(/[^\w.\- ()]+/g, '-')}`;
-  const blob = await put(pathname, bytes, {
-    access: 'private',
-    contentType: 'application/pdf',
-  });
-  return { blobKey: blob.pathname || pathname, blobUrl: blob.url };
+  return await writeObject(parentChunk, childName, bytes);
 }
 
 function getBlobWriter(options) {
@@ -628,8 +593,8 @@ export async function retryChunkAbstraction(jobId, chunkId, options = {}) {
 }
 
 export function serverAbstractionSetupError() {
-  if (!process.env.BLOB_READ_WRITE_TOKEN && !globalThis.__TITLE_ANALYZER_BLOB_LOADER__) {
-    return 'Vercel Blob storage is not configured. Set BLOB_READ_WRITE_TOKEN to enable server-side abstraction.';
+  if (!storageIsConfigured() && !globalThis.__TITLE_ANALYZER_BLOB_LOADER__) {
+    return 'Google Cloud Storage is not configured. Set GCS_BUCKET to enable server-side abstraction.';
   }
   if (!process.env.ANTHROPIC_API_KEY && !globalThis.__TITLE_ANALYZER_MODEL_CLIENT__) {
     return 'ANTHROPIC_API_KEY is required for server-side abstraction.';

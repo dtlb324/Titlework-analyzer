@@ -7,7 +7,7 @@
 //
 // Required env vars for the default driver:
 //   - DATABASE_URL (or POSTGRES_URL / POSTGRES_PRISMA_URL)
-//   - BLOB_READ_WRITE_TOKEN (so workers can fetch chunks from Vercel Blob)
+//   - GCS_BUCKET (so workers can fetch chunks from Google Cloud Storage)
 //   - ANTHROPIC_API_KEY (so workers can call the abstraction model)
 //
 // To select a different driver in the future, set WORKFLOW_DRIVER=inngest
@@ -17,9 +17,9 @@
 import { processChunkAbstraction } from './abstraction.js';
 import { processSynthesisJob, planJobSynthesis } from './synthesis.js';
 
-const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 6, 1, 32);
-const DEFAULT_CONCURRENCY = clampInt(process.env.WORKFLOW_CONCURRENCY, 3, 1, 12);
-const DEFAULT_BUDGET_MS = clampInt(process.env.WORKFLOW_BUDGET_MS, 45_000, 1_000, 55_000);
+const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 12, 1, 64);
+const DEFAULT_CONCURRENCY = clampInt(process.env.WORKFLOW_CONCURRENCY, 4, 1, 16);
+const DEFAULT_BUDGET_MS = clampInt(process.env.WORKFLOW_BUDGET_MS, 20 * 60_000, 1_000, 55 * 60_000);
 const DEFAULT_LEASE_MS = clampInt(process.env.WORKFLOW_LEASE_MS, 90_000, 5_000, 600_000);
 const DEFAULT_MAX_ATTEMPTS = clampInt(process.env.ABSTRACTION_MAX_ATTEMPTS, 5, 1, 12);
 const DEFAULT_STALE_LEASE_MS = clampInt(process.env.WORKFLOW_STALE_LEASE_MS, 120_000, 5_000, 600_000);
@@ -136,7 +136,12 @@ export async function enqueueAbstractionJob(jobId, options = {}) {
   if (store.resetStaleProcessingChunks) {
     await store.resetStaleProcessingChunks(jobId, options.staleLeaseMs || DEFAULT_STALE_LEASE_MS);
   }
-  const enqueueable = ['ready', 'queued', 'planning', 'created', 'uploading', 'partial_failed', 'failed'];
+  if (['created', 'uploading'].includes(job.status)) {
+    const error = new Error('Uploads must be finalized before starting server-side abstraction.');
+    error.statusCode = 409;
+    throw error;
+  }
+  const enqueueable = ['ready', 'queued', 'planning', 'partial_failed', 'failed'];
   if (store.updateJob && enqueueable.includes(job.status)) {
     try {
       await store.updateJob(jobId, { status: 'abstracting', currentPhase: 'Queued for server-side abstraction' });
@@ -282,10 +287,8 @@ export function getSynthesisBackgroundPromise(jobId) {
 }
 
 export function scheduleBackgroundProcessing(jobId, options = {}) {
-  // Run as a fire-and-forget so the route can respond immediately. Vercel keeps
-  // the function instance alive until it returns or hits maxDuration, so the
-  // background work has up to ~55s to drain pending chunks before the next
-  // /abstraction/start or /abstraction/process call from the client.
+  // Legacy in-process fallback for local/manual use. Cloud Run deployments
+  // should use worker.js so route handlers only enqueue durable work.
   const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
   const existing = backgroundPromises.get(jobId);
   if (existing) return existing;
@@ -410,8 +413,8 @@ export async function processSynthesisBatch(jobId, options = {}) {
 }
 
 export function scheduleBackgroundSynthesis(jobId, options = {}) {
-  // Mirrors scheduleBackgroundProcessing for synthesis. Fire-and-forget so the
-  // route can return immediately while the function instance drains segments.
+  // Legacy in-process fallback for local/manual use. Cloud Run deployments
+  // should use worker.js so route handlers only enqueue durable work.
   const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
   const existing = synthesisBackgroundPromises.get(jobId);
   if (existing) return existing;

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { neon } from '@neondatabase/serverless';
+import { buildObjectKey, isAllowedStorageUrl, validateObjectRef } from './storage.js';
 
 const ALLOWED_STATUSES = new Set([
   'created',
@@ -177,13 +178,7 @@ function normalizeChecksum(value) {
 }
 
 function isAllowedBlobUrl(value) {
-  try {
-    const parsed = new URL(value);
-    const host = parsed.hostname.toLowerCase();
-    return parsed.protocol === 'https:' && (host === 'blob.vercel-storage.com' || host.endsWith('.blob.vercel-storage.com'));
-  } catch {
-    return false;
-  }
+  return isAllowedStorageUrl(value);
 }
 
 function sanitizeFilenameForBlob(name) {
@@ -198,7 +193,7 @@ function sanitizeFilenameForBlob(name) {
 }
 
 export function buildChunkBlobKey(jobId, chunkId, originalFilename) {
-  return `${buildChunkBlobPrefix(jobId, chunkId)}${sanitizeFilenameForBlob(originalFilename)}`;
+  return buildObjectKey(jobId, chunkId, originalFilename);
 }
 
 function buildChunkBlobPrefix(jobId, chunkId) {
@@ -451,6 +446,15 @@ export function validatePatchChunkInput(input, context = {}) {
     if (!isSafeMetadataString(input.blobUrl, MAX_BLOB_REF_LENGTH) || !isAllowedBlobUrl(input.blobUrl)) {
       return { valid: false, reason: 'Invalid blobUrl.' };
     }
+    if (context.jobId && context.chunkId && input.blobKey) {
+      const storageRef = validateObjectRef({
+        jobId: context.jobId,
+        chunkId: context.chunkId,
+        objectKey: input.blobKey,
+        objectUrl: input.blobUrl,
+      });
+      if (!storageRef.valid) return { valid: false, reason: storageRef.reason };
+    }
     patch.blobUrl = input.blobUrl;
   }
   const checksumSha256 = normalizeChecksum(input.checksumSha256 ?? input.checksum);
@@ -689,8 +693,12 @@ export function validateSynthesisRequestInput(input) {
   return { valid: true, value: {} };
 }
 
-function getDatabaseUrl() {
-  return process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || '';
+export function getDatabaseUrl(env = process.env) {
+  return env.DATABASE_URL || env.POSTGRES_URL || env.POSTGRES_PRISMA_URL || '';
+}
+
+export function createSqlClient(databaseUrl) {
+  return neon(databaseUrl);
 }
 
 function createPostgresJobStore() {
@@ -698,7 +706,7 @@ function createPostgresJobStore() {
   if (!databaseUrl) {
     return null;
   }
-  const sql = neon(databaseUrl);
+  const sql = createSqlClient(databaseUrl);
   let initialized = null;
 
   async function ensureSchema() {
@@ -1051,14 +1059,38 @@ function createPostgresJobStore() {
           COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'pending')::integer AS pending
         FROM document_chunks
         WHERE job_id = ${jobId}
+      ),
+      document_counts AS (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE chunk_count > 0
+              AND completed_chunks + superseded_chunks = chunk_count
+              AND failed_chunks = 0
+          )::integer AS completed_documents,
+          COUNT(*) FILTER (
+            WHERE chunk_count > 0
+              AND failed_chunks > 0
+              AND completed_chunks + failed_chunks + superseded_chunks = chunk_count
+          )::integer AS failed_documents
+        FROM (
+          SELECT
+            document_id,
+            COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status <> 'split_superseded')::integer AS chunk_count,
+            COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'completed')::integer AS completed_chunks,
+            COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'failed')::integer AS failed_chunks,
+            COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'split_superseded')::integer AS superseded_chunks
+          FROM document_chunks
+          WHERE job_id = ${jobId}
+          GROUP BY document_id
+        ) per_document
       )
       UPDATE analysis_jobs
       SET
         abstract_chunk_total = counts.total,
         abstract_chunk_completed = counts.completed,
         abstract_chunk_failed = counts.failed,
-        completed_documents = counts.completed,
-        failed_documents = counts.failed,
+        completed_documents = LEAST(document_counts.completed_documents, total_documents),
+        failed_documents = LEAST(document_counts.failed_documents, total_documents),
         current_phase = CASE
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total
             THEN 'Server abstraction finished: ' || counts.completed || ' completed, ' || counts.failed || ' failed'
@@ -1074,7 +1106,7 @@ function createPostgresJobStore() {
           ELSE 'abstracting'
         END,
         updated_at = now()
-      FROM counts
+      FROM counts, document_counts
       WHERE id = ${jobId}
       RETURNING analysis_jobs.*
     `;
@@ -1370,6 +1402,24 @@ function createPostgresJobStore() {
         LIMIT ${safeLimit}
       `;
       return rows.map(rowToChunk);
+    },
+
+    async listRunnableAbstractionJobIds(limit = 20) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
+      const rows = await sql`
+        SELECT DISTINCT job_id
+        FROM document_chunks
+        WHERE upload_status = 'uploaded'
+          AND (
+            abstraction_status = 'pending'
+            OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
+            OR (abstraction_status = 'processing' AND (abstraction_lease_expires_at IS NULL OR abstraction_lease_expires_at <= now()))
+          )
+        ORDER BY job_id ASC
+        LIMIT ${safeLimit}
+      `;
+      return rows.map(row => row.job_id);
     },
 
     async refreshAbstractionRollup(jobId) {
@@ -1763,6 +1813,38 @@ function createPostgresJobStore() {
       return rows.map(rowToSynthesisSegment);
     },
 
+    async listRunnableSynthesisJobIds(limit = 20) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
+      const rows = await sql`
+        SELECT DISTINCT j.id
+        FROM analysis_jobs j
+        LEFT JOIN synthesis_segments s
+          ON s.job_id = j.id
+         AND s.plan_id = j.synthesis_plan_id
+        LEFT JOIN job_results r
+          ON r.job_id = j.id
+        WHERE j.status = 'synthesizing'
+          AND r.job_id IS NULL
+          AND (
+            s.id IS NULL
+            OR s.status = 'pending'
+            OR (s.status = 'retry_wait' AND (s.retry_at IS NULL OR s.retry_at <= now()))
+            OR (s.status = 'processing' AND (s.lease_expires_at IS NULL OR s.lease_expires_at <= now()))
+            OR NOT EXISTS (
+              SELECT 1
+              FROM synthesis_segments pending
+              WHERE pending.job_id = j.id
+                AND pending.plan_id = j.synthesis_plan_id
+                AND pending.status <> 'complete'
+            )
+          )
+        ORDER BY j.id ASC
+        LIMIT ${safeLimit}
+      `;
+      return rows.map(row => row.id);
+    },
+
     async claimSynthesisSegment(jobId, segmentId, options = {}) {
       await ensureSchema();
       const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
@@ -2111,7 +2193,7 @@ function createPostgresJobStore() {
         return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(buildChunkBlobPrefix(jobId, chunk.id));
       });
       if (invalidUploaded.length) {
-        throw new JobApiError('Uploaded chunks must include valid Vercel Blob metadata before finalization.', 409);
+        throw new JobApiError('Uploaded chunks must include valid durable storage metadata before finalization.', 409);
       }
       const pendingChunks = chunks.filter(chunk => chunk.uploadStatus !== 'uploaded').length;
       if (!chunks.length || pendingChunks > 0) {

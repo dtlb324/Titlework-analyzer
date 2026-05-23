@@ -55,7 +55,7 @@ function makeChunk(overrides = {}) {
     chunkOrder: overrides.chunkOrder ?? 0,
     originalFilename: overrides.originalFilename || 'Deed.pdf',
     blobKey: overrides.blobKey || `jobs/job_test_1/chunks/${overrides.id || 'chk_test_1'}/deed.pdf`,
-    blobUrl: overrides.blobUrl || 'https://blob.vercel-storage.com/private/deed.pdf',
+    blobUrl: overrides.blobUrl || `gs://titlework-test/jobs/job_test_1/chunks/${overrides.id || 'chk_test_1'}/deed.pdf`,
     mediaType: overrides.mediaType || 'application/pdf',
     sizeBytes: overrides.sizeBytes ?? 100,
     pageStart: overrides.pageStart ?? 1,
@@ -413,7 +413,7 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-test('POST /api/jobs/:id/abstraction/start enqueues quickly and background drains chunks', async () => {
+test('POST /api/jobs/:id/abstraction/start enqueues quickly for the Cloud Run worker', async () => {
   const store = createMemoryPhase3Store([makeChunk()]);
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({
@@ -441,11 +441,27 @@ test('POST /api/jobs/:id/abstraction/start enqueues quickly and background drain
   assert(res.body.workflow.driver === 'inprocess', 'Expected default inprocess driver');
   assert(elapsed < 2000, `Expected start endpoint to return quickly, took ${elapsed}ms`);
 
-  await getBackgroundPromise('job_test_1');
+  assert(!getBackgroundPromise('job_test_1'), 'Expected route not to schedule an in-request background drain');
+  assert((await store.listDocumentAbstracts('job_test_1')).length === 0, 'Expected no abstract before the worker drains the queue');
+
+  await processAbstractionBatch('job_test_1', { store });
   const saved = await store.listDocumentAbstracts('job_test_1');
   assert(saved.length === 1, 'Expected saved abstract');
   assert(saved[0].abstractText.includes('Abstracted deed facts'), 'Expected abstract text persistence');
   assert(saved[0].inputTokens === 111 && saved[0].outputTokens === 22, 'Expected token usage persistence');
+});
+
+test('POST /api/jobs/:id/abstraction/start rejects jobs before uploads are ready', async () => {
+  const store = createMemoryPhase3Store([makeChunk()], { jobStatus: 'uploading' });
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nnoop', model: 'claude-haiku-4-5', usage: {} });
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
+
+  assert(res.statusCode === 409, `Expected 409, got ${res.statusCode}`);
+  assert(/finalized/.test(res.body.error), `Expected finalize guidance, got ${res.body.error}`);
 });
 
 test('buildAbstractMessagesForChunk supports PDF, image, and CSV chunks', async () => {
@@ -503,14 +519,14 @@ test('GET /api/jobs/:id/abstracts returns saved abstracts in chunk order', async
   assert(!JSON.stringify(res.body).includes('data:'), 'Abstract response must not include raw data URLs');
 });
 
-test('server Blob loader rejects non-Vercel Blob URLs before attaching the Blob token', () => {
+test('server storage loader rejects non-GCS URLs before loading object bytes', () => {
   let rejected = false;
   try {
     assertSafeBlobUrl('https://attacker.example/chunk.pdf');
   } catch (err) {
-    rejected = /Vercel Blob/.test(err.message);
+    rejected = /Google Cloud Storage/.test(err.message);
   }
-  assert(rejected, 'Expected non-Vercel Blob URL rejection');
+  assert(rejected, 'Expected non-GCS URL rejection');
 });
 
 test('POST /api/jobs/:id/chunks/:chunkId/retry retries only the failed chunk', async () => {
@@ -761,7 +777,8 @@ test('Phase 4: failed chunks can be retried via /retry-failed', async () => {
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/retry-failed'), res);
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.reset === 1, `Expected one chunk reset, got ${res.body.reset}`);
-  await getBackgroundPromise('job_test_1');
+  assert(!getBackgroundPromise('job_test_1'), 'Expected retry route not to schedule in-request background work');
+  await processAbstractionBatch('job_test_1', { store });
   assert(modelCalls === 1, `Expected one retry call, got ${modelCalls}`);
   const chunk = store.chunks.get('chk_failed');
   assert(chunk.abstractionStatus === 'completed', `Expected chunk completed after retry, got ${chunk.abstractionStatus}`);
@@ -821,7 +838,7 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_WRITER__ = async (parent, name, bytes) => ({
     blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
-    blobUrl: `https://blob.vercel-storage.com/private/${name}`,
+    blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
   });
 
   // Build a real multi-page PDF so pdf-lib can split it
@@ -964,28 +981,11 @@ test('Phase 4: rate_limit error schedules retry_wait instead of failing immediat
   assert(chunk.abstractionErrorType === 'rate_limit', 'Expected rate_limit error type recorded');
 });
 
-test('Phase 4: default Blob loader rejects oversized content before buffering', async () => {
-  const previousToken = process.env.BLOB_READ_WRITE_TOKEN;
-  const previousFetch = global.fetch;
-  process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_test';
+test('Phase 4: default storage loader rejects oversized content before reading object bytes', async () => {
   let buffered = false;
-  global.fetch = async (_url, options = {}) => {
-    assert(options.signal, 'Expected Blob fetch to use an abort signal');
-    return {
-      ok: true,
-      status: 200,
-      headers: {
-        get(name) {
-          if (String(name).toLowerCase() === 'content-length') return String(10_000_000);
-          if (String(name).toLowerCase() === 'content-type') return 'application/pdf';
-          return null;
-        },
-      },
-      async arrayBuffer() {
-        buffered = true;
-        return new ArrayBuffer(0);
-      },
-    };
+  globalThis.__TITLE_ANALYZER_OBJECT_READER__ = async () => {
+    buffered = true;
+    return { bytes: Buffer.alloc(0), mediaType: 'application/pdf' };
   };
 
   let rejected = false;
@@ -994,35 +994,17 @@ test('Phase 4: default Blob loader rejects oversized content before buffering', 
   } catch (err) {
     rejected = /too large/i.test(err.message);
   }
-  global.fetch = previousFetch;
-  if (previousToken) process.env.BLOB_READ_WRITE_TOKEN = previousToken;
-  else delete process.env.BLOB_READ_WRITE_TOKEN;
+  delete globalThis.__TITLE_ANALYZER_OBJECT_READER__;
 
-  assert(rejected, 'Expected oversized Blob to be rejected');
-  assert(buffered === false, 'Expected oversized Blob rejection before arrayBuffer buffering');
+  assert(rejected, 'Expected oversized object to be rejected');
+  assert(buffered === false, 'Expected oversized object rejection before reading bytes');
 });
 
-test('Phase 4: default Blob loader allows splittable PDFs up to the split recovery cap', async () => {
-  const previousToken = process.env.BLOB_READ_WRITE_TOKEN;
-  const previousFetch = global.fetch;
-  process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_test';
-  let fetched = false;
-  global.fetch = async () => {
-    fetched = true;
-    return {
-      ok: true,
-      status: 200,
-      headers: {
-        get(name) {
-          if (String(name).toLowerCase() === 'content-length') return String(10_000_000);
-          if (String(name).toLowerCase() === 'content-type') return 'application/pdf';
-          return null;
-        },
-      },
-      async arrayBuffer() {
-        return new ArrayBuffer(0);
-      },
-    };
+test('Phase 4: default storage loader allows splittable PDFs up to the split recovery cap', async () => {
+  let read = false;
+  globalThis.__TITLE_ANALYZER_OBJECT_READER__ = async chunk => {
+    read = true;
+    return { bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType };
   };
 
   const payload = await defaultBlobLoader(makeChunk({
@@ -1031,11 +1013,9 @@ test('Phase 4: default Blob loader allows splittable PDFs up to the split recove
     pageStart: 1,
     pageEnd: 4,
   }));
-  global.fetch = previousFetch;
-  if (previousToken) process.env.BLOB_READ_WRITE_TOKEN = previousToken;
-  else delete process.env.BLOB_READ_WRITE_TOKEN;
+  delete globalThis.__TITLE_ANALYZER_OBJECT_READER__;
 
-  assert(fetched, 'Expected splittable PDF to be fetched for split recovery');
+  assert(read, 'Expected splittable PDF object to be read for split recovery');
   assert(payload.mediaType === 'application/pdf', 'Expected PDF media type preserved');
 });
 
@@ -1046,9 +1026,9 @@ test('Phase 4: saving an abstract invalidates any existing synthesis plan and me
 });
 
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {
-  const previousBlob = process.env.BLOB_READ_WRITE_TOKEN;
+  const previousBucket = process.env.GCS_BUCKET;
   const previousApi = process.env.ANTHROPIC_API_KEY;
-  delete process.env.BLOB_READ_WRITE_TOKEN;
+  delete process.env.GCS_BUCKET;
   delete process.env.ANTHROPIC_API_KEY;
   delete globalThis.__TITLE_ANALYZER_BLOB_LOADER__;
   delete globalThis.__TITLE_ANALYZER_MODEL_CLIENT__;
@@ -1060,7 +1040,7 @@ test('Phase 4: setup error when queue env not configured returns 503 with fallba
   assert(res.statusCode === 503, `Expected 503 when queue env missing, got ${res.statusCode}`);
   assert(res.body.fallback === 'browser_abstraction', 'Expected fallback hint for frontend');
 
-  if (previousBlob) process.env.BLOB_READ_WRITE_TOKEN = previousBlob;
+  if (previousBucket) process.env.GCS_BUCKET = previousBucket;
   if (previousApi) process.env.ANTHROPIC_API_KEY = previousApi;
 });
 
