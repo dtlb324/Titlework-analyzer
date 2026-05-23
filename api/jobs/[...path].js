@@ -8,8 +8,10 @@ import {
   setJobSecurityHeaders,
   validateCreateChunkInput,
   validateCreateDocumentInput,
+  validateFollowupRequestInput,
   validatePatchChunkInput,
   validatePatchJobInput,
+  validateSynthesisRequestInput,
 } from '../_lib/jobs.js';
 import {
   processJobAbstraction,
@@ -20,12 +22,20 @@ import {
   abstractionSnapshot,
   cancelAbstractionJob,
   enqueueAbstractionJob,
+  enqueueSynthesisJob,
   getWorkflowConfig,
   processAbstractionBatch,
+  processSynthesisBatch,
   retryFailedAbstractionChunks,
   scheduleBackgroundProcessing,
+  scheduleBackgroundSynthesis,
+  synthesisSnapshot,
   workflowSetupError,
 } from '../_lib/queue.js';
+import {
+  answerFollowupQuestion,
+  synthesisSetupError,
+} from '../_lib/synthesis.js';
 
 export const config = {
   runtime: 'nodejs',
@@ -319,6 +329,207 @@ async function handleAbstractList(req, res, requestId, store, jobId) {
   return res.status(200).json({ abstracts: abstracts.map(publicAbstract), requestId });
 }
 
+function publicSynthesisSegment(segment) {
+  if (!segment) return null;
+  return {
+    id: segment.id,
+    segmentIndex: segment.segmentIndex,
+    startSequenceIndex: segment.startSequenceIndex,
+    endSequenceIndex: segment.endSequenceIndex,
+    documentIds: segment.documentIds || [],
+    filenames: segment.filenames || [],
+    status: segment.status,
+    attemptCount: segment.attemptCount,
+    estimatedBytes: segment.estimatedBytes,
+    modelUsed: segment.modelUsed,
+    inputTokens: segment.inputTokens,
+    outputTokens: segment.outputTokens,
+    payloadBytes: segment.payloadBytes,
+    latencyMs: segment.latencyMs,
+    errorType: segment.errorType,
+    errorMessage: segment.errorMessage,
+    warnings: segment.warnings || [],
+    completedAt: segment.completedAt,
+  };
+}
+
+function publicSynthesisStatusBody(snapshot) {
+  if (!snapshot) return null;
+  const raw = snapshot.raw || snapshot;
+  const status = snapshot.status || {};
+  return {
+    total: status.total ?? raw?.total ?? 0,
+    pending: status.pending ?? raw?.pending ?? 0,
+    processing: status.processing ?? raw?.processing ?? 0,
+    complete: status.complete ?? raw?.complete ?? 0,
+    failed: status.failed ?? raw?.failed ?? 0,
+    retry_wait: status.retry_wait ?? raw?.retry_wait ?? 0,
+    planId: status.planId ?? raw?.planId ?? null,
+    hasResult: status.hasResult ?? raw?.hasResult ?? false,
+    segments: (raw?.segments || []).map(publicSynthesisSegment),
+    warnings: raw?.result?.warnings || [],
+    failedDocuments: raw?.result?.failedDocuments || [],
+    hasMore: ((status.pending ?? 0) + (status.processing ?? 0) + (status.retry_wait ?? 0)) > 0,
+  };
+}
+
+function publicJobResult(result) {
+  if (!result) return null;
+  return {
+    jobId: result.jobId,
+    planId: result.planId,
+    status: result.status,
+    finalTitleOpinion: result.finalTitleOpinion,
+    warnings: result.warnings || [],
+    failedDocuments: result.failedDocuments || [],
+    modelUsed: result.modelUsed,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    payloadBytes: result.payloadBytes,
+    synthesisDurationMs: result.synthesisDurationMs,
+    generatedAt: result.generatedAt,
+  };
+}
+
+function synthesisCombinedSetupError() {
+  return workflowSetupError() || synthesisSetupError();
+}
+
+async function handleSynthesisStart(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const body = req.body ? parseBody(req, res, requestId) : {};
+  if (req.body && !body) return;
+  const validation = validateSynthesisRequestInput(body);
+  if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  const setupError = synthesisCombinedSetupError();
+  if (setupError) {
+    return res.status(503).json({ error: setupError, fallback: 'browser_synthesis', requestId });
+  }
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (job.status === 'canceled') {
+    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  }
+  let snapshot;
+  try {
+    snapshot = await enqueueSynthesisJob(jobId, { store });
+  } catch (err) {
+    if (err?.statusCode === 409 || /No abstracts available/i.test(err?.message || '')) {
+      return res.status(409).json({ error: err.message || 'Synthesis cannot start before abstracts are available.', requestId });
+    }
+    throw err;
+  }
+  scheduleBackgroundSynthesis(jobId, { store });
+  const workflow = getWorkflowConfig();
+  return res.status(202).json({
+    status: publicSynthesisStatusBody(snapshot),
+    job: snapshot.job,
+    workflow: { driver: workflow.driver },
+    requestId,
+  });
+}
+
+async function handleSynthesisStatus(req, res, requestId, store, jobId) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  const snapshot = await synthesisSnapshot(jobId, { store });
+  return res.status(200).json({
+    status: publicSynthesisStatusBody(snapshot),
+    job: snapshot.job || job,
+    requestId,
+  });
+}
+
+async function handleSynthesisProcess(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const body = req.body ? parseBody(req, res, requestId) : {};
+  if (req.body && !body) return;
+  const validation = validateSynthesisRequestInput(body);
+  if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  const setupError = synthesisCombinedSetupError();
+  if (setupError) {
+    return res.status(503).json({ error: setupError, fallback: 'browser_synthesis', requestId });
+  }
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (job.status === 'canceled') {
+    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  }
+  let result;
+  try {
+    result = await processSynthesisBatch(jobId, { store });
+  } catch (err) {
+    if (err?.statusCode === 409 || /No abstracts available/i.test(err?.message || '')) {
+      return res.status(409).json({ error: err.message || 'Synthesis cannot run before abstracts are available.', requestId });
+    }
+    throw err;
+  }
+  return res.status(200).json({
+    status: publicSynthesisStatusBody({ status: result.status, raw: result.rawStatus }),
+    job: result.rawStatus?.job || job,
+    completedInBatch: result.completedInBatch,
+    failedInBatch: result.failedInBatch,
+    retryScheduledInBatch: result.retryScheduledInBatch,
+    mergeRan: result.mergeRan,
+    elapsedMs: result.elapsedMs,
+    lastError: result.lastError,
+    result: publicJobResult(result.result),
+    hasMore: result.hasMore,
+    requestId,
+  });
+}
+
+async function handleJobResult(req, res, requestId, store, jobId) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  const result = store.getJobResult ? await store.getJobResult(jobId) : null;
+  if (!result) {
+    return res.status(404).json({ error: 'Final title opinion is not available yet for this job.', requestId, job });
+  }
+  return res.status(200).json({
+    result: publicJobResult(result),
+    job,
+    requestId,
+  });
+}
+
+async function handleFollowup(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const body = parseBody(req, res, requestId);
+  if (!body) return;
+  const validation = validateFollowupRequestInput(body);
+  if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  const setupError = synthesisSetupError();
+  if (setupError) {
+    return res.status(503).json({ error: setupError, fallback: 'browser_synthesis', requestId });
+  }
+  try {
+    const { followup, truncationWarning } = await answerFollowupQuestion(jobId, validation.value.question, { store });
+    return res.status(200).json({
+      followup,
+      truncationWarning,
+      requestId,
+    });
+  } catch (err) {
+    if (err?.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message, requestId });
+    }
+    throw err;
+  }
+}
+
 async function handleChunkRetry(req, res, requestId, store, jobId, chunkId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
   if (!requireServerAbstractionPassword(res, requestId)) return;
@@ -357,6 +568,11 @@ export default async function handler(req, res) {
     if (parts.length === 3 && second === 'abstraction' && third === 'start') return await handleAbstractionStart(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'abstraction' && third === 'status') return await handleAbstractionStatus(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'abstraction' && third === 'process') return await handleAbstractionProcess(req, res, requestId, store, jobId);
+    if (parts.length === 3 && second === 'synthesis' && third === 'start') return await handleSynthesisStart(req, res, requestId, store, jobId);
+    if (parts.length === 3 && second === 'synthesis' && third === 'status') return await handleSynthesisStatus(req, res, requestId, store, jobId);
+    if (parts.length === 3 && second === 'synthesis' && third === 'process') return await handleSynthesisProcess(req, res, requestId, store, jobId);
+    if (parts.length === 2 && second === 'result') return await handleJobResult(req, res, requestId, store, jobId);
+    if (parts.length === 2 && second === 'followup') return await handleFollowup(req, res, requestId, store, jobId);
     if (parts.length === 2 && second === 'abstracts') return await handleAbstractList(req, res, requestId, store, jobId);
     if (parts.length === 2 && second === 'cancel') return await handleJobCancel(req, res, requestId, store, jobId);
     if (parts.length === 2 && second === 'retry-failed') return await handleRetryFailedChunks(req, res, requestId, store, jobId);

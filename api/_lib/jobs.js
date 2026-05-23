@@ -48,6 +48,9 @@ const RAW_PAYLOAD_KEYS = new Set([
   'titleOpinion',
   'opinion',
 ]);
+const SYNTHESIS_SEGMENT_STATUSES = new Set(['pending', 'processing', 'complete', 'failed', 'retry_wait']);
+const JOB_RESULT_STATUSES = new Set(['complete', 'partial_failed', 'failed']);
+const MAX_FOLLOWUP_QUESTION_CHARS = 2000;
 
 let cachedStore = null;
 const jobRateLimitMap = new Map();
@@ -510,6 +513,101 @@ function rowToAbstract(row) {
   };
 }
 
+function rowToSynthesisSegment(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    planId: row.plan_id,
+    segmentIndex: row.segment_index,
+    startSequenceIndex: row.start_sequence_index,
+    endSequenceIndex: row.end_sequence_index,
+    documentIds: Array.isArray(row.document_ids) ? row.document_ids : (row.document_ids ? JSON.parse(row.document_ids) : []),
+    filenames: Array.isArray(row.filenames) ? row.filenames : (row.filenames ? JSON.parse(row.filenames) : []),
+    estimatedBytes: row.estimated_bytes,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    summaryText: row.summary_text,
+    modelUsed: row.model_used,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    payloadBytes: row.payload_bytes,
+    latencyMs: row.latency_ms,
+    errorType: row.error_type,
+    errorMessage: row.error_message,
+    warnings: Array.isArray(row.warnings) ? row.warnings : (row.warnings ? JSON.parse(row.warnings) : []),
+    leaseExpiresAt: row.lease_expires_at instanceof Date ? row.lease_expires_at.toISOString() : row.lease_expires_at,
+    claimedAt: row.claimed_at instanceof Date ? row.claimed_at.toISOString() : row.claimed_at,
+    workerId: row.worker_id,
+    retryAt: row.retry_at instanceof Date ? row.retry_at.toISOString() : row.retry_at,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+    completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+  };
+}
+
+function rowToJobResult(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    planId: row.plan_id,
+    status: row.status,
+    finalTitleOpinion: row.final_title_opinion,
+    warnings: Array.isArray(row.warnings_json) ? row.warnings_json : (row.warnings_json ? JSON.parse(row.warnings_json) : []),
+    failedDocuments: Array.isArray(row.failed_documents_json) ? row.failed_documents_json : (row.failed_documents_json ? JSON.parse(row.failed_documents_json) : []),
+    modelUsed: row.model_used,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    payloadBytes: row.payload_bytes,
+    synthesisDurationMs: row.synthesis_duration_ms,
+    generatedAt: row.generated_at instanceof Date ? row.generated_at.toISOString() : row.generated_at,
+  };
+}
+
+function rowToFollowupMessage(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    question: row.question,
+    answer: row.answer,
+    modelUsed: row.model_used,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    payloadBytes: row.payload_bytes,
+    retrievedDocumentIds: Array.isArray(row.retrieved_document_ids) ? row.retrieved_document_ids : (row.retrieved_document_ids ? JSON.parse(row.retrieved_document_ids) : []),
+    truncationWarning: row.truncation_warning,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+  };
+}
+
+export function validateFollowupRequestInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, reason: 'Invalid follow-up request body.' };
+  }
+  if (hasRawPayloadFields(input)) {
+    return { valid: false, reason: 'Follow-up requests must not include raw documents, abstracts, CSV text, base64 payloads, or title opinions.' };
+  }
+  const question = typeof input.question === 'string' ? input.question.trim() : '';
+  if (!question) return { valid: false, reason: 'question is required.' };
+  if (question.length > MAX_FOLLOWUP_QUESTION_CHARS) {
+    return { valid: false, reason: `question must be ${MAX_FOLLOWUP_QUESTION_CHARS} characters or fewer.` };
+  }
+  return { valid: true, value: { question } };
+}
+
+export function validateSynthesisRequestInput(input) {
+  if (input === undefined || input === null || input === '') return { valid: true, value: {} };
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, reason: 'Invalid synthesis request body.' };
+  }
+  if (hasRawPayloadFields(input)) {
+    return { valid: false, reason: 'Synthesis endpoints must not accept raw documents, abstracts, CSV text, base64 payloads, or title opinions. The server reads stored abstracts directly.' };
+  }
+  return { valid: true, value: {} };
+}
+
 function getDatabaseUrl() {
   return process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || '';
 }
@@ -639,6 +737,76 @@ function createPostgresJobStore() {
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_job_order ON document_chunks(job_id, chunk_order)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_document ON document_chunks(document_id)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_abstracts_job_chunk_order ON document_abstracts(job_id, chunk_id)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_plan_id text`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS synthesis_segments (
+            id text PRIMARY KEY,
+            job_id text NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            plan_id text NOT NULL,
+            segment_index integer NOT NULL CHECK (segment_index >= 0),
+            start_sequence_index integer NOT NULL CHECK (start_sequence_index >= 0),
+            end_sequence_index integer NOT NULL CHECK (end_sequence_index >= start_sequence_index),
+            document_ids jsonb NOT NULL,
+            filenames jsonb NOT NULL,
+            estimated_bytes integer,
+            status text NOT NULL DEFAULT 'pending',
+            attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            summary_text text,
+            model_used text,
+            input_tokens integer,
+            output_tokens integer,
+            payload_bytes integer,
+            latency_ms integer,
+            error_type text,
+            error_message text,
+            warnings jsonb,
+            lease_expires_at timestamptz,
+            claimed_at timestamptz,
+            worker_id text,
+            retry_at timestamptz,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            completed_at timestamptz,
+            UNIQUE (job_id, plan_id, segment_index)
+          )
+        `;
+        await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_job_plan ON synthesis_segments(job_id, plan_id, segment_index)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_job_status ON synthesis_segments(job_id, status)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_lease ON synthesis_segments(job_id, status, lease_expires_at)`;
+        await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_retry ON synthesis_segments(job_id, status, retry_at)`;
+        await sql`
+          CREATE TABLE IF NOT EXISTS job_results (
+            id text PRIMARY KEY,
+            job_id text NOT NULL UNIQUE REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            plan_id text,
+            status text NOT NULL,
+            final_title_opinion text,
+            warnings_json jsonb,
+            failed_documents_json jsonb,
+            model_used text,
+            input_tokens integer,
+            output_tokens integer,
+            payload_bytes integer,
+            synthesis_duration_ms integer,
+            generated_at timestamptz NOT NULL DEFAULT now()
+          )
+        `;
+        await sql`
+          CREATE TABLE IF NOT EXISTS followup_messages (
+            id text PRIMARY KEY,
+            job_id text NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            question text NOT NULL,
+            answer text NOT NULL,
+            model_used text,
+            input_tokens integer,
+            output_tokens integer,
+            payload_bytes integer,
+            retrieved_document_ids jsonb,
+            truncation_warning text,
+            created_at timestamptz NOT NULL DEFAULT now()
+          )
+        `;
+        await sql`CREATE INDEX IF NOT EXISTS idx_followup_messages_job ON followup_messages(job_id, created_at)`;
       })();
     }
     await initialized;
@@ -1227,6 +1395,362 @@ function createPostgresJobStore() {
       return rows.map(rowToChunk);
     },
 
+    async saveSynthesisPlan(jobId, planInput) {
+      await ensureSchema();
+      const job = await this.getJob(jobId);
+      if (!job) return null;
+      const planId = String(planInput?.planId || '').slice(0, 128);
+      if (!planId) throw new JobApiError('planId is required to save a synthesis plan.', 400);
+      const segments = Array.isArray(planInput?.segments) ? planInput.segments : [];
+      // Remove any segments from prior plans so resume cannot mix versions.
+      await sql`
+        DELETE FROM synthesis_segments
+        WHERE job_id = ${jobId} AND plan_id <> ${planId}
+      `;
+      // Persist the currently-active plan id on the job row.
+      await sql`
+        UPDATE analysis_jobs
+        SET synthesis_plan_id = ${planId}, updated_at = now()
+        WHERE id = ${jobId}
+      `;
+      const saved = [];
+      for (const segment of segments) {
+        const id = `seg_${randomUUID()}`;
+        const documentIds = Array.isArray(segment.documentIds) ? segment.documentIds : [];
+        const filenames = Array.isArray(segment.filenames) ? segment.filenames : [];
+        const rows = await sql`
+          INSERT INTO synthesis_segments (
+            id, job_id, plan_id, segment_index,
+            start_sequence_index, end_sequence_index,
+            document_ids, filenames, estimated_bytes,
+            status, attempt_count
+          )
+          VALUES (
+            ${id}, ${jobId}, ${planId}, ${segment.segmentIndex},
+            ${segment.startSequenceIndex}, ${segment.endSequenceIndex},
+            ${JSON.stringify(documentIds)}::jsonb, ${JSON.stringify(filenames)}::jsonb, ${segment.estimatedBytes ?? null},
+            'pending', 0
+          )
+          ON CONFLICT (job_id, plan_id, segment_index) DO UPDATE
+          SET
+            start_sequence_index = EXCLUDED.start_sequence_index,
+            end_sequence_index = EXCLUDED.end_sequence_index,
+            document_ids = EXCLUDED.document_ids,
+            filenames = EXCLUDED.filenames,
+            estimated_bytes = EXCLUDED.estimated_bytes,
+            updated_at = now()
+          RETURNING *
+        `;
+        saved.push(rowToSynthesisSegment(rows[0]));
+      }
+      return { planId, segments: saved };
+    },
+
+    async getCurrentSynthesisPlanId(jobId) {
+      await ensureSchema();
+      const rows = await sql`SELECT synthesis_plan_id FROM analysis_jobs WHERE id = ${jobId} LIMIT 1`;
+      return rows[0]?.synthesis_plan_id || null;
+    },
+
+    async listSynthesisSegments(jobId, planId) {
+      await ensureSchema();
+      const effectivePlanId = planId || await this.getCurrentSynthesisPlanId(jobId);
+      if (!effectivePlanId) return [];
+      const rows = await sql`
+        SELECT * FROM synthesis_segments
+        WHERE job_id = ${jobId} AND plan_id = ${effectivePlanId}
+        ORDER BY segment_index ASC
+      `;
+      return rows.map(rowToSynthesisSegment);
+    },
+
+    async listReadySynthesisSegments(jobId, planId, limit = 4) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 4, 32));
+      const rows = await sql`
+        SELECT * FROM synthesis_segments
+        WHERE job_id = ${jobId}
+          AND plan_id = ${planId}
+          AND (
+            status = 'pending'
+            OR (status = 'retry_wait' AND (retry_at IS NULL OR retry_at <= now()))
+            OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at <= now()))
+          )
+        ORDER BY segment_index ASC
+        LIMIT ${safeLimit}
+      `;
+      return rows.map(rowToSynthesisSegment);
+    },
+
+    async claimSynthesisSegment(jobId, segmentId, options = {}) {
+      await ensureSchema();
+      const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 120000) / 1000));
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          status = 'processing',
+          attempt_count = attempt_count + 1,
+          claimed_at = now(),
+          lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
+          worker_id = ${workerId},
+          retry_at = NULL,
+          error_type = NULL,
+          error_message = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND id = ${segmentId}
+          AND (
+            status = 'pending'
+            OR (status = 'retry_wait' AND (retry_at IS NULL OR retry_at <= now()))
+            OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at <= now()))
+          )
+        RETURNING *
+      `;
+      return rowToSynthesisSegment(rows[0]);
+    },
+
+    async completeSynthesisSegment(jobId, segmentId, payload) {
+      await ensureSchema();
+      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          status = 'complete',
+          summary_text = ${payload.summaryText},
+          model_used = ${payload.modelUsed},
+          input_tokens = ${payload.inputTokens ?? null},
+          output_tokens = ${payload.outputTokens ?? null},
+          payload_bytes = ${payload.payloadBytes ?? null},
+          latency_ms = ${payload.latencyMs ?? null},
+          error_type = NULL,
+          error_message = NULL,
+          warnings = ${JSON.stringify(warnings)}::jsonb,
+          claimed_at = NULL,
+          lease_expires_at = NULL,
+          worker_id = NULL,
+          retry_at = NULL,
+          completed_at = now(),
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${segmentId}
+        RETURNING *
+      `;
+      return rowToSynthesisSegment(rows[0]);
+    },
+
+    async markSynthesisSegmentFailed(jobId, segmentId, failure) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          status = 'failed',
+          error_type = ${failure.errorType},
+          error_message = ${failure.errorMessage},
+          payload_bytes = ${failure.payloadBytes ?? null},
+          latency_ms = ${failure.latencyMs ?? null},
+          model_used = ${failure.modelUsed ?? null},
+          claimed_at = NULL,
+          lease_expires_at = NULL,
+          worker_id = NULL,
+          retry_at = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${segmentId}
+        RETURNING *
+      `;
+      return rowToSynthesisSegment(rows[0]);
+    },
+
+    async markSynthesisSegmentRetryWait(jobId, segmentId, failure) {
+      await ensureSchema();
+      const retryAt = failure?.retryAtIso ? new Date(failure.retryAtIso) : null;
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          status = 'retry_wait',
+          error_type = ${failure.errorType},
+          error_message = ${failure.errorMessage},
+          payload_bytes = ${failure.payloadBytes ?? null},
+          latency_ms = ${failure.latencyMs ?? null},
+          model_used = ${failure.modelUsed ?? null},
+          retry_at = ${retryAt},
+          claimed_at = NULL,
+          lease_expires_at = NULL,
+          worker_id = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId} AND id = ${segmentId}
+        RETURNING *
+      `;
+      return rowToSynthesisSegment(rows[0]);
+    },
+
+    async resetStaleSynthesisSegments(jobId, staleMs = 180000) {
+      await ensureSchema();
+      const staleSeconds = Math.max(1, Math.ceil(Number(staleMs) / 1000));
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          status = 'pending',
+          error_type = 'stale_processing_recovered',
+          error_message = 'Previous synthesis attempt was interrupted and has been requeued.',
+          claimed_at = NULL,
+          lease_expires_at = NULL,
+          worker_id = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND status = 'processing'
+          AND (
+            (lease_expires_at IS NOT NULL AND lease_expires_at <= now())
+            OR (lease_expires_at IS NULL AND updated_at < now() - make_interval(secs => ${staleSeconds}))
+          )
+        RETURNING *
+      `;
+      return rows.map(rowToSynthesisSegment);
+    },
+
+    async resetFailedSynthesisSegments(jobId, planId) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          status = 'pending',
+          error_type = NULL,
+          error_message = NULL,
+          retry_at = NULL,
+          claimed_at = NULL,
+          lease_expires_at = NULL,
+          worker_id = NULL,
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND plan_id = ${planId}
+          AND status IN ('failed', 'retry_wait')
+        RETURNING *
+      `;
+      return rows.map(rowToSynthesisSegment);
+    },
+
+    async saveJobResult(jobId, payload) {
+      await ensureSchema();
+      const job = await this.getJob(jobId);
+      if (!job) return null;
+      const id = `res_${randomUUID()}`;
+      const status = JOB_RESULT_STATUSES.has(payload.status) ? payload.status : 'complete';
+      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+      const failedDocuments = Array.isArray(payload.failedDocuments) ? payload.failedDocuments : [];
+      const rows = await sql`
+        INSERT INTO job_results (
+          id, job_id, plan_id, status,
+          final_title_opinion, warnings_json, failed_documents_json,
+          model_used, input_tokens, output_tokens, payload_bytes,
+          synthesis_duration_ms, generated_at
+        )
+        VALUES (
+          ${id}, ${jobId}, ${payload.planId || null}, ${status},
+          ${payload.finalTitleOpinion || ''}, ${JSON.stringify(warnings)}::jsonb, ${JSON.stringify(failedDocuments)}::jsonb,
+          ${payload.modelUsed || null}, ${payload.inputTokens ?? null}, ${payload.outputTokens ?? null}, ${payload.payloadBytes ?? null},
+          ${payload.synthesisDurationMs ?? null}, now()
+        )
+        ON CONFLICT (job_id) DO UPDATE
+        SET
+          plan_id = EXCLUDED.plan_id,
+          status = EXCLUDED.status,
+          final_title_opinion = EXCLUDED.final_title_opinion,
+          warnings_json = EXCLUDED.warnings_json,
+          failed_documents_json = EXCLUDED.failed_documents_json,
+          model_used = EXCLUDED.model_used,
+          input_tokens = EXCLUDED.input_tokens,
+          output_tokens = EXCLUDED.output_tokens,
+          payload_bytes = EXCLUDED.payload_bytes,
+          synthesis_duration_ms = EXCLUDED.synthesis_duration_ms,
+          generated_at = now()
+        RETURNING *
+      `;
+      // Roll the job into its terminal status. assertValidStatusTransition
+      // forbids regressing once a job has reached 'complete'.
+      const desiredJobStatus = status === 'complete' ? 'complete'
+        : status === 'partial_failed' ? 'partial_failed'
+        : 'failed';
+      if (job.status !== 'canceled' && job.status !== desiredJobStatus) {
+        try {
+          assertValidStatusTransition(job.status, desiredJobStatus);
+          await sql`
+            UPDATE analysis_jobs
+            SET status = ${desiredJobStatus},
+                current_phase = ${status === 'complete' ? 'complete' : status === 'partial_failed' ? 'complete with synthesis warnings' : 'synthesis failed'},
+                completed_at = COALESCE(completed_at, now()),
+                updated_at = now()
+            WHERE id = ${jobId}
+          `;
+        } catch {
+          // ignore invalid transition; the result is still saved
+        }
+      }
+      return rowToJobResult(rows[0]);
+    },
+
+    async getJobResult(jobId) {
+      await ensureSchema();
+      const rows = await sql`SELECT * FROM job_results WHERE job_id = ${jobId} LIMIT 1`;
+      return rowToJobResult(rows[0]);
+    },
+
+    async appendFollowupMessage(jobId, payload) {
+      await ensureSchema();
+      const id = `flw_${randomUUID()}`;
+      const retrievedIds = Array.isArray(payload.retrievedDocumentIds) ? payload.retrievedDocumentIds : [];
+      const rows = await sql`
+        INSERT INTO followup_messages (
+          id, job_id, question, answer,
+          model_used, input_tokens, output_tokens, payload_bytes,
+          retrieved_document_ids, truncation_warning
+        )
+        VALUES (
+          ${id}, ${jobId}, ${payload.question}, ${payload.answer},
+          ${payload.modelUsed || null}, ${payload.inputTokens ?? null}, ${payload.outputTokens ?? null}, ${payload.payloadBytes ?? null},
+          ${JSON.stringify(retrievedIds)}::jsonb, ${payload.truncationWarning || null}
+        )
+        RETURNING *
+      `;
+      return rowToFollowupMessage(rows[0]);
+    },
+
+    async listFollowupMessages(jobId, limit = 50) {
+      await ensureSchema();
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
+      const rows = await sql`
+        SELECT * FROM followup_messages
+        WHERE job_id = ${jobId}
+        ORDER BY created_at ASC
+        LIMIT ${safeLimit}
+      `;
+      return rows.map(rowToFollowupMessage);
+    },
+
+    async getSynthesisStatus(jobId) {
+      await ensureSchema();
+      const job = await this.getJob(jobId);
+      if (!job) return null;
+      const planId = await this.getCurrentSynthesisPlanId(jobId);
+      const segments = planId ? await this.listSynthesisSegments(jobId, planId) : [];
+      const counts = segments.reduce((acc, segment) => {
+        acc[segment.status] = (acc[segment.status] || 0) + 1;
+        return acc;
+      }, {});
+      const result = await this.getJobResult(jobId);
+      return {
+        job,
+        planId,
+        total: segments.length,
+        pending: counts.pending || 0,
+        processing: counts.processing || 0,
+        complete: counts.complete || 0,
+        failed: counts.failed || 0,
+        retry_wait: counts.retry_wait || 0,
+        segments,
+        hasResult: Boolean(result?.finalTitleOpinion),
+        result,
+      };
+    },
+
     async finalizeUploads(jobId) {
       await ensureSchema();
       const chunks = await this.listChunks(jobId);
@@ -1264,3 +1788,5 @@ export function sendStorageNotConfigured(res, requestId) {
     requestId,
   });
 }
+
+export { JOB_RESULT_STATUSES, SYNTHESIS_SEGMENT_STATUSES };
