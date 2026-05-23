@@ -7,6 +7,7 @@ import {
   buildSynthesisChunks,
   computePlanId,
   estimateRequestBytes,
+  groupAbstractsByDocument,
   planSynthesisSegments,
   PARTIAL_SYNTHESIS_PROMPT,
   planJobSynthesis,
@@ -60,10 +61,14 @@ function mockRes() {
 function makeAbstract(overrides = {}) {
   return {
     chunkId: overrides.chunkId,
-    documentId: overrides.documentId || 'doc_1',
+    documentId: Object.hasOwn(overrides, 'documentId') ? overrides.documentId : 'doc_1',
     chunkOrder: overrides.chunkOrder ?? 0,
     originalFilename: overrides.originalFilename || `${overrides.chunkId}.pdf`,
     filename: overrides.filename || overrides.originalFilename || `${overrides.chunkId}.pdf`,
+    sourceFilename: overrides.sourceFilename,
+    pageStart: overrides.pageStart,
+    pageEnd: overrides.pageEnd,
+    createdAt: overrides.createdAt,
     abstractText: overrides.abstractText || `DOC TYPE: Deed\nGRANTOR: Person ${overrides.chunkId}\nGRANTEE: Person ${overrides.chunkId}+1\nFRACTION CONVEYED: 1/4`,
     status: 'completed',
   };
@@ -449,6 +454,7 @@ function createMemoryPhase5Store(initialState = {}) {
 function manyAbstracts(count, opts = {}) {
   return Array.from({ length: count }, (_, i) => makeAbstract({
     chunkId: `chk_${String(i + 1).padStart(3, '0')}`,
+    documentId: `doc_${String(i + 1).padStart(3, '0')}`,
     chunkOrder: i,
     originalFilename: `doc_${i + 1}.pdf`,
     abstractText: (opts.abstractTextFor && opts.abstractTextFor(i))
@@ -509,6 +515,95 @@ test('Ordering: chunk order preserved and failed abstracts excluded from segment
   assert(ok.length === 2, 'Expected failed abstract excluded');
 });
 
+test('groupAbstractsByDocument preserves single chunk abstracts unchanged', () => {
+  const grouped = groupAbstractsByDocument([
+    makeAbstract({
+      chunkId: 'chk_single',
+      documentId: 'doc_single',
+      sourceFilename: 'Single Source.pdf',
+      abstractText: 'single chunk abstract',
+    }),
+  ]);
+
+  assert(grouped.length === 1, `Expected one grouped document, got ${grouped.length}`);
+  assert(grouped[0].documentId === 'doc_single', 'Expected source document ID');
+  assert(grouped[0].filename === 'Single Source.pdf', 'Expected canonical source filename');
+  assert(grouped[0].abstract === 'single chunk abstract', 'Expected single chunk abstract to pass through unchanged');
+  assert(grouped[0].chunkIds.join(',') === 'chk_single', 'Expected chunk provenance to be retained');
+  assert(!Object.hasOwn(grouped[0], 'chunkId'), 'Grouped document should not expose a top-level chunkId');
+});
+
+test('groupAbstractsByDocument merges split chunks with page headings in stable order', () => {
+  const grouped = groupAbstractsByDocument([
+    makeAbstract({
+      chunkId: 'chk_2',
+      documentId: 'doc_split',
+      chunkOrder: 1,
+      pageStart: 13,
+      pageEnd: 24,
+      sourceFilename: 'Split Source.pdf',
+      abstractText: 'second chunk abstract',
+      createdAt: '2026-05-23T00:00:02.000Z',
+    }),
+    makeAbstract({
+      chunkId: 'chk_1',
+      documentId: 'doc_split',
+      chunkOrder: 0,
+      pageStart: 1,
+      pageEnd: 12,
+      sourceFilename: 'Split Source.pdf',
+      abstractText: 'first chunk abstract',
+      createdAt: '2026-05-23T00:00:01.000Z',
+    }),
+  ]);
+
+  assert(grouped.length === 1, `Expected one grouped document, got ${grouped.length}`);
+  assert(grouped[0].chunkIds.join(',') === 'chk_1,chk_2', 'Expected chunk IDs in sorted order');
+  assert(grouped[0].abstract.includes('**Pages 1-12:**\n\nfirst chunk abstract'), 'Expected first page range heading');
+  assert(grouped[0].abstract.includes('**Pages 13-24:**\n\nsecond chunk abstract'), 'Expected second page range heading');
+  assert(grouped[0].abstract.indexOf('first chunk abstract') < grouped[0].abstract.indexOf('second chunk abstract'), 'Expected chunk order to be stable');
+});
+
+test('groupAbstractsByDocument falls back to chunk grouping and chunk headings', () => {
+  const grouped = groupAbstractsByDocument([
+    makeAbstract({
+      chunkId: 'chk_orphan_1',
+      documentId: null,
+      chunkOrder: 0,
+      abstractText: 'first orphan abstract',
+    }),
+    makeAbstract({
+      chunkId: 'chk_orphan_2',
+      documentId: null,
+      chunkOrder: 1,
+      abstractText: 'second orphan abstract',
+    }),
+    makeAbstract({
+      chunkId: 'chk_missing_pages_1',
+      documentId: 'doc_missing_pages',
+      chunkOrder: 0,
+      sourceFilename: 'Missing Pages.pdf',
+      abstractText: 'first missing-pages abstract',
+    }),
+    makeAbstract({
+      chunkId: 'chk_missing_pages_2',
+      documentId: 'doc_missing_pages',
+      chunkOrder: 1,
+      sourceFilename: 'Missing Pages.pdf',
+      abstractText: 'second missing-pages abstract',
+    }),
+  ]);
+
+  assert(grouped.length === 3, `Expected orphan chunks plus grouped split doc, got ${grouped.length}`);
+  assert(grouped[0].id === 'chk_orphan_1', 'Expected orphan fallback ID to use chunk ID');
+  assert(grouped[0].chunkIds.join(',') === 'chk_orphan_1', 'Expected first orphan to remain separate');
+  assert(grouped[1].id === 'chk_orphan_2', 'Expected second orphan fallback ID to use chunk ID');
+  assert(grouped[1].chunkIds.join(',') === 'chk_orphan_2', 'Expected second orphan to remain separate');
+  assert(grouped[2].id === 'doc_missing_pages', 'Expected grouped document ID to be usable as fallback ID');
+  assert(grouped[2].abstract.includes('**Chunk 1:**\n\nfirst missing-pages abstract'), 'Expected missing page range to use chunk heading');
+  assert(grouped[2].abstract.includes('**Chunk 2:**\n\nsecond missing-pages abstract'), 'Expected second missing page range to use chunk heading');
+});
+
 test('buildSynthesisChunks respects 50-doc cap and byte cap', () => {
   const small = Array.from({ length: 60 }, (_, i) => ({ filename: `d${i}.pdf`, abstract: 'small abstract' }));
   const chunks = buildSynthesisChunks(small, '', '', 'pre', SYNTHESIS_PROMPT);
@@ -543,6 +638,46 @@ test('computePlanId changes when abstract content changes', () => {
   assert(planId1 !== planId2, 'Expected planId to change when abstract content changes');
 });
 
+test('planJobSynthesis groups split chunks and stores source document IDs', async () => {
+  const abstracts = [
+    makeAbstract({
+      chunkId: 'chk_split_1',
+      documentId: 'doc_split',
+      chunkOrder: 0,
+      pageStart: 1,
+      pageEnd: 10,
+      sourceFilename: 'Split Source.pdf',
+      abstractText: 'split abstract one',
+    }),
+    makeAbstract({
+      chunkId: 'chk_split_2',
+      documentId: 'doc_split',
+      chunkOrder: 1,
+      pageStart: 11,
+      pageEnd: 20,
+      sourceFilename: 'Split Source.pdf',
+      abstractText: 'split abstract two',
+    }),
+    makeAbstract({
+      chunkId: 'chk_single',
+      documentId: 'doc_single',
+      chunkOrder: 2,
+      sourceFilename: 'Single Source.pdf',
+      abstractText: 'single abstract',
+    }),
+  ];
+  const store = createMemoryPhase5Store({ abstracts });
+
+  const { plan, abstracts: plannedAbstracts } = await planJobSynthesis('job_test_1', { store });
+
+  assert(plannedAbstracts.length === 2, `Expected 2 grouped abstracts, got ${plannedAbstracts.length}`);
+  assert(plannedAbstracts[0].documentId === 'doc_split', 'Expected split document first');
+  assert(plannedAbstracts[0].abstract.includes('**Pages 1-10:**'), 'Expected grouped split abstract to include first page range');
+  assert(plannedAbstracts[0].abstract.includes('**Pages 11-20:**'), 'Expected grouped split abstract to include second page range');
+  assert(plannedAbstracts[1].abstract === 'single abstract', 'Expected single document abstract to pass through');
+  assert(plan.segments[0].documentIds.join(',') === 'doc_split,doc_single', `Expected source document IDs, got ${plan.segments[0].documentIds.join(',')}`);
+});
+
 test('planJobSynthesis rejects pending abstraction chunks', async () => {
   const store = createMemoryPhase5Store({
     abstracts: manyAbstracts(1),
@@ -562,6 +697,82 @@ test('planJobSynthesis rejects pending abstraction chunks', async () => {
     rejected = err.statusCode === 409 && /abstraction/i.test(err.message);
   }
   assert(rejected, 'Expected synthesis planning to reject incomplete abstraction work');
+});
+
+test('processSynthesisSegment resolves grouped abstracts by document ID', async () => {
+  const store = createMemoryPhase5Store({ abstracts: [] });
+  const segment = {
+    id: 'seg_grouped',
+    jobId: 'job_test_1',
+    planId: 'plan_grouped',
+    segmentIndex: 0,
+    startSequenceIndex: 0,
+    endSequenceIndex: 0,
+    documentIds: ['doc_grouped'],
+    filenames: ['Grouped Source.pdf'],
+    status: 'pending',
+    attemptCount: 0,
+  };
+  store.segments.set(segment.id, segment);
+
+  let promptContent = '';
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    promptContent = request.messages[0].content;
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  const result = await processSynthesisSegment('job_test_1', segment, [{
+    documentId: 'doc_grouped',
+    filename: 'Grouped Source.pdf',
+    abstract: 'grouped source abstract',
+    chunkIds: ['chk_1', 'chk_2'],
+  }], {
+    store,
+    workerId: 'wkr_grouped',
+    singlePass: true,
+  });
+
+  assert(result.status === 'complete', `Expected grouped segment to complete, got ${result.status}`);
+  assert(promptContent.includes('Grouped Source.pdf'), 'Expected grouped source filename in synthesis prompt');
+  assert(promptContent.includes('grouped source abstract'), 'Expected grouped abstract in synthesis prompt');
+});
+
+test('processSynthesisSegment resolves legacy chunk IDs against grouped chunkIds', async () => {
+  const store = createMemoryPhase5Store({ abstracts: [] });
+  const segment = {
+    id: 'seg_legacy_chunk',
+    jobId: 'job_test_1',
+    planId: 'plan_legacy_chunk',
+    segmentIndex: 0,
+    startSequenceIndex: 0,
+    endSequenceIndex: 0,
+    documentIds: ['chk_legacy_1'],
+    filenames: ['Grouped Legacy.pdf'],
+    status: 'pending',
+    attemptCount: 0,
+  };
+  store.segments.set(segment.id, segment);
+
+  let promptContent = '';
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    promptContent = request.messages[0].content;
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  const result = await processSynthesisSegment('job_test_1', segment, [{
+    id: 'doc_legacy',
+    documentId: 'doc_legacy',
+    filename: 'Grouped Legacy.pdf',
+    abstract: 'legacy grouped abstract',
+    chunkIds: ['chk_legacy_1', 'chk_legacy_2'],
+  }], {
+    store,
+    workerId: 'wkr_legacy',
+    singlePass: true,
+  });
+
+  assert(result.status === 'complete', `Expected legacy chunk segment to complete, got ${result.status}`);
+  assert(promptContent.includes('legacy grouped abstract'), 'Expected grouped abstract resolved by legacy chunk ID');
 });
 
 test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields title opinion', async () => {
