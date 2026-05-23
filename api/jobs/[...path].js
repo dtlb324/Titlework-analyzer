@@ -16,6 +16,16 @@ import {
   retryChunkAbstraction,
   serverAbstractionSetupError,
 } from '../_lib/abstraction.js';
+import {
+  abstractionSnapshot,
+  cancelAbstractionJob,
+  enqueueAbstractionJob,
+  getWorkflowConfig,
+  processAbstractionBatch,
+  retryFailedAbstractionChunks,
+  scheduleBackgroundProcessing,
+  workflowSetupError,
+} from '../_lib/queue.js';
 
 export const config = {
   runtime: 'nodejs',
@@ -188,18 +198,44 @@ async function handleFinalizeUploads(req, res, requestId, store, jobId) {
   return res.status(200).json({ job: result.job, pendingChunks: 0, requestId });
 }
 
+function publicStatus(snapshot) {
+  if (!snapshot) return null;
+  return {
+    total: snapshot.total || 0,
+    pending: snapshot.pending || 0,
+    processing: snapshot.processing || 0,
+    completed: snapshot.completed || 0,
+    failed: snapshot.failed || 0,
+    retry_wait: snapshot.retry_wait || 0,
+    failedChunks: (snapshot.failedChunks || []).map(publicFailedChunk),
+    hasMore: snapshot.hasMore ?? ((snapshot.pending || 0) + (snapshot.processing || 0) + (snapshot.retry_wait || 0) > 0),
+  };
+}
+
 async function handleAbstractionStart(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
   if (!requireServerAbstractionPassword(res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
-  const setupError = serverAbstractionSetupError();
+  const setupError = serverAbstractionSetupError() || workflowSetupError();
   if (setupError) {
     return res.status(503).json({ error: setupError, fallback: 'browser_abstraction', requestId });
   }
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  const status = await processJobAbstraction(jobId, { store });
-  return res.status(200).json({ status, job: status.job, requestId });
+  if (job.status === 'canceled') {
+    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  }
+  const snapshot = await enqueueAbstractionJob(jobId, { store });
+  // Fire-and-forget background work: drain pending chunks within this function's
+  // remaining maxDuration window. Returns immediately so the client can poll.
+  scheduleBackgroundProcessing(jobId, { store });
+  const config = getWorkflowConfig();
+  return res.status(202).json({
+    status: publicStatus(snapshot),
+    job: snapshot.job,
+    workflow: { driver: config.driver, batchLimit: config.batchLimit, concurrency: config.concurrency },
+    requestId,
+  });
 }
 
 async function handleAbstractionStatus(req, res, requestId, store, jobId) {
@@ -208,15 +244,67 @@ async function handleAbstractionStatus(req, res, requestId, store, jobId) {
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  const status = store.getAbstractionStatus
-    ? await store.getAbstractionStatus(jobId)
-    : { total: 0, pending: 0, processing: 0, completed: 0, failed: 0, failedChunks: [], job };
+  const snapshot = await abstractionSnapshot(jobId, { store });
   return res.status(200).json({
-    status: {
-      ...status,
-      failedChunks: (status.failedChunks || []).map(publicFailedChunk),
-    },
-    job: status.job || job,
+    status: publicStatus(snapshot),
+    job: snapshot.job || job,
+    requestId,
+  });
+}
+
+async function handleAbstractionProcess(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const setupError = serverAbstractionSetupError() || workflowSetupError();
+  if (setupError) {
+    return res.status(503).json({ error: setupError, fallback: 'browser_abstraction', requestId });
+  }
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (job.status === 'canceled') {
+    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  }
+  const result = await processAbstractionBatch(jobId, { store });
+  return res.status(200).json({
+    status: publicStatus(result),
+    job: result.job || job,
+    hasMore: result.hasMore,
+    completedInBatch: result.completedInBatch,
+    failedInBatch: result.failedInBatch,
+    retryScheduledInBatch: result.retryScheduledInBatch,
+    splitsInBatch: result.splitsInBatch,
+    elapsedMs: result.elapsedMs,
+    lastError: result.lastError,
+    requestId,
+  });
+}
+
+async function handleJobCancel(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const body = req.body ? parseBody(req, res, requestId) : {};
+  if (req.body && !body) return;
+  const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 500) : undefined;
+  const { job, alreadyCanceled } = await cancelAbstractionJob(jobId, { store, reason });
+  return res.status(200).json({ job, alreadyCanceled: Boolean(alreadyCanceled), requestId });
+}
+
+async function handleRetryFailedChunks(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  const setupError = serverAbstractionSetupError() || workflowSetupError();
+  if (setupError) {
+    return res.status(503).json({ error: setupError, fallback: 'browser_abstraction', requestId });
+  }
+  const result = await retryFailedAbstractionChunks(jobId, { store });
+  scheduleBackgroundProcessing(jobId, { store });
+  return res.status(200).json({
+    reset: result.reset,
+    status: publicStatus(result.snapshot),
+    job: result.snapshot?.job,
+    requeuedAt: result.requeuedAt,
     requestId,
   });
 }
@@ -268,7 +356,10 @@ export default async function handler(req, res) {
     if (parts.length === 2 && second === 'finalize-uploads') return await handleFinalizeUploads(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'abstraction' && third === 'start') return await handleAbstractionStart(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'abstraction' && third === 'status') return await handleAbstractionStatus(req, res, requestId, store, jobId);
+    if (parts.length === 3 && second === 'abstraction' && third === 'process') return await handleAbstractionProcess(req, res, requestId, store, jobId);
     if (parts.length === 2 && second === 'abstracts') return await handleAbstractList(req, res, requestId, store, jobId);
+    if (parts.length === 2 && second === 'cancel') return await handleJobCancel(req, res, requestId, store, jobId);
+    if (parts.length === 2 && second === 'retry-failed') return await handleRetryFailedChunks(req, res, requestId, store, jobId);
     return res.status(404).json({ error: 'Job route not found.', requestId });
   } catch (err) {
     if (err?.statusCode) {

@@ -4,6 +4,8 @@ const ABSTRACT_MAX_TOKENS = 2000;
 const UPSTREAM_TIMEOUT_MS = 52_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const STALE_PROCESSING_MS = 2 * 60 * 1000;
+const DEFAULT_LEASE_MS = 90_000;
+const MAX_RETRY_WAIT_MS = 5 * 60_000;
 const RAW_PERSISTENCE_KEYS = new Set([
   'data',
   'base64',
@@ -373,20 +375,47 @@ async function callWithRetries(fn, maxAttempts) {
   throw lastError;
 }
 
+function computeRetryBackoff(attempt, retryAfter) {
+  if (retryAfter > 0) {
+    return Math.min(retryAfter > 1000 ? retryAfter : retryAfter * 1000, MAX_RETRY_WAIT_MS);
+  }
+  return Math.min(2000 * (2 ** Math.max(0, attempt - 1)), MAX_RETRY_WAIT_MS);
+}
+
+function extractRetryAfter(err) {
+  const raw = err?.retryAfter ?? err?.retryAfterMs ?? err?.headers?.['retry-after'] ?? 0;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
+async function claimChunkWithLease(store, chunk, workerId, leaseMs) {
+  if (store.claimChunkForAbstraction) {
+    return await store.claimChunkForAbstraction(chunk.jobId, chunk.id, {
+      workerId,
+      leaseMs,
+    });
+  }
+  if (store.markChunkAbstractionProcessing) {
+    return await store.markChunkAbstractionProcessing(chunk.jobId, chunk.id);
+  }
+  return chunk;
+}
+
 export async function processChunkAbstraction(chunk, options = {}) {
   const store = options.store;
   const model = options.model || ABSTRACT_MODEL;
   const maxTokens = options.maxTokens || ABSTRACT_MAX_TOKENS;
   const maxAttempts = options.maxAttempts || DEFAULT_MAX_ATTEMPTS;
+  const leaseMs = options.leaseMs || DEFAULT_LEASE_MS;
+  const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
   const sequenceIndex = Number.isInteger(options.sequenceIndex) ? options.sequenceIndex : chunk.chunkOrder || 0;
   const startedAt = Date.now();
-  const claimedChunk = store.markChunkAbstractionProcessing
-    ? await store.markChunkAbstractionProcessing(chunk.jobId, chunk.id)
-    : chunk;
+  const claimedChunk = await claimChunkWithLease(store, chunk, workerId, leaseMs);
   if (!claimedChunk) {
     return { status: 'skipped', chunkId: chunk.id };
   }
   const processingChunk = claimedChunk;
+  const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
 
   let loadedPayload = null;
   try {
@@ -408,7 +437,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
         payloadBytes,
         chunk: processingChunk,
       }),
-      maxAttempts
+      Math.max(1, Math.min(3, maxAttempts))
     );
     const usage = extractUsage(response.usage);
     const record = {
@@ -422,7 +451,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       status: 'completed',
-      attemptCount: (processingChunk.abstractionAttempts || 0) + attempts - 1,
+      attemptCount: attemptCount + attempts - 1,
     };
     const validation = validateAbstractPersistenceInput(record);
     if (!validation.valid) {
@@ -446,6 +475,16 @@ export async function processChunkAbstraction(chunk, options = {}) {
       latencyMs: Date.now() - startedAt,
       modelUsed: model,
     };
+    const isRetryable = ['rate_limit', 'upstream_timeout', 'provider_error', 'storage_error'].includes(errorType);
+    const hasAttemptsLeft = attemptCount < maxAttempts;
+    if (isRetryable && hasAttemptsLeft && store.markChunkAbstractionRetryWait) {
+      const retryAtMs = Date.now() + computeRetryBackoff(attemptCount, extractRetryAfter(err));
+      await store.markChunkAbstractionRetryWait(processingChunk.jobId, processingChunk.id, {
+        ...failure,
+        retryAtIso: new Date(retryAtMs).toISOString(),
+      });
+      return { status: 'retry_wait', chunkId: processingChunk.id, failure, retryAt: retryAtMs };
+    }
     if (store.markChunkAbstractionFailed) {
       await store.markChunkAbstractionFailed(processingChunk.jobId, processingChunk.id, failure);
     }
@@ -465,14 +504,31 @@ export async function processJobAbstraction(jobId, options = {}) {
     error.statusCode = 404;
     throw error;
   }
+  if (job.status === 'canceled') {
+    const error = new Error('Job has been canceled.');
+    error.statusCode = 409;
+    throw error;
+  }
   if (store.updateJob && !['abstracting', 'synthesizing', 'partial_failed', 'failed'].includes(job.status)) {
     await store.updateJob(jobId, { status: 'abstracting', currentPhase: 'Starting server-side abstraction' });
   }
   let completed = 0;
   let failed = 0;
   for (let pass = 0; pass < 20; pass++) {
+    const refreshed = await store.getJob(jobId);
+    if (!refreshed || refreshed.status === 'canceled') break;
     const chunks = await store.listChunks(jobId);
-    const work = chunks.filter(chunk => chunk.uploadStatus === 'uploaded' && (chunk.abstractionStatus || 'pending') === 'pending');
+    const now = Date.now();
+    const work = chunks.filter(chunk => {
+      if (chunk.uploadStatus !== 'uploaded') return false;
+      const status = chunk.abstractionStatus || 'pending';
+      if (status === 'pending') return true;
+      if (status === 'retry_wait') {
+        const retryAt = chunk.abstractionRetryAt ? Date.parse(chunk.abstractionRetryAt) : 0;
+        return !retryAt || retryAt <= now;
+      }
+      return false;
+    });
     if (!work.length) break;
     for (const chunk of work) {
       const result = await processChunkAbstraction(chunk, {
@@ -488,11 +544,12 @@ export async function processJobAbstraction(jobId, options = {}) {
     ? await store.getAbstractionStatus(jobId)
     : { completed, failed, total: completed + failed };
   return {
-    total: status.total ?? chunks.length,
+    total: status.total ?? 0,
     completed: status.completed ?? completed,
     failed: status.failed ?? failed,
     pending: status.pending ?? 0,
     processing: status.processing ?? 0,
+    retry_wait: status.retry_wait ?? 0,
     failedChunks: status.failedChunks || [],
     job: status.job || await store.getJob(jobId),
   };
@@ -510,8 +567,8 @@ export async function retryChunkAbstraction(jobId, chunkId, options = {}) {
     error.statusCode = 404;
     throw error;
   }
-  if (chunk.abstractionStatus !== 'failed') {
-    const error = new Error('Only failed chunks can be retried.');
+  if (!['failed', 'retry_wait'].includes(chunk.abstractionStatus)) {
+    const error = new Error('Only failed or retry_wait chunks can be retried.');
     error.statusCode = 409;
     throw error;
   }

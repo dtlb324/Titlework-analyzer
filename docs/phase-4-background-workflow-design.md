@@ -2,7 +2,33 @@
 
 **Project:** Mineral Ownership Builder (Titlework-analyzer)  
 **Goal:** Process **200–400 document jobs** without relying on one browser tab or one long synchronous Vercel function.  
-**Status:** Design only — no implementation in this phase.
+**Status:** Implemented (in-process driver). Inngest adapter deferred — see [Implementation notes](#implementation-notes) below.
+
+---
+
+## Implementation notes
+
+The shipped Phase 4 follows this design with one deliberate substitution: the workflow driver defaults to an **in-process Postgres-backed queue** instead of Inngest. The master plan permits this fallback when Inngest is not already configured, and avoids silently adding a new paid dependency. The seams listed in §1 (workflow adapter, fan-out, concurrency limits) are preserved so an Inngest adapter can be plugged in later by setting `WORKFLOW_DRIVER=inngest` and providing the keys.
+
+What ships in this phase:
+
+- `POST /api/jobs/:id/abstraction/start` returns `202 Accepted` and schedules background work via Node's task queue / Vercel `waitUntil` (when available). Each invocation drains pending chunks for up to ~45s under bounded concurrency, then exits cleanly.
+- `POST /api/jobs/:id/abstraction/process` drains a batch synchronously (useful for cron, scripts, or manual recovery).
+- `POST /api/jobs/:id/cancel` marks the job canceled; the worker checks job status before each chunk and exits cleanly.
+- `POST /api/jobs/:id/retry-failed` resets every `failed`/`retry_wait` chunk back to `pending` and kicks the worker; completed abstracts are preserved.
+- `POST /api/jobs/:id/chunks/:chunkId/retry` (Phase 3) still retries a single chunk.
+- Chunk-level lease tracking: `abstraction_claimed_at`, `abstraction_lease_expires_at`, `abstraction_worker_id`, `abstraction_retry_at`. Default lease 90s; stale leases reset to `pending` on the next status poll, start, or process call.
+- New chunk status `retry_wait` for transient errors with attempts remaining; chunks transition `pending → processing → completed`, with `retry_wait` and `split_superseded` paths preserved.
+- Retry/backoff: rate-limit (`Retry-After` respected), upstream timeout, provider, and storage errors get exponential backoff up to `ABSTRACTION_MAX_ATTEMPTS`; 413/504 PDF splits still create child chunks and supersede the parent.
+- Job status rolls up: `abstracting` while work remains, `synthesizing` (ready-for-synthesis) when every chunk completes, `partial_failed` when some chunks fail terminally, `failed` when all chunks fail, `canceled` on cancel.
+- Frontend polls `/abstraction/status` and re-kicks `/abstraction/start` automatically when progress stalls (worker died, lease expired, etc.). Existing browser-driven fallback is preserved when storage or workflow setup is unavailable.
+
+Tuning knobs (env vars): `WORKFLOW_DRIVER`, `WORKFLOW_BATCH_LIMIT`, `WORKFLOW_CONCURRENCY`, `WORKFLOW_BUDGET_MS`, `WORKFLOW_LEASE_MS`, `WORKFLOW_STALE_LEASE_MS`, `ABSTRACTION_MAX_ATTEMPTS`. Defaults are tuned for Vercel's 60s function ceiling and 300 req/min Anthropic rate envelope.
+
+Out of scope (intentionally deferred):
+
+- Durable server-side synthesis (Phase 5).
+- Inngest-backed adapter (event functions, fan-out via `step.sendEvent`, per-job concurrency keys). The DB-backed queue covers everything Phase 4 requires; the Inngest adapter is a future optimization once event-level cancellation or external observability is needed.
 
 ---
 

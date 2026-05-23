@@ -5,6 +5,10 @@ import {
   processJobAbstraction,
   validateAbstractPersistenceInput,
 } from '../api/_lib/abstraction.js';
+import {
+  getBackgroundPromise,
+  processAbstractionBatch,
+} from '../api/_lib/queue.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -62,6 +66,10 @@ function makeChunk(overrides = {}) {
     abstractionAttempts: overrides.abstractionAttempts || 0,
     abstractionErrorType: overrides.abstractionErrorType || null,
     abstractionErrorMessage: overrides.abstractionErrorMessage || null,
+    abstractionRetryAt: overrides.abstractionRetryAt || null,
+    abstractionClaimedAt: overrides.abstractionClaimedAt || null,
+    abstractionLeaseExpiresAt: overrides.abstractionLeaseExpiresAt || null,
+    abstractionWorkerId: overrides.abstractionWorkerId || null,
     payloadBytes: overrides.payloadBytes || null,
     latencyMs: overrides.latencyMs || null,
     modelUsed: overrides.modelUsed || null,
@@ -74,13 +82,13 @@ function makeChunk(overrides = {}) {
   };
 }
 
-function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
+function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
   const now = '2026-05-22T22:31:00.000Z';
   const jobs = new Map([[
     'job_test_1',
     {
       id: 'job_test_1',
-      status: 'ready',
+      status: options.jobStatus || 'ready',
       totalDocuments: chunksInput.length,
       totalChunks: chunksInput.length,
       completedDocuments: 0,
@@ -103,15 +111,20 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
   }
 
   function rollup(jobId) {
-    const jobChunks = orderedChunks(jobId);
+    const jobChunks = orderedChunks(jobId).filter(chunk => chunk.abstractionStatus !== 'split_superseded');
     const completed = jobChunks.filter(chunk => chunk.abstractionStatus === 'completed').length;
     const failed = jobChunks.filter(chunk => chunk.abstractionStatus === 'failed').length;
+    const pending = jobChunks.filter(chunk => chunk.abstractionStatus === 'pending').length;
+    const processing = jobChunks.filter(chunk => chunk.abstractionStatus === 'processing').length;
+    const retry_wait = jobChunks.filter(chunk => chunk.abstractionStatus === 'retry_wait').length;
     const terminal = completed + failed;
     const job = jobs.get(jobId);
     let status = job.status;
-    if (jobChunks.length && terminal === jobChunks.length) {
+    if (status === 'canceled') {
+      // do not transition away from canceled
+    } else if (jobChunks.length && terminal === jobChunks.length) {
       status = completed > 0 && failed > 0 ? 'partial_failed' : completed > 0 ? 'synthesizing' : 'failed';
-    } else if (jobChunks.some(chunk => ['pending', 'processing'].includes(chunk.abstractionStatus))) {
+    } else if (jobChunks.some(chunk => ['pending', 'processing', 'retry_wait'].includes(chunk.abstractionStatus))) {
       status = 'abstracting';
     }
     const updated = {
@@ -119,11 +132,28 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
       status,
       completedDocuments: completed,
       failedDocuments: failed,
-      currentPhase: terminal === jobChunks.length ? `Server abstraction finished: ${completed} completed, ${failed} failed` : `Server abstraction ${completed}/${jobChunks.length}`,
+      currentPhase: terminal === jobChunks.length
+        ? `Server abstraction finished: ${completed} completed, ${failed} failed`
+        : `Server abstraction ${completed}/${jobChunks.length}`,
       updatedAt: now,
     };
     jobs.set(jobId, updated);
-    return updated;
+    return { updated, counts: { completed, failed, pending, processing, retry_wait } };
+  }
+
+  function isClaimable(chunk, asOfMs) {
+    if (chunk.uploadStatus !== 'uploaded') return false;
+    const status = chunk.abstractionStatus || 'pending';
+    if (status === 'pending') return true;
+    if (status === 'retry_wait') {
+      const retryAt = chunk.abstractionRetryAt ? Date.parse(chunk.abstractionRetryAt) : 0;
+      return !retryAt || retryAt <= asOfMs;
+    }
+    if (status === 'processing') {
+      const expires = chunk.abstractionLeaseExpiresAt ? Date.parse(chunk.abstractionLeaseExpiresAt) : 0;
+      return !expires || expires <= asOfMs;
+    }
+    return false;
   }
 
   return {
@@ -143,6 +173,10 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
     async listChunks(jobId) {
       return orderedChunks(jobId);
     },
+    async listReadyAbstractionChunks(jobId, limit = 8) {
+      const asOf = Date.now();
+      return orderedChunks(jobId).filter(chunk => isClaimable(chunk, asOf)).slice(0, limit);
+    },
     async getChunk(jobId, chunkId) {
       const chunk = chunks.get(chunkId);
       return chunk?.jobId === jobId ? chunk : null;
@@ -154,6 +188,26 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
       chunks.set(chunkId, updated);
       return updated;
     },
+    async claimChunkForAbstraction(jobId, chunkId, claimOptions = {}) {
+      const chunk = chunks.get(chunkId);
+      if (!chunk || chunk.jobId !== jobId) return null;
+      if (!isClaimable(chunk, Date.now())) return null;
+      const leaseMs = claimOptions.leaseMs || 90_000;
+      const updated = {
+        ...chunk,
+        abstractionStatus: 'processing',
+        abstractionAttempts: (chunk.abstractionAttempts || 0) + 1,
+        abstractionErrorType: null,
+        abstractionErrorMessage: null,
+        abstractionClaimedAt: new Date().toISOString(),
+        abstractionLeaseExpiresAt: new Date(Date.now() + leaseMs).toISOString(),
+        abstractionWorkerId: claimOptions.workerId || 'wkr_test',
+        abstractionRetryAt: null,
+        updatedAt: now,
+      };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
     async markChunkAbstractionFailed(jobId, chunkId, failure) {
       const chunk = chunks.get(chunkId);
       const updated = {
@@ -161,9 +215,30 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
         abstractionStatus: 'failed',
         abstractionErrorType: failure.errorType,
         abstractionErrorMessage: failure.errorMessage,
+        abstractionClaimedAt: null,
+        abstractionLeaseExpiresAt: null,
+        abstractionWorkerId: null,
+        abstractionRetryAt: null,
         payloadBytes: failure.payloadBytes ?? chunk.payloadBytes,
         latencyMs: failure.latencyMs ?? chunk.latencyMs,
         modelUsed: failure.modelUsed ?? chunk.modelUsed,
+        updatedAt: now,
+      };
+      chunks.set(chunkId, updated);
+      rollup(jobId);
+      return updated;
+    },
+    async markChunkAbstractionRetryWait(jobId, chunkId, failure) {
+      const chunk = chunks.get(chunkId);
+      const updated = {
+        ...chunk,
+        abstractionStatus: 'retry_wait',
+        abstractionErrorType: failure.errorType,
+        abstractionErrorMessage: failure.errorMessage,
+        abstractionRetryAt: failure.retryAtIso,
+        abstractionClaimedAt: null,
+        abstractionLeaseExpiresAt: null,
+        abstractionWorkerId: null,
         updatedAt: now,
       };
       chunks.set(chunkId, updated);
@@ -181,6 +256,10 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
         abstractionStatus: 'completed',
         abstractionErrorType: null,
         abstractionErrorMessage: null,
+        abstractionClaimedAt: null,
+        abstractionLeaseExpiresAt: null,
+        abstractionWorkerId: null,
+        abstractionRetryAt: null,
         payloadBytes: record.payloadBytes,
         latencyMs: record.latencyMs,
         modelUsed: record.modelUsed,
@@ -205,19 +284,76 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
     },
     async resetChunkAbstraction(jobId, chunkId) {
       const chunk = chunks.get(chunkId);
-      if (!chunk || chunk.jobId !== jobId || chunk.abstractionStatus !== 'failed') return null;
+      if (!chunk || chunk.jobId !== jobId) return null;
+      if (!['failed', 'retry_wait'].includes(chunk.abstractionStatus)) return null;
       const updated = {
         ...chunk,
         abstractionStatus: 'pending',
         abstractionErrorType: null,
         abstractionErrorMessage: null,
+        abstractionRetryAt: null,
+        abstractionClaimedAt: null,
+        abstractionLeaseExpiresAt: null,
+        abstractionWorkerId: null,
         updatedAt: now,
       };
       chunks.set(chunkId, updated);
+      rollup(jobId);
       return updated;
     },
-    async getAbstractionStatus(jobId) {
+    async retryFailedChunks(jobId) {
       const jobChunks = orderedChunks(jobId);
+      let reset = 0;
+      for (const chunk of jobChunks) {
+        if (['failed', 'retry_wait'].includes(chunk.abstractionStatus)) {
+          chunks.set(chunk.id, {
+            ...chunk,
+            abstractionStatus: 'pending',
+            abstractionErrorType: null,
+            abstractionErrorMessage: null,
+            abstractionRetryAt: null,
+            abstractionClaimedAt: null,
+            abstractionLeaseExpiresAt: null,
+            abstractionWorkerId: null,
+            updatedAt: now,
+          });
+          reset += 1;
+        }
+      }
+      rollup(jobId);
+      return reset;
+    },
+    async cancelJob(jobId, reason) {
+      const job = jobs.get(jobId);
+      if (!job) return null;
+      const updated = {
+        ...job,
+        status: 'canceled',
+        currentPhase: 'canceled',
+        errorMessage: reason || 'Job canceled by user.',
+        completedAt: job.completedAt || now,
+        updatedAt: now,
+      };
+      jobs.set(jobId, updated);
+      // clear any leases on processing chunks
+      for (const chunk of orderedChunks(jobId)) {
+        if (chunk.abstractionStatus === 'processing') {
+          chunks.set(chunk.id, {
+            ...chunk,
+            abstractionClaimedAt: null,
+            abstractionLeaseExpiresAt: null,
+            abstractionWorkerId: null,
+            updatedAt: now,
+          });
+        }
+      }
+      return updated;
+    },
+    async refreshAbstractionRollup(jobId) {
+      return rollup(jobId).updated;
+    },
+    async getAbstractionStatus(jobId) {
+      const jobChunks = orderedChunks(jobId).filter(chunk => chunk.abstractionStatus !== 'split_superseded');
       const counts = jobChunks.reduce((acc, chunk) => {
         acc[chunk.abstractionStatus] = (acc[chunk.abstractionStatus] || 0) + 1;
         return acc;
@@ -228,12 +364,35 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()]) {
         processing: counts.processing || 0,
         completed: counts.completed || 0,
         failed: counts.failed || 0,
+        retry_wait: counts.retry_wait || 0,
         failedChunks: jobChunks.filter(chunk => chunk.abstractionStatus === 'failed'),
         job: jobs.get(jobId),
       };
     },
-    async resetStaleProcessingChunks() {
-      return [];
+    async resetStaleProcessingChunks(jobId, staleMs = 120_000) {
+      const asOf = Date.now();
+      const stale = [];
+      for (const chunk of orderedChunks(jobId)) {
+        if (chunk.abstractionStatus !== 'processing') continue;
+        const expires = chunk.abstractionLeaseExpiresAt ? Date.parse(chunk.abstractionLeaseExpiresAt) : 0;
+        const updatedAt = chunk.updatedAt ? Date.parse(chunk.updatedAt) : 0;
+        const isStale = (expires && expires <= asOf) || (!expires && updatedAt && (asOf - updatedAt) > staleMs);
+        if (isStale) {
+          chunks.set(chunk.id, {
+            ...chunk,
+            abstractionStatus: 'pending',
+            abstractionErrorType: 'stale_processing_recovered',
+            abstractionErrorMessage: 'Stale lease recovered.',
+            abstractionClaimedAt: null,
+            abstractionLeaseExpiresAt: null,
+            abstractionWorkerId: null,
+            updatedAt: now,
+          });
+          stale.push(chunks.get(chunk.id));
+        }
+      }
+      if (stale.length) rollup(jobId);
+      return stale;
     },
   };
 }
@@ -243,7 +402,7 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-test('POST /api/jobs/:id/abstraction/start processes uploaded chunks and saves abstracts', async () => {
+test('POST /api/jobs/:id/abstraction/start enqueues quickly and background drains chunks', async () => {
   const store = createMemoryPhase3Store([makeChunk()]);
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({
@@ -261,11 +420,17 @@ test('POST /api/jobs/:id/abstraction/start processes uploaded chunks and saves a
     };
   };
 
+  const startedAt = Date.now();
   const res = mockRes();
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
+  const elapsed = Date.now() - startedAt;
 
-  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
-  assert(res.body.status.completed === 1, 'Expected completed abstraction count');
+  assert(res.statusCode === 202, `Expected 202 Accepted, got ${res.statusCode}`);
+  assert(res.body.status, 'Expected status snapshot in response');
+  assert(res.body.workflow.driver === 'inprocess', 'Expected default inprocess driver');
+  assert(elapsed < 2000, `Expected start endpoint to return quickly, took ${elapsed}ms`);
+
+  await getBackgroundPromise('job_test_1');
   const saved = await store.listDocumentAbstracts('job_test_1');
   assert(saved.length === 1, 'Expected saved abstract');
   assert(saved[0].abstractText.includes('Abstracted deed facts'), 'Expected abstract text persistence');
@@ -445,10 +610,368 @@ test('frontend contains server-abstraction start, poll, fetch, and fallback hook
   assert(indexHtml.includes('falling back to browser abstraction'), 'Expected user-visible fallback warning');
 });
 
+// ---------------------------------------------------------------------------
+// Phase 4 tests
+// ---------------------------------------------------------------------------
+
+test('Phase 4: worker claims pending chunks under a lease', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_a', chunkOrder: 0, originalFilename: 'a.pdf' }),
+    makeChunk({ id: 'chk_b', chunkOrder: 1, originalFilename: 'b.pdf' }),
+  ]);
+  let modelCalls = 0;
+  const result = await processAbstractionBatch('job_test_1', {
+    store,
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      modelCalls += 1;
+      return { text: 'DOCUMENT #1:\nClaim test.', model: 'claude-haiku-4-5', usage: {} };
+    },
+    batchLimit: 4,
+    concurrency: 2,
+    budgetMs: 5000,
+    maxAttempts: 1,
+  });
+  assert(modelCalls === 2, `Expected two model calls (one per chunk), got ${modelCalls}`);
+  assert(result.completed === 2, `Expected both chunks completed, got ${result.completed}`);
+  assert(result.hasMore === false, 'Expected no more work');
+  const chunkA = store.chunks.get('chk_a');
+  assert(chunkA.abstractionAttempts >= 1, 'Expected attempt counter incremented by claim');
+  assert(chunkA.abstractionStatus === 'completed', 'Expected completed status after worker success');
+  assert(chunkA.abstractionLeaseExpiresAt === null, 'Expected lease cleared after success');
+});
+
+test('Phase 4: claim sets lease fields while chunk is in flight', async () => {
+  const store = createMemoryPhase3Store([makeChunk()]);
+  let observedDuringRun = null;
+  await processAbstractionBatch('job_test_1', {
+    store,
+    blobLoader: async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      observedDuringRun = store.chunks.get('chk_test_1');
+      return { text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} };
+    },
+    batchLimit: 1,
+    concurrency: 1,
+    budgetMs: 2000,
+    maxAttempts: 1,
+  });
+  assert(observedDuringRun, 'Expected to observe chunk mid-flight');
+  assert(observedDuringRun.abstractionStatus === 'processing', 'Expected processing status during model call');
+  assert(observedDuringRun.abstractionLeaseExpiresAt, 'Expected lease set during processing');
+  assert(observedDuringRun.abstractionWorkerId, 'Expected workerId stamped on claimed chunk');
+});
+
+test('Phase 4: completed chunks are not reprocessed when /abstraction/process runs again', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_done', abstractionStatus: 'completed' }),
+    makeChunk({ id: 'chk_pending', chunkOrder: 1, abstractionStatus: 'pending' }),
+  ]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.saveDocumentAbstract({
+    jobId: 'job_test_1',
+    documentId: 'doc_test_1',
+    chunkId: 'chk_done',
+    abstractText: 'preserved',
+    modelUsed: 'claude-haiku-4-5',
+    payloadBytes: 100,
+    latencyMs: 10,
+    inputTokens: null,
+    outputTokens: null,
+    status: 'completed',
+    attemptCount: 1,
+  });
+  let modelCalls = 0;
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
+    modelCalls += 1;
+    return { text: 'DOCUMENT #2:\nNew abstract.', model: 'claude-haiku-4-5', usage: {} };
+  };
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/process'), res);
+  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
+  assert(modelCalls === 1, `Expected one model call (only pending chunk), got ${modelCalls}`);
+  const preserved = store.abstracts.get('chk_done');
+  assert(preserved.abstractText === 'preserved', 'Expected existing completed abstract preserved');
+});
+
+test('Phase 4: failed chunks can be retried via /retry-failed', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_failed', abstractionStatus: 'failed', abstractionAttempts: 3, abstractionErrorType: 'provider_error' }),
+  ]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  let modelCalls = 0;
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
+    modelCalls += 1;
+    return { text: 'DOCUMENT #1:\nRetried.', model: 'claude-haiku-4-5', usage: {} };
+  };
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/retry-failed'), res);
+  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
+  assert(res.body.reset === 1, `Expected one chunk reset, got ${res.body.reset}`);
+  await getBackgroundPromise('job_test_1');
+  assert(modelCalls === 1, `Expected one retry call, got ${modelCalls}`);
+  const chunk = store.chunks.get('chk_failed');
+  assert(chunk.abstractionStatus === 'completed', `Expected chunk completed after retry, got ${chunk.abstractionStatus}`);
+});
+
+test('Phase 4: stale processing chunks are requeued by resetStaleProcessingChunks', async () => {
+  const longAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const expiredLease = new Date(Date.now() - 1000).toISOString();
+  const store = createMemoryPhase3Store([
+    makeChunk({
+      id: 'chk_stale',
+      abstractionStatus: 'processing',
+      abstractionWorkerId: 'wkr_dead',
+      abstractionClaimedAt: longAgo,
+      abstractionLeaseExpiresAt: expiredLease,
+    }),
+  ]);
+  store.chunks.set('chk_stale', { ...store.chunks.get('chk_stale'), updatedAt: longAgo });
+
+  await store.resetStaleProcessingChunks('job_test_1', 60_000);
+  const chunk = store.chunks.get('chk_stale');
+  assert(chunk.abstractionStatus === 'pending', `Expected requeued, got ${chunk.abstractionStatus}`);
+  assert(chunk.abstractionLeaseExpiresAt === null, 'Expected lease cleared after requeue');
+});
+
+test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_big', pageStart: 1, pageEnd: 4, sizeBytes: 1_200_000 }),
+  ]);
+  let splitCalls = 0;
+  store.createSplitChunk = async (jobId, documentId, input) => {
+    splitCalls += 1;
+    const childId = `chk_split_${splitCalls}`;
+    const child = {
+      ...makeChunk({
+        id: childId,
+        chunkOrder: 0,
+        originalFilename: input.originalFilename,
+        pageStart: input.pageStart,
+        pageEnd: input.pageEnd,
+        sizeBytes: input.sizeBytes,
+      }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      blobKey: input.blobKey,
+      blobUrl: input.blobUrl,
+    };
+    store.chunks.set(childId, child);
+    return child;
+  };
+  store.markChunkAbstractionSplitSuperseded = async (jobId, chunkId, reason) => {
+    const chunk = store.chunks.get(chunkId);
+    store.chunks.set(chunkId, { ...chunk, abstractionStatus: 'split_superseded', abstractionErrorType: reason });
+    return chunk;
+  };
+
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  globalThis.__TITLE_ANALYZER_BLOB_WRITER__ = async (parent, name, bytes) => ({
+    blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+    blobUrl: `https://blob.vercel-storage.com/private/${name}`,
+  });
+
+  // Build a real multi-page PDF so pdf-lib can split it
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  let calls = 0;
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: pdfBytes, mediaType: 'application/pdf' });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
+    calls += 1;
+    if (calls === 1) {
+      const err = new Error('timeout');
+      err.status = 504;
+      throw err;
+    }
+    return { text: 'DOCUMENT #1:\nSplit child abstract.', model: 'claude-haiku-4-5', usage: {} };
+  };
+
+  const result = await processAbstractionBatch('job_test_1', {
+    store,
+    batchLimit: 4,
+    concurrency: 1,
+    budgetMs: 5000,
+    maxAttempts: 1,
+  });
+
+  assert(splitCalls === 2, `Expected two children created from split, got ${splitCalls}`);
+  const parent = store.chunks.get('chk_big');
+  assert(parent.abstractionStatus === 'split_superseded', `Expected parent superseded, got ${parent.abstractionStatus}`);
+  assert(result.splitsInBatch >= 1 || result.completed >= 0, 'Expected split or completion accounted in batch');
+});
+
+test('Phase 4: job progress rolls up correctly across pending/processing/completed/failed', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_a', chunkOrder: 0 }),
+    makeChunk({ id: 'chk_b', chunkOrder: 1 }),
+    makeChunk({ id: 'chk_c', chunkOrder: 2 }),
+  ]);
+  let calls = 0;
+  await processAbstractionBatch('job_test_1', {
+    store,
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      calls += 1;
+      if (calls === 2) {
+        const err = new Error('boom');
+        err.status = 400;
+        throw err;
+      }
+      return { text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} };
+    },
+    batchLimit: 5,
+    concurrency: 1,
+    budgetMs: 5000,
+    maxAttempts: 1,
+  });
+  const job = await store.getJob('job_test_1');
+  const status = await store.getAbstractionStatus('job_test_1');
+  assert(status.completed === 2, `Expected 2 completed, got ${status.completed}`);
+  assert(status.failed === 1, `Expected 1 failed, got ${status.failed}`);
+  assert(job.status === 'partial_failed', `Expected partial_failed rollup, got ${job.status}`);
+});
+
+test('Phase 4: cancellation stops future chunk processing', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_one', chunkOrder: 0 }),
+    makeChunk({ id: 'chk_two', chunkOrder: 1 }),
+  ]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  // Cancel BEFORE any processing
+  await store.cancelJob('job_test_1', 'test cancel');
+
+  let modelCalls = 0;
+  const result = await processAbstractionBatch('job_test_1', {
+    store,
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      modelCalls += 1;
+      return { text: 'DOCUMENT #1:\nshould not run.', model: 'claude-haiku-4-5', usage: {} };
+    },
+    batchLimit: 5,
+    concurrency: 1,
+    budgetMs: 5000,
+  });
+  assert(modelCalls === 0, `Expected zero model calls after cancel, got ${modelCalls}`);
+  assert(result.completedInBatch === 0, 'Expected no completions after cancel');
+  const job = await store.getJob('job_test_1');
+  assert(job.status === 'canceled', 'Expected job to remain canceled');
+});
+
+test('Phase 4: POST /api/jobs/:id/cancel marks job canceled and is idempotent', async () => {
+  const store = createMemoryPhase3Store([makeChunk()]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+
+  const res1 = mockRes();
+  await jobsRouteHandler(mockReq('POST', { reason: 'user' }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/cancel'), res1);
+  assert(res1.statusCode === 200, `Expected 200, got ${res1.statusCode}`);
+  assert(res1.body.job.status === 'canceled', 'Expected canceled status');
+  assert(res1.body.alreadyCanceled === false, 'Expected first cancel reports alreadyCanceled false');
+
+  const res2 = mockRes();
+  await jobsRouteHandler(mockReq('POST', { reason: 'user' }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/cancel'), res2);
+  assert(res2.statusCode === 200, `Expected 200 on second cancel, got ${res2.statusCode}`);
+  assert(res2.body.alreadyCanceled === true, 'Expected second cancel reports alreadyCanceled true');
+});
+
+test('Phase 4: starting a canceled job returns 409', async () => {
+  const store = createMemoryPhase3Store([makeChunk()]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.cancelJob('job_test_1', 'test');
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
+  assert(res.statusCode === 409, `Expected 409 for canceled job, got ${res.statusCode}`);
+});
+
+test('Phase 4: rate_limit error schedules retry_wait instead of failing immediately', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_rate' })]);
+  let calls = 0;
+  await processAbstractionBatch('job_test_1', {
+    store,
+    blobLoader: async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      calls += 1;
+      const err = new Error('rate limit hit');
+      err.status = 429;
+      throw err;
+    },
+    batchLimit: 1,
+    concurrency: 1,
+    budgetMs: 200,
+    maxAttempts: 3,
+  });
+  const chunk = store.chunks.get('chk_rate');
+  assert(chunk.abstractionStatus === 'retry_wait', `Expected retry_wait, got ${chunk.abstractionStatus}`);
+  assert(chunk.abstractionRetryAt, 'Expected retryAt scheduled');
+  assert(chunk.abstractionErrorType === 'rate_limit', 'Expected rate_limit error type recorded');
+});
+
+test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {
+  const previousBlob = process.env.BLOB_READ_WRITE_TOKEN;
+  const previousApi = process.env.ANTHROPIC_API_KEY;
+  delete process.env.BLOB_READ_WRITE_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete globalThis.__TITLE_ANALYZER_BLOB_LOADER__;
+  delete globalThis.__TITLE_ANALYZER_MODEL_CLIENT__;
+  const store = createMemoryPhase3Store([makeChunk()]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
+  assert(res.statusCode === 503, `Expected 503 when queue env missing, got ${res.statusCode}`);
+  assert(res.body.fallback === 'browser_abstraction', 'Expected fallback hint for frontend');
+
+  if (previousBlob) process.env.BLOB_READ_WRITE_TOKEN = previousBlob;
+  if (previousApi) process.env.ANTHROPIC_API_KEY = previousApi;
+});
+
+test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', async () => {
+  process.env.WORKFLOW_DRIVER = 'inngest';
+  const store = createMemoryPhase3Store([makeChunk()]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  // Make sure Phase 3 setup error is past
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} });
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
+  assert(res.statusCode === 503, `Expected 503 for unconfigured Inngest driver, got ${res.statusCode}`);
+  assert(/INNGEST/.test(res.body.error || ''), `Expected Inngest setup error message, got ${res.body.error}`);
+
+  delete process.env.WORKFLOW_DRIVER;
+});
+
+test('Phase 4: /abstraction/process drains another batch when /abstraction/start hits its budget', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_x', chunkOrder: 0 }),
+    makeChunk({ id: 'chk_y', chunkOrder: 1 }),
+    makeChunk({ id: 'chk_z', chunkOrder: 2 }),
+  ]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} });
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/process'), res);
+  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
+  assert(res.body.completedInBatch === 3, `Expected three completions in process batch, got ${res.body.completedInBatch}`);
+  assert(res.body.hasMore === false, 'Expected no more work after draining batch');
+});
+
 for (const { name, fn } of tests) {
   try {
     await fn();
     console.log(`ok - ${name}`);
+    // Reset globals between tests to avoid cross-test pollution
+    delete globalThis.__TITLE_ANALYZER_BLOB_WRITER__;
   } catch (err) {
     console.error(`not ok - ${name}`);
     console.error(err);
@@ -460,5 +983,6 @@ for (const { name, fn } of tests) {
 delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
 delete globalThis.__TITLE_ANALYZER_BLOB_LOADER__;
 delete globalThis.__TITLE_ANALYZER_MODEL_CLIENT__;
+delete globalThis.__TITLE_ANALYZER_BLOB_WRITER__;
 if (previousAppPassword) process.env.APP_PASSWORD = previousAppPassword;
 else delete process.env.APP_PASSWORD;

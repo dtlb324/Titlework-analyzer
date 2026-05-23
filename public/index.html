@@ -1128,6 +1128,25 @@ async function startServerAbstraction(jobId) {
   });
 }
 
+async function processServerAbstractionBatch(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/abstraction/process`, {
+    method: 'POST',
+  });
+}
+
+async function retryFailedServerAbstractionChunks(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/retry-failed`, {
+    method: 'POST',
+  });
+}
+
+async function cancelServerAbstractionJob(jobId, reason) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: reason || 'User canceled job.' }),
+  });
+}
+
 async function fetchServerAbstractionStatus(jobId) {
   return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/abstraction/status`, {
     method: 'GET',
@@ -1154,19 +1173,49 @@ function isServerAbstractionTerminal(status) {
 
 async function pollServerAbstraction(jobId, items, totalDocuments) {
   let latest = null;
-  for (let attempt = 0; attempt < 240; attempt++) {
+  let lastTerminalCount = -1;
+  let stallPolls = 0;
+  const STALL_THRESHOLD = 10; // ~10 seconds with no progress -> kick worker
+  for (let attempt = 0; attempt < 1800; attempt++) {
     latest = await fetchServerAbstractionStatus(jobId);
     const status = latest.status || {};
     const completed = status.completed || 0;
     const failed = status.failed || 0;
+    const retryWait = status.retry_wait || 0;
+    const processing = status.processing || 0;
+    const pending = status.pending || 0;
     const total = status.total || totalDocuments || 0;
-    const pct = total ? Math.round(Math.min(85, ((completed + failed) / total) * 85)) : 8;
+    const terminalCount = completed + failed;
+    const pct = total ? Math.round(Math.min(85, (terminalCount / total) * 85)) : 8;
     if (items?.[0] && items.length <= 2) {
       items[0].status = isServerAbstractionTerminal(status) ? 'done' : 'active';
-      items[0].label = `Server abstracted ${completed} of ${total} chunks${failed ? `; ${failed} failed` : ''}...`;
+      const detail = [];
+      if (processing) detail.push(`${processing} running`);
+      if (retryWait) detail.push(`${retryWait} awaiting retry`);
+      if (failed) detail.push(`${failed} failed`);
+      items[0].label = `Server abstracted ${completed} of ${total} chunks${detail.length ? ` (${detail.join(', ')})` : ''}...`;
     }
-    updateProgress(pct, `Server-side abstraction ${completed}/${total}${failed ? ` (${failed} failed)` : ''}...`, items);
+    const detailText = [];
+    if (processing) detailText.push(`${processing} running`);
+    if (retryWait) detailText.push(`${retryWait} awaiting retry`);
+    if (failed) detailText.push(`${failed} failed`);
+    updateProgress(
+      pct,
+      `Server-side abstraction ${completed}/${total}${detailText.length ? ` (${detailText.join(', ')})` : ''}...`,
+      items
+    );
     if (isServerAbstractionTerminal(status)) return latest;
+
+    if (terminalCount === lastTerminalCount) {
+      stallPolls += 1;
+    } else {
+      stallPolls = 0;
+      lastTerminalCount = terminalCount;
+    }
+    if (stallPolls >= STALL_THRESHOLD && (pending + processing + retryWait) > 0) {
+      try { await startServerAbstraction(jobId); } catch (kickErr) { console.warn('Could not kick server worker', kickErr); }
+      stallPolls = 0;
+    }
     await sleep(1000);
   }
   throw new Error('Server-side abstraction did not finish polling in this browser session.');
