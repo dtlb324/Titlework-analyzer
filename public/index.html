@@ -1379,11 +1379,76 @@ async function applyJobToView(job) {
     renderJobResults(job, null);
   }
 }
-function rememberRecentJob(job) {
-  // Filled in by Task 8
+// === Phase 6: recent jobs (localStorage) ===
+const RECENT_JOBS_KEY = 'title-analyzer:recent-jobs:v1';
+const RECENT_JOBS_LIMIT = 20;
+
+function loadRecentJobs() {
+  const storage = getStorage();
+  if (!storage) return [];
+  try {
+    const raw = storage.getItem(RECENT_JOBS_KEY);
+    if (!raw) return [];
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }
+
+function saveRecentJobs(list) {
+  const storage = getStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(RECENT_JOBS_KEY, JSON.stringify(list.slice(0, RECENT_JOBS_LIMIT)));
+  } catch {
+    /* localStorage quota — ignore */
+  }
+}
+
+function rememberRecentJob(job) {
+  if (!job || !job.id) return;
+  const list = loadRecentJobs().filter(entry => entry.id !== job.id);
+  list.unshift({
+    id: job.id,
+    tractDescription: job.subjectTract || job.tractDescription || '',
+    status: job.status || '',
+    documentCount: job.totalDocuments || 0,
+    lastViewedAt: Date.now(),
+  });
+  saveRecentJobs(list);
+}
+
 function renderRecentJobsView() {
-  // Filled in by Task 8
+  const el = document.getElementById('view-history');
+  if (!el) return;
+  const list = loadRecentJobs();
+  if (!list.length) {
+    el.innerHTML = `
+      <div class="card">
+        <h2 style="margin-top:0">Recent jobs</h2>
+        <div class="recent-jobs-empty">No jobs on this device yet. Start a new job from the home view.</div>
+        <div style="margin-top:.8rem"><a href="#/" class="btn-secondary" style="text-decoration:none;display:inline-block;padding:.45rem .9rem">Back home</a></div>
+      </div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="card">
+      <h2 style="margin-top:0">Recent jobs</h2>
+      ${list.map(entry => {
+        const info = statusInfo(entry.status);
+        const title = entry.tractDescription || `Job ${shortJobId(entry.id)}`;
+        return `
+          <a class="recent-jobs-row" href="#/job/${encodeURIComponent(entry.id)}" style="text-decoration:none;color:inherit">
+            <div>
+              <div style="font-weight:600">${esc(title)}</div>
+              <div style="color:#8a6f4a;font-size:.82rem">${esc(shortJobId(entry.id))} · ${esc(formatRelative(new Date(entry.lastViewedAt).toISOString()))} · ${entry.documentCount} document${entry.documentCount === 1 ? '' : 's'}</div>
+            </div>
+            <span class="status-badge ${info.badge}">${esc(info.label)}</span>
+          </a>`;
+      }).join('')}
+      <div style="margin-top:.8rem"><a href="#/" class="btn-secondary" style="text-decoration:none;display:inline-block;padding:.45rem .9rem">Back home</a></div>
+    </div>`;
 }
 // === Phase 6: adaptive job polling ===
 

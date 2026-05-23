@@ -293,6 +293,15 @@ test('Phase 6: job follow-up posts to /followup endpoint', () => {
     'Follow-up must render Q&A history');
 });
 
+test('Phase 6: recent jobs store caps at 20 entries', () => {
+  assert(script.includes('title-analyzer:recent-jobs:v1'),
+    'Must use a versioned localStorage key for recent jobs');
+  assert(script.includes('RECENT_JOBS_LIMIT = 20') || script.includes('RECENT_JOBS_LIMIT=20'),
+    'Must cap recent jobs at 20');
+  assert(script.includes('function rememberRecentJob'), 'Missing rememberRecentJob()');
+  assert(script.includes('function renderRecentJobsView'), 'Missing renderRecentJobsView()');
+});
+
 
 let passed = 0;
 let failed = 0;
