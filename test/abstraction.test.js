@@ -1,7 +1,4 @@
-import startHandler from '../api/jobs/[id]/abstraction/start.js';
-import statusHandler from '../api/jobs/[id]/abstraction/status.js';
-import abstractsHandler from '../api/jobs/[id]/abstracts.js';
-import retryHandler from '../api/jobs/[id]/chunks/[chunkId]/retry.js';
+import jobsRouteHandler from '../api/jobs/[...path].js';
 import {
   assertSafeBlobUrl,
   buildAbstractMessagesForChunk,
@@ -265,7 +262,7 @@ test('POST /api/jobs/:id/abstraction/start processes uploaded chunks and saves a
   };
 
   const res = mockRes();
-  await startHandler(mockReq('POST', null, {}, { id: 'job_test_1' }), res);
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
 
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.status.completed === 1, 'Expected completed abstraction count');
@@ -320,7 +317,7 @@ test('GET /api/jobs/:id/abstracts returns saved abstracts in chunk order', async
   });
 
   const res = mockRes();
-  await abstractsHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstracts'), res);
+  await jobsRouteHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstracts'), res);
 
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.abstracts.map(item => item.abstractText).join(',') === 'first,second', 'Expected chunk-order abstracts');
@@ -370,7 +367,7 @@ test('POST /api/jobs/:id/chunks/:chunkId/retry retries only the failed chunk', a
   });
 
   const res = mockRes();
-  await retryHandler(mockReq('POST', null, {}, { id: 'job_test_1', chunkId: 'chk_failed' }, '/api/jobs/job_test_1/chunks/chk_failed/retry'), res);
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1', chunkId: 'chk_failed' }, '/api/jobs/job_test_1/chunks/chk_failed/retry'), res);
 
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   const saved = await store.listDocumentAbstracts('job_test_1');
@@ -432,7 +429,7 @@ test('GET /api/jobs/:id/abstraction/status reports failed chunk list', async () 
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
 
   const res = mockRes();
-  await statusHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/status'), res);
+  await jobsRouteHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/status'), res);
 
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.status.completed === 1, 'Expected completed count');
