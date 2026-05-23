@@ -198,6 +198,30 @@ test('Phase 6: getJobLink emits hash route, getRequestedJobId reads it', () => {
     'getRequestedJobId must parse #/job/{id}');
 });
 
+test('Phase 6: #view-job contains required job page subsections', () => {
+  assert(indexHtml.includes('id="jobHeader"'), 'Missing #jobHeader');
+  assert(indexHtml.includes('id="jobProgress"'), 'Missing #jobProgress');
+  assert(indexHtml.includes('id="jobStepper"'), 'Missing #jobStepper');
+  assert(indexHtml.includes('id="jobDetail"'), 'Missing #jobDetail');
+  assert(indexHtml.includes('id="jobActions"'), 'Missing #jobActions');
+  assert(indexHtml.includes('id="jobResults"'), 'Missing #jobResults');
+});
+
+test('Phase 6: status badge CSS classes exist', () => {
+  assert(indexHtml.includes('.status-badge'), 'Missing .status-badge style');
+  assert(indexHtml.includes('.status-badge--complete'), 'Missing complete badge style');
+  assert(indexHtml.includes('.status-badge--failed'), 'Missing failed badge style');
+  assert(indexHtml.includes('.status-badge--partial'), 'Missing partial badge style');
+});
+
+test('Phase 6: job view renderers exist', () => {
+  for (const fn of ['renderJobHeader', 'renderJobProgressView', 'renderJobStepper',
+                    'renderJobDetail', 'renderJobActions', 'renderJobResults']) {
+    assert(script.includes(`function ${fn}`), `Missing ${fn}()`);
+  }
+  assert(script.includes('JOB_STATUS_LABELS'), 'Missing canonical status label map');
+});
+
 
 let passed = 0;
 let failed = 0;

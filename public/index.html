@@ -78,6 +78,27 @@
   .password-gate { max-width: 420px; margin: 4rem auto; padding: 2.2rem; background: #fff; border: 1px solid #d9c9a8; border-top: 4px solid #b8631e; border-radius: 6px; text-align: center; box-shadow: 0 4px 12px rgba(74,60,40,.1); }
   .password-gate h2 { color: #6b3410; margin-bottom: .8rem; font-weight: normal; font-size: 1.4rem; }
   .password-gate p { color: #8a6f4a; font-size: .9rem; margin-bottom: 1.5rem; line-height: 1.5; }
+  .status-badge { display:inline-block; padding:.18rem .65rem; border-radius:999px;
+    font-size:.78rem; font-weight:600; background:#f3e7d8; color:#6b3410; }
+  .status-badge--active { background:#fce8d4; color:#b8631e; }
+  .status-badge--complete { background:#dfeadb; color:#4a7c4e; }
+  .status-badge--failed { background:#fce8e0; color:#d97755; }
+  .status-badge--partial { background:#fff1d6; color:#a06b13; }
+  .status-badge--canceled { background:#ece3d4; color:#8a6f4a; }
+  .job-stepper { display:flex; gap:.6rem; align-items:center; margin:.6rem 0 1rem; font-size:.85rem; color:#8a6f4a; }
+  .job-stepper .step { padding:.18rem .55rem; border-radius:6px; background:#f3e7d8; }
+  .job-stepper .step.active { background:#fce8d4; color:#b8631e; font-weight:600; }
+  .job-stepper .step.done { background:#dfeadb; color:#4a7c4e; }
+  .job-stepper .sep { color:#c8b291; }
+  .job-actions { display:flex; flex-wrap:wrap; gap:.55rem; margin-top:.8rem; }
+  .job-actions button[disabled] { opacity:.55; cursor:not-allowed; }
+  .job-leave-banner { background:#fce8d4; color:#6b3410; padding:.6rem .9rem;
+    border-radius:8px; margin:.4rem 0 1rem; font-size:.88rem; }
+  .recent-jobs-row { display:flex; justify-content:space-between; padding:.7rem .9rem;
+    border:1px solid #e5d6b8; border-radius:8px; margin-bottom:.55rem; cursor:pointer;
+    background:#fbf2dc; }
+  .recent-jobs-row:hover { background:#f5e7c4; }
+  .recent-jobs-empty { color:#8a6f4a; font-style:italic; padding:.6rem 0; }
 </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -188,7 +209,35 @@
 
     </div> <!-- /#view-home -->
 
-    <div id="view-job" data-view="job" style="display:none"></div>
+    <div id="view-job" data-view="job" style="display:none">
+      <div class="card" id="jobHeader"></div>
+      <div id="jobLeaveBanner" class="job-leave-banner" style="display:none">
+        You can close this tab. Reopen this link to check progress.
+      </div>
+      <div id="jobProgress" style="display:none">
+        <div class="progress-card">
+          <div class="progress-status" id="jobProgressStatus">Loading…</div>
+          <div class="progress-eta" id="jobProgressMeta"></div>
+          <div class="progress-eta" id="jobProgressEta"></div>
+          <div class="progress-bar"><div class="progress-fill" id="jobProgressFill" style="width:0%"></div></div>
+          <div class="progress-list" id="jobProgressList"></div>
+        </div>
+      </div>
+      <div id="jobStepper" class="job-stepper" style="display:none"></div>
+      <div id="jobDetail"></div>
+      <div id="jobActions" class="job-actions"></div>
+      <div id="jobResults"></div>
+      <div id="jobFollowup" style="display:none">
+        <div class="card">
+          <label class="field-label">Follow-up Question</label>
+          <div class="followup-row">
+            <input type="text" id="jobFollowupInput" placeholder="Ask about specific owners, fractions, gaps, curative items..." />
+            <button class="btn-ask" id="jobFollowupBtn">Ask</button>
+          </div>
+          <div id="jobFollowupHistory" style="margin-top:1rem"></div>
+        </div>
+      </div>
+    </div>
     <div id="view-history" data-view="history" style="display:none"></div>
 
   </div>
@@ -944,7 +993,168 @@ function applyRoute(route) {
   }
 }
 
-// Placeholder until later tasks fill them in
+// === Phase 6: job view rendering ===
+
+const JOB_STATUS_LABELS = {
+  created:        { label: 'Preparing job…',          badge: 'status-badge--active' },
+  uploading:      { label: 'Uploading documents…',    badge: 'status-badge--active' },
+  ready:          { label: 'Ready to start',          badge: 'status-badge--active' },
+  queued:         { label: 'Queued',                  badge: 'status-badge--active' },
+  planning:       { label: 'Planning…',               badge: 'status-badge--active' },
+  abstracting:    { label: 'Reading documents…',      badge: 'status-badge--active' },
+  synthesizing:   { label: 'Building chain of title…', badge: 'status-badge--active' },
+  complete:       { label: 'Analysis complete',       badge: 'status-badge--complete' },
+  partial_failed: { label: 'Finished with errors',    badge: 'status-badge--partial' },
+  failed:         { label: 'Job failed',              badge: 'status-badge--failed' },
+  canceled:       { label: 'Canceled',                badge: 'status-badge--canceled' },
+};
+
+const TERMINAL_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canceled']);
+
+function statusInfo(status) {
+  return JOB_STATUS_LABELS[status] || { label: status || 'Unknown', badge: 'status-badge' };
+}
+
+function shortJobId(id) {
+  if (!id) return '';
+  const trimmed = id.startsWith('job_') ? id.slice(4) : id;
+  return trimmed.slice(0, 8);
+}
+
+function formatRelative(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const diffSec = Math.max(1, Math.round((Date.now() - t) / 1000));
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.round(diffSec / 3600)}h ago`;
+  return `${Math.round(diffSec / 86400)}d ago`;
+}
+
+function renderJobHeader(job) {
+  const el = document.getElementById('jobHeader');
+  if (!el || !job) return;
+  const info = statusInfo(job.status);
+  const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
+  const link = getJobLink(job.id);
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.6rem">
+      <div>
+        <h2 style="margin:0">${esc(title)}</h2>
+        <div style="color:#8a6f4a;font-size:.85rem;margin-top:.3rem">
+          Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
+          updated ${esc(formatRelative(job.updatedAt))}
+        </div>
+      </div>
+      <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+        <span class="status-badge ${info.badge}">${esc(info.label)}</span>
+        <button class="btn-secondary" id="jobCopyLinkBtn" type="button">Copy link</button>
+      </div>
+    </div>`;
+  const copyBtn = document.getElementById('jobCopyLinkBtn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      try {
+        navigator.clipboard?.writeText(link);
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1200);
+      } catch { /* ignore */ }
+    });
+  }
+}
+
+function derivedProgressPercent(job) {
+  if (!job) return 0;
+  if (job.status === 'complete') return 100;
+  if (job.status === 'failed' || job.status === 'canceled') return 0;
+  const totalChunks = job.totalChunks || job.abstractChunkTotal || 0;
+  const doneChunks = (job.completedChunks || job.abstractChunkCompleted || 0)
+                   + (job.failedChunks || job.abstractChunkFailed || 0);
+  if (totalChunks > 0) {
+    const abstractPct = Math.min(70, (doneChunks / totalChunks) * 70);
+    if (job.status === 'synthesizing' || job.status === 'partial_failed') {
+      return Math.min(99, Math.round(70 + (job.synthesisCompletedSegments || 0) /
+        Math.max(1, job.synthesisTotalSegments || 1) * 30));
+    }
+    return Math.round(abstractPct);
+  }
+  if (!job.totalDocuments) return 0;
+  const finished = (job.completedDocuments || 0) + (job.failedDocuments || 0);
+  if (job.status === 'synthesizing') return Math.max(85, Math.round((finished / job.totalDocuments) * 85));
+  return Math.round(Math.min(85, (finished / job.totalDocuments) * 85));
+}
+
+function renderJobProgressView(job) {
+  const wrap = document.getElementById('jobProgress');
+  const banner = document.getElementById('jobLeaveBanner');
+  if (!wrap || !job) return;
+  if (TERMINAL_STATUSES.has(job.status)) {
+    wrap.style.display = 'none';
+    if (banner) banner.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  if (banner) banner.style.display = '';
+  const info = statusInfo(job.status);
+  const pct = derivedProgressPercent(job);
+  const statusEl = document.getElementById('jobProgressStatus');
+  const fillEl = document.getElementById('jobProgressFill');
+  const metaEl = document.getElementById('jobProgressMeta');
+  const listEl = document.getElementById('jobProgressList');
+  if (statusEl) statusEl.textContent = job.currentPhase || info.label;
+  if (fillEl) fillEl.style.width = `${Math.min(99, pct)}%`;
+  if (metaEl) {
+    const docs = `${job.completedDocuments || 0} / ${job.totalDocuments || 0} documents`;
+    const failed = job.failedDocuments ? ` · ${job.failedDocuments} failed` : '';
+    metaEl.textContent = `${docs}${failed}`;
+  }
+  if (listEl) listEl.innerHTML = '';
+}
+
+function renderJobStepper(job) {
+  const el = document.getElementById('jobStepper');
+  if (!el || !job) return;
+  el.style.display = '';
+  const phases = ['Upload', 'Abstract', 'Synthesize'];
+  const order = { uploading: 0, ready: 1, queued: 1, planning: 1, abstracting: 1, synthesizing: 2 };
+  let activeIdx = order[job.status];
+  if (job.status === 'complete' || job.status === 'partial_failed') activeIdx = 2;
+  if (job.status === 'created') activeIdx = 0;
+  el.innerHTML = phases.map((p, i) => {
+    const cls = i === activeIdx ? 'step active' :
+                (typeof activeIdx === 'number' && i < activeIdx) ? 'step done' : 'step';
+    return `<span class="${cls}">${esc(p)}</span>` + (i < phases.length - 1 ? '<span class="sep">→</span>' : '');
+  }).join('');
+}
+
+function renderJobDetail(job) {
+  const el = document.getElementById('jobDetail');
+  if (!el || !job) return;
+  const failed = Array.isArray(job.failedDocuments) ? job.failedDocuments : [];
+  if (!failed.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="verify-note" style="margin-top:.8rem">
+      <strong>${failed.length} document${failed.length === 1 ? '' : 's'} failed to read.</strong>
+      <ul style="margin:.4rem 0 0 1.2rem">
+        ${failed.map(d => `<li>${esc(d.originalFilename || d.name || d.id)}${d.lastError ? ` — ${esc(d.lastError)}` : ''}</li>`).join('')}
+      </ul>
+    </div>`;
+}
+
+function renderJobActions(job) {
+  // Filled in by Task 5
+  const el = document.getElementById('jobActions');
+  if (el) el.innerHTML = '';
+}
+
+function renderJobResults(job, result) {
+  // Filled in by Task 7
+  const el = document.getElementById('jobResults');
+  if (el) el.innerHTML = '';
+}
+
+// Placeholder until Task 4 fills it in
 async function loadJobView(jobId) {
   console.log('loadJobView stub', jobId);
 }
