@@ -15,6 +15,7 @@
 // ships, requests with WORKFLOW_DRIVER=inngest return a 503 setup error.
 
 import { processChunkAbstraction } from './abstraction.js';
+import { processSynthesisJob, planJobSynthesis } from './synthesis.js';
 
 const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 6, 1, 32);
 const DEFAULT_CONCURRENCY = clampInt(process.env.WORKFLOW_CONCURRENCY, 3, 1, 12);
@@ -270,9 +271,14 @@ function sanitize(err) {
 }
 
 const backgroundPromises = new Map();
+const synthesisBackgroundPromises = new Map();
 
 export function getBackgroundPromise(jobId) {
   return backgroundPromises.get(jobId) || null;
+}
+
+export function getSynthesisBackgroundPromise(jobId) {
+  return synthesisBackgroundPromises.get(jobId) || null;
 }
 
 export function scheduleBackgroundProcessing(jobId, options = {}) {
@@ -298,6 +304,122 @@ export function scheduleBackgroundProcessing(jobId, options = {}) {
     }
   })();
   backgroundPromises.set(jobId, promise);
+  if (typeof waitUntil === 'function') {
+    try { waitUntil(promise); } catch { /* waitUntil may not be available in tests */ }
+  }
+  return promise;
+}
+
+function publicSynthesisStatus(status) {
+  if (!status) return null;
+  return {
+    total: status.total || 0,
+    pending: status.pending || 0,
+    processing: status.processing || 0,
+    complete: status.complete || 0,
+    failed: status.failed || 0,
+    retry_wait: status.retry_wait || 0,
+    planId: status.planId || null,
+    hasResult: Boolean(status.hasResult),
+  };
+}
+
+export async function enqueueSynthesisJob(jobId, options = {}) {
+  const store = options.store;
+  if (!store) throw new Error('A job store is required to enqueue synthesis.');
+  const job = await getJobOrThrow(store, jobId);
+  if (isJobCanceled(job)) {
+    const error = new Error('Job has been canceled.');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (store.resetStaleSynthesisSegments) {
+    await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
+  }
+  // Plan (or reuse plan) and persist segments before the worker picks them up.
+  await planJobSynthesis(jobId, options);
+  if (store.updateJob && !['synthesizing', 'complete', 'partial_failed', 'failed'].includes(job.status)) {
+    try {
+      await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Queued for server-side synthesis' });
+    } catch {
+      // status transition already advanced; fine.
+    }
+  } else if (store.updateJob && job.status === 'failed') {
+    // allow resuming from failed
+    try {
+      await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Resuming synthesis after failure' });
+    } catch { /* ignore */ }
+  }
+  const status = await store.getSynthesisStatus(jobId);
+  return {
+    job: status?.job || (await store.getJob(jobId)),
+    status: publicSynthesisStatus(status),
+    raw: status,
+  };
+}
+
+export async function synthesisSnapshot(jobId, options = {}) {
+  const store = options.store;
+  if (!store) throw new Error('A job store is required to read synthesis status.');
+  await getJobOrThrow(store, jobId);
+  if (store.resetStaleSynthesisSegments) {
+    await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
+  }
+  const status = await store.getSynthesisStatus(jobId);
+  return {
+    job: status?.job || (await store.getJob(jobId)),
+    status: publicSynthesisStatus(status),
+    raw: status,
+  };
+}
+
+export async function processSynthesisBatch(jobId, options = {}) {
+  const store = options.store;
+  if (!store) throw new Error('A job store is required to process synthesis.');
+  const config = {
+    batchLimit: options.batchLimit ?? Math.max(1, Math.min(4, DEFAULT_BATCH_LIMIT)),
+    budgetMs: options.budgetMs ?? DEFAULT_BUDGET_MS,
+    leaseMs: options.leaseMs ?? Math.max(60_000, DEFAULT_LEASE_MS),
+    maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    staleLeaseMs: options.staleLeaseMs ?? 180_000,
+  };
+  const result = await processSynthesisJob(jobId, {
+    ...options,
+    store,
+    budgetMs: config.budgetMs,
+    leaseMs: config.leaseMs,
+    staleLeaseMs: config.staleLeaseMs,
+    batchLimit: config.batchLimit,
+    config: { maxAttempts: config.maxAttempts, ...(options.config || {}) },
+  });
+  return {
+    ...result,
+    status: publicSynthesisStatus(result.status),
+    rawStatus: result.status,
+  };
+}
+
+export function scheduleBackgroundSynthesis(jobId, options = {}) {
+  // Mirrors scheduleBackgroundProcessing for synthesis. Fire-and-forget so the
+  // route can return immediately while the function instance drains segments.
+  const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
+  const existing = synthesisBackgroundPromises.get(jobId);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      return await processSynthesisBatch(jobId, options);
+    } catch (err) {
+      console.error(JSON.stringify({
+        event: 'workflow_synthesis_background_error',
+        jobId,
+        reason: err?.message || String(err),
+      }));
+      return null;
+    } finally {
+      synthesisBackgroundPromises.delete(jobId);
+    }
+  })();
+  synthesisBackgroundPromises.set(jobId, promise);
   if (typeof waitUntil === 'function') {
     try { waitUntil(promise); } catch { /* waitUntil may not be available in tests */ }
   }

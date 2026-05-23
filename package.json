@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/abstraction.test.js"
+    "test": "node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/abstraction.test.js && node test/synthesis.test.js"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

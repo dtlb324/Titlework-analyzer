@@ -281,6 +281,30 @@ Workflow tuning: see `WORKFLOW_*` env vars in [Step 4](#step-4--deploy-to-vercel
 
 If the database, Blob token, or workflow setup is unavailable, the app returns a clear setup error (`503` with `fallback: "browser_abstraction"`), the frontend shows a warning that it is **falling back to browser abstraction**, and the run continues through the existing browser-only path. In that fallback mode, keep the tab open until the run completes because file bytes remain local to the browser.
 
+### Phase 5 — durable server-side synthesis
+
+When `DATABASE_URL`/`POSTGRES_URL` and `ANTHROPIC_API_KEY` are configured, final title synthesis also runs on the server. After server-side abstraction finishes, the frontend calls `POST /api/jobs/:id/synthesis/start`, which plans dynamic segments (50-doc cap and ~3.9 MB safe envelope), persists each plan as `synthesis_segments` rows under a stable `plan_id`, and schedules background work. The worker claims one segment at a time under a Postgres lease, runs partial syntheses with Sonnet (`SYNTHESIS_MODEL`, default `claude-sonnet-4-6`), checkpoints each segment summary, then merges the segments into the final title opinion. If a segment hits 413/timeout it is recursively binary-split; if the final merge itself would exceed the safe envelope, segment summaries are pair-merged into a smaller tree before the final pass.
+
+Status and result endpoints:
+
+- `POST /api/jobs/:id/synthesis/start` — plans + enqueues server synthesis (`202 Accepted`, idempotent).
+- `POST /api/jobs/:id/synthesis/process` — synchronously drains the next batch (useful for cron/scripts/UI kicks).
+- `GET /api/jobs/:id/synthesis/status` — segment counts, plan id, warnings, failed documents.
+- `GET /api/jobs/:id/result` — final title opinion + warnings + token usage.
+- `POST /api/jobs/:id/followup` — durable follow-up Q&A. Uses the stored title opinion plus the last few Q/A turns; raw analysis-input payloads are never sent. History is stored in `followup_messages`.
+
+Synthesis routes reject raw document/abstract/title-opinion fields in their request bodies — the server reads stored abstracts directly from `document_abstracts`. None of the routes accept base64, CSV text, or any document bytes.
+
+If `ANTHROPIC_API_KEY` (or the Postgres/workflow setup) is missing, `/synthesis/*` and `/followup` return `503` with `fallback: "browser_synthesis"`, and the frontend warns that it is **falling back to browser synthesis** before running the existing in-browser `hierarchicalSynthesis` path. Follow-ups in that mode go through `/api/analyze` as before.
+
+Phase 5 storage:
+
+- `synthesis_segments` — segment plan + per-segment summary, attempts, lease, model, token usage, warnings.
+- `job_results` — one row per job: final opinion, warnings, failed-document refs, model, token usage, duration. Saving a result transitions the job to `complete`/`partial_failed`/`failed`.
+- `followup_messages` — append-only Q&A with model, token usage, retrieved document ids, truncation warnings.
+
+The server never logs full abstracts or full title opinions; only IDs, sizes, model, latency, token usage, status, and sanitized errors.
+
 ---
 
 ## How the AI Behaves
@@ -341,7 +365,11 @@ Titlework-analyzer/
 ├── test/
 │   ├── app.test.js       # Integration tests (API handler, frontend constants, syntax)
 │   ├── batching.test.js  # Unit tests for adaptive batching logic
-│   └── reliability.test.js # Regression tests for payload, timeout, and synthesis guardrails
+│   ├── reliability.test.js # Regression tests for payload, timeout, and synthesis guardrails
+│   ├── jobs.test.js      # Phase 1 durable job metadata tests
+│   ├── storage.test.js   # Phase 2 durable upload/Blob endpoint tests
+│   ├── abstraction.test.js # Phase 3/4 server-side abstraction + queue tests
+│   └── synthesis.test.js # Phase 5 server-side synthesis + follow-up tests
 ├── vercel.json           # Vercel config — sets function timeout to 60 seconds
 ├── package.json          # Project metadata — type: module
 ├── SECURITY.md           # Security policy and vulnerability reporting

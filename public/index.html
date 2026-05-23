@@ -1221,6 +1221,94 @@ async function pollServerAbstraction(jobId, items, totalDocuments) {
   throw new Error('Server-side abstraction did not finish polling in this browser session.');
 }
 
+async function startServerSynthesis(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/synthesis/start`, {
+    method: 'POST',
+  });
+}
+
+async function processServerSynthesisBatch(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/synthesis/process`, {
+    method: 'POST',
+  });
+}
+
+async function fetchServerSynthesisStatus(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/synthesis/status`, {
+    method: 'GET',
+  });
+}
+
+async function fetchServerJobResult(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/result`, {
+    method: 'GET',
+  });
+}
+
+async function askServerFollowup(jobId, question) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/followup`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+}
+
+function isServerSynthesisTerminal(status) {
+  if (!status) return false;
+  if (status.hasResult) return true;
+  const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
+  return pending === 0 && (status.total || 0) > 0;
+}
+
+async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
+  let latest = null;
+  let lastSignature = '';
+  let stallPolls = 0;
+  const STALL_THRESHOLD = 10;
+  for (let attempt = 0; attempt < 1800; attempt++) {
+    latest = await fetchServerSynthesisStatus(jobId);
+    const status = latest.status || {};
+    const complete = status.complete || 0;
+    const total = status.total || 0;
+    const failed = status.failed || 0;
+    const processing = status.processing || 0;
+    const retryWait = status.retry_wait || 0;
+    const pct = total ? 88 + Math.round((complete / total) * 10) : 88;
+    if (items && items.length) items[items.length - 1].status = isServerSynthesisTerminal(status) ? 'done' : 'active';
+    const detail = [];
+    if (processing) detail.push(`${processing} segment(s) running`);
+    if (retryWait) detail.push(`${retryWait} awaiting retry`);
+    if (failed) detail.push(`${failed} failed`);
+    const phaseLabel = total > 0
+      ? `Server synthesis ${complete}/${total} segment(s)${detail.length ? ` (${detail.join(', ')})` : ''}...`
+      : 'Server synthesis planning...';
+    if (onProgress) onProgress(Math.min(99, pct), phaseLabel);
+    if (isServerSynthesisTerminal(status)) return latest;
+    const signature = `${complete}|${failed}|${processing}|${retryWait}`;
+    if (signature === lastSignature) stallPolls += 1;
+    else { stallPolls = 0; lastSignature = signature; }
+    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait) > 0) {
+      try { await processServerSynthesisBatch(jobId); } catch (kickErr) { console.warn('Could not kick synthesis worker', kickErr); }
+      stallPolls = 0;
+    }
+    await sleep(1000);
+  }
+  throw new Error('Server-side synthesis did not finish polling in this browser session.');
+}
+
+async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
+  if (onProgress) onProgress(88, 'Starting server-side synthesis from saved abstracts...');
+  const started = await startServerSynthesis(jobId);
+  const status = started.status || {};
+  const settled = isServerSynthesisTerminal(status)
+    ? started
+    : await pollServerSynthesis(jobId, items, totalDocs, onProgress);
+  const final = await fetchServerJobResult(jobId);
+  if (!final?.result?.finalTitleOpinion) {
+    throw new Error('Server-side synthesis finished without producing a title opinion.');
+  }
+  return { result: final.result, status: settled.status };
+}
+
 async function runServerDocumentAbstraction(jobId, fileList, items) {
   updateProgress(8, 'Starting server-side abstraction from durable chunks...', items);
   const start = await startServerAbstraction(jobId);
@@ -2102,35 +2190,62 @@ async function analyze() {
   );
 
   try {
-    let synthStep = 0;
-    const synthSteps = Math.max(1, Math.ceil(documentAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
-    const synthesis = await hierarchicalSynthesis(documentAbstracts, tract, ctx, status => {
-      synthStep += 1;
-      if (activeProgressTimer) activeProgressTimer.synthesisStep = synthStep;
-      const pct = 88 + Math.round((synthStep / synthSteps) * 10);
-      updateProgress(Math.min(99, pct), status, items);
-      safePatchAnalysisJob(job.id, {
-        status: 'synthesizing',
-        completedDocuments: documentAbstracts.length,
-        failedDocuments: serverAbstractionFailedCount,
-        currentPhase: status,
+    let synthesis = null;
+    let usedServerSynthesis = false;
+    if (usedServerAbstraction) {
+      try {
+        const serverResult = await runServerSynthesis(job.id, files.length, items, (pct, label) => {
+          updateProgress(pct, label, items);
+          safePatchAnalysisJob(job.id, {
+            status: 'synthesizing',
+            completedDocuments: documentAbstracts.length,
+            failedDocuments: serverAbstractionFailedCount,
+            currentPhase: label,
+          });
+        });
+        synthesis = serverResult.result.finalTitleOpinion;
+        usedServerSynthesis = true;
+        if (serverResult.result.warnings?.length) {
+          showError(`Server synthesis completed with warnings: ${serverResult.result.warnings.slice(0, 3).join('; ')}.`);
+        }
+      } catch (serverErr) {
+        showError(`Server-side synthesis unavailable (${serverErr.message}); falling back to browser synthesis. Keep this tab open until the run finishes.`);
+      }
+    }
+    if (!usedServerSynthesis) {
+      let synthStep = 0;
+      const synthSteps = Math.max(1, Math.ceil(documentAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
+      synthesis = await hierarchicalSynthesis(documentAbstracts, tract, ctx, status => {
+        synthStep += 1;
+        if (activeProgressTimer) activeProgressTimer.synthesisStep = synthStep;
+        const pct = 88 + Math.round((synthStep / synthSteps) * 10);
+        updateProgress(Math.min(99, pct), status, items);
+        safePatchAnalysisJob(job.id, {
+          status: 'synthesizing',
+          completedDocuments: documentAbstracts.length,
+          failedDocuments: serverAbstractionFailedCount,
+          currentPhase: status,
+        });
       });
-    });
+    }
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${documentAbstracts.length} document abstracts synthesized${serverAbstractionFailedCount ? ` (${serverAbstractionFailedCount} failed chunk(s) omitted)` : ''}`, items);
-    await safePatchAnalysisJob(job.id, {
-      status: serverAbstractionFailedCount ? 'partial_failed' : 'complete',
-      completedDocuments: documentAbstracts.length,
-      failedDocuments: serverAbstractionFailedCount,
-      currentPhase: serverAbstractionFailedCount ? 'complete with abstraction warnings' : 'complete',
-      errorMessage: null,
-    });
+    if (!usedServerSynthesis) {
+      // The server-synthesis branch already updates analysis_jobs via saveJobResult.
+      await safePatchAnalysisJob(job.id, {
+        status: serverAbstractionFailedCount ? 'partial_failed' : 'complete',
+        completedDocuments: documentAbstracts.length,
+        failedDocuments: serverAbstractionFailedCount,
+        currentPhase: serverAbstractionFailedCount ? 'complete with abstraction warnings' : 'complete',
+        errorMessage: null,
+      });
+    }
     clearProgressTimer();
     stopJobPolling();
     files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)`, kind: 'analysis-input' },
-      { role: 'assistant', content: synthesis, kind: 'title-opinion' },
+      { role: 'assistant', content: synthesis, kind: 'title-opinion', sourceJobId: usedServerSynthesis ? job.id : null },
     ];
     setTimeout(() => {
       document.getElementById('progressSection').style.display = 'none';
@@ -2197,13 +2312,41 @@ async function askFollowup() {
   conversationHistory.push({ role: 'user', content: q, kind: 'followup' });
   renderResults();
   try {
-    const reply = await callBackend(buildFollowupMessages(q), SYNTHESIS_PROMPT, {
-      model: SYNTHESIS_MODEL,
-      max_tokens: SYNTHESIS_MAX_TOKENS,
-      phase: 'followup',
-      docCount: documentAbstracts.length,
-      label: 'Follow-up request',
-    });
+    const serverJobId = conversationHistory
+      .slice()
+      .reverse()
+      .find(m => m.role === 'assistant' && m.kind === 'title-opinion' && m.sourceJobId)?.sourceJobId || null;
+    let reply;
+    if (serverJobId) {
+      try {
+        const response = await askServerFollowup(serverJobId, q);
+        reply = response?.followup?.answer || '';
+        if (response?.truncationWarning) {
+          showError(response.truncationWarning);
+        }
+      } catch (serverErr) {
+        if (serverErr?.status === 503) {
+          showError(`Server follow-up unavailable (${serverErr.message}); using browser fallback.`);
+          reply = await callBackend(buildFollowupMessages(q), SYNTHESIS_PROMPT, {
+            model: SYNTHESIS_MODEL,
+            max_tokens: SYNTHESIS_MAX_TOKENS,
+            phase: 'followup',
+            docCount: documentAbstracts.length,
+            label: 'Follow-up request',
+          });
+        } else {
+          throw serverErr;
+        }
+      }
+    } else {
+      reply = await callBackend(buildFollowupMessages(q), SYNTHESIS_PROMPT, {
+        model: SYNTHESIS_MODEL,
+        max_tokens: SYNTHESIS_MAX_TOKENS,
+        phase: 'followup',
+        docCount: documentAbstracts.length,
+        label: 'Follow-up request',
+      });
+    }
     conversationHistory.push({ role: 'assistant', content: reply, kind: 'followup' });
   } catch (e) {
     showError('Error: ' + e.message);
