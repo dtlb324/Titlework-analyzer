@@ -435,6 +435,11 @@ function rowToJob(row) {
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
     startedAt: row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at,
     completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+    synthesisPlanId: row.synthesis_plan_id || null,
+    synthesisMergeWorkerId: row.synthesis_merge_worker_id || null,
+    synthesisMergeLeaseExpiresAt: row.synthesis_merge_lease_expires_at instanceof Date
+      ? row.synthesis_merge_lease_expires_at.toISOString()
+      : row.synthesis_merge_lease_expires_at,
   };
 }
 
@@ -799,6 +804,9 @@ function createPostgresJobStore() {
         await sql`CREATE INDEX IF NOT EXISTS idx_document_chunks_document ON document_chunks(document_id)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_document_abstracts_job_chunk_order ON document_abstracts(job_id, chunk_id)`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_plan_id text`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_merge_worker_id text`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_merge_lease_expires_at timestamptz`;
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_chunks_split_child_unique ON document_chunks(job_id, split_parent_chunk_id, fingerprint) WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL`;
         await sql`
           CREATE TABLE IF NOT EXISTS synthesis_segments (
             id text PRIMARY KEY,
@@ -1178,7 +1186,8 @@ function createPostgresJobStore() {
           last_error_message = ${patch.lastErrorMessage === undefined ? existing.lastErrorMessage : patch.lastErrorMessage},
           completed_at = ${nextStatus === 'uploaded' ? (existing.completedAt || new Date().toISOString()) : null},
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${chunkId}
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
         RETURNING *
       `;
       await refreshDocumentCounts(jobId, existing.documentId);
@@ -1271,7 +1280,9 @@ function createPostgresJobStore() {
           latency_ms = ${failure.latencyMs ?? null},
           model_used = ${failure.modelUsed ?? null},
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${chunkId}
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND (${failure.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1361,14 +1372,16 @@ function createPostgresJobStore() {
           abstraction_worker_id = NULL,
           abstraction_retry_at = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${chunkId}
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND (${failure.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
       return rowToChunk(rows[0]);
     },
 
-    async markChunkAbstractionSplitSuperseded(jobId, chunkId, reason) {
+    async markChunkAbstractionSplitSuperseded(jobId, chunkId, reason, workerId = null) {
       await ensureSchema();
       const rows = await sql`
         UPDATE document_chunks
@@ -1376,8 +1389,13 @@ function createPostgresJobStore() {
           abstraction_status = 'split_superseded',
           abstraction_error_type = ${reason},
           abstraction_error_message = 'PDF chunk was split into smaller child chunks for retry.',
+          abstraction_claimed_at = NULL,
+          abstraction_lease_expires_at = NULL,
+          abstraction_worker_id = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${chunkId}
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND (${workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId}))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1394,14 +1412,39 @@ function createPostgresJobStore() {
           fingerprint, checksum_sha256, upload_status, abstraction_status,
           split_parent_chunk_id, split_reason
         )
-        VALUES (
+        SELECT
           ${id}, ${jobId}, ${documentId}, ${input.chunkOrder}, ${input.originalFilename}, ${input.blobKey},
           ${input.blobUrl}, ${input.mediaType}, ${input.sizeBytes}, ${input.pageStart}, ${input.pageEnd}, ${input.splitFrom},
           ${input.fingerprint}, ${input.checksumSha256}, 'uploaded', 'pending',
           ${input.splitParentChunkId}, ${input.splitReason}
+        WHERE EXISTS (
+          SELECT 1 FROM document_chunks parent
+          WHERE parent.job_id = ${jobId}
+            AND parent.id = ${input.splitParentChunkId}
+            AND (${input.workerId ?? null} IS NULL OR (parent.abstraction_status = 'processing' AND parent.abstraction_worker_id = ${input.workerId}))
         )
+        ON CONFLICT (job_id, split_parent_chunk_id, fingerprint)
+        WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL
+        DO UPDATE SET
+          original_filename = EXCLUDED.original_filename,
+          blob_key = EXCLUDED.blob_key,
+          blob_url = EXCLUDED.blob_url,
+          media_type = EXCLUDED.media_type,
+          size_bytes = EXCLUDED.size_bytes,
+          page_start = EXCLUDED.page_start,
+          page_end = EXCLUDED.page_end,
+          split_from = EXCLUDED.split_from,
+          checksum_sha256 = EXCLUDED.checksum_sha256,
+          upload_status = 'uploaded',
+          abstraction_status = CASE
+            WHEN document_chunks.abstraction_status = 'split_superseded' THEN document_chunks.abstraction_status
+            ELSE 'pending'
+          END,
+          split_reason = EXCLUDED.split_reason,
+          updated_at = now()
         RETURNING *
       `;
+      if (!rows[0]) return null;
       await refreshDocumentCounts(jobId, documentId);
       await refreshUploadCounts(jobId);
       return rowToChunk(rows[0]);
@@ -1411,16 +1454,38 @@ function createPostgresJobStore() {
       await ensureSchema();
       const id = `abs_${randomUUID()}`;
       const rows = await sql`
+        WITH claimed AS (
+          UPDATE document_chunks
+          SET
+            abstraction_status = 'completed',
+            abstraction_error_type = NULL,
+            abstraction_error_message = NULL,
+            payload_bytes = ${record.payloadBytes},
+            latency_ms = ${record.latencyMs},
+            model_used = ${record.modelUsed},
+            input_tokens = ${record.inputTokens},
+            output_tokens = ${record.outputTokens},
+            abstraction_completed_at = now(),
+            abstraction_claimed_at = NULL,
+            abstraction_lease_expires_at = NULL,
+            abstraction_worker_id = NULL,
+            abstraction_retry_at = NULL,
+            updated_at = now()
+          WHERE job_id = ${record.jobId}
+            AND id = ${record.chunkId}
+            AND (${record.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${record.workerId}))
+          RETURNING id
+        )
         INSERT INTO document_abstracts (
           id, job_id, document_id, chunk_id, abstract_text, model_used,
           payload_bytes, latency_ms, input_tokens, output_tokens,
           status, attempt_count, error_type, error_message
         )
-        VALUES (
+        SELECT
           ${id}, ${record.jobId}, ${record.documentId}, ${record.chunkId}, ${record.abstractText}, ${record.modelUsed},
           ${record.payloadBytes}, ${record.latencyMs}, ${record.inputTokens}, ${record.outputTokens},
           ${record.status}, ${record.attemptCount}, ${record.errorType ?? null}, ${record.errorMessage ?? null}
-        )
+        FROM claimed
         ON CONFLICT (chunk_id) DO UPDATE
         SET
           abstract_text = EXCLUDED.abstract_text,
@@ -1436,24 +1501,15 @@ function createPostgresJobStore() {
           updated_at = now()
         RETURNING *
       `;
+      if (!rows[0]) return null;
+      await sql`DELETE FROM job_results WHERE job_id = ${record.jobId}`;
       await sql`
-        UPDATE document_chunks
-        SET
-          abstraction_status = 'completed',
-          abstraction_error_type = NULL,
-          abstraction_error_message = NULL,
-          payload_bytes = ${record.payloadBytes},
-          latency_ms = ${record.latencyMs},
-          model_used = ${record.modelUsed},
-          input_tokens = ${record.inputTokens},
-          output_tokens = ${record.outputTokens},
-          abstraction_completed_at = now(),
-          abstraction_claimed_at = NULL,
-          abstraction_lease_expires_at = NULL,
-          abstraction_worker_id = NULL,
-          abstraction_retry_at = NULL,
-          updated_at = now()
-        WHERE job_id = ${record.jobId} AND id = ${record.chunkId}
+        UPDATE analysis_jobs
+        SET synthesis_plan_id = NULL,
+            synthesis_merge_worker_id = NULL,
+            synthesis_merge_lease_expires_at = NULL,
+            updated_at = now()
+        WHERE id = ${record.jobId}
       `;
       await refreshAbstractionCounts(record.jobId);
       return rowToAbstract(rows[0]);
@@ -1469,7 +1525,7 @@ function createPostgresJobStore() {
         FROM document_abstracts da
         JOIN document_chunks dc ON dc.id = da.chunk_id
         WHERE da.job_id = ${jobId}
-        ORDER BY dc.chunk_order ASC, da.created_at ASC
+        ORDER BY dc.chunk_order ASC, dc.page_start ASC NULLS LAST, da.created_at ASC
       `;
       return rows.map(rowToAbstract);
     },
@@ -1556,8 +1612,16 @@ function createPostgresJobStore() {
       // Persist the currently-active plan id on the job row.
       await sql`
         UPDATE analysis_jobs
-        SET synthesis_plan_id = ${planId}, updated_at = now()
+        SET synthesis_plan_id = ${planId},
+            synthesis_merge_worker_id = NULL,
+            synthesis_merge_lease_expires_at = NULL,
+            updated_at = now()
         WHERE id = ${jobId}
+      `;
+      await sql`
+        DELETE FROM job_results
+        WHERE job_id = ${jobId}
+          AND (plan_id IS NULL OR plan_id <> ${planId})
       `;
       const saved = [];
       for (const segment of segments) {
@@ -1678,7 +1742,9 @@ function createPostgresJobStore() {
           retry_at = NULL,
           completed_at = now(),
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${segmentId}
+        WHERE job_id = ${jobId}
+          AND id = ${segmentId}
+          AND (${payload.workerId ?? null} IS NULL OR (status = 'processing' AND worker_id = ${payload.workerId}))
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
@@ -1700,7 +1766,9 @@ function createPostgresJobStore() {
           worker_id = NULL,
           retry_at = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${segmentId}
+        WHERE job_id = ${jobId}
+          AND id = ${segmentId}
+          AND (${failure.workerId ?? null} IS NULL OR (status = 'processing' AND worker_id = ${failure.workerId}))
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
@@ -1723,7 +1791,9 @@ function createPostgresJobStore() {
           lease_expires_at = NULL,
           worker_id = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId} AND id = ${segmentId}
+        WHERE job_id = ${jobId}
+          AND id = ${segmentId}
+          AND (${failure.workerId ?? null} IS NULL OR (status = 'processing' AND worker_id = ${failure.workerId}))
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
@@ -1774,6 +1844,35 @@ function createPostgresJobStore() {
       return rows.map(rowToSynthesisSegment);
     },
 
+    async claimSynthesisMerge(jobId, planId, options = {}) {
+      await ensureSchema();
+      const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 120000) / 1000));
+      const rows = await sql`
+        UPDATE analysis_jobs
+        SET
+          synthesis_merge_worker_id = ${workerId},
+          synthesis_merge_lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
+          updated_at = now()
+        WHERE id = ${jobId}
+          AND synthesis_plan_id = ${planId}
+          AND (
+            synthesis_merge_worker_id IS NULL
+            OR synthesis_merge_lease_expires_at IS NULL
+            OR synthesis_merge_lease_expires_at <= now()
+          )
+        RETURNING id, synthesis_plan_id, synthesis_merge_worker_id, synthesis_merge_lease_expires_at
+      `;
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        jobId: row.id,
+        planId: row.synthesis_plan_id,
+        workerId: row.synthesis_merge_worker_id,
+        leaseExpiresAt: row.synthesis_merge_lease_expires_at?.toISOString?.() || row.synthesis_merge_lease_expires_at || null,
+      };
+    },
+
     async saveJobResult(jobId, payload) {
       await ensureSchema();
       const job = await this.getJob(jobId);
@@ -1789,12 +1888,17 @@ function createPostgresJobStore() {
           model_used, input_tokens, output_tokens, payload_bytes,
           synthesis_duration_ms, generated_at
         )
-        VALUES (
+        SELECT
           ${id}, ${jobId}, ${payload.planId || null}, ${status},
           ${payload.finalTitleOpinion || ''}, ${JSON.stringify(warnings)}::jsonb, ${JSON.stringify(failedDocuments)}::jsonb,
           ${payload.modelUsed || null}, ${payload.inputTokens ?? null}, ${payload.outputTokens ?? null}, ${payload.payloadBytes ?? null},
           ${payload.synthesisDurationMs ?? null}, now()
-        )
+        FROM analysis_jobs aj
+        WHERE aj.id = ${jobId}
+          AND (${payload.mergeWorkerId ?? null} IS NULL OR (
+            aj.synthesis_plan_id = ${payload.planId || null}
+            AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}
+          ))
         ON CONFLICT (job_id) DO UPDATE
         SET
           plan_id = EXCLUDED.plan_id,
@@ -1810,6 +1914,7 @@ function createPostgresJobStore() {
           generated_at = now()
         RETURNING *
       `;
+      if (!rows[0]) return null;
       // Roll the job into its terminal status. assertValidStatusTransition
       // forbids regressing once a job has reached 'complete'.
       const desiredJobStatus = status === 'complete' ? 'complete'
@@ -1822,13 +1927,34 @@ function createPostgresJobStore() {
             UPDATE analysis_jobs
             SET status = ${desiredJobStatus},
                 current_phase = ${status === 'complete' ? 'complete' : status === 'partial_failed' ? 'complete with synthesis warnings' : 'synthesis failed'},
+                synthesis_merge_worker_id = NULL,
+                synthesis_merge_lease_expires_at = NULL,
                 completed_at = COALESCE(completed_at, now()),
                 updated_at = now()
             WHERE id = ${jobId}
           `;
         } catch {
+          if (payload.mergeWorkerId) {
+            await sql`
+              UPDATE analysis_jobs
+              SET synthesis_merge_worker_id = NULL,
+                  synthesis_merge_lease_expires_at = NULL,
+                  updated_at = now()
+              WHERE id = ${jobId}
+                AND synthesis_merge_worker_id = ${payload.mergeWorkerId}
+            `;
+          }
           // ignore invalid transition; the result is still saved
         }
+      } else if (payload.mergeWorkerId) {
+        await sql`
+          UPDATE analysis_jobs
+          SET synthesis_merge_worker_id = NULL,
+              synthesis_merge_lease_expires_at = NULL,
+              updated_at = now()
+          WHERE id = ${jobId}
+            AND synthesis_merge_worker_id = ${payload.mergeWorkerId}
+        `;
       }
       return rowToJobResult(rows[0]);
     },
@@ -1888,6 +2014,8 @@ function createPostgresJobStore() {
         return acc;
       }, {});
       const result = await this.getJobResult(jobId);
+      const mergeLeaseExpiresAt = job.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
+      const mergeInProgress = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
       return {
         job,
         planId,
@@ -1897,6 +2025,7 @@ function createPostgresJobStore() {
         complete: counts.complete || 0,
         failed: counts.failed || 0,
         retry_wait: counts.retry_wait || 0,
+        mergeInProgress,
         segments,
         hasResult: Boolean(result?.finalTitleOpinion),
         result,

@@ -9,6 +9,8 @@ import {
   estimateRequestBytes,
   planSynthesisSegments,
   PARTIAL_SYNTHESIS_PROMPT,
+  planJobSynthesis,
+  processSynthesisSegment,
   processSynthesisJob,
   SYNTHESIS_PROMPT,
   getSynthesisConfig,
@@ -86,10 +88,12 @@ function createMemoryPhase5Store(initialState = {}) {
 
   const abstracts = (initialState.abstracts || []).slice();
   const failedChunks = (initialState.failedChunks || []).slice();
+  const pendingChunks = (initialState.pendingChunks || []).slice();
   const segments = new Map(); // segmentId -> row
   const results = new Map(); // jobId -> result row
   const followups = []; // ordered
   let currentPlanIdByJob = new Map();
+  let mergeClaimCalls = 0;
 
   function rollupJobStatusOnResult(jobId, status) {
     const job = jobs.get(jobId);
@@ -151,6 +155,17 @@ function createMemoryPhase5Store(initialState = {}) {
           abstractionErrorMessage: f.errorMessage || 'failed',
           pageStart: f.pageStart,
           pageEnd: f.pageEnd,
+        })),
+        ...pendingChunks.map(p => ({
+          id: p.chunkId,
+          documentId: p.documentId,
+          chunkOrder: p.chunkOrder,
+          originalFilename: p.originalFilename,
+          abstractionStatus: p.abstractionStatus || 'pending',
+          abstractionErrorType: p.errorType || null,
+          abstractionErrorMessage: p.errorMessage || null,
+          pageStart: p.pageStart,
+          pageEnd: p.pageEnd,
         })),
       ];
     },
@@ -253,6 +268,9 @@ function createMemoryPhase5Store(initialState = {}) {
     async completeSynthesisSegment(jobId, segmentId, payload) {
       const segment = segments.get(segmentId);
       if (!segment) return null;
+      if (initialState.enforceWorkerLease && (!payload.workerId || segment.status !== 'processing' || segment.workerId !== payload.workerId)) {
+        return null;
+      }
       const next = {
         ...segment,
         status: 'complete',
@@ -278,6 +296,9 @@ function createMemoryPhase5Store(initialState = {}) {
     async markSynthesisSegmentFailed(jobId, segmentId, failure) {
       const segment = segments.get(segmentId);
       if (!segment) return null;
+      if (initialState.enforceWorkerLease && (!failure.workerId || segment.status !== 'processing' || segment.workerId !== failure.workerId)) {
+        return null;
+      }
       const next = {
         ...segment,
         status: 'failed',
@@ -298,6 +319,9 @@ function createMemoryPhase5Store(initialState = {}) {
     async markSynthesisSegmentRetryWait(jobId, segmentId, failure) {
       const segment = segments.get(segmentId);
       if (!segment) return null;
+      if (initialState.enforceWorkerLease && (!failure.workerId || segment.status !== 'processing' || segment.workerId !== failure.workerId)) {
+        return null;
+      }
       const next = {
         ...segment,
         status: 'retry_wait',
@@ -362,6 +386,19 @@ function createMemoryPhase5Store(initialState = {}) {
     },
     async clearJobResult(jobId) {
       return results.delete(jobId);
+    },
+    async claimSynthesisMerge(jobId, planId, options = {}) {
+      mergeClaimCalls += 1;
+      if (initialState.mergeClaimResult === false) return null;
+      return {
+        jobId,
+        planId,
+        workerId: options.workerId || 'wkr_merge_test',
+        leaseExpiresAt: new Date(Date.now() + (options.leaseMs || 120_000)).toISOString(),
+      };
+    },
+    __mergeClaimCalls() {
+      return mergeClaimCalls;
     },
     async appendFollowupMessage(jobId, payload) {
       const id = `flw_${followups.length + 1}`;
@@ -499,6 +536,34 @@ test('planSynthesisSegments produces stable planId for same inputs', () => {
   assert(plan1.segments.length >= 1, 'Expected at least one segment');
 });
 
+test('computePlanId changes when abstract content changes', () => {
+  const base = { jobId: 'job_test_1', tract: 'Tract A', contextNotes: 'Notes', documentIds: ['chk_1'] };
+  const planId1 = computePlanId({ ...base, abstractDigests: ['first abstract version'] });
+  const planId2 = computePlanId({ ...base, abstractDigests: ['updated abstract version'] });
+  assert(planId1 !== planId2, 'Expected planId to change when abstract content changes');
+});
+
+test('planJobSynthesis rejects pending abstraction chunks', async () => {
+  const store = createMemoryPhase5Store({
+    abstracts: manyAbstracts(1),
+    pendingChunks: [{
+      chunkId: 'chk_pending',
+      documentId: 'doc_pending',
+      chunkOrder: 1,
+      originalFilename: 'pending.pdf',
+      abstractionStatus: 'processing',
+    }],
+  });
+
+  let rejected = false;
+  try {
+    await planJobSynthesis('job_test_1', { store });
+  } catch (err) {
+    rejected = err.statusCode === 409 && /abstraction/i.test(err.message);
+  }
+  assert(rejected, 'Expected synthesis planning to reject incomplete abstraction work');
+});
+
 test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields title opinion', async () => {
   const abstracts = manyAbstracts(5);
   const store = createMemoryPhase5Store({ abstracts });
@@ -514,6 +579,61 @@ test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields ti
   assert(result.result.status === 'complete', `Expected complete status, got ${result.result.status}`);
   const job = await store.getJob('job_test_1');
   assert(job.status === 'complete', `Expected job complete, got ${job.status}`);
+});
+
+test('Synthesis segment stale worker cannot overwrite a reclaimed segment', async () => {
+  const abstracts = manyAbstracts(1);
+  const store = createMemoryPhase5Store({ abstracts, enforceWorkerLease: true });
+  const { plan } = await planJobSynthesis('job_test_1', { store });
+  const segment = plan.segments[0];
+  let raced = false;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    if (!raced) {
+      raced = true;
+      const current = store.segments.get(segment.id);
+      store.segments.set(segment.id, {
+        ...current,
+        status: 'complete',
+        summaryText: goodFinalOpinion('new worker result'),
+        workerId: null,
+        leaseExpiresAt: null,
+        completedAt: new Date().toISOString(),
+      });
+    }
+    return { text: goodFinalOpinion('stale worker result'), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  const result = await processSynthesisSegment('job_test_1', segment, abstracts, {
+    store,
+    workerId: 'wkr_old',
+    singlePass: true,
+    config: { maxAttempts: 1 },
+  });
+
+  const finalSegment = (await store.listSynthesisSegments('job_test_1', plan.planId))[0];
+  assert(result.status === 'stale', `Expected stale segment writer to be skipped, got ${result.status}`);
+  assert(finalSegment.summaryText.includes('new worker result'), 'Expected newer segment summary to remain intact');
+});
+
+test('Invalid single-pass model output fails instead of persisting a complete result', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
+    text: 'too short',
+    model: 'claude-sonnet-4-6',
+    usage: {},
+  });
+
+  const result = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 1 },
+  });
+
+  assert(result.result?.status === 'failed', `Expected invalid output to save failed result, got ${result.result?.status}`);
+  assert(!result.result.finalTitleOpinion, 'Expected invalid final opinion not to be persisted');
+  const segments = await store.listSynthesisSegments('job_test_1', result.planId);
+  assert(segments[0].status === 'failed', `Expected segment failed, got ${segments[0].status}`);
+  assert(segments[0].errorType === 'validation_failed', `Expected validation_failed, got ${segments[0].errorType}`);
 });
 
 test('Multi-segment: 120 abstracts → segments + merge with checkpoints written', async () => {
@@ -539,6 +659,51 @@ test('Multi-segment: 120 abstracts → segments + merge with checkpoints written
   assert(segments.length === 3, `Expected 3 segments stored, got ${segments.length}`);
   assert(segments.every(s => s.status === 'complete'), 'Expected all segments complete');
   assert(result.result?.status === 'complete', `Expected complete status, got ${result.result?.status}`);
+});
+
+test('Final merge honors single-writer claim and skips merge when claim is unavailable', async () => {
+  const abstracts = manyAbstracts(120);
+  const store = createMemoryPhase5Store({ abstracts, mergeClaimResult: false });
+  let segmentCalls = 0;
+  let mergeCalls = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      segmentCalls += 1;
+      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-4-6', usage: {} };
+    }
+    mergeCalls += 1;
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
+
+  assert(store.__mergeClaimCalls() >= 1, 'Expected final merge claim to be attempted');
+  assert(mergeCalls === 0, `Expected no merge call without claim, got ${mergeCalls}`);
+  assert(!result.result, 'Expected no final result when merge claim is unavailable');
+  assert(result.hasMore === true, 'Expected caller to keep polling when another worker owns final merge');
+});
+
+test('Final merge error persists failed result instead of leaving no-result terminal state', async () => {
+  const abstracts = manyAbstracts(120);
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+    }
+    const err = new Error('merge provider failure');
+    err.status = 500;
+    throw err;
+  };
+
+  const result = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 1 },
+  });
+
+  assert(result.result?.status === 'failed', `Expected failed result, got ${result.result?.status}`);
+  assert(result.result.warnings.some(w => /final_merge_failed/i.test(w)), `Expected final merge warning, got ${JSON.stringify(result.result?.warnings)}`);
+  assert(result.hasMore === false, 'Expected terminal failed result rather than polling a no-result state');
 });
 
 test('Partial job: failed abstract omitted; warnings list excluded documents', async () => {

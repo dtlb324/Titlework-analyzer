@@ -415,10 +415,12 @@ function publicSynthesisStatusBody(snapshot) {
     retry_wait: status.retry_wait ?? raw?.retry_wait ?? 0,
     planId: status.planId ?? raw?.planId ?? null,
     hasResult: status.hasResult ?? raw?.hasResult ?? false,
+    mergeInProgress: status.mergeInProgress ?? raw?.mergeInProgress ?? false,
     segments: (raw?.segments || []).map(publicSynthesisSegment),
     warnings: raw?.result?.warnings || [],
     failedDocuments: raw?.result?.failedDocuments || [],
-    hasMore: ((status.pending ?? 0) + (status.processing ?? 0) + (status.retry_wait ?? 0)) > 0,
+    hasMore: Boolean(status.mergeInProgress ?? raw?.mergeInProgress)
+      || ((status.pending ?? 0) + (status.processing ?? 0) + (status.retry_wait ?? 0)) > 0,
   };
 }
 

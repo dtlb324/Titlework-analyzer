@@ -136,7 +136,7 @@ export function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemProm
   return chunks;
 }
 
-export function computePlanId({ jobId, tract, contextNotes, documentIds }) {
+export function computePlanId({ jobId, tract, contextNotes, documentIds, abstractDigests }) {
   const hash = createHash('sha256');
   hash.update(String(jobId || ''));
   hash.update('|');
@@ -145,7 +145,17 @@ export function computePlanId({ jobId, tract, contextNotes, documentIds }) {
   hash.update(String(contextNotes || ''));
   hash.update('|');
   hash.update((documentIds || []).join(','));
+  hash.update('|');
+  hash.update((abstractDigests || []).join(','));
   return hash.digest('hex').slice(0, 32);
+}
+
+function computeAbstractDigest(item) {
+  const hash = createHash('sha256');
+  hash.update(String(item.chunkId || item.documentId || item.id || ''));
+  hash.update('|');
+  hash.update(String(item.abstract || item.abstractText || ''));
+  return hash.digest('hex').slice(0, 16);
 }
 
 export function planSynthesisSegments(abstracts, tract, contextNotes, configOverrides = {}) {
@@ -450,10 +460,12 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
     .filter(item => item.abstract.trim().length > 0);
 
   if (!segmentAbstracts.length) {
-    await store.markSynthesisSegmentFailed(jobId, segment.id, {
+    const updated = await store.markSynthesisSegmentFailed(jobId, segment.id, {
       errorType: 'missing_abstracts',
       errorMessage: 'Segment has no abstracts available for synthesis.',
+      workerId,
     });
+    if (!updated) return { status: 'stale', segmentId: segment.id };
     return { status: 'failed', segmentId: segment.id, failure: { errorType: 'missing_abstracts' } };
   }
 
@@ -489,7 +501,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
         });
         const repairValidation = isSinglePass ? validateFinalOpinion(retry.text) : validateSegmentSummary(retry.text);
         if (repairValidation.ok) {
-          await store.completeSynthesisSegment(jobId, segment.id, {
+          const updated = await store.completeSynthesisSegment(jobId, segment.id, {
             summaryText: retry.text,
             modelUsed: retry.model,
             inputTokens: (result.usage.inputTokens || 0) + (retry.usage.inputTokens || 0),
@@ -497,13 +509,35 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
             payloadBytes: retry.payloadBytes,
             latencyMs: (Date.now() - startedAt),
             warnings: [...warnings, 'repair_retry'],
+            workerId,
           });
+          if (!updated) return { status: 'stale', segmentId: segment.id };
           return { status: 'complete', segmentId: segment.id };
         }
-        warnings.push('validation_failed');
       }
-      if (!validation.ok) warnings.push('validation_failed');
-      await store.completeSynthesisSegment(jobId, segment.id, {
+      if (!validation.ok) {
+        const failure = {
+          errorType: 'validation_failed',
+          errorMessage: validation.reason,
+          modelUsed: result.model || config.model,
+          payloadBytes: result.payloadBytes,
+          latencyMs: Date.now() - startedAt,
+          workerId,
+        };
+        if (attempt < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
+          const retryAtMs = Date.now() + computeRetryBackoff(attempt, 0);
+          const updated = await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
+            ...failure,
+            retryAtIso: new Date(retryAtMs).toISOString(),
+          });
+          if (!updated) return { status: 'stale', segmentId: segment.id };
+          return { status: 'retry_wait', segmentId: segment.id, failure };
+        }
+        const updated = await store.markSynthesisSegmentFailed(jobId, segment.id, failure);
+        if (!updated) return { status: 'stale', segmentId: segment.id };
+        return { status: 'failed', segmentId: segment.id, failure };
+      }
+      const updated = await store.completeSynthesisSegment(jobId, segment.id, {
         summaryText: result.text,
         modelUsed: result.model,
         inputTokens: result.usage.inputTokens,
@@ -511,7 +545,9 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
         payloadBytes: result.payloadBytes,
         latencyMs: Date.now() - startedAt,
         warnings,
+        workerId,
       });
+      if (!updated) return { status: 'stale', segmentId: segment.id };
       return { status: 'complete', segmentId: segment.id };
     } catch (err) {
       lastError = err;
@@ -525,14 +561,17 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       };
       if (isRetryable && attempt < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
         const retryAtMs = Date.now() + computeRetryBackoff(attempt, extractRetryAfter(err));
-        await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
+        const updated = await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
           ...failure,
           retryAtIso: new Date(retryAtMs).toISOString(),
+          workerId,
         });
+        if (!updated) return { status: 'stale', segmentId: segment.id };
         return { status: 'retry_wait', segmentId: segment.id, failure };
       }
       if (!isRetryable || attempt >= config.maxAttempts) {
-        await store.markSynthesisSegmentFailed(jobId, segment.id, failure);
+        const updated = await store.markSynthesisSegmentFailed(jobId, segment.id, { ...failure, workerId });
+        if (!updated) return { status: 'stale', segmentId: segment.id };
         return { status: 'failed', segmentId: segment.id, failure };
       }
       // Wait then loop for another attempt within the same claim window.
@@ -656,6 +695,23 @@ export async function planJobSynthesis(jobId, options = {}) {
     err.statusCode = 409;
     throw err;
   }
+  if (store.getAbstractionStatus) {
+    const abstractionStatus = await store.getAbstractionStatus(jobId);
+    const blockers = (abstractionStatus?.pending || 0) + (abstractionStatus?.processing || 0) + (abstractionStatus?.retry_wait || 0);
+    if (blockers > 0) {
+      const err = new Error('Synthesis cannot start until all abstraction chunks are completed or failed.');
+      err.statusCode = 409;
+      throw err;
+    }
+  } else if (store.listChunks) {
+    const chunks = await store.listChunks(jobId);
+    const blockers = chunks.filter(chunk => ['pending', 'processing', 'retry_wait'].includes(chunk.abstractionStatus || 'pending'));
+    if (blockers.length) {
+      const err = new Error('Synthesis cannot start until all abstraction chunks are completed or failed.');
+      err.statusCode = 409;
+      throw err;
+    }
+  }
   const abstracts = await store.listDocumentAbstracts(jobId);
   const orderedAbstracts = abstracts
     .filter(item => (item.abstractText || item.abstract || '').trim().length > 0)
@@ -675,6 +731,7 @@ export async function planJobSynthesis(jobId, options = {}) {
     tract: job.subjectTract || options.tract || '',
     contextNotes: job.contextNotes || options.contextNotes || '',
     documentIds: orderedAbstracts.map(item => item.chunkId),
+    abstractDigests: orderedAbstracts.map(computeAbstractDigest),
   });
 
   const existingPlanId = await store.getCurrentSynthesisPlanId(jobId);
@@ -705,6 +762,7 @@ export async function processSynthesisJob(jobId, options = {}) {
   const startedAt = Date.now();
   const budgetMs = options.budgetMs || 45_000;
   const deadline = startedAt + budgetMs;
+  const mergeWorkerId = options.workerId || `wkr_merge_${Math.random().toString(36).slice(2, 10)}`;
 
   // Recover any stranded leases first.
   if (store.resetStaleSynthesisSegments) {
@@ -749,25 +807,40 @@ export async function processSynthesisJob(jobId, options = {}) {
   const failedSegments = refreshedSegments.filter(s => s.status === 'failed');
   const stillPending = refreshedSegments.filter(s => ['pending', 'processing', 'retry_wait'].includes(s.status));
 
-  const existingResult = store.getJobResult ? await store.getJobResult(jobId) : null;
+  const storedResult = store.getJobResult ? await store.getJobResult(jobId) : null;
+  const existingResult = storedResult?.planId === planId ? storedResult : null;
   const failedDocumentRefs = await collectFailedDocuments(store, jobId);
   const tract = job.subjectTract || options.tract || '';
   const contextNotes = job.contextNotes || options.contextNotes || '';
 
   let result = existingResult || null;
   let mergeRanInThisBatch = false;
+  let mergeClaimBlocked = false;
+  async function claimFinalWriter() {
+    if (!store.claimSynthesisMerge) return { workerId: null };
+    const claim = await store.claimSynthesisMerge(jobId, planId, { workerId: mergeWorkerId, leaseMs: options.mergeLeaseMs || 120_000 });
+    if (!claim) {
+      mergeClaimBlocked = true;
+      return null;
+    }
+    return claim;
+  }
   if (!existingResult && completedSegments.length === refreshedSegments.length && refreshedSegments.length > 0) {
-    if (singlePass) {
+    const mergeClaim = await claimFinalWriter();
+    if (!mergeClaim) {
+      // Another worker is already performing the final write. Report hasMore so
+      // callers continue polling instead of treating segment completion as final.
+    } else if (singlePass) {
       const onlySummary = completedSegments[0];
       const validation = validateFinalOpinion(onlySummary.summaryText || '');
       const opinionWarnings = [];
       if (!validation.ok) opinionWarnings.push(`final_validation_failed: ${validation.reason}`);
       if (failedDocumentRefs.length) opinionWarnings.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
-      const status = failedDocumentRefs.length ? 'partial_failed' : 'complete';
+      const status = !validation.ok ? 'failed' : failedDocumentRefs.length ? 'partial_failed' : 'complete';
       result = await store.saveJobResult(jobId, {
         planId,
         status,
-        finalTitleOpinion: onlySummary.summaryText || '',
+        finalTitleOpinion: validation.ok ? (onlySummary.summaryText || '') : '',
         warnings: opinionWarnings,
         failedDocuments: failedDocumentRefs,
         modelUsed: onlySummary.modelUsed || config.model,
@@ -775,8 +848,9 @@ export async function processSynthesisJob(jobId, options = {}) {
         outputTokens: onlySummary.outputTokens || 0,
         payloadBytes: onlySummary.payloadBytes || 0,
         synthesisDurationMs: Date.now() - startedAt,
+        mergeWorkerId: mergeClaim.workerId,
       });
-      mergeRanInThisBatch = true;
+      mergeRanInThisBatch = Boolean(result);
     } else {
       const warningsAccum = [];
       const tokensAccum = { inputTokens: 0, outputTokens: 0 };
@@ -799,11 +873,11 @@ export async function processSynthesisJob(jobId, options = {}) {
         const validation = validateFinalOpinion(merged.text);
         if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
         if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
-        const status = failedDocumentRefs.length ? 'partial_failed' : 'complete';
+        const status = !validation.ok ? 'failed' : failedDocumentRefs.length ? 'partial_failed' : 'complete';
         result = await store.saveJobResult(jobId, {
           planId,
           status,
-          finalTitleOpinion: merged.text,
+          finalTitleOpinion: validation.ok ? merged.text : '',
           warnings: warningsAccum,
           failedDocuments: failedDocumentRefs,
           modelUsed: merged.model,
@@ -811,72 +885,109 @@ export async function processSynthesisJob(jobId, options = {}) {
           outputTokens: tokensAccum.outputTokens,
           payloadBytes: merged.payloadBytes,
           synthesisDurationMs: Date.now() - startedAt,
+          mergeWorkerId: mergeClaim.workerId,
         });
-        mergeRanInThisBatch = true;
+        mergeRanInThisBatch = Boolean(result);
       } catch (err) {
         lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+        result = await store.saveJobResult(jobId, {
+          planId,
+          status: 'failed',
+          finalTitleOpinion: '',
+          warnings: [`final_merge_failed: ${lastError.errorType}`],
+          failedDocuments: failedDocumentRefs,
+          modelUsed: config.model,
+          inputTokens: tokensAccum.inputTokens,
+          outputTokens: tokensAccum.outputTokens,
+          payloadBytes: 0,
+          synthesisDurationMs: Date.now() - startedAt,
+          mergeWorkerId: mergeClaim.workerId,
+        });
+        mergeRanInThisBatch = Boolean(result);
       }
     }
   } else if (!existingResult && failedSegments.length && !stillPending.length) {
     // All work finished with at least one failed segment. Preserve any completed
     // segment work as a degraded result instead of stranding the job with no result.
-    const failureWarnings = failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`);
-    if (completedSegments.length) {
-      const warningsAccum = [...failureWarnings];
-      const tokensAccum = { inputTokens: 0, outputTokens: 0 };
-      completedSegments.forEach(segment => {
-        tokensAccum.inputTokens += segment.inputTokens || 0;
-        tokensAccum.outputTokens += segment.outputTokens || 0;
-        (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
-      });
-      try {
-        const merged = await mergeSegmentsIntoOpinion({
-          segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
-          totalAbstracts: abstracts.length,
-          tract,
-          contextNotes,
-          config,
-          options,
-          warningsAccum,
-          tokensAccum,
+    const mergeClaim = await claimFinalWriter();
+    if (!mergeClaim) {
+      // Another worker owns finalization.
+    } else {
+      const failureWarnings = failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`);
+      if (completedSegments.length) {
+        const warningsAccum = [...failureWarnings];
+        const tokensAccum = { inputTokens: 0, outputTokens: 0 };
+        completedSegments.forEach(segment => {
+          tokensAccum.inputTokens += segment.inputTokens || 0;
+          tokensAccum.outputTokens += segment.outputTokens || 0;
+          (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
         });
-        const validation = validateFinalOpinion(merged.text);
-        if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-        if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
+        try {
+          const merged = await mergeSegmentsIntoOpinion({
+            segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
+            totalAbstracts: abstracts.length,
+            tract,
+            contextNotes,
+            config,
+            options,
+            warningsAccum,
+            tokensAccum,
+          });
+          const validation = validateFinalOpinion(merged.text);
+          if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
+          if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
+          const resultStatus = validation.ok ? 'partial_failed' : 'failed';
+          result = await store.saveJobResult(jobId, {
+            planId,
+            status: resultStatus,
+            finalTitleOpinion: validation.ok ? merged.text : '',
+            warnings: warningsAccum,
+            failedDocuments: failedDocumentRefs,
+            modelUsed: merged.model,
+            inputTokens: tokensAccum.inputTokens,
+            outputTokens: tokensAccum.outputTokens,
+            payloadBytes: merged.payloadBytes,
+            synthesisDurationMs: Date.now() - startedAt,
+            mergeWorkerId: mergeClaim.workerId,
+          });
+          mergeRanInThisBatch = Boolean(result);
+        } catch (err) {
+          lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+          result = await store.saveJobResult(jobId, {
+            planId,
+            status: 'failed',
+            finalTitleOpinion: '',
+            warnings: [...warningsAccum, `final_merge_failed: ${lastError.errorType}`],
+            failedDocuments: failedDocumentRefs,
+            modelUsed: config.model,
+            inputTokens: tokensAccum.inputTokens,
+            outputTokens: tokensAccum.outputTokens,
+            payloadBytes: 0,
+            synthesisDurationMs: Date.now() - startedAt,
+            mergeWorkerId: mergeClaim.workerId,
+          });
+          mergeRanInThisBatch = Boolean(result);
+        }
+      } else {
+        const failureWarnings = [
+          'all_segments_failed',
+          ...failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`),
+        ];
         result = await store.saveJobResult(jobId, {
           planId,
-          status: 'partial_failed',
-          finalTitleOpinion: merged.text,
-          warnings: warningsAccum,
+          status: 'failed',
+          finalTitleOpinion: '',
+          warnings: failureWarnings,
           failedDocuments: failedDocumentRefs,
-          modelUsed: merged.model,
-          inputTokens: tokensAccum.inputTokens,
-          outputTokens: tokensAccum.outputTokens,
-          payloadBytes: merged.payloadBytes,
+          modelUsed: config.model,
+          inputTokens: 0,
+          outputTokens: 0,
+          payloadBytes: 0,
           synthesisDurationMs: Date.now() - startedAt,
+          mergeWorkerId: mergeClaim.workerId,
         });
-        mergeRanInThisBatch = true;
-      } catch (err) {
-        lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+        mergeRanInThisBatch = Boolean(result);
       }
-    } else {
-      const failureWarnings = [
-        'all_segments_failed',
-        ...failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`),
-      ];
-      result = await store.saveJobResult(jobId, {
-        planId,
-        status: 'failed',
-        finalTitleOpinion: '',
-        warnings: failureWarnings,
-        failedDocuments: failedDocumentRefs,
-        modelUsed: config.model,
-        inputTokens: 0,
-        outputTokens: 0,
-        payloadBytes: 0,
-        synthesisDurationMs: Date.now() - startedAt,
-      });
-      mergeRanInThisBatch = true;
     }
   }
 
@@ -894,7 +1005,7 @@ export async function processSynthesisJob(jobId, options = {}) {
     result,
     status,
     lastError: lastError ? { errorType: lastError.errorType, errorMessage: lastError.errorMessage } : null,
-    hasMore: status?.pending + status?.processing + status?.retry_wait > 0,
+    hasMore: mergeClaimBlocked || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0),
   };
 }
 

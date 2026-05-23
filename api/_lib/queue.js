@@ -321,6 +321,7 @@ function publicSynthesisStatus(status) {
     retry_wait: status.retry_wait || 0,
     planId: status.planId || null,
     hasResult: Boolean(status.hasResult),
+    mergeInProgress: Boolean(status.mergeInProgress),
   };
 }
 

@@ -1,7 +1,10 @@
 const REQUEST_ENVELOPE_SAFE_BYTES = 3_900_000;
+const REQUEST_OVERHEAD_BYTES = 350_000;
 const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'claude-haiku-4-5';
 const ABSTRACT_MAX_TOKENS = 2000;
 const UPSTREAM_TIMEOUT_MS = 52_000;
+const BLOB_FETCH_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_BLOB_FETCH_TIMEOUT_MS, 10_000, 1_000, 30_000);
+const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
 const DEFAULT_MAX_ATTEMPTS = 5;
 const STALE_PROCESSING_MS = 2 * 60 * 1000;
 const DEFAULT_LEASE_MS = 90_000;
@@ -19,6 +22,12 @@ const RAW_PERSISTENCE_KEYS = new Set([
   'csvText',
   'sourceBytes',
 ]);
+
+function clampInt(raw, fallback, min, max) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
 
 export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
@@ -77,12 +86,34 @@ function isPdfChunk(chunk) {
   return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
 }
 
+function isSplittablePdfChunk(chunk) {
+  return isPdfChunk(chunk) && chunk.pageStart && chunk.pageEnd && chunk.pageEnd > chunk.pageStart;
+}
+
 function isImageChunk(chunk) {
   return /^image\/[-+.a-z0-9]+$/i.test(chunk.mediaType || '');
 }
 
 function isCsvChunk(chunk) {
   return chunk.mediaType === 'text/csv' || /\.csv$/i.test(chunk.originalFilename || '');
+}
+
+function maxRawBlobBytesForChunk(chunk) {
+  const available = Math.max(1, REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES);
+  if (isSplittablePdfChunk(chunk)) return Math.max(Math.floor(available * 0.70), SPLITTABLE_PDF_FETCH_MAX_BYTES);
+  if (isCsvChunk(chunk)) return available;
+  return Math.floor(available * 0.70);
+}
+
+function assertBlobSizeWithinBudget(chunk, sizeBytes) {
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(size) || size < 0) return;
+  const maxBytes = maxRawBlobBytesForChunk(chunk);
+  if (size > maxBytes) {
+    const error = new Error(`Chunk Blob is too large for abstraction request budget (${(size / 1024 / 1024).toFixed(1)} MB).`);
+    error.status = 413;
+    throw error;
+  }
 }
 
 function chunkDisplayName(chunk) {
@@ -204,7 +235,7 @@ export function assertSafeBlobUrl(blobUrl) {
   return parsed;
 }
 
-async function defaultBlobLoader(chunk) {
+export async function defaultBlobLoader(chunk) {
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
     const error = new Error('Vercel Blob storage is not configured. Set BLOB_READ_WRITE_TOKEN to enable server-side abstraction.');
     error.statusCode = 503;
@@ -216,18 +247,29 @@ async function defaultBlobLoader(chunk) {
     throw error;
   }
   assertSafeBlobUrl(chunk.blobUrl);
-  const response = await fetch(chunk.blobUrl, {
-    headers: { Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}` },
-  });
-  if (!response.ok) {
-    const error = new Error(`Could not load chunk from Blob (HTTP ${response.status}).`);
-    error.status = response.status;
-    throw error;
+  assertBlobSizeWithinBudget(chunk, chunk.sizeBytes);
+  const timeout = createTimeoutSignal(BLOB_FETCH_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(chunk.blobUrl, {
+      headers: { Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}` },
+      signal: timeout.signal,
+    });
+    if (!response.ok) {
+      const error = new Error(`Could not load chunk from Blob (HTTP ${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
+    assertBlobSizeWithinBudget(chunk, response.headers.get('content-length'));
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assertBlobSizeWithinBudget(chunk, bytes.byteLength);
+    return {
+      bytes,
+      mediaType: response.headers.get('content-type') || chunk.mediaType,
+    };
+  } finally {
+    timeout.cleanup();
   }
-  return {
-    bytes: Buffer.from(await response.arrayBuffer()),
-    mediaType: response.headers.get('content-type') || chunk.mediaType,
-  };
 }
 
 async function defaultModelClient(request) {
@@ -335,7 +377,7 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
     const childBytes = Buffer.from(await childDoc.save());
     const childName = `${baseName} (pp ${range.pageStart}${range.pageEnd === range.pageStart ? '' : `-${range.pageEnd}`}).pdf`;
     const blob = await getBlobWriter(options)(parentChunk, childName, childBytes);
-    await options.store.createSplitChunk(parentChunk.jobId, parentChunk.documentId, {
+    const child = await options.store.createSplitChunk(parentChunk.jobId, parentChunk.documentId, {
       originalFilename: childName,
       mediaType: 'application/pdf',
       sizeBytes: childBytes.byteLength,
@@ -349,9 +391,12 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
       blobUrl: blob.blobUrl,
       splitParentChunkId: parentChunk.id,
       splitReason: reason,
+      workerId: options.workerId,
     });
+    if (!child) return false;
   }
-  await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason);
+  const superseded = await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason, options.workerId);
+  if (!superseded) return false;
   return true;
 }
 
@@ -428,17 +473,14 @@ export async function processChunkAbstraction(chunk, options = {}) {
       error.status = 413;
       throw error;
     }
-    const { value: response, attempts } = await callWithRetries(
-      () => getModelClient(options)({
-        model,
-        maxTokens,
-        system: ABSTRACTION_PROMPT,
-        messages,
-        payloadBytes,
-        chunk: processingChunk,
-      }),
-      Math.max(1, Math.min(3, maxAttempts))
-    );
+    const response = await getModelClient(options)({
+      model,
+      maxTokens,
+      system: ABSTRACTION_PROMPT,
+      messages,
+      payloadBytes,
+      chunk: processingChunk,
+    });
     const usage = extractUsage(response.usage);
     const record = {
       jobId: processingChunk.jobId,
@@ -451,7 +493,8 @@ export async function processChunkAbstraction(chunk, options = {}) {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       status: 'completed',
-      attemptCount: attemptCount + attempts - 1,
+      attemptCount,
+      workerId,
     };
     const validation = validateAbstractPersistenceInput(record);
     if (!validation.valid) {
@@ -459,12 +502,15 @@ export async function processChunkAbstraction(chunk, options = {}) {
       error.status = 500;
       throw error;
     }
-    await store.saveDocumentAbstract(record);
+    const saved = await store.saveDocumentAbstract(record);
+    if (!saved) {
+      return { status: 'stale', chunkId: processingChunk.id };
+    }
     return { status: 'completed', chunkId: processingChunk.id, abstract: record };
   } catch (err) {
     const errorType = classifyError(err);
     if (loadedPayload && ['payload_too_large', 'upstream_timeout'].includes(errorType)) {
-      const split = await splitPdfChunk(processingChunk, loadedPayload.bytes, errorType, options).catch(() => false);
+      const split = await splitPdfChunk(processingChunk, loadedPayload.bytes, errorType, { ...options, workerId }).catch(() => false);
       if (split) {
         return { status: 'split_superseded', chunkId: processingChunk.id };
       }
@@ -474,19 +520,22 @@ export async function processChunkAbstraction(chunk, options = {}) {
       errorMessage: sanitizeErrorMessage(err),
       latencyMs: Date.now() - startedAt,
       modelUsed: model,
+      workerId,
     };
     const isRetryable = ['rate_limit', 'upstream_timeout', 'provider_error', 'storage_error'].includes(errorType);
     const hasAttemptsLeft = attemptCount < maxAttempts;
     if (isRetryable && hasAttemptsLeft && store.markChunkAbstractionRetryWait) {
       const retryAtMs = Date.now() + computeRetryBackoff(attemptCount, extractRetryAfter(err));
-      await store.markChunkAbstractionRetryWait(processingChunk.jobId, processingChunk.id, {
+      const updated = await store.markChunkAbstractionRetryWait(processingChunk.jobId, processingChunk.id, {
         ...failure,
         retryAtIso: new Date(retryAtMs).toISOString(),
       });
+      if (!updated) return { status: 'stale', chunkId: processingChunk.id };
       return { status: 'retry_wait', chunkId: processingChunk.id, failure, retryAt: retryAtMs };
     }
     if (store.markChunkAbstractionFailed) {
-      await store.markChunkAbstractionFailed(processingChunk.jobId, processingChunk.id, failure);
+      const updated = await store.markChunkAbstractionFailed(processingChunk.jobId, processingChunk.id, failure);
+      if (!updated) return { status: 'stale', chunkId: processingChunk.id };
     }
     return { status: 'failed', chunkId: processingChunk.id, failure };
   }

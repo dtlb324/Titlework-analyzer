@@ -2,6 +2,8 @@ import jobsRouteHandler from '../api/jobs/[...path].js';
 import {
   assertSafeBlobUrl,
   buildAbstractMessagesForChunk,
+  defaultBlobLoader,
+  processChunkAbstraction,
   processJobAbstraction,
   validateAbstractPersistenceInput,
 } from '../api/_lib/abstraction.js';
@@ -210,6 +212,9 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     },
     async markChunkAbstractionFailed(jobId, chunkId, failure) {
       const chunk = chunks.get(chunkId);
+      if (options.enforceWorkerLease && (!failure.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== failure.workerId)) {
+        return null;
+      }
       const updated = {
         ...chunk,
         abstractionStatus: 'failed',
@@ -230,6 +235,9 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     },
     async markChunkAbstractionRetryWait(jobId, chunkId, failure) {
       const chunk = chunks.get(chunkId);
+      if (options.enforceWorkerLease && (!failure.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== failure.workerId)) {
+        return null;
+      }
       const updated = {
         ...chunk,
         abstractionStatus: 'retry_wait',
@@ -247,10 +255,13 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     },
     async saveDocumentAbstract(record) {
       validateAbstractPersistenceInput(record);
+      const chunk = chunks.get(record.chunkId);
+      if (options.enforceWorkerLease && (!record.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== record.workerId)) {
+        return null;
+      }
       const id = `abs_${record.chunkId}`;
       const saved = { id, ...record, createdAt: now };
       abstracts.set(record.chunkId, saved);
-      const chunk = chunks.get(record.chunkId);
       chunks.set(record.chunkId, {
         ...chunk,
         abstractionStatus: 'completed',
@@ -662,6 +673,44 @@ test('Phase 4: claim sets lease fields while chunk is in flight', async () => {
   assert(observedDuringRun.abstractionWorkerId, 'Expected workerId stamped on claimed chunk');
 });
 
+test('Phase 4: stale abstraction worker cannot overwrite a reclaimed chunk', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_race' })], { enforceWorkerLease: true });
+  let raced = false;
+
+  const result = await processChunkAbstraction(store.chunks.get('chk_race'), {
+    store,
+    workerId: 'wkr_old',
+    leaseMs: 50,
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      if (!raced) {
+        raced = true;
+        const claimed = store.chunks.get('chk_race');
+        store.chunks.set('chk_race', {
+          ...claimed,
+          abstractionStatus: 'completed',
+          abstractionWorkerId: null,
+          abstractionLeaseExpiresAt: null,
+          abstractionCompletedAt: new Date().toISOString(),
+        });
+        store.abstracts.set('chk_race', {
+          id: 'abs_chk_race',
+          jobId: 'job_test_1',
+          documentId: 'doc_test_1',
+          chunkId: 'chk_race',
+          abstractText: 'new worker abstract',
+          status: 'completed',
+        });
+      }
+      return { text: 'DOCUMENT #1:\nstale worker abstract', model: 'claude-haiku-4-5', usage: {} };
+    },
+    maxAttempts: 1,
+  });
+
+  assert(result.status === 'stale', `Expected stale writer to be skipped, got ${result.status}`);
+  assert(store.abstracts.get('chk_race').abstractText === 'new worker abstract', 'Expected newer abstract to remain intact');
+});
+
 test('Phase 4: completed chunks are not reprocessed when /abstraction/process runs again', async () => {
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_done', abstractionStatus: 'completed' }),
@@ -909,9 +958,91 @@ test('Phase 4: rate_limit error schedules retry_wait instead of failing immediat
     maxAttempts: 3,
   });
   const chunk = store.chunks.get('chk_rate');
+  assert(calls === 1, `Expected one model call before durable retry_wait, got ${calls}`);
   assert(chunk.abstractionStatus === 'retry_wait', `Expected retry_wait, got ${chunk.abstractionStatus}`);
   assert(chunk.abstractionRetryAt, 'Expected retryAt scheduled');
   assert(chunk.abstractionErrorType === 'rate_limit', 'Expected rate_limit error type recorded');
+});
+
+test('Phase 4: default Blob loader rejects oversized content before buffering', async () => {
+  const previousToken = process.env.BLOB_READ_WRITE_TOKEN;
+  const previousFetch = global.fetch;
+  process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_test';
+  let buffered = false;
+  global.fetch = async (_url, options = {}) => {
+    assert(options.signal, 'Expected Blob fetch to use an abort signal');
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          if (String(name).toLowerCase() === 'content-length') return String(10_000_000);
+          if (String(name).toLowerCase() === 'content-type') return 'application/pdf';
+          return null;
+        },
+      },
+      async arrayBuffer() {
+        buffered = true;
+        return new ArrayBuffer(0);
+      },
+    };
+  };
+
+  let rejected = false;
+  try {
+    await defaultBlobLoader(makeChunk({ id: 'chk_large', sizeBytes: 10_000_000 }));
+  } catch (err) {
+    rejected = /too large/i.test(err.message);
+  }
+  global.fetch = previousFetch;
+  if (previousToken) process.env.BLOB_READ_WRITE_TOKEN = previousToken;
+  else delete process.env.BLOB_READ_WRITE_TOKEN;
+
+  assert(rejected, 'Expected oversized Blob to be rejected');
+  assert(buffered === false, 'Expected oversized Blob rejection before arrayBuffer buffering');
+});
+
+test('Phase 4: default Blob loader allows splittable PDFs up to the split recovery cap', async () => {
+  const previousToken = process.env.BLOB_READ_WRITE_TOKEN;
+  const previousFetch = global.fetch;
+  process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_test';
+  let fetched = false;
+  global.fetch = async () => {
+    fetched = true;
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          if (String(name).toLowerCase() === 'content-length') return String(10_000_000);
+          if (String(name).toLowerCase() === 'content-type') return 'application/pdf';
+          return null;
+        },
+      },
+      async arrayBuffer() {
+        return new ArrayBuffer(0);
+      },
+    };
+  };
+
+  const payload = await defaultBlobLoader(makeChunk({
+    id: 'chk_split_candidate',
+    sizeBytes: 10_000_000,
+    pageStart: 1,
+    pageEnd: 4,
+  }));
+  global.fetch = previousFetch;
+  if (previousToken) process.env.BLOB_READ_WRITE_TOKEN = previousToken;
+  else delete process.env.BLOB_READ_WRITE_TOKEN;
+
+  assert(fetched, 'Expected splittable PDF to be fetched for split recovery');
+  assert(payload.mediaType === 'application/pdf', 'Expected PDF media type preserved');
+});
+
+test('Phase 4: saving an abstract invalidates any existing synthesis plan and merge claim', () => {
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(jobsSource.includes('synthesis_plan_id = NULL'), 'saveDocumentAbstract should clear stale synthesis_plan_id');
+  assert(jobsSource.includes('synthesis_merge_worker_id = NULL'), 'saveDocumentAbstract should clear stale merge claim');
 });
 
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {
