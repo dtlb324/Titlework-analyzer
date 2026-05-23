@@ -1161,13 +1161,158 @@ async function loadJobView(jobId) {
 function renderRecentJobsView() {
   // Filled in by Task 8
 }
+// === Phase 6: adaptive job polling ===
+
+const JOB_POLL_INTERVALS = {
+  initial: 2000,
+  unchanged: 5000,
+  cool: 10_000,
+  cold: 30_000,
+  backoffMin: 5000,
+  backoffMax: 60_000,
+  hiddenMultiplier: 3,
+};
+
+let activeJobPollState = null;
+
+function pollerKey(job) {
+  if (!job) return '';
+  return `${job.status || ''}:${job.updatedAt || ''}:${job.completedDocuments || 0}:${job.failedDocuments || 0}:${job.completedChunks || 0}:${job.failedChunks || 0}`;
+}
+
+function visibilityMultiplier() {
+  return (typeof document !== 'undefined' && document.hidden)
+    ? JOB_POLL_INTERVALS.hiddenMultiplier : 1;
+}
+
+function nextPollDelay(state) {
+  if (state.errorBackoffMs) return state.errorBackoffMs * visibilityMultiplier();
+  const idleMs = Date.now() - state.lastChangeAt;
+  let base = JOB_POLL_INTERVALS.initial;
+  if (state.consecutiveUnchanged >= 3) base = JOB_POLL_INTERVALS.unchanged;
+  if (idleMs > 2 * 60_000) base = JOB_POLL_INTERVALS.cool;
+  if (idleMs > 10 * 60_000) base = JOB_POLL_INTERVALS.cold;
+  return Math.max(JOB_POLL_INTERVALS.initial, base * visibilityMultiplier());
+}
+
+function scheduleJobPoll(state, delayMs) {
+  if (state.cancelled) return;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = setTimeout(() => runJobPollTick(state), delayMs);
+}
+
+async function runJobPollTick(state) {
+  if (state.cancelled) return;
+  try {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}`, {
+      method: 'GET',
+      headers: getJobHeaders(),
+    });
+    if (res.status === 429 || res.status === 503) {
+      state.errorBackoffMs = Math.min(
+        JOB_POLL_INTERVALS.backoffMax,
+        Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
+      );
+      renderPollerBanner('Connection issue — retrying…');
+      scheduleJobPoll(state, state.errorBackoffMs);
+      return;
+    }
+    state.errorBackoffMs = 0;
+    renderPollerBanner('');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const job = data.job;
+    const key = pollerKey(job);
+    if (key !== state.lastKey) {
+      state.lastKey = key;
+      state.lastChangeAt = Date.now();
+      state.consecutiveUnchanged = 0;
+    } else {
+      state.consecutiveUnchanged += 1;
+    }
+    state.lastJob = job;
+    if (typeof state.onUpdate === 'function') {
+      try { state.onUpdate(job); } catch (err) { console.warn('poller onUpdate failed', err); }
+    }
+    if (TERMINAL_STATUSES.has(job.status)) {
+      state.cancelled = true;
+      if (typeof state.onTerminal === 'function') {
+        try { await state.onTerminal(job); } catch (err) { console.warn('poller onTerminal failed', err); }
+      }
+      return;
+    }
+    scheduleJobPoll(state, nextPollDelay(state));
+  } catch (err) {
+    console.warn('Job poll failed', err);
+    state.errorBackoffMs = Math.min(
+      JOB_POLL_INTERVALS.backoffMax,
+      Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
+    );
+    renderPollerBanner('Connection issue — retrying…');
+    scheduleJobPoll(state, state.errorBackoffMs);
+  }
+}
+
+function renderPollerBanner(msg) {
+  const banner = document.getElementById('jobLeaveBanner');
+  if (!banner) return;
+  if (msg) {
+    banner.textContent = msg;
+    banner.style.background = '#fce8e0';
+    banner.style.color = '#d97755';
+  } else {
+    banner.textContent = 'You can close this tab. Reopen this link to check progress.';
+    banner.style.background = '';
+    banner.style.color = '';
+  }
+}
+
+function startJobPoller(jobId, onUpdate, onTerminal) {
+  stopJobPoller();
+  activeJobPollState = {
+    jobId,
+    timer: null,
+    cancelled: false,
+    consecutiveUnchanged: 0,
+    lastKey: '',
+    lastChangeAt: Date.now(),
+    errorBackoffMs: 0,
+    onUpdate,
+    onTerminal,
+  };
+  scheduleJobPoll(activeJobPollState, JOB_POLL_INTERVALS.initial);
+}
+
 function stopJobPoller() {
+  if (activeJobPollState) {
+    activeJobPollState.cancelled = true;
+    if (activeJobPollState.timer) clearTimeout(activeJobPollState.timer);
+    activeJobPollState = null;
+  }
   if (typeof activeJobPollTimer !== 'undefined' && activeJobPollTimer) {
     clearTimeout(activeJobPollTimer);
     clearInterval(activeJobPollTimer);
     activeJobPollTimer = null;
   }
 }
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    const state = activeJobPollState;
+    if (!state || state.cancelled) return;
+    if (!document.hidden) {
+      state.consecutiveUnchanged = 0;
+      state.lastChangeAt = Date.now();
+      scheduleJobPoll(state, 0);
+    }
+  });
+}
+
+// Legacy resume path wrappers (kept for backwards compatibility)
+function startJobPolling(jobId) {
+  startJobPoller(jobId, job => renderPolledJobStatus(job), null);
+}
+function stopJobPolling() { stopJobPoller(); }
 
 function getJobStorageKey() {
   return 'title-analyzer:last-job';
@@ -1687,19 +1832,6 @@ async function pollAnalysisJobOnce(jobId) {
   saveActiveJob(data.job);
   renderPolledJobStatus(data.job);
   return data.job;
-}
-
-function startJobPolling(jobId) {
-  stopJobPolling();
-  if (!jobId) return;
-  activeJobPollTimer = setInterval(() => {
-    pollAnalysisJobOnce(jobId).catch(err => console.warn('Could not poll durable job status', err));
-  }, 5000);
-}
-
-function stopJobPolling() {
-  if (activeJobPollTimer) clearInterval(activeJobPollTimer);
-  activeJobPollTimer = null;
 }
 
 async function resumeLastAnalysisJob() {

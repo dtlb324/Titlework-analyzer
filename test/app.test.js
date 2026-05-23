@@ -222,6 +222,19 @@ test('Phase 6: job view renderers exist', () => {
   assert(script.includes('JOB_STATUS_LABELS'), 'Missing canonical status label map');
 });
 
+test('Phase 6: adaptive polling helper exists with documented intervals', () => {
+  assert(script.includes('JOB_POLL_INTERVALS'), 'Missing JOB_POLL_INTERVALS table');
+  assert(script.includes('function scheduleJobPoll'), 'Missing scheduleJobPoll()');
+  assert(script.includes("document.addEventListener('visibilitychange'"),
+    'Adaptive poller must respond to visibilitychange');
+  assert(script.includes('429') && script.includes('503'),
+    'Adaptive poller must back off on 429/503');
+});
+
+test('Phase 6: stopJobPoller cancels any pending poll', () => {
+  assert(script.includes('function stopJobPoller'), 'Missing stopJobPoller()');
+});
+
 
 let passed = 0;
 let failed = 0;
