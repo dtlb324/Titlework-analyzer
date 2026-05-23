@@ -118,11 +118,15 @@ async function runClientScript(assertions) {
       elements.set(id, {
         style: {},
         classList: { add() {}, remove() {} },
+        attributes: new Map(),
         innerHTML: '',
         textContent: '',
         disabled: false,
         value: '',
         addEventListener() {},
+        setAttribute(name, value) { this.attributes.set(name, String(value)); },
+        getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; },
+        removeAttribute(name) { this.attributes.delete(name); },
         querySelectorAll() { return []; },
         focus() {},
       });
@@ -505,6 +509,32 @@ test('frontend job route ignores stale async job responses', async () => {
     const source = ${JSON.stringify(script)};
     assert(source.includes('jobViewLoadSeq') && source.includes('isCurrentJobRoute(jobId)'),
       'loadJobView must guard async fetch/result responses against stale route changes');
+  `);
+});
+
+test('frontend disables recent jobs card until a completed local job exists', async () => {
+  await runClientScript(`
+    const card = document.getElementById('recentJobsCard');
+    const hint = document.getElementById('recentJobsCardHint');
+
+    renderHomeStartOptions();
+    assert(card.getAttribute('aria-disabled') === 'true', 'Expected recent jobs card disabled before completed jobs');
+    assert(card.getAttribute('href') === null, 'Disabled recent jobs card should not link to history');
+    assert(hint.textContent.includes('Available after'), 'Expected disabled card to explain when it unlocks');
+
+    localStorage.setItem(RECENT_JOBS_KEY, JSON.stringify([
+      { id: 'job_failed_1', status: 'failed', lastViewedAt: Date.now(), documentCount: 1 }
+    ]));
+    renderHomeStartOptions();
+    assert(card.getAttribute('aria-disabled') === 'true', 'Failed jobs should not unlock recent jobs card');
+
+    localStorage.setItem(RECENT_JOBS_KEY, JSON.stringify([
+      { id: 'job_complete_1', status: 'complete', lastViewedAt: Date.now(), documentCount: 2 }
+    ]));
+    renderHomeStartOptions();
+    assert(card.getAttribute('aria-disabled') === 'false', 'Completed job should enable recent jobs card');
+    assert(card.getAttribute('href') === '#/jobs', 'Enabled recent jobs card should link to history');
+    assert(hint.textContent.includes('Resume'), 'Expected enabled card copy to invite resuming jobs');
   `);
 });
 

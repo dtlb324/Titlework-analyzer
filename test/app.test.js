@@ -276,8 +276,10 @@ test('Phase 6: job actions wire to existing API endpoints', () => {
     'Cancel action must confirm');
 });
 
-test('Phase 6: home view exposes a recent-jobs link', () => {
-  assert(indexHtml.includes('href="#/jobs"'), 'Home view must link to #/jobs');
+test('Phase 6: home view presents recent jobs as a start option', () => {
+  assert(indexHtml.includes('id="homeStartOptions"'), 'Home view must expose start option cards');
+  assert(indexHtml.includes('id="recentJobsCard"'), 'Home view must include a recent jobs card');
+  assert(script.includes('function renderHomeStartOptions'), 'Home view must render recent jobs availability');
 });
 
 test('Phase 6: analyze() navigates to #/job/{id} when durable storage is available', () => {
