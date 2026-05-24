@@ -259,6 +259,9 @@ export function validatePatchJobInput(input, existingJob) {
     return { valid: false, statusCode: 400, reason: 'completedDocuments plus failedDocuments cannot exceed totalDocuments.' };
   }
 
+  if (input.subjectTract !== undefined || input.tractDescription !== undefined) {
+    patch.subjectTract = truncateText(input.subjectTract ?? input.tractDescription, 500);
+  }
   if (input.currentPhase !== undefined) patch.currentPhase = truncateText(input.currentPhase, 200) || existingJob.currentPhase;
   if (input.errorMessage !== undefined) patch.errorMessage = truncateText(input.errorMessage, 1000);
   return { valid: true, patch };
@@ -1150,6 +1153,7 @@ function createPostgresJobStore() {
       const rows = await sql`
         UPDATE analysis_jobs
         SET
+          subject_tract = ${patch.subjectTract === undefined ? existing.subjectTract : patch.subjectTract},
           status = ${nextStatus},
           completed_documents = ${patch.completedDocuments ?? existing.completedDocuments},
           failed_documents = ${patch.failedDocuments ?? existing.failedDocuments},

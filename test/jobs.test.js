@@ -269,6 +269,23 @@ test('GET and PATCH /api/jobs/:id fetch and update progress', async () => {
   assert(getRes.body.job.currentPhase === 'Abstracting batch 1 of 2', 'Expected current phase to persist');
 });
 
+test('PATCH /api/jobs/:id renames the job for recent-job display', async () => {
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
+  await jobsHandler(mockReq('POST', { totalDocuments: 3, subjectTract: 'Original tract' }), mockRes());
+
+  const patchRes = mockRes();
+  await jobHandler(mockReq('PATCH', {
+    subjectTract: 'Smith Ranch title run',
+  }, {}, { id: 'job_test_1' }), patchRes);
+
+  assert(patchRes.statusCode === 200, `Expected 200, got ${patchRes.statusCode}`);
+  assert(patchRes.body.job.subjectTract === 'Smith Ranch title run', 'Expected renamed subject tract');
+
+  const getRes = mockRes();
+  await jobHandler(mockReq('GET', null, {}, { id: 'job_test_1' }), getRes);
+  assert(getRes.body.job.subjectTract === 'Smith Ranch title run', 'Expected renamed job title to persist');
+});
+
 test('PATCH /api/jobs/:id rejects invalid status transitions', async () => {
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
   await jobsHandler(mockReq('POST', { totalDocuments: 1 }), mockRes());

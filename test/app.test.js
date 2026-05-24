@@ -244,6 +244,15 @@ test('Phase 6: completed job header downloads PDF instead of copying links', () 
   assert(!script.includes('navigator.clipboard?.writeText(link)'), 'Job header should not wire clipboard copy');
 });
 
+test('Phase 6: job header uses footer actions and editable job name', () => {
+  assert(script.includes('id="jobHeaderActionsFooter"'), 'Job header should place actions in a footer row');
+  assert(script.includes('id="jobRenameBtn"'), 'Job header should expose a Rename action');
+  assert(script.includes('id="jobNameInput"'), 'Rename flow should render a job name input');
+  assert(script.includes('async function saveJobName'), 'Missing saveJobName() helper');
+  assert(script.includes('subjectTract: nextName'), 'Rename should persist through subjectTract for recent jobs');
+  assert(script.includes('rememberRecentJob(updated)'), 'Rename should refresh the recent jobs cache');
+});
+
 test('Phase 6: status badge CSS classes exist', () => {
   assert(indexHtml.includes('.status-badge'), 'Missing .status-badge style');
   assert(indexHtml.includes('.status-badge--complete'), 'Missing complete badge style');

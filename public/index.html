@@ -1068,20 +1068,29 @@ function renderJobHeader(job) {
   const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
   const hasDownloadableResult = job.status === 'complete' || job.status === 'partial_failed';
   el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.6rem">
-      <div>
-        <h2 style="margin:0">${esc(title)}</h2>
-        <div style="color:#8a6f4a;font-size:.85rem;margin-top:.3rem">
-          Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
-          updated ${esc(formatRelative(job.updatedAt))}
+    <div>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:.8rem">
+        <div id="jobTitleBlock">
+          <div style="display:flex;align-items:center;gap:.55rem;flex-wrap:wrap">
+            <h2 id="jobTitleText" style="margin:0">${esc(title)}</h2>
+            <button class="btn-secondary" id="jobRenameBtn" type="button" style="padding:.25rem .55rem;font-size:.78rem">Rename</button>
+          </div>
+          <div style="color:#8a6f4a;font-size:.85rem;margin-top:.3rem">
+            Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
+            updated ${esc(formatRelative(job.updatedAt))}
+          </div>
         </div>
-      </div>
-      <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
         <span class="status-badge ${info.badge}">${esc(info.label)}</span>
+      </div>
+      <div id="jobHeaderActionsFooter" style="display:flex;justify-content:flex-end;gap:.6rem;align-items:center;flex-wrap:wrap;border-top:1px solid #eadcc0;margin-top:1rem;padding-top:.85rem">
         ${hasDownloadableResult ? '<button class="btn-primary" id="jobDownloadPdfBtn" type="button">Download PDF</button>' : ''}
         <button class="btn-secondary" id="jobStartNewBtn" type="button">Start New Job</button>
       </div>
     </div>`;
+  const renameBtn = document.getElementById('jobRenameBtn');
+  if (renameBtn) {
+    renameBtn.addEventListener('click', () => renderJobNameEditor(job, title));
+  }
   const downloadBtn = document.getElementById('jobDownloadPdfBtn');
   if (downloadBtn) {
     downloadBtn.addEventListener('click', () => {
@@ -1094,6 +1103,57 @@ function renderJobHeader(job) {
       resetHomeForNewJob();
       navigate('#/');
     });
+  }
+}
+
+function renderJobNameEditor(job, currentTitle) {
+  const block = document.getElementById('jobTitleBlock');
+  if (!block || !job) return;
+  block.innerHTML = `
+    <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+      <input id="jobNameInput" type="text" value="${esc(currentTitle)}" maxlength="500" style="font-size:1.25rem;font-weight:700;padding:.42rem .55rem;border:1px solid #d7c2a2;border-radius:8px;min-width:min(420px, 80vw)" />
+      <button class="btn-primary" id="jobNameSaveBtn" type="button" style="padding:.35rem .75rem;font-size:.82rem">Save</button>
+      <button class="btn-secondary" id="jobNameCancelBtn" type="button" style="padding:.35rem .75rem;font-size:.82rem">Cancel</button>
+    </div>
+    <div style="color:#8a6f4a;font-size:.85rem;margin-top:.3rem">
+      Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
+      updated ${esc(formatRelative(job.updatedAt))}
+    </div>`;
+  const input = document.getElementById('jobNameInput');
+  const saveBtn = document.getElementById('jobNameSaveBtn');
+  const cancelBtn = document.getElementById('jobNameCancelBtn');
+  const save = () => saveJobName(job, input?.value || '');
+  if (saveBtn) saveBtn.addEventListener('click', save);
+  if (cancelBtn) cancelBtn.addEventListener('click', () => renderJobHeader(job));
+  if (input) {
+    input.focus();
+    input.select?.();
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') save();
+      if (e.key === 'Escape') renderJobHeader(job);
+    });
+  }
+}
+
+async function saveJobName(job, value) {
+  const nextName = String(value || '').trim();
+  if (!nextName) {
+    alert('Enter a job name before saving.');
+    return;
+  }
+  const saveBtn = document.getElementById('jobNameSaveBtn');
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const updated = await patchAnalysisJob(job.id, { subjectTract: nextName });
+    rememberRecentJob(updated);
+    if (isCurrentJobRoute(job.id)) {
+      await applyJobToView(updated, () => isCurrentJobRoute(job.id));
+    } else {
+      renderJobHeader(updated);
+    }
+  } catch (err) {
+    alert(err.message || 'Could not rename job.');
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
