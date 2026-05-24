@@ -69,7 +69,7 @@ export function createServer() {
   return createHttpServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     try {
-      if (url.pathname === '/healthz') {
+      if (url.pathname === '/healthz' || url.pathname === '/api/healthz') {
         return sendJson(res, 200, { ok: true, service: 'title-analyzer', release: getRuntimeInfo() });
       }
       if (url.pathname === '/api/analyze') return await callApiHandler(analyzeHandler, req, res, url);

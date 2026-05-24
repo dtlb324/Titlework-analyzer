@@ -93,7 +93,7 @@ test('API and worker health responses include release metadata', async () => {
       new Promise(resolve => worker.listen(0, '127.0.0.1', resolve)),
     ]);
     try {
-      const apiHealth = await requestServer(api);
+      const apiHealth = await requestServer(api, '/api/healthz');
       const workerHealth = await requestServer(worker);
       assert(apiHealth.body.release.version === 'v2.3.1', 'Expected API release version in health response');
       assert(apiHealth.body.release.gitSha === 'def5678', 'Expected API git sha in health response');
@@ -176,10 +176,15 @@ test('release verification requires API health metadata including revision', asy
   const missingUrl = await verifyHealth('', expectedRelease, async () => response(goodHealth));
   assert(missingUrl.valid === false, 'Expected health verification to fail without API URL');
 
-  const badRevision = await verifyHealth('https://api.example.test', expectedRelease, async () => response({
+  let requestedHealthUrl = '';
+  const badRevision = await verifyHealth('https://api.example.test', expectedRelease, async url => {
+    requestedHealthUrl = String(url);
+    return response({
     ...goodHealth,
     release: { ...goodHealth.release, revision: 'api-00002' },
-  }));
+    });
+  });
+  assert(requestedHealthUrl === 'https://api.example.test/api/healthz', `Expected verifier to call /api/healthz, got ${requestedHealthUrl}`);
   assert(badRevision.valid === false, 'Expected mismatched health revision to fail verification');
 });
 

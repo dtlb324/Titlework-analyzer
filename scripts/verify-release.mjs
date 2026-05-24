@@ -128,8 +128,9 @@ async function collectServiceFacts({ project, region, service, name, describeSer
 export async function verifyHealth(url, expected, fetchImpl = globalThis.fetch) {
   if (!url) return { valid: false, error: 'API service URL is required for health verification.' };
   if (!fetchImpl) return { valid: false, error: 'fetch is required for health verification.' };
-  const response = await fetchImpl(new URL('/healthz', url));
-  if (!response.ok) return { valid: false, error: `${url}/healthz returned ${response.status}` };
+  const healthUrl = new URL('/api/healthz', url);
+  const response = await fetchImpl(healthUrl);
+  if (!response.ok) return { valid: false, error: `${healthUrl} returned ${response.status}` };
   const body = await response.json();
   const release = body.release || {};
   const errors = [];
