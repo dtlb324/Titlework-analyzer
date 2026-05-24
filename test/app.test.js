@@ -226,6 +226,25 @@ test('Phase 6: #view-job contains required job page subsections', () => {
   assert(indexHtml.includes('id="jobResults"'), 'Missing #jobResults');
 });
 
+test('Phase 6: job stepper replaces close-tab banner above progress', () => {
+  const headerIdx = indexHtml.indexOf('id="jobHeader"');
+  const stepperIdx = indexHtml.indexOf('id="jobStepper"');
+  const progressIdx = indexHtml.indexOf('id="jobProgress"');
+  assert(headerIdx >= 0 && stepperIdx > headerIdx && progressIdx > stepperIdx,
+    'Job stepper should render between the job header and progress card');
+  assert(!indexHtml.includes('You can close this tab. Reopen this link to check progress.'),
+    'Close-tab progress banner copy should be removed');
+  assert(!indexHtml.includes('id="jobLeaveBanner"'),
+    'Job leave banner should be removed from the job view');
+  assert(!script.includes('jobLeaveBanner'),
+    'Progress renderer should not toggle the removed job leave banner');
+  assert(indexHtml.includes('#jobHeader { margin-bottom:.45rem; }'),
+    'Job header should have a tight banner-specific bottom margin above the stepper');
+  assert(indexHtml.includes('.job-stepper {') &&
+         indexHtml.includes('margin:0 0 1rem'),
+    'Job stepper should sit immediately below the job banner');
+});
+
 test('Phase 6: job header offers a clear start-new-job action', () => {
   assert(script.includes('id="jobStartNewBtn"'), 'Missing Start New Job button in job header');
   assert(script.includes('Start New Job'), 'Job header should label the new-job action clearly');
