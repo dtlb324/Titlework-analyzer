@@ -689,6 +689,39 @@ test('Phase 4: claim sets lease fields while chunk is in flight', async () => {
   assert(observedDuringRun.abstractionWorkerId, 'Expected workerId stamped on claimed chunk');
 });
 
+test('Phase 4: abstraction worker logs chunk processing stages without raw payloads', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ mediaType: 'text/csv', originalFilename: 'owners.csv' })]);
+  const previousLog = console.log;
+  const logs = [];
+  console.log = value => {
+    try { logs.push(JSON.parse(value)); } catch {}
+  };
+  try {
+    await processAbstractionBatch('job_test_1', {
+      store,
+      blobLoader: async chunk => ({ bytes: Buffer.from('owner,interest\nA,1/2'), mediaType: chunk.mediaType }),
+      modelClient: async () => ({ text: 'DOCUMENT #1:\nCSV abstract.', model: 'claude-haiku-4-5', usage: {} }),
+      batchLimit: 1,
+      concurrency: 1,
+      budgetMs: 2000,
+      maxAttempts: 1,
+      workerId: 'wkr_log_test',
+      logStages: true,
+    });
+  } finally {
+    console.log = previousLog;
+  }
+
+  const events = logs.filter(entry => entry.event === 'chunk_abstraction_stage');
+  const stages = events.map(entry => entry.stage);
+  assert(stages.includes('claimed'), 'Expected claimed stage log');
+  assert(stages.includes('loaded'), 'Expected loaded stage log');
+  assert(stages.includes('model_start'), 'Expected model_start stage log');
+  assert(stages.includes('model_response'), 'Expected model_response stage log');
+  assert(stages.includes('saved'), 'Expected saved stage log');
+  assert(events.every(entry => !JSON.stringify(entry).includes('owner,interest')), 'Logs must not include raw CSV payload');
+});
+
 test('Phase 4: stale abstraction worker cannot overwrite a reclaimed chunk', async () => {
   const store = createMemoryPhase3Store([makeChunk({ id: 'chk_race' })], { enforceWorkerLease: true });
   let raced = false;

@@ -1575,11 +1575,11 @@ function createPostgresJobStore() {
             abstraction_status = 'completed',
             abstraction_error_type = NULL,
             abstraction_error_message = NULL,
-            payload_bytes = ${record.payloadBytes},
-            latency_ms = ${record.latencyMs},
-            model_used = ${record.modelUsed},
-            input_tokens = ${record.inputTokens},
-            output_tokens = ${record.outputTokens},
+            payload_bytes = ${record.payloadBytes}::integer,
+            latency_ms = ${record.latencyMs}::integer,
+            model_used = ${record.modelUsed}::text,
+            input_tokens = ${record.inputTokens}::integer,
+            output_tokens = ${record.outputTokens}::integer,
             abstraction_completed_at = now(),
             abstraction_claimed_at = NULL,
             abstraction_lease_expires_at = NULL,
@@ -1588,7 +1588,7 @@ function createPostgresJobStore() {
             updated_at = now()
           WHERE job_id = ${record.jobId}
             AND id = ${record.chunkId}
-            AND (${record.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${record.workerId}))
+            AND (${record.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${record.workerId}::text))
           RETURNING id
         )
         INSERT INTO document_abstracts (
@@ -1597,9 +1597,9 @@ function createPostgresJobStore() {
           status, attempt_count, error_type, error_message
         )
         SELECT
-          ${id}, ${record.jobId}, ${record.documentId}, ${record.chunkId}, ${record.abstractText}, ${record.modelUsed},
-          ${record.payloadBytes}, ${record.latencyMs}, ${record.inputTokens}, ${record.outputTokens},
-          ${record.status}, ${record.attemptCount}, ${record.errorType ?? null}, ${record.errorMessage ?? null}
+          ${id}::text, ${record.jobId}::text, ${record.documentId}::text, ${record.chunkId}::text, ${record.abstractText}::text, ${record.modelUsed}::text,
+          ${record.payloadBytes}::integer, ${record.latencyMs}::integer, ${record.inputTokens}::integer, ${record.outputTokens}::integer,
+          ${record.status}::text, ${record.attemptCount}::integer, ${record.errorType ?? null}::text, ${record.errorMessage ?? null}::text
         FROM claimed
         ON CONFLICT (chunk_id) DO UPDATE
         SET
@@ -1757,9 +1757,9 @@ function createPostgresJobStore() {
             status, attempt_count
           )
           VALUES (
-            ${id}, ${jobId}, ${planId}, ${segment.segmentIndex},
-            ${segment.startSequenceIndex}, ${segment.endSequenceIndex},
-            ${JSON.stringify(documentIds)}::jsonb, ${JSON.stringify(filenames)}::jsonb, ${segment.estimatedBytes ?? null},
+            ${id}::text, ${jobId}::text, ${planId}::text, ${segment.segmentIndex}::integer,
+            ${segment.startSequenceIndex}::integer, ${segment.endSequenceIndex}::integer,
+            ${JSON.stringify(documentIds)}::jsonb, ${JSON.stringify(filenames)}::jsonb, ${segment.estimatedBytes ?? null}::integer,
             'pending', 0
           )
           ON CONFLICT (job_id, plan_id, segment_index) DO UPDATE
@@ -1856,13 +1856,13 @@ function createPostgresJobStore() {
           attempt_count = attempt_count + 1,
           claimed_at = now(),
           lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
-          worker_id = ${workerId},
+          worker_id = ${workerId}::text,
           retry_at = NULL,
           error_type = NULL,
           error_message = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId}
-          AND id = ${segmentId}
+        WHERE job_id = ${jobId}::text
+          AND id = ${segmentId}::text
           AND (
             status = 'pending'
             OR (status = 'retry_wait' AND (retry_at IS NULL OR retry_at <= now()))
@@ -1880,12 +1880,12 @@ function createPostgresJobStore() {
         UPDATE synthesis_segments
         SET
           status = 'complete',
-          summary_text = ${payload.summaryText},
-          model_used = ${payload.modelUsed},
-          input_tokens = ${payload.inputTokens ?? null},
-          output_tokens = ${payload.outputTokens ?? null},
-          payload_bytes = ${payload.payloadBytes ?? null},
-          latency_ms = ${payload.latencyMs ?? null},
+          summary_text = ${payload.summaryText}::text,
+          model_used = ${payload.modelUsed}::text,
+          input_tokens = ${payload.inputTokens ?? null}::integer,
+          output_tokens = ${payload.outputTokens ?? null}::integer,
+          payload_bytes = ${payload.payloadBytes ?? null}::integer,
+          latency_ms = ${payload.latencyMs ?? null}::integer,
           error_type = NULL,
           error_message = NULL,
           warnings = ${JSON.stringify(warnings)}::jsonb,
@@ -1895,9 +1895,9 @@ function createPostgresJobStore() {
           retry_at = NULL,
           completed_at = now(),
           updated_at = now()
-        WHERE job_id = ${jobId}
-          AND id = ${segmentId}
-          AND (${payload.workerId ?? null} IS NULL OR (status = 'processing' AND worker_id = ${payload.workerId}))
+        WHERE job_id = ${jobId}::text
+          AND id = ${segmentId}::text
+          AND (${payload.workerId ?? null}::text IS NULL OR (status = 'processing' AND worker_id = ${payload.workerId}::text))
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
@@ -1909,19 +1909,19 @@ function createPostgresJobStore() {
         UPDATE synthesis_segments
         SET
           status = 'failed',
-          error_type = ${failure.errorType},
-          error_message = ${failure.errorMessage},
-          payload_bytes = ${failure.payloadBytes ?? null},
-          latency_ms = ${failure.latencyMs ?? null},
-          model_used = ${failure.modelUsed ?? null},
+          error_type = ${failure.errorType}::text,
+          error_message = ${failure.errorMessage}::text,
+          payload_bytes = ${failure.payloadBytes ?? null}::integer,
+          latency_ms = ${failure.latencyMs ?? null}::integer,
+          model_used = ${failure.modelUsed ?? null}::text,
           claimed_at = NULL,
           lease_expires_at = NULL,
           worker_id = NULL,
           retry_at = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId}
-          AND id = ${segmentId}
-          AND (${failure.workerId ?? null} IS NULL OR (status = 'processing' AND worker_id = ${failure.workerId}))
+        WHERE job_id = ${jobId}::text
+          AND id = ${segmentId}::text
+          AND (${failure.workerId ?? null}::text IS NULL OR (status = 'processing' AND worker_id = ${failure.workerId}::text))
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
@@ -1934,19 +1934,19 @@ function createPostgresJobStore() {
         UPDATE synthesis_segments
         SET
           status = 'retry_wait',
-          error_type = ${failure.errorType},
-          error_message = ${failure.errorMessage},
-          payload_bytes = ${failure.payloadBytes ?? null},
-          latency_ms = ${failure.latencyMs ?? null},
-          model_used = ${failure.modelUsed ?? null},
+          error_type = ${failure.errorType}::text,
+          error_message = ${failure.errorMessage}::text,
+          payload_bytes = ${failure.payloadBytes ?? null}::integer,
+          latency_ms = ${failure.latencyMs ?? null}::integer,
+          model_used = ${failure.modelUsed ?? null}::text,
           retry_at = ${retryAt},
           claimed_at = NULL,
           lease_expires_at = NULL,
           worker_id = NULL,
           updated_at = now()
-        WHERE job_id = ${jobId}
-          AND id = ${segmentId}
-          AND (${failure.workerId ?? null} IS NULL OR (status = 'processing' AND worker_id = ${failure.workerId}))
+        WHERE job_id = ${jobId}::text
+          AND id = ${segmentId}::text
+          AND (${failure.workerId ?? null}::text IS NULL OR (status = 'processing' AND worker_id = ${failure.workerId}::text))
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
@@ -2042,15 +2042,15 @@ function createPostgresJobStore() {
           synthesis_duration_ms, generated_at
         )
         SELECT
-          ${id}, ${jobId}, ${payload.planId || null}, ${status},
+          ${id}::text, ${jobId}::text, ${payload.planId || null}::text, ${status}::text,
           ${payload.finalTitleOpinion || ''}, ${JSON.stringify(warnings)}::jsonb, ${JSON.stringify(failedDocuments)}::jsonb,
-          ${payload.modelUsed || null}, ${payload.inputTokens ?? null}, ${payload.outputTokens ?? null}, ${payload.payloadBytes ?? null},
-          ${payload.synthesisDurationMs ?? null}, now()
+          ${payload.modelUsed || null}::text, ${payload.inputTokens ?? null}::integer, ${payload.outputTokens ?? null}::integer, ${payload.payloadBytes ?? null}::integer,
+          ${payload.synthesisDurationMs ?? null}::integer, now()
         FROM analysis_jobs aj
-        WHERE aj.id = ${jobId}
-          AND (${payload.mergeWorkerId ?? null} IS NULL OR (
-            aj.synthesis_plan_id = ${payload.planId || null}
-            AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}
+        WHERE aj.id = ${jobId}::text
+          AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
+            aj.synthesis_plan_id = ${payload.planId || null}::text
+            AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
           ))
         ON CONFLICT (job_id) DO UPDATE
         SET

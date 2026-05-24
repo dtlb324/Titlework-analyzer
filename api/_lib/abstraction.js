@@ -218,6 +218,24 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function logChunkStage(stage, chunk, details = {}, enabled = false) {
+  if (!enabled) return;
+  try {
+    console.log(JSON.stringify({
+      event: 'chunk_abstraction_stage',
+      stage,
+      jobId: chunk?.jobId,
+      chunkId: chunk?.id,
+      documentId: chunk?.documentId,
+      mediaType: chunk?.mediaType,
+      sizeBytes: chunk?.sizeBytes ?? null,
+      ...details,
+    }));
+  } catch {
+    // Logging must never affect document processing.
+  }
+}
+
 export function assertSafeBlobUrl(blobUrl) {
   let parsed;
   try {
@@ -426,11 +444,20 @@ export async function processChunkAbstraction(chunk, options = {}) {
   }
   const processingChunk = claimedChunk;
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
+  const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';
 
   let loadedPayload = null;
   try {
+    logChunkStage('claimed', processingChunk, { workerId, attemptCount }, stageLoggingEnabled);
     const payload = await getBlobLoader(options)(processingChunk);
     loadedPayload = payload;
+    logChunkStage('loaded', processingChunk, {
+      workerId,
+      attemptCount,
+      loadedBytes: payload.bytes?.byteLength ?? null,
+      loadedMediaType: payload.mediaType || processingChunk.mediaType || null,
+      elapsedMs: Date.now() - startedAt,
+    }, stageLoggingEnabled);
     const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex);
     const payloadBytes = estimateRequestBytes(model, maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
@@ -438,6 +465,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       error.status = 413;
       throw error;
     }
+    logChunkStage('model_start', processingChunk, { workerId, attemptCount, model, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
     const response = await getModelClient(options)({
       model,
       maxTokens,
@@ -446,6 +474,13 @@ export async function processChunkAbstraction(chunk, options = {}) {
       payloadBytes,
       chunk: processingChunk,
     });
+    logChunkStage('model_response', processingChunk, {
+      workerId,
+      attemptCount,
+      modelUsed: response.model || model,
+      payloadBytes,
+      elapsedMs: Date.now() - startedAt,
+    }, stageLoggingEnabled);
     const usage = extractUsage(response.usage);
     const record = {
       jobId: processingChunk.jobId,
@@ -469,11 +504,20 @@ export async function processChunkAbstraction(chunk, options = {}) {
     }
     const saved = await store.saveDocumentAbstract(record);
     if (!saved) {
+      logChunkStage('save_stale', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
       return { status: 'stale', chunkId: processingChunk.id };
     }
+    logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
     return { status: 'completed', chunkId: processingChunk.id, abstract: record };
   } catch (err) {
     const errorType = classifyError(err);
+    logChunkStage('error', processingChunk, {
+      workerId,
+      attemptCount,
+      errorType,
+      errorMessage: sanitizeErrorMessage(err),
+      elapsedMs: Date.now() - startedAt,
+    }, stageLoggingEnabled);
     if (loadedPayload && ['payload_too_large', 'upstream_timeout'].includes(errorType)) {
       const split = await splitPdfChunk(processingChunk, loadedPayload.bytes, errorType, { ...options, workerId }).catch(() => false);
       if (split) {

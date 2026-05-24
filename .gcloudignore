@@ -1,0 +1,10 @@
+.git/
+.DS_Store
+node_modules/
+
+.claude/
+.cursor/
+.superpowers/
+
+docs/.DS_Store
+docs/superpowers/.DS_Store

@@ -464,6 +464,21 @@ test('chunk inserts cast upload status for Neon parameter typing', () => {
   assert(source.includes('${input.uploadStatus}::text'), 'createChunk should cast uploadStatus so Neon can type the parameter');
 });
 
+test('abstract persistence casts nullable values for Neon parameter typing', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(source.includes('${record.inputTokens}::integer'), 'saveDocumentAbstract should cast inputTokens for Neon');
+  assert(source.includes('${record.outputTokens}::integer'), 'saveDocumentAbstract should cast outputTokens for Neon');
+  assert(source.includes('${record.errorType ?? null}::text'), 'saveDocumentAbstract should cast nullable errorType for Neon');
+});
+
+test('synthesis persistence casts nullable values for Neon parameter typing', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(source.includes('${payload.inputTokens ?? null}::integer'), 'synthesis completion should cast inputTokens for Neon');
+  assert(source.includes('${payload.outputTokens ?? null}::integer'), 'synthesis completion should cast outputTokens for Neon');
+  assert(source.includes('${payload.modelUsed || null}::text'), 'job result persistence should cast nullable modelUsed for Neon');
+  assert(source.includes('${payload.mergeWorkerId ?? null}::text'), 'job result persistence should cast nullable mergeWorkerId for Neon');
+});
+
 let passed = 0;
 let failed = 0;
 
