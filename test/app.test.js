@@ -251,6 +251,10 @@ test('Phase 6: job header uses footer actions and editable job name', () => {
   assert(script.includes('async function saveJobName'), 'Missing saveJobName() helper');
   assert(script.includes('subjectTract: nextName'), 'Rename should persist through subjectTract for recent jobs');
   assert(script.includes('rememberRecentJob(updated)'), 'Rename should refresh the recent jobs cache');
+  assert(indexHtml.includes('#jobHeaderActionsFooter .btn-primary') &&
+         indexHtml.includes('width:auto') &&
+         indexHtml.includes('margin-top:0'),
+    'Job header action buttons should not inherit full-width primary CTA styling');
 });
 
 test('Phase 6: status badge CSS classes exist', () => {
