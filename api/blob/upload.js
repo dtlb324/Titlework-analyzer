@@ -76,8 +76,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Unsupported upload content type.', requestId });
     }
     const job = await store.getJob(jobId);
-    const chunks = job ? await store.listChunks(jobId) : [];
-    const chunk = chunks.find(item => item.id === chunkId);
+    const chunk = job && store.getChunk
+      ? await store.getChunk(jobId, chunkId)
+      : (job ? (await store.listChunks(jobId)).find(item => item.id === chunkId) : null);
     if (!job || !chunk) {
       return res.status(404).json({ error: 'Upload chunk not found.', requestId });
     }

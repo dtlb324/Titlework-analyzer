@@ -20,6 +20,7 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
+import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'claude-sonnet-4-6';
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 8192);
@@ -31,6 +32,7 @@ const DEFAULT_FOLLOWUP_HISTORY_TURNS = clampInt(process.env.SYNTHESIS_FOLLOWUP_H
 const DEFAULT_UPSTREAM_TIMEOUT_MS = clampInt(process.env.SYNTHESIS_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const DEFAULT_MERGE_LEASE_MS = clampInt(process.env.SYNTHESIS_MERGE_LEASE_MS || process.env.WORKFLOW_LEASE_MS, DEFAULT_UPSTREAM_TIMEOUT_MS + 60_000, 5_000, 600_000);
 const DEFAULT_STALE_SYNTHESIS_LEASE_MS = clampInt(process.env.SYNTHESIS_STALE_LEASE_MS || process.env.WORKFLOW_STALE_LEASE_MS, DEFAULT_MERGE_LEASE_MS + 60_000, 5_000, 600_000);
+const DEFAULT_SYNTHESIS_CONCURRENCY = clampInt(process.env.SYNTHESIS_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 16);
 const MAX_RETRY_WAIT_MS = 5 * 60_000;
 const MIN_FINAL_OPINION_CHARS = 500;
 const MIN_SEGMENT_SUMMARY_CHARS = 200;
@@ -92,6 +94,7 @@ export function getSynthesisConfig(overrides = {}) {
     maxAttempts: overrides.maxAttempts || DEFAULT_MAX_ATTEMPTS,
     followupHistoryTurns: overrides.followupHistoryTurns || DEFAULT_FOLLOWUP_HISTORY_TURNS,
     upstreamTimeoutMs: overrides.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS,
+    concurrency: overrides.concurrency || DEFAULT_SYNTHESIS_CONCURRENCY,
   };
 }
 
@@ -872,15 +875,18 @@ export async function processSynthesisJob(jobId, options = {}) {
   let lastError = null;
 
   while (Date.now() < deadline) {
-    const currentJob = await store.getJob(jobId);
+    let currentJob = await store.getJob(jobId);
     if (currentJob?.status === 'canceled') break;
     const ready = await store.listReadySynthesisSegments(jobId, planId, options.batchLimit || 4);
     if (!ready.length) break;
-    for (const segment of ready) {
-      if (Date.now() >= deadline) break;
-      const refreshedJob = await store.getJob(jobId);
-      if (refreshedJob?.status === 'canceled') break;
-      const result = await processSynthesisSegment(jobId, segment, abstracts, {
+    const segmentResults = await runWithConcurrency(ready, config.concurrency, async segment => {
+      if (Date.now() >= deadline) {
+        return { status: 'skipped', segmentId: segment.id, reason: 'deadline' };
+      }
+      if (!currentJob || currentJob.status === 'canceled') {
+        return { status: 'skipped', segmentId: segment.id, reason: 'canceled' };
+      }
+      return await processSynthesisSegment(jobId, segment, abstracts, {
         ...options,
         store,
         config,
@@ -888,10 +894,15 @@ export async function processSynthesisJob(jobId, options = {}) {
         contextNotes: job.contextNotes || options.contextNotes || '',
         singlePass,
       });
+    });
+    currentJob = await store.getJob(jobId);
+    for (const result of segmentResults) {
+      if (!result || result.status === 'skipped' || result.status === 'stale') continue;
       if (result.status === 'complete') completedInBatch += 1;
       else if (result.status === 'failed') { failedInBatch += 1; lastError = result.failure; }
       else if (result.status === 'retry_wait') { retryInBatch += 1; lastError = result.failure; }
     }
+    if (currentJob?.status === 'canceled') break;
   }
 
   // After segment work, attempt the final merge if every segment is complete and no result exists yet.

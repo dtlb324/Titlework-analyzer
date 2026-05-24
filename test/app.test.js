@@ -332,6 +332,19 @@ test('Phase 6: terminal job hydrates result via /result', () => {
     'Job view must fetch /result on terminal status');
 });
 
+test('Phase 6: durable uploads use bounded concurrency', () => {
+  assert(script.includes('DURABLE_UPLOAD_CONCURRENCY'), 'Must define durable upload concurrency');
+  assert(script.includes('runWithConcurrency(uploadTasks, DURABLE_UPLOAD_CONCURRENCY)'),
+    'registerJobUploads must upload chunks with bounded concurrency');
+});
+
+test('Phase 6: stalled server polls kick /process endpoints', () => {
+  assert(script.includes('processServerAbstractionBatch(jobId)'),
+    'Abstraction poll stall must POST /abstraction/process');
+  assert(script.includes('processServerSynthesisBatch(jobId)'),
+    'Synthesis poll stall must POST /synthesis/process');
+});
+
 test('Phase 6: job actions wire to existing API endpoints', () => {
   // Path components passed to runJobAction(job, '/<endpoint>') — URL is composed
   // inside runJobAction as `/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`.
