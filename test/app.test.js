@@ -283,13 +283,16 @@ test('Phase 6: status badge CSS classes exist', () => {
   assert(indexHtml.includes('.status-badge--partial'), 'Missing partial badge style');
 });
 
-test('Phase 6: job stepper uses neutral outline and marker for active status', () => {
-  assert(indexHtml.includes('.job-stepper .step.active::before'), 'Active step should include a marker');
-  assert(indexHtml.includes('box-shadow: inset 0 0 0 1px'), 'Active step should use an outline cue');
-  assert(!indexHtml.includes('.job-stepper .step.active { background:#fce8d4; color:#b8631e;'),
-    'Active step should not rely on orange status color');
-  assert(!indexHtml.includes('.job-stepper .step.done { background:#dfeadb; color:#4a7c4e;'),
-    'Completed step should not rely on green status color');
+test('Phase 6: job stepper renders visual stage cards with active progress accent', () => {
+  assert(indexHtml.includes('.job-stepper .step-card'), 'Stepper should render each stage as a card');
+  assert(indexHtml.includes('.job-stepper .step-meta'), 'Stepper cards should include Done/Now/Next metadata');
+  assert(indexHtml.includes('.job-stepper .step-progress'), 'Active step should include a progress accent');
+  assert(script.includes("const meta = i < activeIdx ? 'Done' : i === activeIdx ? 'Now' : 'Next';"),
+    'Stepper renderer should label each phase by progress state');
+  assert(script.includes('step-card active') && script.includes('step-progress'),
+    'Active step card should render the active progress accent');
+  assert(!script.includes('<span class="sep">→</span>'),
+    'Stage-card stepper should not use arrow separators');
 });
 
 test('Phase 6: job view renderers exist', () => {

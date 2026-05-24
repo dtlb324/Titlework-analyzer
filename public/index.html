@@ -86,12 +86,14 @@
   .status-badge--partial { background:#fff1d6; color:#a06b13; }
   .status-badge--canceled { background:#ece3d4; color:#8a6f4a; }
   #jobHeader { margin-bottom:.45rem; }
-  .job-stepper { display:flex; gap:.6rem; align-items:center; margin:0 0 1rem; font-size:.85rem; color:#6b5840; }
-  .job-stepper .step { display:inline-flex; align-items:center; gap:.35rem; padding:.2rem .6rem; border:1px solid #d7c7a8; border-radius:6px; background:#f3e7d8; color:#6b5840; }
-  .job-stepper .step.active { background:#fffaf0; color:#4a3c28; font-weight:600; box-shadow: inset 0 0 0 1px #6b5840; }
-  .job-stepper .step.active::before { content:""; width:.38rem; height:.38rem; border-radius:999px; background:currentColor; }
-  .job-stepper .step.done { background:#eee5d4; color:#6b5840; }
-  .job-stepper .sep { color:#c8b291; }
+  .job-stepper { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.55rem; align-items:stretch; margin:0 0 1rem; font-size:.85rem; color:#6b5840; }
+  .job-stepper .step-card { border:1px solid #d7c7a8; border-radius:9px; background:#fffaf0; padding:.65rem .75rem; min-width:0; }
+  .job-stepper .step-card.done { background:#eef3e7; border-color:#c9dcc2; color:#4a7c4e; }
+  .job-stepper .step-card.active { background:#fff6e8; border-color:#b8631e; color:#6b3410; }
+  .job-stepper .step-meta { display:block; margin-bottom:.18rem; color:#8a6f4a; font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+  .job-stepper .step-name { display:block; color:inherit; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .job-stepper .step-progress { display:block; height:.24rem; margin-top:.5rem; border-radius:999px; background:#b8631e; }
+  @media (max-width: 620px) { .job-stepper { grid-template-columns:1fr; } }
   .job-actions { display:flex; flex-wrap:wrap; gap:.55rem; margin-top:.8rem; }
   .job-actions button[disabled] { opacity:.55; cursor:not-allowed; }
   #jobHeaderActionsFooter .btn-primary,
@@ -1252,12 +1254,14 @@ function renderJobStepper(job) {
   const phases = ['Upload', 'Abstract', 'Synthesize'];
   const order = { uploading: 0, ready: 1, queued: 1, planning: 1, abstracting: 1, synthesizing: 2 };
   let activeIdx = order[job.status];
-  if (job.status === 'complete' || job.status === 'partial_failed') activeIdx = 2;
+  if (job.status === 'complete' || job.status === 'partial_failed') activeIdx = phases.length;
   if (job.status === 'created') activeIdx = 0;
   el.innerHTML = phases.map((p, i) => {
-    const cls = i === activeIdx ? 'step active' :
-                (typeof activeIdx === 'number' && i < activeIdx) ? 'step done' : 'step';
-    return `<span class="${cls}">${esc(p)}</span>` + (i < phases.length - 1 ? '<span class="sep">→</span>' : '');
+    const cls = i === activeIdx ? 'step-card active' :
+                (typeof activeIdx === 'number' && i < activeIdx) ? 'step-card done' : 'step-card';
+    const meta = i < activeIdx ? 'Done' : i === activeIdx ? 'Now' : 'Next';
+    const progress = i === activeIdx ? '<span class="step-progress" aria-hidden="true"></span>' : '';
+    return `<span class="${cls}"><span class="step-meta">${esc(meta)}</span><span class="step-name">${esc(p)}</span>${progress}</span>`;
   }).join('');
 }
 
