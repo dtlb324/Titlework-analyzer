@@ -1,0 +1,75 @@
+<h2>Where should “Recent jobs” live?</h2>
+<p class="subtitle">The goal is to make history feel like a valid starting option, not a footer link.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Option A: Top Action Row</div>
+        <div class="mockup-body">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:16px">
+            <div>
+              <div style="height:18px;width:210px;background:#6b3410;border-radius:4px;margin-bottom:7px"></div>
+              <div style="height:10px;width:280px;background:#d7c2a2;border-radius:4px"></div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="mock-button">Recent jobs</button>
+              <button class="mock-button">Build Chain of Title</button>
+            </div>
+          </div>
+          <div class="placeholder" style="height:120px">Upload form</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Top Action Row</h3>
+      <p>Places Recent jobs beside the main action area so it reads as an alternate path.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Option B: Start Choice Cards</div>
+        <div class="mockup-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+            <div style="border:2px solid #6b3410;border-radius:10px;padding:14px;background:#fbf2dc">
+              <strong>Start new analysis</strong>
+              <p style="margin:8px 0 0;color:#8a6f4a;font-size:12px">Upload documents and build a chain of title.</p>
+            </div>
+            <div style="border:2px solid #d7c2a2;border-radius:10px;padding:14px;background:#fffaf0">
+              <strong>Open recent jobs</strong>
+              <p style="margin:8px 0 0;color:#8a6f4a;font-size:12px">Resume or review previous analyses.</p>
+            </div>
+          </div>
+          <div class="placeholder" style="height:105px">Upload form follows</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Start Choice Cards</h3>
+      <p>Makes Recent jobs a peer to starting fresh. Most explicit, but adds a new UI block.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Option C: Upload Card Header Link</div>
+        <div class="mockup-body">
+          <div style="border:1px solid #e5d6b8;border-radius:10px;padding:14px;background:#fffaf0">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+              <strong>Build a Chain of Title</strong>
+              <button class="mock-button">Recent jobs</button>
+            </div>
+            <div class="placeholder" style="height:118px">Subject tract, notes, upload zone</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Upload Card Header Link</h3>
+      <p>Smallest change. Keeps history visible without adding a new decision block.</p>
+    </div>
+  </div>
+</div>

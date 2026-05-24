@@ -1,0 +1,15 @@
+---
+description: Release workflow for GitHub latest version
+alwaysApply: true
+---
+
+# GitHub Release Workflow
+
+When the user asks to push a release, do all of the following:
+
+- Bump the package version as requested and commit the release changes.
+- Create and push the matching git tag, for example `v2.0.3`.
+- Create or update the GitHub Release object with `gh release create ... --latest` or `gh release edit ... --latest`.
+- Verify with `gh release list --limit 3` that the new version is marked `Latest`.
+
+Pushing a git tag alone is not enough; GitHub's visible release version changes only after the GitHub Release exists.
