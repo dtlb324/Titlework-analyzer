@@ -377,7 +377,7 @@ export async function synthesisSnapshot(jobId, options = {}) {
   if (!store) throw new Error('A job store is required to read synthesis status.');
   await getJobOrThrow(store, jobId);
   if (store.resetStaleSynthesisSegments) {
-    await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
+    await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS);
   }
   const status = await store.getSynthesisStatus(jobId);
   return {
@@ -395,13 +395,14 @@ export async function processSynthesisBatch(jobId, options = {}) {
     budgetMs: options.budgetMs ?? DEFAULT_BUDGET_MS,
     leaseMs: options.leaseMs ?? Math.max(60_000, DEFAULT_LEASE_MS),
     maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-    staleLeaseMs: options.staleLeaseMs ?? 180_000,
+    staleLeaseMs: options.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS,
   };
   const result = await processSynthesisJob(jobId, {
     ...options,
     store,
     budgetMs: config.budgetMs,
     leaseMs: config.leaseMs,
+    mergeLeaseMs: options.mergeLeaseMs ?? config.leaseMs,
     staleLeaseMs: config.staleLeaseMs,
     batchLimit: config.batchLimit,
     config: { maxAttempts: config.maxAttempts, ...(options.config || {}) },

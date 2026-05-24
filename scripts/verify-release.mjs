@@ -112,10 +112,10 @@ async function describeRevision({ project, region, revision }) {
   return await gcloudJson(['run', 'revisions', 'describe', revision, '--project', project, '--region', region]);
 }
 
-async function collectServiceFacts({ project, region, service, name }) {
-  const serviceJson = await describeService({ project, region, service });
+async function collectServiceFacts({ project, region, service, name, describeServiceFn = describeService, describeRevisionFn = describeRevision }) {
+  const serviceJson = await describeServiceFn({ project, region, service });
   const revisionName = serviceJson?.status?.latestReadyRevisionName || serviceJson?.status?.latestCreatedRevisionName;
-  const revisionJson = revisionName ? await describeRevision({ project, region, revision: revisionName }) : null;
+  const revisionJson = revisionName ? await describeRevisionFn({ project, region, revision: revisionName }) : null;
   return {
     name,
     service,
@@ -125,8 +125,9 @@ async function collectServiceFacts({ project, region, service, name }) {
   };
 }
 
-async function verifyHealth(url, expected, fetchImpl = globalThis.fetch) {
-  if (!url || !fetchImpl) return { skipped: true };
+export async function verifyHealth(url, expected, fetchImpl = globalThis.fetch) {
+  if (!url) return { valid: false, error: 'API service URL is required for health verification.' };
+  if (!fetchImpl) return { valid: false, error: 'fetch is required for health verification.' };
   const response = await fetchImpl(new URL('/healthz', url));
   if (!response.ok) return { valid: false, error: `${url}/healthz returned ${response.status}` };
   const body = await response.json();
@@ -135,6 +136,7 @@ async function verifyHealth(url, expected, fetchImpl = globalThis.fetch) {
   if (expected.version && release.version !== expected.version) errors.push(`health version ${release.version} did not match ${expected.version}`);
   if (expected.gitSha && release.gitSha !== expected.gitSha) errors.push(`health gitSha ${release.gitSha} did not match ${expected.gitSha}`);
   if (expected.imageDigest && release.imageDigest !== expected.imageDigest) errors.push(`health imageDigest ${release.imageDigest} did not match ${expected.imageDigest}`);
+  if (expected.revision && release.revision !== expected.revision) errors.push(`health revision ${release.revision} did not match ${expected.revision}`);
   return { valid: errors.length === 0, errors, body };
 }
 
@@ -148,12 +150,16 @@ export async function verifyRelease(options) {
     region: options.region,
     service: options.apiService,
     name: 'api',
+    describeServiceFn: options.describeService,
+    describeRevisionFn: options.describeRevision,
   });
   const worker = await collectServiceFacts({
     project: options.project,
     region: options.region,
     service: options.workerService,
     name: 'worker',
+    describeServiceFn: options.describeService,
+    describeRevisionFn: options.describeRevision,
   });
 
   const errors = [];
@@ -166,14 +172,13 @@ export async function verifyRelease(options) {
     errors.push(`Deployed digest ${api.digest} did not match expected ${options.expectedDigest}`);
   }
 
-  if (options.apiUrl) {
-    const health = await verifyHealth(options.apiUrl, {
-      version: options.tag,
-      gitSha: options.gitSha,
-      imageDigest: api.digest,
-    });
-    if (health.valid === false) errors.push(...(health.errors || [health.error]));
-  }
+  const health = await verifyHealth(options.apiUrl, {
+    version: options.tag,
+    gitSha: options.gitSha,
+    imageDigest: api.digest,
+    revision: api.revision,
+  }, options.fetchImpl);
+  if (health.valid === false) errors.push(...(health.errors || [health.error]));
 
   if (errors.length) {
     throw new Error(errors.join('\n'));
@@ -194,7 +199,7 @@ async function main() {
     apiUrl: args['api-url'] || process.env.API_URL,
   };
   for (const [key, value] of Object.entries(options)) {
-    if (['gitSha', 'expectedDigest', 'apiUrl'].includes(key)) continue;
+    if (['gitSha', 'expectedDigest'].includes(key)) continue;
     if (!value) throw new Error(`Missing required option: ${key}`);
   }
   const result = await verifyRelease(options);

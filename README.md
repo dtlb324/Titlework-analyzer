@@ -36,13 +36,18 @@ Set these on both Cloud Run services unless noted otherwise:
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
 | `GCS_BUCKET` | Yes | Private bucket for uploaded source chunks and split PDFs. |
 | `ANALYZE_MAX_REQUEST_BYTES` | Optional | Default `20000000`. |
-| `ANALYZE_UPSTREAM_TIMEOUT_MS` | Optional | Default `240000`. |
+| `ANALYZE_UPSTREAM_TIMEOUT_MS` | API only | Default `240000`. |
+| `ABSTRACTION_UPSTREAM_TIMEOUT_MS` | Worker only | Default `240000`; used to size abstraction leases. |
+| `SYNTHESIS_UPSTREAM_TIMEOUT_MS` | Worker only | Default `240000`; used to size synthesis leases. |
+| `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` | Optional | Shared fallback for abstraction and synthesis upstream timeouts. |
 | `STORAGE_MAX_UPLOAD_BYTES` | Optional | Default `104857600` (100 MB). |
 | `WORKFLOW_BATCH_LIMIT` | Optional | Default `12`. |
 | `WORKFLOW_CONCURRENCY` | Optional | Default `4`. |
 | `WORKFLOW_BUDGET_MS` | Optional | Default `1200000` (20 min). |
 | `WORKFLOW_LEASE_MS` | Optional | Default is longer than the model upstream timeout. |
 | `WORKFLOW_STALE_LEASE_MS` | Optional | Default is longer than `WORKFLOW_LEASE_MS`. |
+| `SYNTHESIS_MERGE_LEASE_MS` | Optional | Defaults longer than synthesis upstream timeout. |
+| `SYNTHESIS_STALE_LEASE_MS` | Optional | Defaults longer than synthesis merge lease. |
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Default `5000`. |
 | `RELEASE_VERSION` | Release workflow | Set automatically from the release tag. |
 | `GIT_SHA` | Release workflow | Set automatically from the deployed commit. |
@@ -76,8 +81,9 @@ npm run start:worker
 Production releases are automated by `.github/workflows/release.yml`. Push a lowercase `vX.Y.Z` tag that exactly matches the `package.json` version:
 
 ```bash
-git tag v2.3.1
-git push origin v2.3.1
+VERSION="v$(node -p "require('./package.json').version")"
+git tag "$VERSION"
+git push origin "$VERSION"
 ```
 
 The release workflow runs tests on Node 22, builds one Docker image, pushes it to Artifact Registry, resolves the immutable image digest, deploys the worker first, then deploys the API from that same immutable image digest. The worker deploy uses `--min-instances=1`, `--concurrency=1`, `--no-cpu-throttling`, and a 3600 second timeout so long-running batch work is not starved while idle. The workflow creates or updates the GitHub Release only after production verification passes.
@@ -94,6 +100,8 @@ Configure these GitHub repository variables before the first release:
 | `GAR_REPOSITORY` | Artifact Registry Docker repository. |
 | `API_SERVICE` | API Cloud Run service name, usually `titlework-analyzer-api`. |
 | `WORKER_SERVICE` | Worker Cloud Run service name, usually `titlework-analyzer-worker`. |
+
+The GitHub deploy service account must be configured for Workload Identity Federation from this repository. Grant it enough IAM to push images and deploy Cloud Run, typically Artifact Registry writer on the image repository, Cloud Run service deployment permissions, and `roles/iam.serviceAccountUser` on `GCP_RUNTIME_SERVICE_ACCOUNT` when that variable is set. The runtime service account still needs the bucket, Secret Manager, and database/network access required by the app.
 
 Secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
 

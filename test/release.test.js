@@ -11,6 +11,8 @@ import {
   extractImageDigest,
   validateRequiredEnv,
   validateTagVersion,
+  verifyHealth,
+  verifyRelease,
 } from '../scripts/verify-release.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +62,9 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
+const packageVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+const releaseTag = `v${packageVersion}`;
+
 test('runtime info reports release metadata from the environment with package fallback', () => withEnv({
   RELEASE_VERSION: 'v2.3.1',
   GIT_SHA: 'abc1234',
@@ -68,7 +73,7 @@ test('runtime info reports release metadata from the environment with package fa
 }, () => {
   const info = getRuntimeInfo();
   assert(info.version === 'v2.3.1', `Expected env release version, got ${info.version}`);
-  assert(info.packageVersion === '2.3.0', `Expected package fallback version, got ${info.packageVersion}`);
+  assert(info.packageVersion === packageVersion, `Expected package fallback version, got ${info.packageVersion}`);
   assert(info.gitSha === 'abc1234', `Expected git sha, got ${info.gitSha}`);
   assert(info.imageDigest === 'sha256:abc', `Expected image digest, got ${info.imageDigest}`);
   assert(info.revision === 'titlework-analyzer-api-00042-xzy', `Expected revision, got ${info.revision}`);
@@ -104,10 +109,9 @@ test('API and worker health responses include release metadata', async () => {
 });
 
 test('release verification helpers enforce tag version, env, and image parity', () => {
-  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  assert(validateTagVersion('v2.3.0', pkg.version).valid === true, 'Expected lowercase tag to match package version');
-  assert(validateTagVersion('V2.3.0', pkg.version).valid === false, 'Expected uppercase release tag to be rejected');
-  assert(validateTagVersion('v2.3.1', pkg.version).valid === false, 'Expected mismatched tag to be rejected');
+  assert(validateTagVersion(releaseTag, packageVersion).valid === true, 'Expected lowercase tag to match package version');
+  assert(validateTagVersion(releaseTag.toUpperCase(), packageVersion).valid === false, 'Expected uppercase release tag to be rejected');
+  assert(validateTagVersion('v0.0.0', packageVersion).valid === false, 'Expected mismatched tag to be rejected');
 
   const service = {
     spec: {
@@ -152,13 +156,133 @@ test('release verification helpers enforce tag version, env, and image parity', 
   ).valid === false, 'Expected mismatched service digests to fail parity validation');
 });
 
+test('release verification requires API health metadata including revision', async () => {
+  const goodHealth = {
+    ok: true,
+    release: {
+      version: releaseTag,
+      gitSha: 'abc123',
+      imageDigest: 'sha256:abc',
+      revision: 'api-00001',
+    },
+  };
+  const expectedRelease = goodHealth.release;
+  const response = body => ({
+    ok: true,
+    status: 200,
+    async json() { return body; },
+  });
+
+  const missingUrl = await verifyHealth('', expectedRelease, async () => response(goodHealth));
+  assert(missingUrl.valid === false, 'Expected health verification to fail without API URL');
+
+  const badRevision = await verifyHealth('https://api.example.test', expectedRelease, async () => response({
+    ...goodHealth,
+    release: { ...goodHealth.release, revision: 'api-00002' },
+  }));
+  assert(badRevision.valid === false, 'Expected mismatched health revision to fail verification');
+});
+
+test('verifyRelease checks Cloud Run parity, env configuration, and API health', async () => {
+  const services = {
+    api: {
+      spec: {
+        template: {
+          spec: {
+            containers: [{
+              image: 'us-central1-docker.pkg.dev/p/titlework/app@sha256:abc',
+              env: [
+                { name: 'DATABASE_URL', valueFrom: { secretKeyRef: { name: 'db' } } },
+                { name: 'GCS_BUCKET', value: 'bucket' },
+                { name: 'ANTHROPIC_API_KEY', valueFrom: { secretKeyRef: { name: 'anthropic' } } },
+                { name: 'APP_PASSWORD', valueFrom: { secretKeyRef: { name: 'app-password' } } },
+              ],
+            }],
+          },
+        },
+      },
+      status: { latestReadyRevisionName: 'api-00001' },
+    },
+    worker: {
+      spec: {
+        template: {
+          spec: {
+            containers: [{
+              image: 'us-central1-docker.pkg.dev/p/titlework/app@sha256:abc',
+              env: [
+                { name: 'DATABASE_URL', valueFrom: { secretKeyRef: { name: 'db' } } },
+                { name: 'GCS_BUCKET', value: 'bucket' },
+                { name: 'ANTHROPIC_API_KEY', valueFrom: { secretKeyRef: { name: 'anthropic' } } },
+                { name: 'APP_PASSWORD', valueFrom: { secretKeyRef: { name: 'app-password' } } },
+              ],
+            }],
+          },
+        },
+      },
+      status: { latestReadyRevisionName: 'worker-00001' },
+    },
+  };
+  const revisions = {
+    'api-00001': { status: { imageDigest: 'us-central1-docker.pkg.dev/p/titlework/app@sha256:abc' } },
+    'worker-00001': { status: { imageDigest: 'us-central1-docker.pkg.dev/p/titlework/app@sha256:abc' } },
+  };
+
+  const result = await verifyRelease({
+    project: 'project',
+    region: 'us-central1',
+    apiService: 'api',
+    workerService: 'worker',
+    tag: releaseTag,
+    gitSha: 'abc123',
+    expectedDigest: 'sha256:abc',
+    apiUrl: 'https://api.example.test',
+    packageVersion,
+    describeService: async ({ service }) => services[service],
+    describeRevision: async ({ revision }) => revisions[revision],
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ok: true,
+          release: {
+            version: releaseTag,
+            gitSha: 'abc123',
+            imageDigest: 'sha256:abc',
+            revision: 'api-00001',
+          },
+        };
+      },
+    }),
+  });
+
+  assert(result.api.revision === 'api-00001', 'Expected API revision in verification result');
+  let failedOpen = false;
+  try {
+    await verifyRelease({
+      project: 'project',
+      region: 'us-central1',
+      apiService: 'api',
+      workerService: 'worker',
+      tag: releaseTag,
+      packageVersion,
+      describeService: async ({ service }) => services[service],
+      describeRevision: async ({ revision }) => revisions[revision],
+      fetchImpl: async () => { throw new Error('fetch should not be skipped'); },
+    });
+  } catch {
+    failedOpen = true;
+  }
+  assert(failedOpen, 'Expected verifyRelease to fail when API URL is missing');
+});
+
 test('release workflows and image context encode immutable Cloud Run deployment policy', () => {
   const testWorkflow = readFileSync(join(root, '.github/workflows/test.yml'), 'utf8');
   assert(testWorkflow.includes('node-version: 22'), 'Expected CI to run tests on Node 22');
   assert(testWorkflow.includes('docker build'), 'Expected CI workflow to exercise Docker build');
 
   const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
-  assert(releaseWorkflow.includes("- 'v*.*.*'"), 'Expected release trigger to use a GitHub glob that actually matches semver tags');
+  assert(releaseWorkflow.includes("- 'v[0-9]*.[0-9]*.[0-9]*'"), 'Expected release trigger to avoid clearly malformed release tags');
   assert(!releaseWorkflow.includes('[0-9]+'), 'Expected semver validation in script, not an unsupported regex-like tag glob');
   assert(releaseWorkflow.includes('id-token: write'), 'Expected release workflow to use OIDC auth');
   assert(releaseWorkflow.includes('google-github-actions/auth'), 'Expected release workflow to authenticate to Google Cloud');
@@ -175,7 +299,9 @@ test('release workflows and image context encode immutable Cloud Run deployment 
 test('release documentation describes automated deploy, verification, and rollback', () => {
   const readme = readFileSync(join(root, 'README.md'), 'utf8');
   assert(readme.includes('Push a lowercase `vX.Y.Z` tag'), 'Expected README to document tag-triggered releases');
+  assert(readme.includes('node -p "require'), 'Expected README release example to derive tag from package.json');
   assert(readme.includes('same immutable image digest'), 'Expected README to document API/worker digest parity');
+  assert(readme.includes('Workload Identity Federation'), 'Expected README to document WIF setup');
   assert(readme.includes('APP_PASSWORD` | Yes for production'), 'Expected README production password policy to match release verification');
   assert(readme.includes('Rollback API and worker together'), 'Expected README to document paired rollback');
   assert(readme.includes('GCS CORS'), 'Expected README to call out GCS CORS release verification');
