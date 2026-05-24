@@ -1235,7 +1235,7 @@ function createPostgresJobStore() {
         VALUES (
           ${id}, ${jobId}, ${documentId}, ${input.chunkOrder}, ${input.originalFilename}, ${blobKey},
           ${input.mediaType}, ${input.sizeBytes}, ${input.pageStart}, ${input.pageEnd}, ${input.splitFrom},
-          ${input.fingerprint}, ${input.checksumSha256}, ${input.uploadStatus}
+          ${input.fingerprint}, ${input.checksumSha256}, ${input.uploadStatus}::text
         )
         RETURNING *
       `;

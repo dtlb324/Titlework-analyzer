@@ -459,6 +459,11 @@ test('storage upload endpoint signs GCS uploads without Vercel Blob client code'
   assert(!source.includes("'image/tiff'"), 'Storage upload content types should not include TIFF when analyze API cannot process TIFF images');
 });
 
+test('chunk inserts cast upload status for Neon parameter typing', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(source.includes('${input.uploadStatus}::text'), 'createChunk should cast uploadStatus so Neon can type the parameter');
+});
+
 let passed = 0;
 let failed = 0;
 
