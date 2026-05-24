@@ -1,0 +1,16 @@
+.git/
+.github/
+.claude/
+.cursor/
+.superpowers/
+.tmp-gcloud/
+.DS_Store
+.env*
+node_modules/
+__pycache__/
+
+docs/
+test/
+*.log
+*.md
+repo_agent_cloud.py

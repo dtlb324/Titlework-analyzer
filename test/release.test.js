@@ -1,0 +1,204 @@
+import { readFileSync } from 'fs';
+import { request } from 'http';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+import { createServer } from '../server.js';
+import { createWorkerHealthServer } from '../worker.js';
+import { getRuntimeInfo } from '../api/_lib/runtime-info.js';
+import {
+  compareServiceParity,
+  extractEnvNames,
+  extractImageDigest,
+  validateRequiredEnv,
+  validateTagVersion,
+} from '../scripts/verify-release.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, '..');
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function requestServer(server, path = '/healthz') {
+  return new Promise((resolve, reject) => {
+    const req = request({
+      host: '127.0.0.1',
+      port: server.address().port,
+      path,
+    }, res => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { text += chunk; });
+      res.on('end', () => {
+        resolve({ statusCode: res.statusCode, body: JSON.parse(text) });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function withEnv(env, fn) {
+  const previous = {};
+  for (const key of Object.keys(env)) {
+    previous[key] = process.env[key];
+    process.env[key] = env[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const key of Object.keys(env)) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+}
+
+const tests = [];
+function test(name, fn) {
+  tests.push({ name, fn });
+}
+
+test('runtime info reports release metadata from the environment with package fallback', () => withEnv({
+  RELEASE_VERSION: 'v2.3.1',
+  GIT_SHA: 'abc1234',
+  IMAGE_DIGEST: 'sha256:abc',
+  K_REVISION: 'titlework-analyzer-api-00042-xzy',
+}, () => {
+  const info = getRuntimeInfo();
+  assert(info.version === 'v2.3.1', `Expected env release version, got ${info.version}`);
+  assert(info.packageVersion === '2.3.0', `Expected package fallback version, got ${info.packageVersion}`);
+  assert(info.gitSha === 'abc1234', `Expected git sha, got ${info.gitSha}`);
+  assert(info.imageDigest === 'sha256:abc', `Expected image digest, got ${info.imageDigest}`);
+  assert(info.revision === 'titlework-analyzer-api-00042-xzy', `Expected revision, got ${info.revision}`);
+}));
+
+test('API and worker health responses include release metadata', async () => {
+  await withEnv({
+    RELEASE_VERSION: 'v2.3.1',
+    GIT_SHA: 'def5678',
+    IMAGE_DIGEST: 'sha256:def',
+    K_REVISION: 'titlework-analyzer-worker-00042-xzy',
+  }, async () => {
+    const api = createServer();
+    const worker = createWorkerHealthServer();
+    await Promise.all([
+      new Promise(resolve => api.listen(0, '127.0.0.1', resolve)),
+      new Promise(resolve => worker.listen(0, '127.0.0.1', resolve)),
+    ]);
+    try {
+      const apiHealth = await requestServer(api);
+      const workerHealth = await requestServer(worker);
+      assert(apiHealth.body.release.version === 'v2.3.1', 'Expected API release version in health response');
+      assert(apiHealth.body.release.gitSha === 'def5678', 'Expected API git sha in health response');
+      assert(workerHealth.body.release.imageDigest === 'sha256:def', 'Expected worker image digest in health response');
+      assert(workerHealth.body.release.revision === 'titlework-analyzer-worker-00042-xzy', 'Expected worker revision in health response');
+    } finally {
+      await Promise.all([
+        new Promise(resolve => api.close(resolve)),
+        new Promise(resolve => worker.close(resolve)),
+      ]);
+    }
+  });
+});
+
+test('release verification helpers enforce tag version, env, and image parity', () => {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert(validateTagVersion('v2.3.0', pkg.version).valid === true, 'Expected lowercase tag to match package version');
+  assert(validateTagVersion('V2.3.0', pkg.version).valid === false, 'Expected uppercase release tag to be rejected');
+  assert(validateTagVersion('v2.3.1', pkg.version).valid === false, 'Expected mismatched tag to be rejected');
+
+  const service = {
+    spec: {
+      template: {
+        spec: {
+          containers: [{
+            image: 'us-central1-docker.pkg.dev/p/titlework/app@sha256:abc',
+            env: [
+              { name: 'DATABASE_URL', valueFrom: { secretKeyRef: { name: 'db' } } },
+              { name: 'GCS_BUCKET', value: 'bucket' },
+              { name: 'ANTHROPIC_API_KEY', valueFrom: { secretKeyRef: { name: 'anthropic' } } },
+              { name: 'APP_PASSWORD', valueFrom: { secretKeyRef: { name: 'app-password' } } },
+            ],
+          }],
+        },
+      },
+    },
+    status: {
+      latestReadyRevisionName: 'svc-00001-abc',
+      imageDigest: 'us-central1-docker.pkg.dev/p/titlework/app@sha256:abc',
+    },
+  };
+
+  assert(extractImageDigest(service) === 'sha256:abc', 'Expected digest extraction from Cloud Run service metadata');
+  assert(extractEnvNames(service).has('DATABASE_URL'), 'Expected env name extraction from service template');
+  assert(validateRequiredEnv(service).missing.length === 0, 'Expected required env validation to pass');
+  const emptyPasswordService = structuredClone(service);
+  emptyPasswordService.spec.template.spec.containers[0].env = [
+    { name: 'DATABASE_URL', valueFrom: { secretKeyRef: { name: 'db' } } },
+    { name: 'GCS_BUCKET', value: 'bucket' },
+    { name: 'ANTHROPIC_API_KEY', valueFrom: { secretKeyRef: { name: 'anthropic' } } },
+    { name: 'APP_PASSWORD', value: '' },
+  ];
+  assert(validateRequiredEnv(emptyPasswordService).missing.includes('app password'), 'Expected empty APP_PASSWORD to fail required env validation');
+  assert(compareServiceParity(
+    { name: 'api', digest: 'sha256:abc', revision: 'api-00001' },
+    { name: 'worker', digest: 'sha256:abc', revision: 'worker-00001' },
+  ).valid === true, 'Expected matching service digests to pass parity validation');
+  assert(compareServiceParity(
+    { name: 'api', digest: 'sha256:abc', revision: 'api-00001' },
+    { name: 'worker', digest: 'sha256:def', revision: 'worker-00001' },
+  ).valid === false, 'Expected mismatched service digests to fail parity validation');
+});
+
+test('release workflows and image context encode immutable Cloud Run deployment policy', () => {
+  const testWorkflow = readFileSync(join(root, '.github/workflows/test.yml'), 'utf8');
+  assert(testWorkflow.includes('node-version: 22'), 'Expected CI to run tests on Node 22');
+  assert(testWorkflow.includes('docker build'), 'Expected CI workflow to exercise Docker build');
+
+  const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+  assert(releaseWorkflow.includes("- 'v*.*.*'"), 'Expected release trigger to use a GitHub glob that actually matches semver tags');
+  assert(!releaseWorkflow.includes('[0-9]+'), 'Expected semver validation in script, not an unsupported regex-like tag glob');
+  assert(releaseWorkflow.includes('id-token: write'), 'Expected release workflow to use OIDC auth');
+  assert(releaseWorkflow.includes('google-github-actions/auth'), 'Expected release workflow to authenticate to Google Cloud');
+  assert(releaseWorkflow.includes('--image "${IMAGE_DIGEST_REF}"'), 'Expected Cloud Run deploys to use an immutable digest image');
+  assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
+  assert(releaseWorkflow.includes('--json tagName,isLatest'), 'Expected workflow to enforce that the GitHub Release is marked Latest');
+  assert(releaseWorkflow.includes('verify-release.mjs'), 'Expected workflow to verify production before release creation');
+
+  const dockerignore = readFileSync(join(root, '.dockerignore'), 'utf8');
+  assert(dockerignore.includes('test/'), 'Expected tests to be excluded from production image context');
+  assert(dockerignore.includes('docs/'), 'Expected docs to be excluded from production image context');
+});
+
+test('release documentation describes automated deploy, verification, and rollback', () => {
+  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  assert(readme.includes('Push a lowercase `vX.Y.Z` tag'), 'Expected README to document tag-triggered releases');
+  assert(readme.includes('same immutable image digest'), 'Expected README to document API/worker digest parity');
+  assert(readme.includes('APP_PASSWORD` | Yes for production'), 'Expected README production password policy to match release verification');
+  assert(readme.includes('Rollback API and worker together'), 'Expected README to document paired rollback');
+  assert(readme.includes('GCS CORS'), 'Expected README to call out GCS CORS release verification');
+
+  const security = readFileSync(join(root, 'SECURITY.md'), 'utf8');
+  assert(security.includes('Cloud Run environment variables'), 'Expected SECURITY.md to describe Cloud Run secrets');
+  assert(!security.includes('Vercel environment variables'), 'Expected SECURITY.md to remove stale Vercel secret guidance');
+});
+
+let passed = 0;
+let failed = 0;
+
+for (const { name, fn } of tests) {
+  try {
+    await fn();
+    console.log(`✓ ${name}`);
+    passed++;
+  } catch (err) {
+    console.error(`✗ ${name}`);
+    console.error(`  ${err.message}`);
+    failed++;
+  }
+}
+
+console.log(`\n${passed} passed, ${failed} failed`);
+process.exit(failed > 0 ? 1 : 0);

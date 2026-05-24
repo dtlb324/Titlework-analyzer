@@ -32,7 +32,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | Name | Required | Notes |
 |------|----------|-------|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for abstraction, synthesis, and follow-ups. |
-| `APP_PASSWORD` | Recommended | Password gate for users. |
+| `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
 | `GCS_BUCKET` | Yes | Private bucket for uploaded source chunks and split PDFs. |
 | `ANALYZE_MAX_REQUEST_BYTES` | Optional | Default `20000000`. |
@@ -41,7 +41,12 @@ Set these on both Cloud Run services unless noted otherwise:
 | `WORKFLOW_BATCH_LIMIT` | Optional | Default `12`. |
 | `WORKFLOW_CONCURRENCY` | Optional | Default `4`. |
 | `WORKFLOW_BUDGET_MS` | Optional | Default `1200000` (20 min). |
+| `WORKFLOW_LEASE_MS` | Optional | Default is longer than the model upstream timeout. |
+| `WORKFLOW_STALE_LEASE_MS` | Optional | Default is longer than `WORKFLOW_LEASE_MS`. |
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Default `5000`. |
+| `RELEASE_VERSION` | Release workflow | Set automatically from the release tag. |
+| `GIT_SHA` | Release workflow | Set automatically from the deployed commit. |
+| `IMAGE_DIGEST` | Release workflow | Set automatically from the immutable container digest. |
 
 Use Neon's pooled connection string for Cloud Run. It keeps database cost low while the app still uses standard Postgres tables and SQL.
 
@@ -66,37 +71,61 @@ Run the worker locally in a second terminal:
 npm run start:worker
 ```
 
-## Deploy To Cloud Run
+## Release To Cloud Run
 
-Build and deploy the web/API service:
+Production releases are automated by `.github/workflows/release.yml`. Push a lowercase `vX.Y.Z` tag that exactly matches the `package.json` version:
 
 ```bash
-gcloud run deploy titlework-analyzer-api \
-  --source . \
-  --region us-central1 \
-  --service-account TITLEWORK_SERVICE_ACCOUNT \
-  --memory 1Gi \
-  --timeout 300 \
-  --allow-unauthenticated \
-  --set-env-vars GCS_BUCKET=YOUR_BUCKET
+git tag v2.3.1
+git push origin v2.3.1
 ```
 
-Deploy the worker from the same image but override the command:
+The release workflow runs tests on Node 22, builds one Docker image, pushes it to Artifact Registry, resolves the immutable image digest, deploys the worker first, then deploys the API from that same immutable image digest. The worker deploy uses `--min-instances=1`, `--concurrency=1`, `--no-cpu-throttling`, and a 3600 second timeout so long-running batch work is not starved while idle. The workflow creates or updates the GitHub Release only after production verification passes.
+
+Configure these GitHub repository variables before the first release:
+
+| Name | Purpose |
+|------|---------|
+| `GCP_PROJECT_ID` | Google Cloud project ID. |
+| `GCP_REGION` | Cloud Run and Artifact Registry region, usually `us-central1`. |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider for GitHub OIDC. |
+| `GCP_SERVICE_ACCOUNT` | Deploy service account used by GitHub Actions. |
+| `GCP_RUNTIME_SERVICE_ACCOUNT` | Optional runtime service account assigned to Cloud Run services. |
+| `GAR_REPOSITORY` | Artifact Registry Docker repository. |
+| `API_SERVICE` | API Cloud Run service name, usually `titlework-analyzer-api`. |
+| `WORKER_SERVICE` | Worker Cloud Run service name, usually `titlework-analyzer-worker`. |
+
+Secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
+
+### Release Verification
+
+After each release, verify:
+
+- API `/healthz` reports the expected `release.version`, `release.gitSha`, `release.imageDigest`, and Cloud Run revision.
+- API and worker latest ready revisions use the same immutable image digest.
+- Both services still have database, GCS, Anthropic, and app password configuration.
+- GCS CORS allows `PUT` uploads from the API service origin with the `content-type` header.
+- `gh release list --limit 3` marks the new version as `Latest`.
+
+### Rollback
+
+Rollback API and worker together. Either redeploy both services from the same previously verified image digest:
 
 ```bash
 gcloud run deploy titlework-analyzer-worker \
-  --source . \
+  --image PREVIOUS_IMAGE_DIGEST_REF \
   --region us-central1 \
-  --service-account TITLEWORK_SERVICE_ACCOUNT \
-  --memory 2Gi \
-  --timeout 3600 \
-  --no-allow-unauthenticated \
   --command npm \
   --args run,start:worker \
-  --set-env-vars GCS_BUCKET=YOUR_BUCKET
+  --no-allow-unauthenticated
+
+gcloud run deploy titlework-analyzer-api \
+  --image PREVIOUS_IMAGE_DIGEST_REF \
+  --region us-central1 \
+  --allow-unauthenticated
 ```
 
-Add secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` through Cloud Run environment variables or Secret Manager.
+Or shift both services to matching prior Cloud Run revisions. After rollback, confirm both latest ready revisions report the same image digest and release metadata. Database changes are forward-only unless a future migration system adds explicit reversible migrations.
 
 ## How Bulk Processing Works
 

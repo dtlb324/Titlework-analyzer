@@ -99,6 +99,7 @@ function createMemoryPhase5Store(initialState = {}) {
   const followups = []; // ordered
   let currentPlanIdByJob = new Map();
   let mergeClaimCalls = 0;
+  let lastMergeLeaseMs = null;
 
   function rollupJobStatusOnResult(jobId, status) {
     const job = jobs.get(jobId);
@@ -394,6 +395,7 @@ function createMemoryPhase5Store(initialState = {}) {
     },
     async claimSynthesisMerge(jobId, planId, options = {}) {
       mergeClaimCalls += 1;
+      lastMergeLeaseMs = options.leaseMs || 120_000;
       if (initialState.mergeClaimResult === false) return null;
       return {
         jobId,
@@ -404,6 +406,9 @@ function createMemoryPhase5Store(initialState = {}) {
     },
     __mergeClaimCalls() {
       return mergeClaimCalls;
+    },
+    __lastMergeLeaseMs() {
+      return lastMergeLeaseMs;
     },
     async appendFollowupMessage(jobId, payload) {
       const id = `flw_${followups.length + 1}`;
@@ -870,6 +875,22 @@ test('Multi-segment: 120 abstracts → segments + merge with checkpoints written
   assert(segments.length === 3, `Expected 3 segments stored, got ${segments.length}`);
   assert(segments.every(s => s.status === 'complete'), 'Expected all segments complete');
   assert(result.result?.status === 'complete', `Expected complete status, got ${result.result?.status}`);
+});
+
+test('Final merge claim lease exceeds upstream model timeout by default', async () => {
+  const abstracts = manyAbstracts(120);
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+    }
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
+
+  const defaultModelTimeoutMs = 240_000;
+  assert(store.__lastMergeLeaseMs() > defaultModelTimeoutMs, `Expected merge lease ${store.__lastMergeLeaseMs()} to exceed model timeout ${defaultModelTimeoutMs}`);
 });
 
 test('Final merge honors single-writer claim and skips merge when claim is unavailable', async () => {

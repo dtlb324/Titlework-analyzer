@@ -1,5 +1,6 @@
 import { createServer } from 'http';
 import { runWorkerLoop } from './api/_lib/cloud-run-worker.js';
+import { getRuntimeInfo } from './api/_lib/runtime-info.js';
 
 function closeServer(server) {
   return new Promise(resolve => {
@@ -14,7 +15,7 @@ function closeServer(server) {
 export function createWorkerHealthServer() {
   return createServer((req, res) => {
     if (req.url === '/healthz') {
-      const body = JSON.stringify({ ok: true, service: 'title-analyzer-worker' });
+      const body = JSON.stringify({ ok: true, service: 'title-analyzer-worker', release: getRuntimeInfo() });
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'content-length': Buffer.byteLength(body),

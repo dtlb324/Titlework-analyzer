@@ -29,6 +29,7 @@ const DEFAULT_REQUEST_OVERHEAD_BYTES = clampInt(process.env.REQUEST_OVERHEAD_BYT
 const DEFAULT_MAX_ATTEMPTS = clampInt(process.env.SYNTHESIS_MAX_ATTEMPTS, 3, 1, 10);
 const DEFAULT_FOLLOWUP_HISTORY_TURNS = clampInt(process.env.SYNTHESIS_FOLLOWUP_HISTORY_TURNS, 4, 0, 20);
 const DEFAULT_UPSTREAM_TIMEOUT_MS = clampInt(process.env.SYNTHESIS_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
+const DEFAULT_MERGE_LEASE_MS = clampInt(process.env.SYNTHESIS_MERGE_LEASE_MS || process.env.WORKFLOW_LEASE_MS, DEFAULT_UPSTREAM_TIMEOUT_MS + 60_000, 5_000, 600_000);
 const MAX_RETRY_WAIT_MS = 5 * 60_000;
 const MIN_FINAL_OPINION_CHARS = 500;
 const MIN_SEGMENT_SUMMARY_CHARS = 200;
@@ -909,7 +910,7 @@ export async function processSynthesisJob(jobId, options = {}) {
   let mergeClaimBlocked = false;
   async function claimFinalWriter() {
     if (!store.claimSynthesisMerge) return { workerId: null };
-    const claim = await store.claimSynthesisMerge(jobId, planId, { workerId: mergeWorkerId, leaseMs: options.mergeLeaseMs || 120_000 });
+    const claim = await store.claimSynthesisMerge(jobId, planId, { workerId: mergeWorkerId, leaseMs: options.mergeLeaseMs || DEFAULT_MERGE_LEASE_MS });
     if (!claim) {
       mergeClaimBlocked = true;
       return null;

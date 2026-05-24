@@ -40,13 +40,14 @@ The following are **in scope** for security reports:
 - Cross-site scripting (XSS)
 - Data exposure or leakage
 - Server-side vulnerabilities in the `/api/analyze` function
+- Cloud Run service, worker, or release configuration that could expose data or credentials
 
 The following are **out of scope:**
 
-- Vulnerabilities in third-party services (Anthropic API, Vercel infrastructure)
+- Vulnerabilities in third-party services (Anthropic API, Google Cloud, Neon)
 - Issues requiring physical access to a device
 - Social engineering attacks
 
 ## Important Notes
 
-This project uses the Anthropic API. API keys and access passwords are stored as Vercel environment variables and are never committed to this repository. If you believe an API key has been exposed, please also notify Anthropic at **security@anthropic.com** and revoke the key immediately at **console.anthropic.com/settings/keys**.
+This project uses the Anthropic API. API keys, database URLs, and access passwords are stored as Cloud Run environment variables or Secret Manager-backed Cloud Run environment variables and are never committed to this repository. If you believe an API key has been exposed, please also notify Anthropic at **security@anthropic.com** and revoke the key immediately at **console.anthropic.com/settings/keys**.

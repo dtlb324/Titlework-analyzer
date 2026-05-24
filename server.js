@@ -9,6 +9,7 @@ import analyzeHandler from './api/analyze.js';
 import jobsHandler from './api/jobs.js';
 import jobPathHandler from './api/jobs/[...path].js';
 import blobUploadHandler from './api/blob/upload.js';
+import { getRuntimeInfo } from './api/_lib/runtime-info.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, 'public');
@@ -69,7 +70,7 @@ export function createServer() {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     try {
       if (url.pathname === '/healthz') {
-        return sendJson(res, 200, { ok: true, service: 'title-analyzer' });
+        return sendJson(res, 200, { ok: true, service: 'title-analyzer', release: getRuntimeInfo() });
       }
       if (url.pathname === '/api/analyze') return await callApiHandler(analyzeHandler, req, res, url);
       if (url.pathname === '/api/jobs') return await callApiHandler(jobsHandler, req, res, url);

@@ -1,6 +1,13 @@
+import { readFileSync } from 'fs';
 import { request } from 'http';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { createWorkerHealthServer } from '../worker.js';
 import { runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-run-worker.js';
+import { getWorkflowConfig } from '../api/_lib/queue.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, '..');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -72,6 +79,19 @@ test('Cloud Run worker loop backs off after failed work instead of hot-looping',
 
   assert(result.iterations === 2, `Expected two iterations, got ${result.iterations}`);
   assert(sleeps === 2, `Expected backoff sleep after each failed work pass, got ${sleeps}`);
+});
+
+test('default worker leases exceed upstream model call timeout', () => {
+  const config = getWorkflowConfig();
+  const defaultModelTimeoutMs = 240_000;
+  assert(config.leaseMs > defaultModelTimeoutMs, `Expected lease ${config.leaseMs} to exceed model timeout ${defaultModelTimeoutMs}`);
+  assert(config.staleLeaseMs > config.leaseMs, `Expected stale lease ${config.staleLeaseMs} to exceed lease ${config.leaseMs}`);
+});
+
+test('synthesis runnable query skips jobs with an active final merge lease', () => {
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(jobsSource.includes('j.synthesis_merge_worker_id IS NULL'), 'Expected runnable synthesis query to allow jobs with no merge owner');
+  assert(jobsSource.includes('j.synthesis_merge_lease_expires_at <= now()'), 'Expected runnable synthesis query to wait for active merge leases to expire');
 });
 
 test('worker exposes an HTTP health server for Cloud Run service readiness', async () => {

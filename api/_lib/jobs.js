@@ -1835,12 +1835,19 @@ function createPostgresJobStore() {
             OR s.status = 'pending'
             OR (s.status = 'retry_wait' AND (s.retry_at IS NULL OR s.retry_at <= now()))
             OR (s.status = 'processing' AND (s.lease_expires_at IS NULL OR s.lease_expires_at <= now()))
-            OR NOT EXISTS (
-              SELECT 1
-              FROM synthesis_segments pending
-              WHERE pending.job_id = j.id
-                AND pending.plan_id = j.synthesis_plan_id
-                AND pending.status <> 'complete'
+            OR (
+              NOT EXISTS (
+                SELECT 1
+                FROM synthesis_segments pending
+                WHERE pending.job_id = j.id
+                  AND pending.plan_id = j.synthesis_plan_id
+                  AND pending.status <> 'complete'
+              )
+              AND (
+                j.synthesis_merge_worker_id IS NULL
+                OR j.synthesis_merge_lease_expires_at IS NULL
+                OR j.synthesis_merge_lease_expires_at <= now()
+              )
             )
           )
         ORDER BY j.id ASC

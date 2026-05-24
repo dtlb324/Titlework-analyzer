@@ -1,0 +1,167 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY }}
+  API_SERVICE: ${{ vars.API_SERVICE }}
+  WORKER_SERVICE: ${{ vars.WORKER_SERVICE }}
+  GCP_RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+
+jobs:
+  release:
+    name: Build, deploy, and verify release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release tag
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'fs';
+          import { validateTagVersion } from './scripts/verify-release.mjs';
+
+          const tag = process.env.GITHUB_REF_NAME;
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const result = validateTagVersion(tag, pkg.version);
+          if (!result.valid) {
+            console.error(result.error);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Run tests
+        run: npm test
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Artifact Registry Docker auth
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push release image
+        id: image
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/titlework-analyzer"
+          docker build \
+            --label "org.opencontainers.image.version=${GITHUB_REF_NAME}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE_URI}:${GITHUB_REF_NAME}" \
+            -t "${IMAGE_URI}:${GITHUB_SHA}" \
+            .
+          docker push "${IMAGE_URI}:${GITHUB_REF_NAME}"
+          docker push "${IMAGE_URI}:${GITHUB_SHA}"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE_URI}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}')"
+          IMAGE_DIGEST_REF="${IMAGE_URI}@${DIGEST}"
+          {
+            echo "image-uri=${IMAGE_URI}"
+            echo "image-digest=${DIGEST}"
+            echo "image-digest-ref=${IMAGE_DIGEST_REF}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Deploy worker from immutable image
+        env:
+          IMAGE_DIGEST_REF: ${{ steps.image.outputs.image-digest-ref }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          SERVICE_ACCOUNT_FLAGS=()
+          if [ -n "${GCP_RUNTIME_SERVICE_ACCOUNT}" ]; then
+            SERVICE_ACCOUNT_FLAGS=(--service-account "${GCP_RUNTIME_SERVICE_ACCOUNT}")
+          fi
+          RELEASE_LABEL="${GITHUB_REF_NAME//./-}"
+          gcloud run deploy "${WORKER_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --image "${IMAGE_DIGEST_REF}" \
+            --memory 2Gi \
+            --timeout 3600 \
+            --concurrency 1 \
+            --min-instances 1 \
+            --no-cpu-throttling \
+            --no-allow-unauthenticated \
+            --command npm \
+            --args run,start:worker \
+            --labels "managed-by=github-actions,release=${RELEASE_LABEL},git-sha=${GITHUB_SHA}" \
+            --update-env-vars "RELEASE_VERSION=${GITHUB_REF_NAME},GIT_SHA=${GITHUB_SHA},IMAGE_DIGEST=${IMAGE_DIGEST}" \
+            "${SERVICE_ACCOUNT_FLAGS[@]}"
+
+      - name: Deploy API from immutable image
+        env:
+          IMAGE_DIGEST_REF: ${{ steps.image.outputs.image-digest-ref }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          SERVICE_ACCOUNT_FLAGS=()
+          if [ -n "${GCP_RUNTIME_SERVICE_ACCOUNT}" ]; then
+            SERVICE_ACCOUNT_FLAGS=(--service-account "${GCP_RUNTIME_SERVICE_ACCOUNT}")
+          fi
+          RELEASE_LABEL="${GITHUB_REF_NAME//./-}"
+          gcloud run deploy "${API_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --image "${IMAGE_DIGEST_REF}" \
+            --memory 1Gi \
+            --timeout 300 \
+            --allow-unauthenticated \
+            --labels "managed-by=github-actions,release=${RELEASE_LABEL},git-sha=${GITHUB_SHA}" \
+            --update-env-vars "RELEASE_VERSION=${GITHUB_REF_NAME},GIT_SHA=${GITHUB_SHA},IMAGE_DIGEST=${IMAGE_DIGEST}" \
+            "${SERVICE_ACCOUNT_FLAGS[@]}"
+
+      - name: Verify production release
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}
+        run: |
+          API_URL="$(gcloud run services describe "${API_SERVICE}" --project "${GCP_PROJECT_ID}" --region "${GCP_REGION}" --format='value(status.url)')"
+          node scripts/verify-release.mjs \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --api-service "${API_SERVICE}" \
+            --worker-service "${WORKER_SERVICE}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --expected-digest "${IMAGE_DIGEST}" \
+            --api-url "${API_URL}"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --latest
+          else
+            gh release create "${GITHUB_REF_NAME}" --latest --generate-notes --target "${GITHUB_SHA}"
+          fi
+          gh release list --limit 3
+          IS_LATEST="$(gh release list --limit 10 --json tagName,isLatest --jq ".[] | select(.tagName == \"${GITHUB_REF_NAME}\") | .isLatest")"
+          if [ "${IS_LATEST}" != "true" ]; then
+            echo "Release ${GITHUB_REF_NAME} was not marked Latest." >&2
+            exit 1
+          fi
