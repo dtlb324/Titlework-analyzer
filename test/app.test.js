@@ -229,8 +229,19 @@ test('Phase 6: #view-job contains required job page subsections', () => {
 test('Phase 6: job header offers a clear start-new-job action', () => {
   assert(script.includes('id="jobStartNewBtn"'), 'Missing Start New Job button in job header');
   assert(script.includes('Start New Job'), 'Job header should label the new-job action clearly');
+  assert(script.includes('class="btn-secondary" id="jobStartNewBtn"'),
+    'Start New Job should use the smaller secondary button style');
   assert(script.includes("navigate('#/')") || script.includes('navigate("#/")'),
     'Start New Job action should navigate back to the home route');
+});
+
+test('Phase 6: completed job header downloads PDF instead of copying links', () => {
+  assert(script.includes('id="jobDownloadPdfBtn"'), 'Missing durable job Download PDF button');
+  assert(script.includes('Download PDF'), 'Job header should expose a PDF download action');
+  assert(script.includes("downloadPDF({ rootElement: document.getElementById('jobResults'), tractOverride: title })"),
+    'Durable job PDF download should be scoped to #jobResults and use the job title');
+  assert(!script.includes('id="jobCopyLinkBtn"'), 'Job header should not expose Copy link');
+  assert(!script.includes('navigator.clipboard?.writeText(link)'), 'Job header should not wire clipboard copy');
 });
 
 test('Phase 6: status badge CSS classes exist', () => {

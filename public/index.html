@@ -1066,7 +1066,7 @@ function renderJobHeader(job) {
   if (!el || !job) return;
   const info = statusInfo(job.status);
   const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
-  const link = getJobLink(job.id);
+  const hasDownloadableResult = job.status === 'complete' || job.status === 'partial_failed';
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.6rem">
       <div>
@@ -1078,25 +1078,21 @@ function renderJobHeader(job) {
       </div>
       <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
         <span class="status-badge ${info.badge}">${esc(info.label)}</span>
-        <button class="btn-primary" id="jobStartNewBtn" type="button">Start New Job</button>
-        <button class="btn-secondary" id="jobCopyLinkBtn" type="button">Copy link</button>
+        ${hasDownloadableResult ? '<button class="btn-primary" id="jobDownloadPdfBtn" type="button">Download PDF</button>' : ''}
+        <button class="btn-secondary" id="jobStartNewBtn" type="button">Start New Job</button>
       </div>
     </div>`;
+  const downloadBtn = document.getElementById('jobDownloadPdfBtn');
+  if (downloadBtn) {
+    downloadBtn.addEventListener('click', () => {
+      downloadPDF({ rootElement: document.getElementById('jobResults'), tractOverride: title });
+    });
+  }
   const startNewBtn = document.getElementById('jobStartNewBtn');
   if (startNewBtn) {
     startNewBtn.addEventListener('click', () => {
       resetHomeForNewJob();
       navigate('#/');
-    });
-  }
-  const copyBtn = document.getElementById('jobCopyLinkBtn');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', () => {
-      try {
-        navigator.clipboard?.writeText(link);
-        copyBtn.textContent = 'Copied';
-        setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1200);
-      } catch { /* ignore */ }
     });
   }
 }
@@ -3438,9 +3434,10 @@ async function analyzeAdditional() {
   }
 }
 
-function downloadPDF() {
+function downloadPDF(options = {}) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
+  const rootElement = options.rootElement || document;
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -3477,8 +3474,8 @@ function downloadPDF() {
   doc.text('AI-ASSISTED ANALYSIS — NOT A LEGAL OPINION. Verify all facts against source documents before any action.', margin + 3, y + 6.5);
   y += 16;
 
-  // Get analysis content from the page
-  const analysisCards = document.querySelectorAll('.analysis-card');
+  // Get analysis content from the selected result area.
+  const analysisCards = rootElement.querySelectorAll('.analysis-card');
   if (analysisCards.length === 0) {
     alert('No analysis to download yet.');
     return;
@@ -3618,7 +3615,9 @@ function downloadPDF() {
 
   // Generate filename with date
   const date = new Date().toISOString().slice(0, 10);
-  const tract = document.getElementById('tractDescription')?.value?.trim();
+  const tract = typeof options.tractOverride === 'string'
+    ? options.tractOverride.trim()
+    : document.getElementById('tractDescription')?.value?.trim();
   const filename = tract
     ? 'Title-Analysis-' + tract.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30) + '-' + date + '.pdf'
     : 'Title-Analysis-' + date + '.pdf';
