@@ -85,10 +85,11 @@
   .status-badge--failed { background:#fce8e0; color:#d97755; }
   .status-badge--partial { background:#fff1d6; color:#a06b13; }
   .status-badge--canceled { background:#ece3d4; color:#8a6f4a; }
-  .job-stepper { display:flex; gap:.6rem; align-items:center; margin:.6rem 0 1rem; font-size:.85rem; color:#8a6f4a; }
-  .job-stepper .step { padding:.18rem .55rem; border-radius:6px; background:#f3e7d8; }
-  .job-stepper .step.active { background:#fce8d4; color:#b8631e; font-weight:600; }
-  .job-stepper .step.done { background:#dfeadb; color:#4a7c4e; }
+  .job-stepper { display:flex; gap:.6rem; align-items:center; margin:.6rem 0 1rem; font-size:.85rem; color:#6b5840; }
+  .job-stepper .step { display:inline-flex; align-items:center; gap:.35rem; padding:.2rem .6rem; border:1px solid #d7c7a8; border-radius:6px; background:#f3e7d8; color:#6b5840; }
+  .job-stepper .step.active { background:#fffaf0; color:#4a3c28; font-weight:600; box-shadow: inset 0 0 0 1px #6b5840; }
+  .job-stepper .step.active::before { content:""; width:.38rem; height:.38rem; border-radius:999px; background:currentColor; }
+  .job-stepper .step.done { background:#eee5d4; color:#6b5840; }
   .job-stepper .sep { color:#c8b291; }
   .job-actions { display:flex; flex-wrap:wrap; gap:.55rem; margin-top:.8rem; }
   .job-actions button[disabled] { opacity:.55; cursor:not-allowed; }
