@@ -1078,9 +1078,17 @@ function renderJobHeader(job) {
       </div>
       <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
         <span class="status-badge ${info.badge}">${esc(info.label)}</span>
+        <button class="btn-primary" id="jobStartNewBtn" type="button">Start New Job</button>
         <button class="btn-secondary" id="jobCopyLinkBtn" type="button">Copy link</button>
       </div>
     </div>`;
+  const startNewBtn = document.getElementById('jobStartNewBtn');
+  if (startNewBtn) {
+    startNewBtn.addEventListener('click', () => {
+      resetHomeForNewJob();
+      navigate('#/');
+    });
+  }
   const copyBtn = document.getElementById('jobCopyLinkBtn');
   if (copyBtn) {
     copyBtn.addEventListener('click', () => {
@@ -1091,6 +1099,47 @@ function renderJobHeader(job) {
       } catch { /* ignore */ }
     });
   }
+}
+
+function resetHomeForNewJob() {
+  stopJobPoller();
+  clearProgressTimer();
+  files.forEach(freeFileMemory);
+  files = [];
+  additionalFiles = [];
+  documentAbstracts = [];
+  conversationHistory = [];
+  activeJobId = null;
+  activeJobCompletedDocuments = 0;
+  jobPatchQueue = Promise.resolve();
+  const storage = getStorage();
+  try { storage?.removeItem(getJobStorageKey()); } catch { /* ignore */ }
+
+  const idsToClear = ['fileList', 'fileList2', 'results', 'progressList', 'jobMeta'];
+  idsToClear.forEach(id => {
+    const node = document.getElementById(id);
+    if (node) node.innerHTML = '';
+  });
+  const tract = document.getElementById('tractDescription');
+  const context = document.getElementById('contextNotes');
+  const fileInput = document.getElementById('fileInput');
+  const fileInput2 = document.getElementById('fileInput2');
+  if (tract) tract.value = '';
+  if (context) context.value = '';
+  if (fileInput) fileInput.value = '';
+  if (fileInput2) fileInput2.value = '';
+  clearError();
+
+  const upload = document.getElementById('uploadSection');
+  const progress = document.getElementById('progressSection');
+  const followup = document.getElementById('followupSection');
+  const addDocs = document.getElementById('addDocsSection');
+  const analyzeBtn = document.getElementById('analyzeBtn');
+  if (upload) upload.style.display = 'block';
+  if (progress) progress.style.display = 'none';
+  if (followup) followup.style.display = 'none';
+  if (addDocs) addDocs.style.display = 'none';
+  if (analyzeBtn) analyzeBtn.disabled = true;
 }
 
 function derivedProgressPercent(job) {

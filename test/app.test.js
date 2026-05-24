@@ -226,6 +226,13 @@ test('Phase 6: #view-job contains required job page subsections', () => {
   assert(indexHtml.includes('id="jobResults"'), 'Missing #jobResults');
 });
 
+test('Phase 6: job header offers a clear start-new-job action', () => {
+  assert(script.includes('id="jobStartNewBtn"'), 'Missing Start New Job button in job header');
+  assert(script.includes('Start New Job'), 'Job header should label the new-job action clearly');
+  assert(script.includes("navigate('#/')") || script.includes('navigate("#/")'),
+    'Start New Job action should navigate back to the home route');
+});
+
 test('Phase 6: status badge CSS classes exist', () => {
   assert(indexHtml.includes('.status-badge'), 'Missing .status-badge style');
   assert(indexHtml.includes('.status-badge--complete'), 'Missing complete badge style');
