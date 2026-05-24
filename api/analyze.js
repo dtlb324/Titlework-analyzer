@@ -182,25 +182,8 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: validation.reason, requestId });
   }
 
-  if (validation.isPing) {
-    return res.status(200).json({ ok: true });
-  }
-
   cleanupRateLimitMap();
   const rateEntry = getRateLimitEntry(ip);
-
-  rateEntry.count++;
-  if (rateEntry.count > RATE_LIMIT_MAX_REQUESTS) {
-    res.setHeader('Retry-After', '60');
-    logRequestEvent('api_reject', { requestId, status: 429, reason: 'rate_limit', ip, latencyMs: Date.now() - startedAt });
-    return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.', requestId });
-  }
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    logRequestEvent('api_error', { requestId, status: 500, reason: 'missing_api_key', latencyMs: Date.now() - startedAt });
-    return res.status(500).json({ error: 'API key not configured on server.', requestId });
-  }
 
   const requiredPassword = process.env.APP_PASSWORD;
   if (requiredPassword) {
@@ -216,6 +199,23 @@ export default async function handler(req, res) {
       logRequestEvent('api_reject', { requestId, status: 401, reason: 'invalid_password', ip, latencyMs: Date.now() - startedAt });
       return res.status(401).json({ error: 'Invalid password.', requestId });
     }
+  }
+
+  if (validation.isPing) {
+    return res.status(200).json({ ok: true });
+  }
+
+  rateEntry.count++;
+  if (rateEntry.count > RATE_LIMIT_MAX_REQUESTS) {
+    res.setHeader('Retry-After', '60');
+    logRequestEvent('api_reject', { requestId, status: 429, reason: 'rate_limit', ip, latencyMs: Date.now() - startedAt });
+    return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.', requestId });
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    logRequestEvent('api_error', { requestId, status: 500, reason: 'missing_api_key', latencyMs: Date.now() - startedAt });
+    return res.status(500).json({ error: 'API key not configured on server.', requestId });
   }
 
   const safeBody = {

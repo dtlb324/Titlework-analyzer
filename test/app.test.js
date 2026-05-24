@@ -95,6 +95,20 @@ test('API ping works without API key (health check)', async () => {
   assert(res.body?.ok === true, 'Ping body should be { ok: true }');
 });
 
+test('API ping validates APP_PASSWORD when password gate is enabled', async () => {
+  const prevPassword = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'secret-test-password';
+  const missing = mockRes();
+  await handler(mockReq({ ping: true }), missing);
+  const valid = mockRes();
+  await handler(mockReq({ ping: true }, { 'x-app-password': 'secret-test-password' }), valid);
+  if (prevPassword) process.env.APP_PASSWORD = prevPassword;
+  else delete process.env.APP_PASSWORD;
+
+  assert(missing.statusCode === 401, `Expected missing ping password to return 401, got ${missing.statusCode}`);
+  assert(valid.statusCode === 200, `Expected valid ping password to return 200, got ${valid.statusCode}`);
+});
+
 test('API rejects unknown model', async () => {
   const prev = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
