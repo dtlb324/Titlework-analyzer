@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { abstractionApiKeyError, invokeModel, sanitizeModelClientError } from './model-client.js';
+import { resolvePdfTextDelivery } from './pdf-text.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
@@ -16,7 +17,7 @@ export function resolveAbstractModel() {
 }
 
 const ABSTRACT_MODEL = resolveAbstractModel();
-const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 3000, 512, 4096);
+const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 2000, 512, 4096);
 const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'claude-sonnet-4-6';
 const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
 const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
@@ -141,7 +142,7 @@ function chunkDisplayName(chunk) {
   return chunk.originalFilename || chunk.id;
 }
 
-export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex = 0) {
+export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex = 0, delivery = null) {
   const bytes = normalizeBytes(payloadBytes);
   const docNum = sequenceIndex + 1;
   const name = chunkDisplayName(chunk);
@@ -155,6 +156,8 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
   if (isCsvChunk(chunk)) {
     const csvText = bytes.toString('utf8');
     textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
+  } else if (isPdfChunk(chunk) && delivery?.mode === 'text' && delivery.extractedText) {
+    textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES and write ILLEGIBLE - VERIFY MANUALLY where needed.`;
   } else if (isPdfChunk(chunk)) {
     content.push({
       type: 'document',
@@ -179,6 +182,86 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
 
   content.push({ type: 'text', text: textPrompt });
   return [{ role: 'user', content }];
+}
+
+/**
+ * Build one user message abstracting multiple chunks (server/browser batch path).
+ * Each item: { chunk, payloadBytes, delivery?, sequenceIndex? }
+ */
+export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
+  const content = [];
+  const labels = items.map((item, index) => {
+    const docNum = globalStartIdx + index + 1;
+    return `Document #${docNum} (${chunkDisplayName(item.chunk)})`;
+  });
+  let textPrompt = `Abstract each of the following documents in order: ${labels.join(', ')}. Label each section clearly as DOCUMENT #${globalStartIdx + 1}:, DOCUMENT #${globalStartIdx + 2}:, etc. Extract every relevant fact. Do not guess at anything illegible.`;
+  if (items.some(item => item.chunk.splitFrom || (item.chunk.pageStart && item.chunk.pageEnd))) {
+    textPrompt += ' Some files are page ranges from a larger PDF. Abstract each part fully and note the source document/page range.';
+  }
+
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    const docNum = globalStartIdx + index + 1;
+    const name = chunkDisplayName(item.chunk);
+    const bytes = normalizeBytes(item.payloadBytes);
+    const delivery = item.delivery || null;
+    if (isCsvChunk(item.chunk)) {
+      const csvText = bytes.toString('utf8');
+      textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
+    } else if (isPdfChunk(item.chunk) && delivery?.mode === 'text' && delivery.extractedText) {
+      textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES.`;
+    } else if (isPdfChunk(item.chunk)) {
+      content.push({
+        type: 'document',
+        source: {
+          type: 'base64',
+          media_type: 'application/pdf',
+          data: bytes.toString('base64'),
+        },
+      });
+    } else if (isImageChunk(item.chunk)) {
+      content.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: item.chunk.mediaType,
+          data: bytes.toString('base64'),
+        },
+      });
+    } else {
+      throw new Error(`Unsupported chunk media type: ${item.chunk.mediaType || 'unknown'}`);
+    }
+  }
+
+  content.push({ type: 'text', text: textPrompt });
+  return [{ role: 'user', content }];
+}
+
+export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
+  const trimmed = String(result || '').trim();
+  let unlabeledFallbackUsed = false;
+  return items.map((item, index) => {
+    const docNum = globalStartIdx + index + 1;
+    const nextDocNum = docNum + 1;
+    const regex = new RegExp(`DOCUMENT\\s*#${docNum}\\s*:?([\\s\\S]*?)(?=DOCUMENT\\s*#${nextDocNum}\\s*:|$)`, 'i');
+    const match = trimmed.match(regex);
+    let abstractText;
+    if (match) {
+      abstractText = match[1].trim();
+    } else if (items.length === 1) {
+      abstractText = trimmed;
+    } else if (!unlabeledFallbackUsed) {
+      abstractText = trimmed;
+      unlabeledFallbackUsed = true;
+    } else {
+      abstractText = '';
+    }
+    return {
+      chunk: item.chunk,
+      abstractText,
+      sequenceIndex: globalStartIdx + index,
+    };
+  });
 }
 
 export function validateAbstractPersistenceInput(input) {
@@ -293,12 +376,116 @@ async function defaultModelClient(request) {
   }
 }
 
-function getBlobLoader(options) {
+export function getBlobLoader(options) {
   return options.blobLoader || globalThis.__TITLE_ANALYZER_BLOB_LOADER__ || defaultBlobLoader;
 }
 
 function getModelClient(options) {
   return options.modelClient || globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ || defaultModelClient;
+}
+
+export async function resolveChunkDelivery(chunk, payloadBytes) {
+  if (isPdfChunk(chunk)) {
+    return await resolvePdfTextDelivery(payloadBytes);
+  }
+  return { mode: 'visual' };
+}
+
+export async function runModelAbstraction({
+  messages,
+  model,
+  maxTokens,
+  payloadBytes,
+  escalationModel = ABSTRACT_ESCALATION_MODEL,
+  escalationMaxTokens = ABSTRACT_ESCALATION_MAX_TOKENS,
+  options = {},
+}) {
+  const modelClient = getModelClient(options);
+  let response = await modelClient({
+    model,
+    maxTokens,
+    system: ABSTRACTION_PROMPT,
+    messages,
+    payloadBytes,
+  });
+  let usage = extractUsage(response.usage);
+  const escalationEnabled = options.escalationEnabled !== false
+    && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
+    && escalationModel
+    && escalationModel !== model;
+  let escalated = false;
+  if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
+    try {
+      const escalatedResponse = await modelClient({
+        model: escalationModel,
+        maxTokens: escalationMaxTokens,
+        system: ABSTRACTION_PROMPT,
+        messages,
+        payloadBytes,
+        escalation: true,
+      });
+      usage = addUsage(usage, extractUsage(escalatedResponse.usage));
+      response = escalatedResponse;
+      escalated = true;
+    } catch (_) {
+      // Keep initial Flash abstract when escalation fails.
+    }
+  }
+  return {
+    text: response.text || '',
+    model: response.model || model,
+    usage,
+    escalated,
+  };
+}
+
+export async function persistCompletedAbstract({
+  store,
+  chunk,
+  workerId,
+  sequenceIndex,
+  abstractText,
+  modelUsed,
+  payloadBytes,
+  usage,
+  latencyMs,
+  attemptCount,
+}) {
+  const record = {
+    jobId: chunk.jobId,
+    documentId: chunk.documentId,
+    chunkId: chunk.id,
+    abstractText: stripDocumentLabel(abstractText, sequenceIndex + 1),
+    modelUsed,
+    payloadBytes,
+    latencyMs,
+    inputTokens: usage?.inputTokens ?? null,
+    outputTokens: usage?.outputTokens ?? null,
+    status: 'completed',
+    attemptCount,
+    workerId,
+  };
+  const validation = validateAbstractPersistenceInput(record);
+  if (!validation.valid) {
+    const error = new Error(validation.reason);
+    error.status = 500;
+    throw error;
+  }
+  const latestChunk = store.getChunk
+    ? await store.getChunk(chunk.jobId, chunk.id)
+    : chunk;
+  if (
+    !latestChunk
+    || latestChunk.abstractionStatus !== 'processing'
+    || (latestChunk.abstractionWorkerId && latestChunk.abstractionWorkerId !== workerId)
+  ) {
+    return { status: 'stale', chunkId: chunk.id };
+  }
+  const saved = await store.saveDocumentAbstract(record);
+  if (!saved) {
+    return { status: 'stale', chunkId: chunk.id };
+  }
+  return { status: 'completed', chunkId: chunk.id, abstract: record };
 }
 
 async function defaultBlobWriter(parentChunk, childName, bytes) {
@@ -337,7 +524,7 @@ export function shouldEscalateAbstract(text, usage = {}, maxTokens = ABSTRACT_MA
   return Number.isFinite(outputTokens) && maxTokens > 0 && outputTokens >= Math.floor(maxTokens * 0.9);
 }
 
-function stripDocumentLabel(text, docNum) {
+export function stripDocumentLabel(text, docNum) {
   const value = String(text || '').trim();
   const regex = new RegExp(`^DOCUMENT\\s*#${docNum}\\s*:?\\s*`, 'i');
   return value.replace(regex, '').trim() || value;
@@ -538,116 +725,56 @@ export async function processChunkAbstraction(chunk, options = {}) {
       loadedMediaType: payload.mediaType || processingChunk.mediaType || null,
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
-    const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex);
+    const delivery = await resolveChunkDelivery(processingChunk, payload.bytes);
+    const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex, delivery);
     const payloadBytes = estimateRequestBytes(model, maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
       const error = new Error(`Abstraction request too large (${(payloadBytes / 1024 / 1024).toFixed(1)} MB).`);
       error.status = 413;
       throw error;
     }
-    const modelClient = getModelClient(options);
-    logChunkStage('model_start', processingChunk, { workerId, attemptCount, model, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
-    let response = await modelClient({
+    logChunkStage('model_start', processingChunk, {
+      workerId,
+      attemptCount,
+      model,
+      payloadBytes,
+      deliveryMode: delivery.mode,
+      elapsedMs: Date.now() - startedAt,
+    }, stageLoggingEnabled);
+    const modelResult = await runModelAbstraction({
+      messages,
       model,
       maxTokens,
-      system: ABSTRACTION_PROMPT,
-      messages,
       payloadBytes,
-      chunk: processingChunk,
+      escalationModel: options.escalationModel || ABSTRACT_ESCALATION_MODEL,
+      escalationMaxTokens: options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS,
+      options,
     });
     logChunkStage('model_response', processingChunk, {
       workerId,
       attemptCount,
-      modelUsed: response.model || model,
+      modelUsed: modelResult.model,
       payloadBytes,
+      deliveryMode: delivery.mode,
+      escalated: modelResult.escalated,
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
-    let usage = extractUsage(response.usage);
-    const escalationModel = options.escalationModel || ABSTRACT_ESCALATION_MODEL;
-    const escalationMaxTokens = options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS;
-    const escalationEnabled = options.escalationEnabled !== false
-      && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
-      && escalationModel
-      && escalationModel !== model;
-    if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
-      logChunkStage('model_escalation_start', processingChunk, {
-        workerId,
-        attemptCount,
-        model: escalationModel,
-        initialModel: response.model || model,
-        payloadBytes,
-        elapsedMs: Date.now() - startedAt,
-      }, stageLoggingEnabled);
-      try {
-        const escalatedResponse = await modelClient({
-          model: escalationModel,
-          maxTokens: escalationMaxTokens,
-          system: ABSTRACTION_PROMPT,
-          messages,
-          payloadBytes,
-          chunk: processingChunk,
-          escalation: true,
-          initialModel: response.model || model,
-        });
-        const escalatedUsage = extractUsage(escalatedResponse.usage);
-        usage = addUsage(usage, escalatedUsage);
-        response = escalatedResponse;
-        logChunkStage('model_escalation_response', processingChunk, {
-          workerId,
-          attemptCount,
-          modelUsed: response.model || escalationModel,
-          payloadBytes,
-          elapsedMs: Date.now() - startedAt,
-        }, stageLoggingEnabled);
-      } catch (err) {
-        logChunkStage('model_escalation_failed', processingChunk, {
-          workerId,
-          attemptCount,
-          model: escalationModel,
-          errorType: classifyError(err),
-          errorMessage: sanitizeErrorMessage(err),
-          elapsedMs: Date.now() - startedAt,
-        }, stageLoggingEnabled);
-      }
-    }
-    const record = {
-      jobId: processingChunk.jobId,
-      documentId: processingChunk.documentId,
-      chunkId: processingChunk.id,
-      abstractText: stripDocumentLabel(response.text, sequenceIndex + 1),
-      modelUsed: response.model || model,
-      payloadBytes,
-      latencyMs: Date.now() - startedAt,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      status: 'completed',
-      attemptCount,
+    const saved = await persistCompletedAbstract({
+      store,
+      chunk: processingChunk,
       workerId,
-    };
-    const validation = validateAbstractPersistenceInput(record);
-    if (!validation.valid) {
-      const error = new Error(validation.reason);
-      error.status = 500;
-      throw error;
+      sequenceIndex,
+      abstractText: modelResult.text,
+      modelUsed: modelResult.model,
+      payloadBytes,
+      usage: modelResult.usage,
+      latencyMs: Date.now() - startedAt,
+      attemptCount,
+    });
+    if (saved.status === 'completed') {
+      logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
     }
-    const latestChunk = store.getChunk
-      ? await store.getChunk(processingChunk.jobId, processingChunk.id)
-      : processingChunk;
-    if (
-      !latestChunk
-      || latestChunk.abstractionStatus !== 'processing'
-      || (latestChunk.abstractionWorkerId && latestChunk.abstractionWorkerId !== workerId)
-    ) {
-      logChunkStage('save_stale', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
-      return { status: 'stale', chunkId: processingChunk.id };
-    }
-    const saved = await store.saveDocumentAbstract(record);
-    if (!saved) {
-      logChunkStage('save_stale', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
-      return { status: 'stale', chunkId: processingChunk.id };
-    }
-    logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
-    return { status: 'completed', chunkId: processingChunk.id, abstract: record };
+    return saved;
   } catch (err) {
     const errorType = classifyError(err);
     logChunkStage('error', processingChunk, {

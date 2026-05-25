@@ -54,6 +54,13 @@ Set these on both Cloud Run services unless noted otherwise:
 | `SYNTHESIS_MERGE_LEASE_MS` | Optional | Defaults longer than synthesis upstream timeout. |
 | `SYNTHESIS_STALE_LEASE_MS` | Optional | Defaults longer than synthesis merge lease. |
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Default `5000`. |
+| `ABSTRACTION_PDF_TEXT_FIRST` | Optional | Default `true`. Use extracted PDF text when quality checks pass (lower token cost). |
+| `ABSTRACTION_BATCH_ENABLED` | Optional | Default `true`. Batch up to 8 small chunks per abstraction API call on the worker. |
+| `ABSTRACTION_BATCH_MAX_DOCS` | Optional | Default `8`. Max documents per server abstraction batch. |
+| `ABSTRACT_MAX_TOKENS` | Optional | Default `2000` (was 3000). |
+| `SYNTHESIS_MAX_TOKENS` | Optional | Default `6000` (was 8000). |
+| `ABSTRACTION_ESCALATION_ENABLED` | Optional | Default `true`. Set `false` to skip Sonnet re-reads on low-confidence abstracts. |
+| `OPUS_AUDIT_ENABLED` | Optional | Default off. Set `true` only when you want an extra Opus audit pass. |
 | `RELEASE_VERSION` | Release workflow | Set automatically from the release tag. |
 | `GIT_SHA` | Release workflow | Set automatically from the deployed commit. |
 | `IMAGE_DIGEST` | Release workflow | Set automatically from the immutable container digest. |
@@ -161,13 +168,14 @@ Browser
 Cloud Run worker
   -> claims ready chunk/segment rows from Neon Postgres
   -> reads source bytes from GCS
-  -> calls Anthropic
+  -> calls Gemini 2.5 Flash (abstraction + partial synthesis segments)
+  -> calls Claude Sonnet (final title opinion, follow-ups, optional escalation/audit)
   -> stores abstracts, synthesis segments, and final result in Postgres
 ```
 
-Anthropic calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
+Model calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
 
-The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
+The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **8 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
 
 ## Features
 
@@ -232,4 +240,28 @@ Lower `WORKFLOW_CONCURRENCY`, lower `WORKFLOW_BATCH_LIMIT`, or raise provider ra
 
 ## Cost Notes
 
-Cloud Run and GCS are billed by Google Cloud usage, while Neon can start on its free tier. Anthropic API usage is billed separately through Anthropic. API cost scales with document count, page count, scan resolution, and title complexity.
+Cloud Run and GCS are billed by Google Cloud usage, while Neon can start on its free tier. **Gemini** (abstraction and partial synthesis) and **Anthropic** (final opinion, follow-ups, optional escalation) are billed separately by each provider. API cost scales with document count, page count, scan resolution, and title complexity.
+
+### Typical 300-document job (no PDF splits)
+
+Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthesis segments for bulk chunking + 1 final Sonnet merge). App `/api/*` polling and GCS uploads are separate from token cost.
+
+| Stage | Model | Role |
+|-------|--------|------|
+| Abstraction | `gemini-2.5-flash` | One call per chunk (or fewer with worker batching) |
+| Partial synthesis | `gemini-2.5-flash` | Segment summaries before merge |
+| Final opinion | `claude-sonnet-4-6` | Single merge (and follow-ups) |
+
+**Paid Gemini 2.5 Flash** (indicative): ~$0.30/MTok input, ~$2.50/MTok output. **Sonnet 4.6** remains the dominant cost for the final merge on large runs. A full 300-doc run is typically on the order of **~$2–4** in model tokens on the Gemini + Sonnet stack (varies with page count, scans vs text PDFs, and output length)—well below the old Haiku-heavy estimate (~$6–7) before the Gemini migration.
+
+### Optimizations in this branch
+
+| Knob | Effect |
+|------|--------|
+| `ABSTRACTION_PDF_TEXT_FIRST=true` (default) | Largest savings on text-native PDFs: sends extracted text instead of visual PDF blocks |
+| `ABSTRACTION_BATCH_ENABLED=true` | Fewer abstraction **calls** (up to 8 small chunks per request); modest token savings |
+| `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts |
+| `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash) |
+| `OPUS_AUDIT_ENABLED` off (default) | Keeps Opus off the hot path |
+
+We do **not** use Anthropic or Gemini Batch API (24h window, no completion notification). Reliability and progress polling stay on the durable worker + Neon job model.
