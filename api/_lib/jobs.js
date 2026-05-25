@@ -2339,6 +2339,8 @@ function createPostgresJobStore() {
       const chunks = await this.listChunks(jobId);
       const invalidUploaded = chunks.filter(chunk => {
         if (chunk.uploadStatus !== 'uploaded') return false;
+        // Server-created split children use a parent-based key path; skip them.
+        if (chunk.splitParentChunkId) return false;
         return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(buildChunkBlobPrefix(jobId, chunk.id));
       });
       if (invalidUploaded.length) {

@@ -88,10 +88,6 @@ function isPdfChunk(chunk) {
   return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
 }
 
-function isSplittablePdfChunk(chunk) {
-  return isPdfChunk(chunk) && chunk.pageStart && chunk.pageEnd && chunk.pageEnd > chunk.pageStart;
-}
-
 function isPotentiallySplittablePdfChunk(chunk) {
   return isPdfChunk(chunk) && (!chunk.pageStart || !chunk.pageEnd || chunk.pageEnd > chunk.pageStart);
 }
@@ -379,7 +375,7 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
       pageEnd: range.pageEnd,
       splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
       fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
-      checksumSha256: parentChunk.checksumSha256,
+      checksumSha256: null,
       chunkOrder: parentChunk.chunkOrder,
       blobKey: blob.blobKey,
       blobUrl: blob.blobUrl,
@@ -392,26 +388,6 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
   const superseded = await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason, options.workerId);
   if (!superseded) return false;
   return true;
-}
-
-async function callWithRetries(fn, maxAttempts) {
-  let lastError;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const value = await fn(attempt);
-      return { value, attempts: attempt };
-    } catch (err) {
-      lastError = err;
-      const type = classifyError(err);
-      if (!['rate_limit', 'upstream_timeout', 'provider_error'].includes(type) || attempt >= maxAttempts) break;
-      const retryAfter = Number(err?.retryAfter || err?.retryAfterMs || 0);
-      const waitMs = retryAfter > 0
-        ? (retryAfter > 1000 ? retryAfter : retryAfter * 1000)
-        : Math.min(2000 * (2 ** (attempt - 1)), 60_000);
-      await sleep(waitMs);
-    }
-  }
-  throw lastError;
 }
 
 function computeRetryBackoff(attempt, retryAfter) {

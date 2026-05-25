@@ -3178,7 +3178,9 @@ async function analyze() {
           updateProgress(pct, label, items);
           safePatchAnalysisJob(job.id, {
             status: 'synthesizing',
-            completedDocuments: documentAbstracts.length,
+            // documentAbstracts may include split-child chunks; cap at file count
+            // to avoid exceeding totalDocuments in the job metadata validator.
+            completedDocuments: Math.min(documentAbstracts.length, files.length),
             failedDocuments: serverAbstractionFailedCount,
             currentPhase: label,
           });

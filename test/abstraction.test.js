@@ -1284,6 +1284,94 @@ test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', as
   delete process.env.WORKFLOW_DRIVER;
 });
 
+test('Bug fix: split child checksumSha256 is null, not inherited from parent', async () => {
+  const wholeChunk = {
+    ...makeChunk({ id: 'chk_cs_parent', sizeBytes: 1_200_000, checksumSha256: 'a'.repeat(64) }),
+    pageStart: null,
+    pageEnd: null,
+  };
+  const store = createMemoryPhase3Store([wholeChunk]);
+  const createdChildren = [];
+  store.createSplitChunk = async (jobId, documentId, input) => {
+    createdChildren.push(input);
+    const childId = `chk_cs_child_${createdChildren.length}`;
+    const child = {
+      ...makeChunk({ id: childId, pageStart: input.pageStart, pageEnd: input.pageEnd }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      blobKey: input.blobKey,
+      blobUrl: input.blobUrl,
+      splitParentChunkId: input.splitParentChunkId,
+    };
+    store.chunks.set(childId, child);
+    return child;
+  };
+  store.markChunkAbstractionSplitSuperseded = async (jobId, chunkId) => {
+    const chunk = store.chunks.get(chunkId);
+    store.chunks.set(chunkId, { ...chunk, abstractionStatus: 'split_superseded' });
+    return store.chunks.get(chunkId);
+  };
+
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  await processChunkAbstraction(wholeChunk, {
+    store,
+    blobLoader: async () => ({ bytes: pdfBytes, mediaType: 'application/pdf' }),
+    blobWriter: async (parent, name) => ({
+      blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      blobUrl: `gs://test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+    }),
+    modelClient: async () => { const e = new Error('timeout'); e.status = 504; throw e; },
+    maxAttempts: 1,
+  });
+
+  assert(createdChildren.length === 2, `Expected two split children, got ${createdChildren.length}`);
+  for (const child of createdChildren) {
+    assert(child.checksumSha256 === null, `Expected split child checksumSha256 to be null, got ${child.checksumSha256}`);
+  }
+});
+
+test('Bug fix: finalize-uploads passes when server-created split children are present', async () => {
+  // Simulate a job where finalize-uploads is called after server-side splitting has
+  // already produced children.  Split children carry a parent-based blobKey path that
+  // does not start with the child chunk's own ID — without the fix, the route handler
+  // would reject these chunks as "invalid storage metadata".
+  const parentChunk = makeChunk({ id: 'chk_parent_fin', blobKey: 'jobs/job_test_1/chunks/chk_parent_fin/deed.pdf', blobUrl: 'gs://bucket/jobs/job_test_1/chunks/chk_parent_fin/deed.pdf', abstractionStatus: 'split_superseded' });
+  const splitChild = {
+    ...makeChunk({ id: 'chk_split_child_fin' }),
+    // blobKey uses the parent-based suffix pattern produced by writeObject, NOT the child's own ID
+    blobKey: 'jobs/job_test_1/chunks/chk_parent_fin-split-123-abc/deed-pp-1-2.pdf',
+    blobUrl: 'gs://bucket/jobs/job_test_1/chunks/chk_parent_fin-split-123-abc/deed-pp-1-2.pdf',
+    splitParentChunkId: 'chk_parent_fin',
+    abstractionStatus: 'pending',
+    uploadStatus: 'uploaded',
+  };
+  const store = createMemoryPhase3Store([parentChunk, splitChild]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+
+  // Manually set the job to 'ready' so the finalize transition is valid
+  store.jobs.set('job_test_1', { ...store.jobs.get('job_test_1'), status: 'ready' });
+
+  // Provide a mock finalizeUploads that checks our fix
+  store.finalizeUploads = async (jobId) => {
+    const chunks = await store.listChunks(jobId);
+    const invalidUploaded = chunks.filter(chunk => {
+      if (chunk.uploadStatus !== 'uploaded') return false;
+      if (chunk.splitParentChunkId) return false; // fix: skip split children
+      return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(`jobs/${jobId}/chunks/${chunk.id}/`);
+    });
+    if (invalidUploaded.length) throw new Error('Invalid chunks: ' + invalidUploaded.map(c => c.id).join(', '));
+    return { ready: true, job: { ...store.jobs.get(jobId), status: 'ready' }, pendingChunks: 0 };
+  };
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
+  assert(res.statusCode === 200, `Expected 200 when split children are present, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
+});
+
 test('Phase 4: /abstraction/process drains another batch when /abstraction/start hits its budget', async () => {
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_x', chunkOrder: 0 }),

@@ -513,6 +513,19 @@ test('frontend saves browser synthesis fallback before terminal status', async (
   `);
 });
 
+test('Bug fix: server synthesis progress caps completedDocuments at files.length after splits', async () => {
+  await runClientScript(`
+    const source = ${JSON.stringify(script)};
+    // When PDF splits occur the abstract count exceeds the original file count.
+    // The PATCH validator rejects completedDocuments > totalDocuments, so the
+    // browser must cap the value.
+    assert(
+      source.includes('Math.min(documentAbstracts.length, files.length)'),
+      'completedDocuments patch must be capped at files.length to avoid exceeding totalDocuments after server-side PDF splits'
+    );
+  `);
+});
+
 test('frontend job-view follow-up falls back to browser synthesis on 503', async () => {
   await runClientScript(`
     const source = ${JSON.stringify(script)};

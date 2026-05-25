@@ -66,6 +66,9 @@ function expectedChunkBlobPrefix(jobId, chunkId) {
 
 async function chunkHasUsableBlobMetadata(chunk) {
   if (!chunk || chunk.uploadStatus !== 'uploaded') return true;
+  // Server-created split children use a parent-based blob key path; their
+  // storage ref is valid by construction — skip the prefix check for them.
+  if (chunk.splitParentChunkId) return true;
   if (typeof chunk.blobKey !== 'string' || !chunk.blobKey.startsWith(expectedChunkBlobPrefix(chunk.jobId, chunk.id))) {
     return false;
   }
