@@ -243,6 +243,67 @@ test('single PDF timeout fallback uses finer PDF chunks', async () => {
   `);
 });
 
+test('large PDF ingest keeps durable uploads whole with page range metadata', async () => {
+  await runClientScript(`
+    let splitCalled = false;
+    splitPdfIntoEntries = async function() {
+      splitCalled = true;
+      return [
+        { name: 'large (pp 1-2).pdf', type: 'application/pdf', size: 100, data: 'aaa', pageRange: [1, 2] },
+        { name: 'large (pp 3-4).pdf', type: 'application/pdf', size: 100, data: 'bbb', pageRange: [3, 4] },
+      ];
+    };
+    readFileAsBase64 = async function() { return 'base64'; };
+    PDFLib = {
+      PDFDocument: {
+        load: async function() {
+          return { getPageCount: function() { return 7; } };
+        },
+      },
+    };
+    window.PDFLib = PDFLib;
+    const file = {
+      name: 'large.pdf',
+      type: 'application/pdf',
+      size: 2_000_000,
+      arrayBuffer: async function() { return new ArrayBuffer(8); },
+    };
+    const entries = await prepareFileEntries(file, 400);
+    assert(splitCalled === false, 'Expected large PDF ingest not to call page splitting');
+    assert(entries.length === 1, 'Expected one whole-PDF entry');
+    assert(entries[0].name === 'large.pdf', 'Expected original PDF filename preserved');
+    assert(entries[0].pageRange[0] === 1 && entries[0].pageRange[1] === 7, 'Expected whole-PDF page range metadata');
+    assert(entries[0].splitFrom === null || entries[0].splitFrom === undefined, 'Whole PDF should not be marked as split');
+  `);
+});
+
+test('browser fallback splits a single PDF that exceeds the request envelope', async () => {
+  await runClientScript(`
+    let splitCalled = false;
+    splitPdfIntoEntries = async function(source, slotsAvailable, maxChunkRaw) {
+      splitCalled = true;
+      return [
+        { name: 'huge (pp 1-2).pdf', type: 'application/pdf', size: 100, data: 'aaa', pageRange: [1, 2] },
+        { name: 'huge (pp 3-4).pdf', type: 'application/pdf', size: 100, data: 'bbb', pageRange: [3, 4] },
+      ];
+    };
+    callBackend = async function(messages) {
+      const prompt = messages[0].content.find(block => block.type === 'text').text;
+      const docNum = Number(prompt.match(/DOCUMENT #(\\d+)/)[1]);
+      return 'DOCUMENT #' + docNum + ':\\nPart abstract';
+    };
+    const result = await abstractBatch([{
+      name: 'huge.pdf',
+      type: 'application/pdf',
+      size: 9_000_000,
+      data: 'x'.repeat(13_000_000),
+      sourceFile: { name: 'huge.pdf', type: 'application/pdf', size: 9_000_000 },
+    }], 0, true);
+    assert(splitCalled, 'Expected oversized single PDF to use page-split fallback');
+    assert(result.includes('pp 1-2') && result.includes('pp 3-4'), 'Expected split page ranges in fallback result');
+  `);
+});
+
 test('synthesis recursively splits oversized request envelopes', async () => {
   await runClientScript(`
     let synthesisCalls = 0;

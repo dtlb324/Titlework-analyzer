@@ -155,7 +155,7 @@ Cloud Run worker
 
 Anthropic calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
 
-The durable Cloud Run worker processes uploaded chunks directly from GCS. If the app has to fall back to browser abstraction, it can group up to 8 small documents per browser fallback call when payload and timeout estimates allow it; larger files are processed alone or split into smaller PDF page ranges before model calls.
+The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
 
 ## Features
 

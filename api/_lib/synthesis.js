@@ -974,6 +974,18 @@ export async function processSynthesisJob(jobId, options = {}) {
     if (!failedDocumentRefs) failedDocumentRefs = await collectFailedDocuments(store, jobId);
     return failedDocumentRefs;
   }
+  let splitDegradationWarningRefs = null;
+  async function splitDegradationWarningsForMerge() {
+    if (!splitDegradationWarningRefs) splitDegradationWarningRefs = await collectSplitDegradationWarnings(store, jobId);
+    return splitDegradationWarningRefs;
+  }
+  async function appendResultWarnings(warnings) {
+    const splitWarnings = await splitDegradationWarningsForMerge();
+    for (const warning of splitWarnings) {
+      if (!warnings.includes(warning)) warnings.push(warning);
+    }
+    return warnings;
+  }
   let mergeRanInThisBatch = false;
   let mergeClaimBlocked = false;
   async function claimFinalWriter() {
@@ -997,6 +1009,7 @@ export async function processSynthesisJob(jobId, options = {}) {
       if (!validation.ok) opinionWarnings.push(`final_validation_failed: ${validation.reason}`);
       const failedDocs = await failedDocumentsForMerge();
       if (failedDocs.length) opinionWarnings.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+      await appendResultWarnings(opinionWarnings);
       const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
       result = await store.saveJobResult(jobId, {
         planId,
@@ -1036,6 +1049,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
         const failedDocs = await failedDocumentsForMerge();
         if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+        await appendResultWarnings(warningsAccum);
         const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
         result = await store.saveJobResult(jobId, {
           planId,
@@ -1053,11 +1067,12 @@ export async function processSynthesisJob(jobId, options = {}) {
         mergeRanInThisBatch = Boolean(result);
       } catch (err) {
         lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+        const finalWarnings = await appendResultWarnings([`final_merge_failed: ${lastError.errorType}`]);
         result = await store.saveJobResult(jobId, {
           planId,
           status: 'failed',
           finalTitleOpinion: '',
-          warnings: [`final_merge_failed: ${lastError.errorType}`],
+          warnings: finalWarnings,
           failedDocuments: await failedDocumentsForMerge(),
           modelUsed: config.model,
           inputTokens: tokensAccum.inputTokens,
@@ -1101,6 +1116,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
           const failedDocs = await failedDocumentsForMerge();
           if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+          await appendResultWarnings(warningsAccum);
           const resultStatus = validation.ok ? 'partial_failed' : 'failed';
           result = await store.saveJobResult(jobId, {
             planId,
@@ -1118,6 +1134,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           mergeRanInThisBatch = Boolean(result);
         } catch (err) {
           lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+          await appendResultWarnings(warningsAccum);
           result = await store.saveJobResult(jobId, {
             planId,
             status: 'failed',
@@ -1138,6 +1155,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           'all_segments_failed',
           ...failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`),
         ];
+        await appendResultWarnings(failureWarnings);
         result = await store.saveJobResult(jobId, {
           planId,
           status: 'failed',
@@ -1190,6 +1208,36 @@ async function collectFailedDocuments(store, jobId) {
       errorType: chunk.abstractionErrorType,
       errorMessage: chunk.abstractionErrorMessage,
     }));
+  } catch {
+    return [];
+  }
+}
+
+async function collectSplitDegradationWarnings(store, jobId) {
+  if (!store.listChunks) return [];
+  try {
+    const chunks = await store.listChunks(jobId);
+    const splitChildren = chunks.filter(chunk => chunk.splitParentChunkId && chunk.abstractionStatus !== 'split_superseded');
+    const byDocument = new Map();
+    for (const chunk of splitChildren) {
+      const key = chunk.documentId || chunk.splitFrom || chunk.originalFilename || chunk.splitParentChunkId;
+      const existing = byDocument.get(key) || {
+        filename: chunk.splitFrom || chunk.originalFilename || 'A PDF',
+        reason: chunk.splitReason || chunk.abstractionErrorType || 'model_request_limit',
+        ranges: [],
+      };
+      if (chunk.splitFrom) existing.filename = chunk.splitFrom;
+      if (chunk.pageStart && chunk.pageEnd) existing.ranges.push([chunk.pageStart, chunk.pageEnd]);
+      byDocument.set(key, existing);
+    }
+    return [...byDocument.values()].map(item => {
+      const orderedRanges = item.ranges
+        .sort((a, b) => a[0] - b[0])
+        .map(([start, end]) => `pp ${start}${end === start ? '' : `-${end}`}`)
+        .join(', ');
+      const rangeText = orderedRanges ? ` (${orderedRanges})` : '';
+      return `${item.filename}${rangeText} exceeded model request limits and was abstracted in page-range segments. Verify clause continuity, legal descriptions, exceptions, exhibits, and cross-page context manually.`;
+    });
   } catch {
     return [];
   }

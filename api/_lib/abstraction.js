@@ -92,6 +92,10 @@ function isSplittablePdfChunk(chunk) {
   return isPdfChunk(chunk) && chunk.pageStart && chunk.pageEnd && chunk.pageEnd > chunk.pageStart;
 }
 
+function isPotentiallySplittablePdfChunk(chunk) {
+  return isPdfChunk(chunk) && (!chunk.pageStart || !chunk.pageEnd || chunk.pageEnd > chunk.pageStart);
+}
+
 function isImageChunk(chunk) {
   return /^image\/[-+.a-z0-9]+$/i.test(chunk.mediaType || '');
 }
@@ -102,7 +106,7 @@ function isCsvChunk(chunk) {
 
 function maxRawBlobBytesForChunk(chunk) {
   const available = Math.max(1, REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES);
-  if (isSplittablePdfChunk(chunk)) return Math.max(Math.floor(available * 0.70), SPLITTABLE_PDF_FETCH_MAX_BYTES);
+  if (isPotentiallySplittablePdfChunk(chunk)) return Math.max(Math.floor(available * 0.70), SPLITTABLE_PDF_FETCH_MAX_BYTES);
   if (isCsvChunk(chunk)) return available;
   return Math.floor(available * 0.70);
 }
@@ -337,7 +341,7 @@ function stripDocumentLabel(text, docNum) {
 }
 
 async function splitPdfChunk(parentChunk, bytes, reason, options) {
-  if (!isPdfChunk(parentChunk) || !parentChunk.pageStart || !parentChunk.pageEnd || parentChunk.pageEnd <= parentChunk.pageStart) {
+  if (!isPdfChunk(parentChunk)) {
     return false;
   }
   if (!options.store?.createSplitChunk || !options.store?.markChunkAbstractionSplitSuperseded) return false;
@@ -346,10 +350,16 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
   const pageCount = source.getPageCount();
   if (pageCount <= 1) return false;
 
+  const sourcePageStart = parentChunk.pageStart || 1;
+  const sourcePageEnd = parentChunk.pageEnd && parentChunk.pageEnd >= sourcePageStart
+    ? parentChunk.pageEnd
+    : sourcePageStart + pageCount - 1;
+  if (sourcePageEnd <= sourcePageStart) return false;
+
   const leftCount = Math.ceil(pageCount / 2);
   const ranges = [
-    { startPageIndex: 0, endPageIndex: leftCount - 1, pageStart: parentChunk.pageStart, pageEnd: parentChunk.pageStart + leftCount - 1 },
-    { startPageIndex: leftCount, endPageIndex: pageCount - 1, pageStart: parentChunk.pageStart + leftCount, pageEnd: parentChunk.pageEnd },
+    { startPageIndex: 0, endPageIndex: leftCount - 1, pageStart: sourcePageStart, pageEnd: sourcePageStart + leftCount - 1 },
+    { startPageIndex: leftCount, endPageIndex: pageCount - 1, pageStart: sourcePageStart + leftCount, pageEnd: sourcePageEnd },
   ];
   const baseName = String(parentChunk.originalFilename || 'document.pdf').replace(/\.pdf$/i, '');
   for (const range of ranges) {

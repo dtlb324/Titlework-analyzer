@@ -149,9 +149,10 @@ test('rate limit default allows bulk throughput', () => {
 });
 
 
-test('auto-splits large PDFs client-side', () => {
-  assert(script.includes('splitPdfIntoEntries'), 'Missing PDF split helper');
-  assert(script.includes('PDF_SPLIT_RAW_THRESHOLD'), 'Missing PDF split threshold');
+test('keeps large PDFs whole at ingest and retains page-split fallback', () => {
+  assert(script.includes('readPdfPageCount'), 'Missing whole-PDF page count helper');
+  assert(script.includes('pageRange: pdfPageCount ? [1, pdfPageCount]'), 'Expected whole-PDF page range metadata');
+  assert(script.includes('splitPdfIntoEntries'), 'Missing PDF split fallback helper');
   assert(indexHtml.includes('pdf-lib'), 'Missing pdf-lib script');
   assert(script.includes('ingestUploadedFiles'), 'Missing shared upload ingest helper');
 });
