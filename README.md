@@ -32,7 +32,9 @@ Set these on both Cloud Run services unless noted otherwise:
 | Name | Required | Notes |
 |------|----------|-------|
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key for document abstraction (`gemini-2.5-flash` by default). Also accepts `GOOGLE_API_KEY`. |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for synthesis, follow-ups, and optional abstraction escalation. |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for final title synthesis (Sonnet), follow-ups, and optional abstraction escalation. |
+| `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion and merge step. Gemini/Haiku values are ignored. |
+| `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `claude-haiku-4-5` for large-job segment synthesis only (not the final opinion). |
 | `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Claude Haiku is not supported for abstraction. |
 | `GEMINI_THINKING_BUDGET` | Optional | Default `0` (fastest/cheapest). Set to `-1` for Gemini dynamic thinking on abstraction. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
@@ -114,7 +116,7 @@ Secrets such as `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATA
 
 1. Open [Google AI Studio](https://aistudio.google.com/apikey) and create an API key for your Google account or Cloud project.
 2. In Cloud Run (both API and worker services), add `GEMINI_API_KEY` with that value.
-3. Keep `ANTHROPIC_API_KEY` configured — synthesis and follow-ups still use Claude Sonnet.
+3. Keep `ANTHROPIC_API_KEY` configured — the **final title opinion** and follow-ups use Claude Sonnet (`claude-sonnet-4-6` by default). Only document abstraction uses Gemini.
 4. Optional: set `ABSTRACT_ESCALATION_MODEL=claude-sonnet-4-6` (default) for harder documents; escalation requires Anthropic even when abstraction uses Gemini.
 
 ### Release Verification
@@ -172,7 +174,7 @@ The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs a
 - Bulk upload up to 400 documents per job.
 - Direct browser-to-GCS durable uploads.
 - Server-side abstraction with Gemini 2.5 Flash.
-- Server-side synthesis and follow-ups with Claude Sonnet 4.6.
+- Server-side final title synthesis and follow-ups with Claude Sonnet 4.6 (segment passes may use Haiku).
 - Durable job URLs that survive refreshes and closed tabs.
 - Retry, cancellation, partial failure, and failed-chunk recovery.
 - PDF download of final results.

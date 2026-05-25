@@ -10,7 +10,7 @@
 //   - ANTHROPIC_API_KEY (override per call with options.modelClient)
 //
 // Configurable (env):
-//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6)
+//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6 for final title opinion; Gemini/Haiku ignored)
 //   - SYNTHESIS_MAX_TOKENS (default: 8000)
 //   - SYNTHESIS_CHUNK_SIZE (default: 50)
 //   - REQUEST_ENVELOPE_SAFE_BYTES (default: 3_900_000)
@@ -21,9 +21,20 @@
 
 import { createHash } from 'crypto';
 import { buildMessagesRequestBody } from './anthropic-request.js';
+import { isGeminiModel } from './model-client.js';
 import { runWithConcurrency } from './concurrency.js';
 
-const DEFAULT_SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'claude-sonnet-4-6';
+const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-4-6';
+
+export function resolveFinalSynthesisModel() {
+  const configured = String(process.env.SYNTHESIS_MODEL || DEFAULT_FINAL_SYNTHESIS_MODEL).trim();
+  if (isGeminiModel(configured) || /^claude-haiku/i.test(configured)) {
+    return DEFAULT_FINAL_SYNTHESIS_MODEL;
+  }
+  return configured || DEFAULT_FINAL_SYNTHESIS_MODEL;
+}
+
+const DEFAULT_SYNTHESIS_MODEL = resolveFinalSynthesisModel();
 const DEFAULT_PARTIAL_SYNTHESIS_MODEL = process.env.SYNTHESIS_PARTIAL_MODEL || 'claude-haiku-4-5';
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 8192);
 const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 3500, 512, 8192);

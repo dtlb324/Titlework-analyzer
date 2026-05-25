@@ -16,6 +16,7 @@ import {
   SYNTHESIS_PROMPT,
   getSynthesisConfig,
   getPartialSynthesisConfig,
+  resolveFinalSynthesisModel,
   effectiveSynthesisChunkSize,
 } from '../api/_lib/synthesis.js';
 import {
@@ -1491,6 +1492,23 @@ test('Synthesis endpoint returns 503 with fallback hint when ANTHROPIC_API_KEY m
 test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
   assert(effectiveSynthesisChunkSize(50, {}) === 50, 'Small jobs should keep default chunk size');
   assert(effectiveSynthesisChunkSize(120, {}) >= 80, 'Bulk jobs should use larger synthesis segments');
+});
+
+test('resolveFinalSynthesisModel keeps Sonnet for final title opinions', () => {
+  const previous = process.env.SYNTHESIS_MODEL;
+  process.env.SYNTHESIS_MODEL = 'gemini-2.5-pro';
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-4-6', 'Gemini SYNTHESIS_MODEL must not be used for final opinions');
+  process.env.SYNTHESIS_MODEL = 'claude-haiku-4-5';
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-4-6', 'Haiku SYNTHESIS_MODEL must not be used for final opinions');
+  process.env.SYNTHESIS_MODEL = 'claude-sonnet-4-6';
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-4-6', 'Sonnet should be honored');
+  if (previous) process.env.SYNTHESIS_MODEL = previous;
+  else delete process.env.SYNTHESIS_MODEL;
+});
+
+test('getSynthesisConfig uses Sonnet for final merge model', () => {
+  const config = getSynthesisConfig();
+  assert(config.model === 'claude-sonnet-4-6', `Expected Sonnet final model, got ${config.model}`);
 });
 
 test('getPartialSynthesisConfig defaults to Haiku for segment work', () => {
