@@ -17,6 +17,7 @@ import {
   getSynthesisConfig,
   getPartialSynthesisConfig,
   resolveFinalSynthesisModel,
+  resolvePartialSynthesisModel,
   effectiveSynthesisChunkSize,
 } from '../api/_lib/synthesis.js';
 import {
@@ -32,6 +33,7 @@ const indexHtml = readFileSync(join(root, 'public/index.html'), 'utf8');
 const previousAppPassword = process.env.APP_PASSWORD;
 process.env.APP_PASSWORD = 'test-password';
 process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'sk-ant-test';
+process.env.GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'test-gemini-key';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -1473,9 +1475,12 @@ test('Synthesis routes reject raw payload fields', async () => {
   assert(/must not accept/i.test(res.body.error), `Expected raw-payload rejection, got ${res.body.error}`);
 });
 
-test('Synthesis endpoint returns 503 with fallback hint when ANTHROPIC_API_KEY missing', async () => {
-  const previousKey = process.env.ANTHROPIC_API_KEY;
+test('Synthesis endpoint returns 503 with fallback hint when API keys missing', async () => {
+  const previousAnthropic = process.env.ANTHROPIC_API_KEY;
+  const previousGemini = process.env.GEMINI_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
   delete globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__;
   delete globalThis.__TITLE_ANALYZER_MODEL_CLIENT__;
   const abstracts = manyAbstracts(2);
@@ -1485,8 +1490,10 @@ test('Synthesis endpoint returns 503 with fallback hint when ANTHROPIC_API_KEY m
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/synthesis/start'), res);
   assert(res.statusCode === 503, `Expected 503, got ${res.statusCode}`);
   assert(res.body.fallback === 'browser_synthesis', `Expected browser_synthesis fallback, got ${res.body.fallback}`);
-  if (previousKey) process.env.ANTHROPIC_API_KEY = previousKey;
+  if (previousAnthropic) process.env.ANTHROPIC_API_KEY = previousAnthropic;
   else process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  if (previousGemini) process.env.GEMINI_API_KEY = previousGemini;
+  else process.env.GEMINI_API_KEY = 'test-gemini-key';
 });
 
 test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
@@ -1511,9 +1518,19 @@ test('getSynthesisConfig uses Sonnet for final merge model', () => {
   assert(config.model === 'claude-sonnet-4-6', `Expected Sonnet final model, got ${config.model}`);
 });
 
-test('getPartialSynthesisConfig defaults to Haiku for segment work', () => {
+test('resolvePartialSynthesisModel uses Gemini Flash for segment work', () => {
+  const previous = process.env.SYNTHESIS_PARTIAL_MODEL;
+  process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-haiku-4-5';
+  assert(resolvePartialSynthesisModel() === 'gemini-2.5-flash', 'Haiku partial override must fall back to Gemini Flash');
+  process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-sonnet-4-6';
+  assert(resolvePartialSynthesisModel() === 'gemini-2.5-flash', 'Sonnet partial override must fall back to Gemini Flash');
+  if (previous) process.env.SYNTHESIS_PARTIAL_MODEL = previous;
+  else delete process.env.SYNTHESIS_PARTIAL_MODEL;
+});
+
+test('getPartialSynthesisConfig defaults to Gemini Flash for segment work', () => {
   const partial = getPartialSynthesisConfig();
-  assert(partial.model === 'claude-haiku-4-5', `Expected Haiku partial model, got ${partial.model}`);
+  assert(partial.model === 'gemini-2.5-flash', `Expected Gemini Flash partial model, got ${partial.model}`);
   assert(partial.maxTokens <= 4000, 'Partial synthesis should use a smaller output cap');
 });
 

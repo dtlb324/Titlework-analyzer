@@ -1,7 +1,7 @@
 import { buildMessagesRequestBody } from './anthropic-request.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, isGeminiModel } from './gemini-request.js';
 
-export { isGeminiModel };
+export { isGeminiModel, geminiApiKeyError };
 
 function anthropicApiKey() {
   return process.env.ANTHROPIC_API_KEY || '';
