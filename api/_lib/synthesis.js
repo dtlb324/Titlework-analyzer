@@ -570,17 +570,23 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       byChunkId.set(chunkId, item);
     }
   }
-  const segmentAbstracts = (segment.documentIds || [])
-    .map(id => byDocumentId.get(id) || byChunkId.get(id))
-    .filter(Boolean)
-    .map(record => ({
+  const seenAbstractKeys = new Set();
+  const segmentAbstracts = [];
+  for (const id of segment.documentIds || []) {
+    const record = byDocumentId.get(id) || byChunkId.get(id);
+    if (!record) continue;
+    const recordKey = record.documentId || record.id || record.chunkId || (record.chunkIds || []).join('|') || id;
+    if (seenAbstractKeys.has(recordKey)) continue;
+    seenAbstractKeys.add(recordKey);
+    const item = {
       filename: record.filename || record.originalFilename || record.documentId || record.chunkId,
       abstract: record.abstract || record.abstractText || '',
       documentId: record.documentId,
       chunkId: record.chunkId,
       chunkIds: record.chunkIds || (record.chunkId ? [record.chunkId] : []),
-    }))
-    .filter(item => item.abstract.trim().length > 0);
+    };
+    if (item.abstract.trim().length > 0) segmentAbstracts.push(item);
+  }
 
   if (!segmentAbstracts.length) {
     const updated = await store.markSynthesisSegmentFailed(jobId, segment.id, {

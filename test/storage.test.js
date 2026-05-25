@@ -399,6 +399,49 @@ test('POST /api/jobs/:id/finalize-uploads marks job ready after all chunks uploa
   assert(res.body.pendingChunks === 0, 'Expected no pending chunks');
 });
 
+test('POST /api/jobs/:id/finalize-uploads accepts server-created split children with parent-based blob keys', async () => {
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.createDocument('job_test_1', {
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-fingerprint',
+    checksumSha256: 'a'.repeat(64),
+  });
+  await store.createChunk('job_test_1', 'doc_test_1', {
+    chunkOrder: 0,
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-chunk-fingerprint',
+    checksumSha256: 'b'.repeat(64),
+  });
+  await store.updateChunk('job_test_1', 'chk_test_1', {
+    uploadStatus: 'uploaded',
+    blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+    blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+  });
+  await store.createChunk('job_test_1', 'doc_test_1', {
+    chunkOrder: 1,
+    originalFilename: 'Deed (pp 1-2).pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 65432,
+    fingerprint: 'deed-split-fingerprint',
+    checksumSha256: 'c'.repeat(64),
+  });
+  await store.updateChunk('job_test_1', 'chk_test_2', {
+    uploadStatus: 'uploaded',
+    blobKey: 'jobs/job_test_1/chunks/chk_test_1-split-123-abc/deed-pp-1-2.pdf',
+    blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1-split-123-abc/deed-pp-1-2.pdf',
+    splitParentChunkId: 'chk_test_1',
+  });
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
+  assert(res.statusCode === 200, `Expected 200 when split children are present, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
+});
+
 test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable storage metadata', async () => {
   const store = createMemoryJobStore();
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
