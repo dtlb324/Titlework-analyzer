@@ -66,6 +66,8 @@ function expectedChunkBlobPrefix(jobId, chunkId) {
 
 async function chunkHasUsableBlobMetadata(chunk) {
   if (!chunk || chunk.uploadStatus !== 'uploaded') return true;
+  // Server-created split children use a parent-based blob key path; skip prefix check.
+  if (chunk.splitParentChunkId) return true;
   if (typeof chunk.blobKey !== 'string' || !chunk.blobKey.startsWith(expectedChunkBlobPrefix(chunk.jobId, chunk.id))) {
     return false;
   }
@@ -117,6 +119,10 @@ function publicAbstract(record) {
     chunkOrder: record.chunkOrder,
     sequence_index: record.chunkOrder,
     originalFilename: record.originalFilename,
+    sourceFilename: record.sourceFilename,
+    pageStart: record.pageStart,
+    pageEnd: record.pageEnd,
+    splitFrom: record.splitFrom,
     display_name: record.originalFilename,
     filename: record.originalFilename,
     abstractText: record.abstractText,

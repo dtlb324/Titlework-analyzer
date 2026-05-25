@@ -12,6 +12,7 @@ import {
   getBackgroundPromise,
   processAbstractionBatch,
 } from '../api/_lib/queue.js';
+import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -858,8 +859,11 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
     makeChunk({ id: 'chk_big', pageStart: 1, pageEnd: 4, sizeBytes: 1_200_000 }),
   ]);
   let splitCalls = 0;
+  const expectedChildChecksums = new Map();
   store.createSplitChunk = async (jobId, documentId, input) => {
     splitCalls += 1;
+    assert(input.checksumSha256 === expectedChildChecksums.get(input.originalFilename), 'Expected split child checksum to match child PDF bytes');
+    assert(input.checksumSha256 !== store.chunks.get('chk_big').checksumSha256, 'Expected child checksum not to reuse parent checksum');
     const childId = `chk_split_${splitCalls}`;
     const child = {
       ...makeChunk({
@@ -885,10 +889,13 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
   };
 
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
-  globalThis.__TITLE_ANALYZER_BLOB_WRITER__ = async (parent, name, bytes) => ({
-    blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
-    blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
-  });
+  globalThis.__TITLE_ANALYZER_BLOB_WRITER__ = async (parent, name, bytes) => {
+    expectedChildChecksums.set(name, createHash('sha256').update(bytes).digest('hex'));
+    return {
+      blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+    };
+  };
 
   // Build a real multi-page PDF so pdf-lib can split it
   const { PDFDocument } = await import('pdf-lib');
@@ -1282,6 +1289,102 @@ test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', as
   assert(/INNGEST/.test(res.body.error || ''), `Expected Inngest setup error message, got ${res.body.error}`);
 
   delete process.env.WORKFLOW_DRIVER;
+});
+
+test('Bug fix: split child checksumSha256 matches child PDF bytes', async () => {
+  const wholeChunk = {
+    ...makeChunk({ id: 'chk_cs_parent', sizeBytes: 1_200_000, checksumSha256: 'a'.repeat(64) }),
+    pageStart: null,
+    pageEnd: null,
+  };
+  const store = createMemoryPhase3Store([wholeChunk]);
+  const createdChildren = [];
+  store.createSplitChunk = async (jobId, documentId, input) => {
+    createdChildren.push(input);
+    const childId = `chk_cs_child_${createdChildren.length}`;
+    const child = {
+      ...makeChunk({ id: childId, pageStart: input.pageStart, pageEnd: input.pageEnd }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      blobKey: input.blobKey,
+      blobUrl: input.blobUrl,
+      splitParentChunkId: input.splitParentChunkId,
+    };
+    store.chunks.set(childId, child);
+    return child;
+  };
+  store.markChunkAbstractionSplitSuperseded = async (jobId, chunkId) => {
+    const chunk = store.chunks.get(chunkId);
+    store.chunks.set(chunkId, { ...chunk, abstractionStatus: 'split_superseded' });
+    return store.chunks.get(chunkId);
+  };
+
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  await processChunkAbstraction(wholeChunk, {
+    store,
+    blobLoader: async () => ({ bytes: pdfBytes, mediaType: 'application/pdf' }),
+    blobWriter: async (parent, name, bytes) => ({
+      blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      blobUrl: `gs://test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      childBytes: bytes,
+    }),
+    modelClient: async () => { const e = new Error('timeout'); e.status = 504; throw e; },
+    maxAttempts: 1,
+  });
+
+  assert(createdChildren.length === 2, `Expected two split children, got ${createdChildren.length}`);
+  for (const child of createdChildren) {
+    assert(typeof child.checksumSha256 === 'string' && child.checksumSha256.length === 64, 'Expected split child checksumSha256 to be a SHA-256 hex string');
+    assert(child.checksumSha256 !== wholeChunk.checksumSha256, 'Expected child checksum not to reuse parent checksum');
+  }
+});
+
+test('Bug fix: partial PDF split marks created children failed when supersede fails', async () => {
+  const wholeChunk = {
+    ...makeChunk({ id: 'chk_partial_split', sizeBytes: 1_200_000 }),
+    pageStart: 1,
+    pageEnd: 4,
+  };
+  const store = createMemoryPhase3Store([wholeChunk]);
+  let createCalls = 0;
+  store.createSplitChunk = async () => {
+    createCalls += 1;
+    const childId = `chk_partial_child_${createCalls}`;
+    const child = {
+      ...makeChunk({ id: childId }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      splitParentChunkId: 'chk_partial_split',
+    };
+    store.chunks.set(childId, child);
+    return child;
+  };
+  store.markChunkAbstractionSplitSuperseded = async () => null;
+
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  const result = await processChunkAbstraction(wholeChunk, {
+    store,
+    blobLoader: async () => ({ bytes: pdfBytes, mediaType: 'application/pdf' }),
+    blobWriter: async (parent, name) => ({
+      blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      blobUrl: `gs://test/${name}`,
+    }),
+    modelClient: async () => { const e = new Error('timeout'); e.status = 504; throw e; },
+    maxAttempts: 1,
+  });
+
+  assert(createCalls === 2, `Expected two children before supersede failure, got ${createCalls}`);
+  assert(result.status === 'failed' || result.status === 'retry_wait', `Expected failure after split supersede miss, got ${result.status}`);
+  const failedChildren = [...store.chunks.values()].filter(chunk => chunk.splitParentChunkId === 'chk_partial_split' && chunk.abstractionStatus === 'failed');
+  assert(failedChildren.length === 2, `Expected created split children to be marked failed, got ${failedChildren.length}`);
 });
 
 test('Phase 4: /abstraction/process drains another batch when /abstraction/start hits its budget', async () => {

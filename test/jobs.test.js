@@ -505,6 +505,28 @@ test('frontend guards authenticated initial job route until password succeeds', 
   `);
 });
 
+test('Bug fix: synthesis progress caps completedDocuments at files.length after splits', async () => {
+  await runClientScript(`
+    const source = ${JSON.stringify(script)};
+    assert(
+      source.includes('function completedDocumentsForJob'),
+      'Missing completedDocumentsForJob helper'
+    );
+    assert(
+      source.includes('completedDocuments: completedDocumentsForJob(documentAbstracts.length, files.length)'),
+      'completedDocuments patch must be capped at files.length to avoid exceeding totalDocuments after server-side PDF splits'
+    );
+  `);
+});
+
+test('Bug fix: server abstraction failed count uses chunk failure status', async () => {
+  await runClientScript(`
+    const source = ${JSON.stringify(script)};
+    assert(source.includes('failedChunkCount: status.failed || 0'), 'Server abstraction should expose failed chunk count from status');
+    assert(source.includes('serverAbstractionFailedCount = serverAbstraction.failedChunkCount'), 'Analyze should use server failed chunk count');
+  `);
+});
+
 test('frontend saves browser synthesis fallback before terminal status', async () => {
   await runClientScript(`
     const source = ${JSON.stringify(script)};

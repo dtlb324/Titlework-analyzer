@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { buildMessagesRequestBody } from './anthropic-request.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
@@ -86,10 +87,6 @@ function normalizeBytes(payload) {
 
 function isPdfChunk(chunk) {
   return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
-}
-
-function isSplittablePdfChunk(chunk) {
-  return isPdfChunk(chunk) && chunk.pageStart && chunk.pageEnd && chunk.pageEnd > chunk.pageStart;
 }
 
 function isPotentiallySplittablePdfChunk(chunk) {
@@ -340,6 +337,10 @@ function stripDocumentLabel(text, docNum) {
   return value.replace(regex, '').trim() || value;
 }
 
+function sha256Hex(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
 async function splitPdfChunk(parentChunk, bytes, reason, options) {
   if (!isPdfChunk(parentChunk)) {
     return false;
@@ -362,6 +363,13 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
     { startPageIndex: leftCount, endPageIndex: pageCount - 1, pageStart: sourcePageStart + leftCount, pageEnd: sourcePageEnd },
   ];
   const baseName = String(parentChunk.originalFilename || 'document.pdf').replace(/\.pdf$/i, '');
+  const createdChildIds = [];
+  const splitFailure = {
+    errorType: 'storage_error',
+    errorMessage: 'PDF split child creation failed.',
+    workerId: options.workerId,
+  };
+
   for (const range of ranges) {
     const childDoc = await PDFDocument.create();
     const indices = [];
@@ -379,7 +387,7 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
       pageEnd: range.pageEnd,
       splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
       fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
-      checksumSha256: parentChunk.checksumSha256,
+      checksumSha256: sha256Hex(childBytes),
       chunkOrder: parentChunk.chunkOrder,
       blobKey: blob.blobKey,
       blobUrl: blob.blobUrl,
@@ -387,31 +395,27 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
       splitReason: reason,
       workerId: options.workerId,
     });
-    if (!child) return false;
-  }
-  const superseded = await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason, options.workerId);
-  if (!superseded) return false;
-  return true;
-}
-
-async function callWithRetries(fn, maxAttempts) {
-  let lastError;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const value = await fn(attempt);
-      return { value, attempts: attempt };
-    } catch (err) {
-      lastError = err;
-      const type = classifyError(err);
-      if (!['rate_limit', 'upstream_timeout', 'provider_error'].includes(type) || attempt >= maxAttempts) break;
-      const retryAfter = Number(err?.retryAfter || err?.retryAfterMs || 0);
-      const waitMs = retryAfter > 0
-        ? (retryAfter > 1000 ? retryAfter : retryAfter * 1000)
-        : Math.min(2000 * (2 ** (attempt - 1)), 60_000);
-      await sleep(waitMs);
+    if (!child) {
+      if (options.store.markChunkAbstractionFailed) {
+        for (const childId of createdChildIds) {
+          await options.store.markChunkAbstractionFailed(parentChunk.jobId, childId, splitFailure);
+        }
+      }
+      return false;
     }
+    createdChildIds.push(child.id);
   }
-  throw lastError;
+
+  const superseded = await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason, options.workerId);
+  if (!superseded) {
+    if (options.store.markChunkAbstractionFailed) {
+      for (const childId of createdChildIds) {
+        await options.store.markChunkAbstractionFailed(parentChunk.jobId, childId, splitFailure);
+      }
+    }
+    return false;
+  }
+  return true;
 }
 
 function computeRetryBackoff(attempt, retryAfter) {
