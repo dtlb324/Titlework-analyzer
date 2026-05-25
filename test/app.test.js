@@ -59,7 +59,7 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('buildAdaptiveBatches'), 'Missing adaptive batching');
   assert(script.includes('runDocumentAbstraction'), 'Missing shared abstraction runner');
   assert(script.includes('ABSTRACT_CONCURRENCY = 2'), 'Missing parallel pool');
-  assert(script.includes('MAX_DOCS_PER_BATCH = 2'), 'Max docs per batch should be 2 for timeout safety');
+  assert(script.includes('MAX_DOCS_PER_BATCH = 8'), 'Max docs per batch should use Cloud Run fallback capacity');
   assert(script.includes('isTimeoutError'), 'Missing timeout error detection');
   assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing timeout PDF split retry');
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
