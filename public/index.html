@@ -2329,7 +2329,38 @@ function completedDocumentsForJob(abstractCount, fileCount) {
   return Math.min(abstractCount, fileCount);
 }
 
-async function registerJobUploads(jobId, fileList) {
+async function importContinuationAbstracts(jobId, sourceJobId) {
+  const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/import-continuation`, {
+    method: 'POST',
+    body: JSON.stringify({ sourceJobId }),
+  });
+  return data;
+}
+
+function getContinuationSourceJobId() {
+  const fromHistory = conversationHistory
+    .slice()
+    .reverse()
+    .find(m => m.role === 'assistant' && m.kind === 'title-opinion' && m.sourceJobId)?.sourceJobId;
+  return fromHistory || activeJobId || loadSavedJobId() || null;
+}
+
+async function resolvePriorAbstractsForContinuation() {
+  if (documentAbstracts.length) {
+    return groupAbstractsBySourceDocument(documentAbstracts);
+  }
+  const sourceJobId = getContinuationSourceJobId();
+  if (!sourceJobId) return [];
+  try {
+    return groupAbstractsBySourceDocument(await fetchServerAbstracts(sourceJobId));
+  } catch (err) {
+    console.warn('Could not load prior abstracts from source job', err);
+    return [];
+  }
+}
+
+async function registerJobUploads(jobId, fileList, options = {}) {
+  const chunkOrderOffset = Number.isInteger(options.chunkOrderOffset) ? options.chunkOrderOffset : 0;
   const status = await getDurableStorageStatus();
   if (!status.available) {
     return { durable: false, warning: durableUploadWarning(status.error || 'Set GCS_BUCKET to enable durable file resume.') };
@@ -2367,7 +2398,7 @@ async function registerJobUploads(jobId, fileList) {
     }
     const documentId = await documentIdForEntry(entry);
     entry.sourceDocumentKey = documentId;
-    const chunk = await registerChunkForUpload(jobId, documentId, entry, i);
+    const chunk = await registerChunkForUpload(jobId, documentId, entry, chunkOrderOffset + i);
     entry.uploadStatus = 'uploading';
     await uploadChunkToBlob(jobId, documentId, chunk, entry, percentage => {
       const pct = Math.round(((completed + (percentage / 100)) / total) * 8);
@@ -3607,71 +3638,203 @@ async function analyzeAdditional() {
   clearError();
   document.getElementById('addDocsBtn').disabled = true;
 
-  // Hide add docs panel, show progress
   document.getElementById('addDocsSection').style.display = 'none';
   document.getElementById('progressSection').style.display = 'block';
 
-  const showAllProgress = additionalFiles.length <= 50;
+  const tract = document.getElementById('tractDescription').value;
+  const ctx = document.getElementById('contextNotes').value;
+  const priorAbstracts = await resolvePriorAbstractsForContinuation();
+  const sourceJobId = getContinuationSourceJobId();
+  const priorCount = priorAbstracts.length;
+  const newFiles = additionalFiles.slice();
+  const totalAfter = priorCount + newFiles.length;
+
+  const showAllProgress = newFiles.length <= 50;
   const items = showAllProgress
-    ? [...additionalFiles.map(f => ({ label: f.name, status: 'pending' })), { label: 'Update chain of title with all documents', status: 'pending' }]
-    : [{ label: `Abstracting ${additionalFiles.length} additional documents...`, status: 'pending' }, { label: 'Update chain of title with all documents', status: 'pending' }];
+    ? [...newFiles.map(f => ({ label: f.name, status: 'pending' })), { label: 'Update chain of title with all documents', status: 'pending' }]
+    : [{ label: `Abstracting ${newFiles.length} additional documents...`, status: 'pending' }, { label: 'Update chain of title with all documents', status: 'pending' }];
 
-  const globalOffset = documentAbstracts.length;
-  const totalAfter = documentAbstracts.length + additionalFiles.length;
-  let newAbstracts = [];
-
-  activeProgressTimer = createProgressTimer(additionalFiles, totalAfter);
-  setProgressEta(formatInitialEstimate(activeProgressTimer));
-  updateProgress(0, `Starting analysis of ${additionalFiles.length} additional document${additionalFiles.length === 1 ? '' : 's'}...`, items);
-
+  let job;
   try {
-    newAbstracts = groupAbstractsBySourceDocument(await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress, `additional-${globalOffset}`));
+    job = await createAnalysisJob({
+      subjectTract: tract,
+      contextNotes: ctx,
+      totalDocuments: totalAfter,
+    });
   } catch (e) {
-    showError(e.message);
-    clearProgressTimer();
+    showError('Job setup failed: ' + e.message);
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('addDocsSection').style.display = 'block';
     document.getElementById('addDocsBtn').disabled = false;
     return;
   }
 
-  // Combine all abstracts
-  const allAbstracts = groupAbstractsBySourceDocument([...documentAbstracts, ...newAbstracts]);
+  updateProgress(0, 'Checking durable file storage...', null);
+  const uploadRegistration = await registerJobUploads(job.id, newFiles, { chunkOrderOffset: 0 }).catch(err => ({
+    durable: false,
+    warning: durableUploadWarning(err.message),
+  }));
+  if (uploadRegistration.warning) {
+    showError(uploadRegistration.warning);
+  } else if (uploadRegistration.durable) {
+    updateProgress(8, 'Durable uploads complete; starting server-side abstraction for new documents...', null);
+    try {
+      navigate(`#/job/${encodeURIComponent(job.id)}`);
+    } catch (err) {
+      console.warn('Could not navigate to durable job view', err);
+    }
+  }
+
+  activeProgressTimer = createProgressTimer(newFiles, totalAfter);
+  setProgressEta(formatInitialEstimate(activeProgressTimer));
+  updateProgress(0, `Starting analysis of ${newFiles.length} additional document${newFiles.length === 1 ? '' : 's'}...`, items);
+
+  let newAbstracts = [];
+  let usedServerAbstraction = false;
+  let serverAbstractionFailedCount = 0;
+  let importedContinuation = false;
+
+  if (uploadRegistration.durable) {
+    try {
+      const serverAbstraction = await runServerDocumentAbstraction(job.id, newFiles, items);
+      newAbstracts = groupAbstractsBySourceDocument(serverAbstraction.abstracts);
+      usedServerAbstraction = true;
+      serverAbstractionFailedCount = serverAbstraction.failedChunkCount;
+      if (sourceJobId && sourceJobId !== job.id) {
+        try {
+          const imported = await importContinuationAbstracts(job.id, sourceJobId);
+          importedContinuation = (imported.imported || 0) > 0;
+        } catch (importErr) {
+          showError(`Could not import prior job abstracts (${importErr.message}); combining in-browser for synthesis.`);
+        }
+      }
+    } catch (serverErr) {
+      showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);
+    }
+  }
+
+  if (!usedServerAbstraction) {
+    await safePatchAnalysisJob(job.id, {
+      status: 'abstracting',
+      completedDocuments: priorCount,
+      failedDocuments: 0,
+      currentPhase: `Starting analysis of ${newFiles.length} additional document${newFiles.length === 1 ? '' : 's'}`,
+    });
+    try {
+      newAbstracts = groupAbstractsBySourceDocument(
+        await runDocumentAbstraction(newFiles, priorCount, items, showAllProgress, `additional-${priorCount}`, job.id)
+      );
+    } catch (e) {
+      await safePatchAnalysisJob(job.id, {
+        status: 'failed',
+        completedDocuments: priorCount + activeJobCompletedDocuments,
+        failedDocuments: Math.max(0, newFiles.length - activeJobCompletedDocuments),
+        currentPhase: 'abstracting',
+        errorMessage: e.message,
+      });
+      showError(e.message);
+      clearProgressTimer();
+      stopJobPolling();
+      document.getElementById('progressSection').style.display = 'none';
+      document.getElementById('addDocsSection').style.display = 'block';
+      document.getElementById('addDocsBtn').disabled = false;
+      return;
+    }
+  }
+
+  let allAbstracts;
+  if (usedServerAbstraction && importedContinuation) {
+    allAbstracts = groupAbstractsBySourceDocument(await fetchServerAbstracts(job.id));
+  } else {
+    allAbstracts = groupAbstractsBySourceDocument([...priorAbstracts, ...newAbstracts]);
+  }
+
   if (activeProgressTimer) activeProgressTimer.phase = 'synthesis';
   items[items.length - 1].status = 'active';
   updateProgress(88, 'Updating chain of title with all documents combined...', items);
+  await safePatchAnalysisJob(job.id, {
+    status: 'synthesizing',
+    completedDocuments: completedDocumentsForJob(allAbstracts.length, totalAfter),
+    failedDocuments: serverAbstractionFailedCount,
+    currentPhase: 'Updating chain of title with all documents combined',
+  });
 
   const synthesisInput = buildAbstractInput(
     allAbstracts,
-    document.getElementById('tractDescription').value,
-    document.getElementById('contextNotes').value,
-    `You have previously analyzed ${documentAbstracts.length} documents. I am now providing ${newAbstracts.length} additional documents. Re-synthesize the complete chain of title based on ALL ${allAbstracts.length} documents combined.`
+    tract,
+    ctx,
+    `You have previously analyzed ${priorCount} documents. I am now providing ${newAbstracts.length} additional documents. Re-synthesize the complete chain of title based on ALL ${allAbstracts.length} documents combined.`
   );
 
   try {
-    let synthStep = 0;
-    const synthSteps = Math.max(1, Math.ceil(allAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
-    const synthesis = await hierarchicalSynthesis(
-      allAbstracts,
-      document.getElementById('tractDescription').value,
-      document.getElementById('contextNotes').value,
-      status => {
+    let synthesis = null;
+    let usedServerSynthesis = false;
+    if (usedServerAbstraction && importedContinuation) {
+      try {
+        const serverResult = await runServerSynthesis(job.id, totalAfter, items, (pct, label) => {
+          updateProgress(pct, label, items);
+          safePatchAnalysisJob(job.id, {
+            status: 'synthesizing',
+            completedDocuments: completedDocumentsForJob(allAbstracts.length, totalAfter),
+            failedDocuments: serverAbstractionFailedCount,
+            currentPhase: label,
+          });
+        });
+        synthesis = serverResult.result.finalTitleOpinion;
+        usedServerSynthesis = true;
+        if (serverResult.result.warnings?.length) {
+          showError(`Server synthesis completed with warnings: ${serverResult.result.warnings.slice(0, 3).join('; ')}.`);
+        }
+      } catch (serverErr) {
+        showError(`Server-side synthesis unavailable (${serverErr.message}); falling back to browser synthesis. Keep this tab open until the run finishes.`);
+      }
+    }
+    if (!usedServerSynthesis) {
+      let synthStep = 0;
+      const synthSteps = Math.max(1, Math.ceil(allAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
+      synthesis = await hierarchicalSynthesis(allAbstracts, tract, ctx, status => {
         synthStep += 1;
         if (activeProgressTimer) activeProgressTimer.synthesisStep = synthStep;
         updateProgress(Math.min(99, 88 + Math.round((synthStep / synthSteps) * 10)), status, items);
-      }
-    );
+        safePatchAnalysisJob(job.id, {
+          status: 'synthesizing',
+          completedDocuments: completedDocumentsForJob(allAbstracts.length, totalAfter),
+          failedDocuments: serverAbstractionFailedCount,
+          currentPhase: status,
+        });
+      });
+      const browserResultStatus = serverAbstractionFailedCount ? 'partial_failed' : 'complete';
+      await saveBrowserJobResult(job.id, {
+        status: browserResultStatus,
+        finalTitleOpinion: synthesis,
+        warnings: serverAbstractionFailedCount
+          ? [`${serverAbstractionFailedCount} abstraction chunk(s) failed and were omitted from browser synthesis.`]
+          : [],
+        failedDocuments: [],
+        modelUsed: SYNTHESIS_MODEL,
+      });
+    }
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
     clearProgressTimer();
+    stopJobPolling();
 
-    // Update global state
     documentAbstracts = allAbstracts;
-    additionalFiles.forEach(freeFileMemory);
+    newFiles.forEach(freeFileMemory);
     additionalFiles = [];
 
-    conversationHistory.push({ role: 'user', content: synthesisInput, displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together`, kind: 'analysis-input' });
-    conversationHistory.push({ role: 'assistant', content: synthesis, kind: 'title-opinion' });
+    conversationHistory.push({
+      role: 'user',
+      content: synthesisInput,
+      displayText: `Added ${newAbstracts.length} more document(s) — re-analyzed all ${allAbstracts.length} together`,
+      kind: 'analysis-input',
+    });
+    conversationHistory.push({
+      role: 'assistant',
+      content: synthesis,
+      kind: 'title-opinion',
+      sourceJobId: usedServerSynthesis ? job.id : null,
+    });
 
     setTimeout(() => {
       document.getElementById('progressSection').style.display = 'none';
@@ -3680,7 +3843,16 @@ async function analyzeAdditional() {
       renderResults();
     }, 600);
   } catch (e) {
+    await safePatchAnalysisJob(job.id, {
+      status: 'failed',
+      completedDocuments: completedDocumentsForJob(allAbstracts.length, totalAfter),
+      failedDocuments: serverAbstractionFailedCount || Math.max(0, newFiles.length - newAbstracts.length),
+      currentPhase: 'synthesizing',
+      errorMessage: e.message,
+    });
     showError('Update failed: ' + e.message);
+    clearProgressTimer();
+    stopJobPolling();
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('addDocsSection').style.display = 'block';
     document.getElementById('addDocsBtn').disabled = false;
