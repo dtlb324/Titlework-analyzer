@@ -164,6 +164,39 @@ export async function createSignedUpload({ jobId, chunkId, originalFilename, obj
   };
 }
 
+function blobCacheKey(chunk) {
+  return chunk?.blobUrl || chunk?.objectUrl || `${chunk?.jobId || ''}:${chunk?.blobKey || chunk?.objectKey || chunk?.id || ''}`;
+}
+
+/**
+ * Dedupe GCS downloads within a single worker batch (multi-chunk batches, concurrent singles).
+ */
+export function createBlobReadCache(options = {}) {
+  const pending = new Map();
+  const load = async chunk => {
+    if (options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__) {
+      return await (options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__)(chunk);
+    }
+    if (options.blobLoader || globalThis.__TITLE_ANALYZER_BLOB_LOADER__) {
+      return await (options.blobLoader || globalThis.__TITLE_ANALYZER_BLOB_LOADER__)(chunk);
+    }
+    return await readObject(chunk, options);
+  };
+  return async chunk => {
+    const key = blobCacheKey(chunk);
+    if (!key) return await load(chunk);
+    if (pending.has(key)) return await pending.get(key);
+    const promise = load(chunk);
+    pending.set(key, promise);
+    try {
+      return await promise;
+    } catch (err) {
+      pending.delete(key);
+      throw err;
+    }
+  };
+}
+
 export async function readObject(chunk, options = {}) {
   if (options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__) {
     return await (options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__)(chunk);

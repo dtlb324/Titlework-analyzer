@@ -287,6 +287,30 @@ test('PATCH /api/jobs/:id/chunks/:chunkId rejects uploaded status without a vali
   assert(wrongKeyRes.statusCode === 400, `Expected wrong Blob key rejection, got ${wrongKeyRes.statusCode}`);
 });
 
+test('blob read cache dedupes concurrent downloads for the same object URL', async () => {
+  const storage = await import('../api/_lib/storage.js');
+  let downloads = 0;
+  const chunk = {
+    id: 'chk_cache_1',
+    jobId: 'job_cache_1',
+    blobUrl: 'gs://titlework-test/jobs/job_cache_1/chunks/chk_cache_1/deed.pdf',
+    blobKey: 'jobs/job_cache_1/chunks/chk_cache_1/deed.pdf',
+  };
+  globalThis.__TITLE_ANALYZER_OBJECT_READER__ = async () => {
+    downloads += 1;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    return { bytes: Buffer.from('cached'), mediaType: 'application/pdf' };
+  };
+  try {
+    const cachedRead = storage.createBlobReadCache();
+    const [a, b] = await Promise.all([cachedRead(chunk), cachedRead(chunk)]);
+    assert(downloads === 1, `Expected one GCS download, got ${downloads}`);
+    assert(a.bytes.equals(b.bytes), 'Expected identical cached payload bytes');
+  } finally {
+    delete globalThis.__TITLE_ANALYZER_OBJECT_READER__;
+  }
+});
+
 test('storage adapter validates GCS object refs and rejects Vercel Blob refs', async () => {
   const storage = await import('../api/_lib/storage.js');
   assert(storage.isAllowedStorageUrl('gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf'), 'Expected gs:// object URL to be allowed');

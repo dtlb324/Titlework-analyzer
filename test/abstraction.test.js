@@ -474,14 +474,29 @@ test('POST /api/jobs/:id/abstraction/start enqueues quickly for the Cloud Run wo
   assert(res.body.workflow.driver === 'inprocess', 'Expected default inprocess driver');
   assert(elapsed < 2000, `Expected start endpoint to return quickly, took ${elapsed}ms`);
 
-  assert(!getBackgroundPromise('job_test_1'), 'Expected route not to schedule an in-request background drain');
-  assert((await store.listDocumentAbstracts('job_test_1')).length === 0, 'Expected no abstract before the worker drains the queue');
-
-  await processAbstractionBatch('job_test_1', { store });
+  const kickPromise = getBackgroundPromise('job_test_1');
+  assert(kickPromise, 'Expected abstraction/start to kick a bounded background batch');
+  await kickPromise;
   const saved = await store.listDocumentAbstracts('job_test_1');
   assert(saved.length === 1, 'Expected saved abstract');
   assert(saved[0].abstractText.includes('Abstracted deed facts'), 'Expected abstract text persistence');
   assert(saved[0].inputTokens === 111 && saved[0].outputTokens === 22, 'Expected token usage persistence');
+});
+
+test('POST /api/jobs/:id/abstraction/start can enqueue only when WORKFLOW_KICK_ON_START=false', async () => {
+  const previousKick = process.env.WORKFLOW_KICK_ON_START;
+  process.env.WORKFLOW_KICK_ON_START = 'false';
+  const store = createMemoryPhase3Store([makeChunk()]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  try {
+    const res = mockRes();
+    await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
+    assert(res.statusCode === 202, `Expected 202, got ${res.statusCode}`);
+    assert(!getBackgroundPromise('job_test_1'), 'Expected no in-request kick when disabled');
+  } finally {
+    if (previousKick === undefined) delete process.env.WORKFLOW_KICK_ON_START;
+    else process.env.WORKFLOW_KICK_ON_START = previousKick;
+  }
 });
 
 test('POST /api/jobs/:id/abstraction/start rejects jobs before uploads are ready', async () => {

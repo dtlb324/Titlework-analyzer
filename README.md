@@ -53,7 +53,11 @@ Set these on both Cloud Run services unless noted otherwise:
 | `WORKFLOW_STALE_LEASE_MS` | Optional | Default is longer than `WORKFLOW_LEASE_MS`. |
 | `SYNTHESIS_MERGE_LEASE_MS` | Optional | Defaults longer than synthesis upstream timeout. |
 | `SYNTHESIS_STALE_LEASE_MS` | Optional | Defaults longer than synthesis merge lease. |
-| `WORKER_POLL_INTERVAL_MS` | Worker only | Default `5000`. |
+| `WORKER_POLL_INTERVAL_MS` | Worker only | Legacy idle poll fallback. Default `5000`; prefer `WORKER_POLL_IDLE_MS`. |
+| `WORKER_POLL_IDLE_MS` | Worker only | Default `2000` when idle (no runnable jobs). |
+| `WORKER_POLL_ACTIVE_MS` | Worker only | Default `0` (no sleep between busy worker passes). |
+| `WORKFLOW_KICK_ON_START` | API | Default `true`. Runs a bounded background batch when abstraction/synthesis start is called. |
+| `WORKFLOW_KICK_BUDGET_MS` | API kick | Default `50000` per start kick (under the 60s API limit). |
 | `ABSTRACTION_PDF_TEXT_FIRST` | Optional | Default `true`. Use extracted PDF text when quality checks pass (lower token cost). |
 | `ABSTRACTION_BATCH_ENABLED` | Optional | Default `true`. Batch up to 8 small chunks per abstraction API call on the worker. |
 | `ABSTRACTION_BATCH_MAX_DOCS` | Optional | Default `8`. Max documents per server abstraction batch. |
