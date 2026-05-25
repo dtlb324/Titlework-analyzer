@@ -1602,9 +1602,9 @@ test('Synthesis /start enqueues quickly for the Cloud Run worker', async () => {
   const elapsed = Date.now() - startedAt;
   assert(res.statusCode === 202, `Expected 202, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
   assert(elapsed < 2000, `Expected /synthesis/start to return quickly, took ${elapsed}ms`);
-  assert(!getSynthesisBackgroundPromise('job_test_1'), 'Expected route not to schedule an in-request synthesis drain');
-  assert(!(await store.getJobResult('job_test_1')), 'Expected no result before the worker drains synthesis');
-  await processSynthesisBatch('job_test_1', { store });
+  const kickPromise = getSynthesisBackgroundPromise('job_test_1');
+  assert(kickPromise, 'Expected synthesis/start to kick a bounded background batch');
+  await kickPromise;
   const result = await store.getJobResult('job_test_1');
   assert(result?.finalTitleOpinion?.includes('FINAL OWNERSHIP'), 'Expected background work to save final opinion');
 });

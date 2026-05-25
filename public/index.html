@@ -2140,11 +2140,15 @@ function isServerAbstractionTerminal(status) {
   return total > 0 && (status.completed || 0) + (status.failed || 0) >= total;
 }
 
+function kickServerWorkflowBatch(runBatch) {
+  void runBatch().catch(err => console.warn('Could not kick server workflow batch', err));
+}
+
 async function pollServerAbstraction(jobId, items, totalDocuments) {
   let latest = null;
   let lastTerminalCount = -1;
   let stallPolls = 0;
-  const STALL_THRESHOLD = 10; // ~10 seconds with no progress -> kick worker
+  const STALL_THRESHOLD = 4; // ~4 seconds with no progress -> kick worker
   for (let attempt = 0; attempt < 1800; attempt++) {
     latest = await fetchServerAbstractionStatus(jobId);
     const status = latest.status || {};
@@ -2189,7 +2193,7 @@ async function pollServerAbstraction(jobId, items, totalDocuments) {
         console.warn('Could not kick server abstraction batch', err);
       }
     }
-    await sleep(1000);
+    await sleep(stallPolls > 0 ? 1000 : 750);
   }
   throw new Error('Server-side abstraction did not finish polling in this browser session.');
 }
@@ -2250,7 +2254,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   let cachedResult = null;
   let lastSignature = '';
   let stallPolls = 0;
-  const STALL_THRESHOLD = 10;
+  const STALL_THRESHOLD = 4;
   for (let attempt = 0; attempt < 1800; attempt++) {
     latest = await fetchServerSynthesisStatus(jobId);
     const status = latest.status || {};
@@ -2285,7 +2289,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
         console.warn('Could not kick server synthesis batch', err);
       }
     }
-    await sleep(1000);
+    await sleep(stallPolls > 0 ? 1000 : 750);
   }
   throw new Error('Server-side synthesis did not finish polling in this browser session.');
 }
@@ -2293,6 +2297,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
 async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
   if (onProgress) onProgress(88, 'Starting server-side synthesis from saved abstracts...');
   const started = await startServerSynthesis(jobId);
+  kickServerWorkflowBatch(() => processServerSynthesisBatch(jobId));
   const status = started.status || {};
   const settled = isServerSynthesisTerminal(status)
     ? started
@@ -2311,6 +2316,7 @@ async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
 async function runServerDocumentAbstraction(jobId, fileList, items) {
   updateProgress(8, 'Starting server-side abstraction from durable chunks...', items);
   const start = await startServerAbstraction(jobId);
+  kickServerWorkflowBatch(() => processServerAbstractionBatch(jobId));
   const latest = isServerAbstractionTerminal(start.status)
     ? start
     : await pollServerAbstraction(jobId, items, fileList.length);

@@ -21,6 +21,7 @@ import {
   processMultiChunkAbstraction,
 } from './abstraction-batch.js';
 import { runWithConcurrency } from './concurrency.js';
+import { createBlobReadCache } from './storage.js';
 import { processSynthesisJob, planJobSynthesis } from './synthesis.js';
 
 const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 12, 1, 64);
@@ -31,6 +32,7 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TI
 const DEFAULT_LEASE_MS = clampInt(process.env.WORKFLOW_LEASE_MS, DEFAULT_UPSTREAM_TIMEOUT_MS + 60_000, 5_000, 600_000);
 const DEFAULT_MAX_ATTEMPTS = clampInt(process.env.ABSTRACTION_MAX_ATTEMPTS, 5, 1, 12);
 const DEFAULT_STALE_LEASE_MS = clampInt(process.env.WORKFLOW_STALE_LEASE_MS, DEFAULT_LEASE_MS + 60_000, 5_000, 600_000);
+const DEFAULT_KICK_BUDGET_MS = clampInt(process.env.WORKFLOW_KICK_BUDGET_MS, 50_000, 5_000, 55_000);
 
 function clampInt(raw, fallback, min, max) {
   const value = Number(raw);
@@ -169,6 +171,7 @@ async function listReadyChunks(store, jobId, limit, now) {
 export async function processAbstractionBatch(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process abstraction.');
+  const blobLoader = options.blobLoader || createBlobReadCache(options);
   const config = {
     batchLimit: options.batchLimit ?? DEFAULT_BATCH_LIMIT,
     concurrency: options.concurrency ?? DEFAULT_CONCURRENCY,
@@ -212,6 +215,7 @@ export async function processAbstractionBatch(jobId, options = {}) {
           return await processMultiChunkAbstraction(batch.chunks, {
             ...options,
             store,
+            blobLoader,
             workerId,
             leaseMs: config.leaseMs,
             maxAttempts: config.maxAttempts,
@@ -225,6 +229,7 @@ export async function processAbstractionBatch(jobId, options = {}) {
           return [await processChunkAbstraction(chunk, {
             ...options,
             store,
+            blobLoader,
             workerId,
             leaseMs: config.leaseMs,
             maxAttempts: config.maxAttempts,
@@ -242,6 +247,7 @@ export async function processAbstractionBatch(jobId, options = {}) {
         return await processChunkAbstraction(chunk, {
           ...options,
           store,
+          blobLoader,
           workerId,
           leaseMs: config.leaseMs,
           maxAttempts: config.maxAttempts,
@@ -310,6 +316,21 @@ export function getSynthesisBackgroundPromise(jobId) {
   return synthesisBackgroundPromises.get(jobId) || null;
 }
 
+export function isWorkflowKickOnStartEnabled() {
+  return process.env.WORKFLOW_KICK_ON_START !== 'false';
+}
+
+export function kickWorkflowOnStart(jobId, phase, options = {}) {
+  if (!isWorkflowKickOnStartEnabled()) return null;
+  const budgetMs = options.budgetMs ?? DEFAULT_KICK_BUDGET_MS;
+  const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
+  const kickOptions = { ...options, budgetMs };
+  if (phase === 'synthesis') {
+    return scheduleBackgroundSynthesis(jobId, kickOptions);
+  }
+  return scheduleBackgroundProcessing(jobId, kickOptions);
+}
+
 export function scheduleBackgroundProcessing(jobId, options = {}) {
   // Legacy in-process fallback for local/manual use. Cloud Run deployments
   // should use worker.js so route handlers only enqueue durable work.
@@ -318,7 +339,10 @@ export function scheduleBackgroundProcessing(jobId, options = {}) {
   if (existing) return existing;
   const promise = (async () => {
     try {
-      return await processAbstractionBatch(jobId, options);
+      return await processAbstractionBatch(jobId, {
+        ...options,
+        budgetMs: options.budgetMs ?? options.batchBudgetMs,
+      });
     } catch (err) {
       console.error(JSON.stringify({
         event: 'workflow_background_error',
@@ -449,7 +473,10 @@ export function scheduleBackgroundSynthesis(jobId, options = {}) {
   if (existing) return existing;
   const promise = (async () => {
     try {
-      return await processSynthesisBatch(jobId, options);
+      return await processSynthesisBatch(jobId, {
+        ...options,
+        budgetMs: options.budgetMs ?? options.batchBudgetMs,
+      });
     } catch (err) {
       console.error(JSON.stringify({
         event: 'workflow_synthesis_background_error',
