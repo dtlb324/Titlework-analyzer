@@ -114,19 +114,19 @@ function test(name, fn) {
 }
 
 test('server returns 413 for requests over the configured Cloud Run envelope', async () => {
-  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevKey = process.env.GEMINI_API_KEY;
   const prevLimit = process.env.ANALYZE_MAX_REQUEST_BYTES;
-  process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
   process.env.ANALYZE_MAX_REQUEST_BYTES = '1000';
   const req = mockReq({
-    model: 'claude-haiku-4-5',
+    model: 'gemini-2.5-flash',
     max_tokens: 100,
     messages: [{ role: 'user', content: 'x'.repeat(2000) }],
   });
   const res = mockRes();
   await handler(req, res);
-  if (prevKey) process.env.ANTHROPIC_API_KEY = prevKey;
-  else delete process.env.ANTHROPIC_API_KEY;
+  if (prevKey) process.env.GEMINI_API_KEY = prevKey;
+  else delete process.env.GEMINI_API_KEY;
   if (prevLimit) process.env.ANALYZE_MAX_REQUEST_BYTES = prevLimit;
   else delete process.env.ANALYZE_MAX_REQUEST_BYTES;
 
@@ -135,9 +135,9 @@ test('server returns 413 for requests over the configured Cloud Run envelope', a
 });
 
 test('server maps upstream aborts to 504 before Cloud Run request timeout', async () => {
-  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevKey = process.env.GEMINI_API_KEY;
   const prevFetch = global.fetch;
-  process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
   global.fetch = async () => {
     const err = new Error('The operation was aborted');
     err.name = 'AbortError';
@@ -145,15 +145,15 @@ test('server maps upstream aborts to 504 before Cloud Run request timeout', asyn
   };
 
   const req = mockReq({
-    model: 'claude-haiku-4-5',
+    model: 'gemini-2.5-flash',
     messages: [{ role: 'user', content: 'hello' }],
   }, { 'x-request-id': 'test-timeout' });
   const res = mockRes();
   await handler(req, res);
 
   global.fetch = prevFetch;
-  if (prevKey) process.env.ANTHROPIC_API_KEY = prevKey;
-  else delete process.env.ANTHROPIC_API_KEY;
+  if (prevKey) process.env.GEMINI_API_KEY = prevKey;
+  else delete process.env.GEMINI_API_KEY;
 
   assert(res.statusCode === 504, `Expected 504, got ${res.statusCode}`);
   assert(res.headers['X-Request-Id'] === 'test-timeout', 'Expected request id header');

@@ -4,7 +4,18 @@ import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } fro
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
-const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'gemini-2.5-flash';
+const DEFAULT_ABSTRACT_MODEL = 'gemini-2.5-flash';
+const REMOVED_ABSTRACT_MODELS = new Set(['claude-haiku-4-5', 'claude-3-5-haiku-20241022', 'claude-3-5-haiku-latest']);
+
+export function resolveAbstractModel() {
+  const configured = String(process.env.ABSTRACT_MODEL || DEFAULT_ABSTRACT_MODEL).trim();
+  if (REMOVED_ABSTRACT_MODELS.has(configured) || /^claude-haiku/i.test(configured)) {
+    return DEFAULT_ABSTRACT_MODEL;
+  }
+  return configured;
+}
+
+const ABSTRACT_MODEL = resolveAbstractModel();
 const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 3000, 512, 4096);
 const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'claude-sonnet-4-6';
 const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);

@@ -7,10 +7,12 @@
 // would exceed the safe request envelope.
 //
 // Required env vars:
-//   - ANTHROPIC_API_KEY (override per call with options.modelClient)
+//   - GEMINI_API_KEY (partial segment synthesis)
+//   - ANTHROPIC_API_KEY (final title opinion, follow-ups, optional audit)
+//   Override per call with options.modelClient
 //
 // Configurable (env):
-//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6)
+//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6 for final title opinion; Gemini/Haiku ignored)
 //   - SYNTHESIS_MAX_TOKENS (default: 8000)
 //   - SYNTHESIS_CHUNK_SIZE (default: 50)
 //   - REQUEST_ENVELOPE_SAFE_BYTES (default: 3_900_000)
@@ -20,11 +22,39 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
-import { buildMessagesRequestBody } from './anthropic-request.js';
+import { isGeminiModel, invokeModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
 import { runWithConcurrency } from './concurrency.js';
 
-const DEFAULT_SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'claude-sonnet-4-6';
-const DEFAULT_PARTIAL_SYNTHESIS_MODEL = process.env.SYNTHESIS_PARTIAL_MODEL || 'claude-haiku-4-5';
+const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-4-6';
+
+export function resolveFinalSynthesisModel() {
+  const configured = String(process.env.SYNTHESIS_MODEL || DEFAULT_FINAL_SYNTHESIS_MODEL).trim();
+  if (isGeminiModel(configured) || /^claude-haiku/i.test(configured)) {
+    return DEFAULT_FINAL_SYNTHESIS_MODEL;
+  }
+  return configured || DEFAULT_FINAL_SYNTHESIS_MODEL;
+}
+
+const DEFAULT_SYNTHESIS_MODEL = resolveFinalSynthesisModel();
+const DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID = 'gemini-2.5-flash';
+const REMOVED_PARTIAL_SYNTHESIS_MODELS = new Set([
+  'claude-haiku-4-5',
+  'claude-3-5-haiku-20241022',
+  'claude-3-5-haiku-latest',
+]);
+
+export function resolvePartialSynthesisModel() {
+  const configured = String(process.env.SYNTHESIS_PARTIAL_MODEL || DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID).trim();
+  if (REMOVED_PARTIAL_SYNTHESIS_MODELS.has(configured) || /^claude-haiku/i.test(configured)) {
+    return DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID;
+  }
+  if (!isGeminiModel(configured)) {
+    return DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID;
+  }
+  return configured;
+}
+
+const DEFAULT_PARTIAL_SYNTHESIS_MODEL = resolvePartialSynthesisModel();
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 8192);
 const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 3500, 512, 8192);
 const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
@@ -344,9 +374,7 @@ function classifyError(err) {
 }
 
 function sanitizeErrorMessage(err) {
-  return String(err?.message || err || 'Unknown error')
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[REDACTED]')
-    .slice(0, 1000);
+  return sanitizeModelClientError(err);
 }
 
 function extractUsage(usage = {}) {
@@ -357,40 +385,13 @@ function extractUsage(usage = {}) {
 }
 
 async function defaultModelClient(request) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    const error = new Error('ANTHROPIC_API_KEY is required for server-side synthesis.');
-    error.statusCode = 503;
-    throw error;
-  }
-  const body = JSON.stringify(buildMessagesRequestBody({
-    model: request.model,
-    maxTokens: request.maxTokens,
-    system: request.system,
-    messages: request.messages,
-  }));
-  const timeout = createTimeoutSignal(request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS);
+  const timeoutMs = request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS;
+  const timeout = createTimeoutSignal(timeoutMs);
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body,
-      signal: timeout.signal,
+    return await invokeModel(request, {
+      timeoutMs,
+      createTimeoutSignal: () => timeout,
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data?.error?.message || data?.error || `Anthropic request failed (HTTP ${response.status}).`);
-      error.status = response.status;
-      throw error;
-    }
-    return {
-      text: data.content?.map(block => block.text || '').join('') || '',
-      model: data.model || request.model,
-      usage: data.usage || {},
-    };
   } finally {
     timeout.cleanup();
   }
@@ -1543,10 +1544,14 @@ export async function answerFollowupQuestion(jobId, question, options = {}) {
 }
 
 export function synthesisSetupError() {
-  if (!process.env.ANTHROPIC_API_KEY
-    && !globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__
-    && !globalThis.__TITLE_ANALYZER_MODEL_CLIENT__) {
-    return 'ANTHROPIC_API_KEY is required for server-side synthesis.';
+  if (globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ || globalThis.__TITLE_ANALYZER_MODEL_CLIENT__) {
+    return null;
   }
-  return null;
+  const missing = [];
+  const geminiError = geminiApiKeyError();
+  if (geminiError) missing.push(geminiError);
+  if (!process.env.ANTHROPIC_API_KEY) {
+    missing.push('ANTHROPIC_API_KEY is required for final title synthesis and follow-ups.');
+  }
+  return missing.length ? missing.join(' ') : null;
 }
