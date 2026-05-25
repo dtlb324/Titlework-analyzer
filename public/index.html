@@ -280,7 +280,6 @@ const MAX_FILE_LIST_DISPLAY = 8;
 const CLIENT_MAX_REQUESTS_PER_MIN = 120;
 const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
-const PDF_SPLIT_RAW_THRESHOLD = 1_500_000;
 const MAX_PDF_CHUNK_RAW_BYTES = 1_500_000;
 
 const ABSTRACT_MODEL = 'claude-haiku-4-5';
@@ -821,14 +820,24 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
   return entries;
 }
 
+async function readPdfPageCount(file) {
+  if (!window.PDFLib || !file?.arrayBuffer) return null;
+  try {
+    const bytes = await file.arrayBuffer();
+    const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+    const count = doc.getPageCount();
+    return Number.isInteger(count) && count > 0 ? count : null;
+  } catch {
+    return null;
+  }
+}
+
 async function prepareFileEntries(file, slotsAvailable) {
   if (isCsvFile(file)) {
     const text = await readFileAsText(file);
     return [{ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file, originalSizeBytes: file.size, originalMediaType: 'text/csv' }];
   }
-  if (isPdfFile(file) && file.size > PDF_SPLIT_RAW_THRESHOLD) {
-    return await splitPdfIntoEntries(file, slotsAvailable);
-  }
+  const pdfPageCount = isPdfFile(file) ? await readPdfPageCount(file) : null;
   const data = await readFileAsBase64(file);
   return [{
     name: file.name,
@@ -839,6 +848,7 @@ async function prepareFileEntries(file, slotsAvailable) {
     sourceFile: file,
     originalSizeBytes: file.size,
     originalMediaType: file.type || (isPdfFile(file) ? 'application/pdf' : file.type),
+    pageRange: pdfPageCount ? [1, pdfPageCount] : undefined,
   }];
 }
 
@@ -3000,6 +3010,9 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
       return part1 + '\n\n' + part2;
     }
+    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0])) {
+      return await abstractSinglePdfOnTimeout(batchFiles[0], globalStartIdx);
+    }
     const names = batchFiles.map(f => f.name).join(', ');
     throw new Error(`File too large: ${names} (${formatMegabytes(requestBytes)} MB) exceeds the app's safe ${formatMegabytes(REQUEST_ENVELOPE_SAFE_BYTES)} MB request budget. Scan at 150 DPI black and white or split into about 10-page sections.`);
   }
@@ -3023,7 +3036,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
       return part1 + '\n\n' + part2;
     }
-    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0]) && isTimeoutError(e)) {
+    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0]) && (isEnvelopeError(e) || isTimeoutError(e))) {
       return await abstractSinglePdfOnTimeout(batchFiles[0], globalStartIdx);
     }
     throw e;

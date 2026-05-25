@@ -70,6 +70,9 @@ function makeAbstract(overrides = {}) {
     sourceFilename: overrides.sourceFilename,
     pageStart: overrides.pageStart,
     pageEnd: overrides.pageEnd,
+    splitFrom: overrides.splitFrom,
+    splitParentChunkId: overrides.splitParentChunkId,
+    splitReason: overrides.splitReason,
     createdAt: overrides.createdAt,
     abstractText: overrides.abstractText || `DOC TYPE: Deed\nGRANTOR: Person ${overrides.chunkId}\nGRANTEE: Person ${overrides.chunkId}+1\nFRACTION CONVEYED: 1/4`,
     status: 'completed',
@@ -152,6 +155,11 @@ function createMemoryPhase5Store(initialState = {}) {
           chunkOrder: a.chunkOrder,
           originalFilename: a.originalFilename,
           abstractionStatus: 'completed',
+          pageStart: a.pageStart,
+          pageEnd: a.pageEnd,
+          splitFrom: a.splitFrom,
+          splitParentChunkId: a.splitParentChunkId,
+          splitReason: a.splitReason,
         })),
         ...failedChunks.map(f => ({
           id: f.chunkId,
@@ -1004,6 +1012,48 @@ test('Partial job: failed abstract omitted; warnings list excluded documents', a
   assert(result.result?.status === 'partial_failed', `Expected partial_failed, got ${result.result?.status}`);
   assert(result.result.failedDocuments.some(f => f.chunkId === 'chk_fail'), 'Expected failed chunk listed');
   assert(result.result.warnings.some(w => /excluded/i.test(w)), `Expected exclusion warning, got ${JSON.stringify(result.result.warnings)}`);
+});
+
+test('Split-degraded documents produce final result warnings even when all chunks succeed', async () => {
+  const abstracts = [
+    makeAbstract({
+      chunkId: 'chk_split_left',
+      documentId: 'doc_deed',
+      chunkOrder: 0,
+      originalFilename: 'Deed (pp 1-2).pdf',
+      splitFrom: 'Deed.pdf',
+      splitParentChunkId: 'chk_parent',
+      splitReason: 'payload_too_large',
+      pageStart: 1,
+      pageEnd: 2,
+      abstractText: 'DOC TYPE: Deed\nGRANTOR: A\nGRANTEE: B\nFRACTION CONVEYED: 1/2',
+    }),
+    makeAbstract({
+      chunkId: 'chk_split_right',
+      documentId: 'doc_deed',
+      chunkOrder: 0,
+      originalFilename: 'Deed (pp 3-4).pdf',
+      splitFrom: 'Deed.pdf',
+      splitParentChunkId: 'chk_parent',
+      splitReason: 'payload_too_large',
+      pageStart: 3,
+      pageEnd: 4,
+      abstractText: 'DOC TYPE: Deed\nGRANTOR: A\nGRANTEE: B\nFRACTION CONVEYED: 1/2',
+    }),
+  ];
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
+    text: goodFinalOpinion(),
+    model: 'claude-sonnet-4-6',
+    usage: { input_tokens: 1, output_tokens: 1 },
+  });
+
+  const result = await processSynthesisJob('job_test_1', { store });
+
+  assert(result.result?.status === 'complete', `Expected complete result, got ${result.result?.status}`);
+  assert(result.result.failedDocuments.length === 0, 'Expected no failed documents');
+  assert(result.result.warnings.some(w => /page-range segments/i.test(w) && /Deed\.pdf/.test(w)), `Expected split degradation warning, got ${JSON.stringify(result.result.warnings)}`);
+  assert(result.result.warnings.some(w => /clause continuity|legal descriptions|exhibits/i.test(w)), 'Expected legal continuity warning language');
 });
 
 test('Segment timeout triggers binary split retry', async () => {

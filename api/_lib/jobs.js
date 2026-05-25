@@ -566,6 +566,8 @@ function rowToChunk(row) {
     modelUsed: row.model_used,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
+    splitParentChunkId: row.split_parent_chunk_id,
+    splitReason: row.split_reason,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
     completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
@@ -1059,7 +1061,8 @@ function createPostgresJobStore() {
           COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'failed')::integer AS failed,
           COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'retry_wait')::integer AS retry_wait,
           COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'processing')::integer AS processing,
-          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'pending')::integer AS pending
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'pending')::integer AS pending,
+          COUNT(*) FILTER (WHERE upload_status = 'uploaded' AND abstraction_status = 'split_superseded')::integer AS superseded
         FROM document_chunks
         WHERE job_id = ${jobId}
       ),
@@ -1097,6 +1100,8 @@ function createPostgresJobStore() {
         current_phase = CASE
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total
             THEN 'Server abstraction finished: ' || counts.completed || ' completed, ' || counts.failed || ' failed'
+          WHEN counts.superseded > 0 AND counts.processing + counts.pending + counts.retry_wait > 0
+            THEN 'Re-segmenting oversized PDF for model limits: ' || counts.completed || '/' || counts.total || ' chunks'
           WHEN counts.total > 0 AND counts.processing + counts.pending + counts.retry_wait > 0
             THEN 'Server abstraction ' || counts.completed || '/' || counts.total || ' (' || counts.processing || ' running, ' || counts.retry_wait || ' awaiting retry)'
           ELSE 'Server abstraction ' || counts.completed || '/' || counts.total

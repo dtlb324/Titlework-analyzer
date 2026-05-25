@@ -922,6 +922,106 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
   assert(result.splitsInBatch >= 1 || result.completed >= 0, 'Expected split or completion accounted in batch');
 });
 
+test('Phase 4: 504 timeout splits whole PDFs even when page range metadata is missing', async () => {
+  const wholeChunk = {
+    ...makeChunk({ id: 'chk_whole_big', sizeBytes: 1_200_000 }),
+    pageStart: null,
+    pageEnd: null,
+  };
+  const store = createMemoryPhase3Store([wholeChunk]);
+  let splitCalls = 0;
+  store.createSplitChunk = async (jobId, documentId, input) => {
+    splitCalls += 1;
+    const childId = `chk_whole_split_${splitCalls}`;
+    const child = {
+      ...makeChunk({
+        id: childId,
+        chunkOrder: input.chunkOrder,
+        originalFilename: input.originalFilename,
+        pageStart: input.pageStart,
+        pageEnd: input.pageEnd,
+        sizeBytes: input.sizeBytes,
+      }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      blobKey: input.blobKey,
+      blobUrl: input.blobUrl,
+      splitFrom: input.splitFrom,
+      splitParentChunkId: input.splitParentChunkId,
+      splitReason: input.splitReason,
+    };
+    store.chunks.set(childId, child);
+    return child;
+  };
+  store.markChunkAbstractionSplitSuperseded = async (jobId, chunkId, reason) => {
+    const chunk = store.chunks.get(chunkId);
+    store.chunks.set(chunkId, { ...chunk, abstractionStatus: 'split_superseded', abstractionErrorType: reason });
+    return store.chunks.get(chunkId);
+  };
+
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  await processChunkAbstraction(wholeChunk, {
+    store,
+    blobLoader: async chunk => ({ bytes: pdfBytes, mediaType: chunk.mediaType }),
+    blobWriter: async (parent, name) => ({
+      blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+    }),
+    modelClient: async () => {
+      const err = new Error('timeout');
+      err.status = 504;
+      throw err;
+    },
+    maxAttempts: 1,
+  });
+
+  assert(splitCalls === 2, `Expected two inferred-range children, got ${splitCalls}`);
+  const parent = store.chunks.get('chk_whole_big');
+  const children = [...store.chunks.values()].filter(chunk => chunk.splitParentChunkId === 'chk_whole_big');
+  assert(parent.abstractionStatus === 'split_superseded', `Expected parent superseded, got ${parent.abstractionStatus}`);
+  assert(children.map(child => `${child.pageStart}-${child.pageEnd}`).join(',') === '1-2,3-4', 'Expected inferred child page ranges 1-2 and 3-4');
+});
+
+test('Phase 4: single-page oversized PDFs fail instead of split', async () => {
+  const wholeChunk = {
+    ...makeChunk({ id: 'chk_single_page_big', sizeBytes: 1_200_000 }),
+    pageStart: null,
+    pageEnd: null,
+  };
+  const store = createMemoryPhase3Store([wholeChunk]);
+  let splitCalls = 0;
+  store.createSplitChunk = async () => {
+    splitCalls += 1;
+    return null;
+  };
+
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  const result = await processChunkAbstraction(wholeChunk, {
+    store,
+    blobLoader: async chunk => ({ bytes: pdfBytes, mediaType: chunk.mediaType }),
+    modelClient: async () => {
+      const err = new Error('timeout');
+      err.status = 504;
+      throw err;
+    },
+    maxAttempts: 1,
+  });
+
+  const parent = store.chunks.get('chk_single_page_big');
+  assert(result.status === 'failed', `Expected terminal failed status, got ${result.status}`);
+  assert(splitCalls === 0, `Expected no split children for single-page PDF, got ${splitCalls}`);
+  assert(parent.abstractionStatus === 'failed', `Expected parent failed, got ${parent.abstractionStatus}`);
+  assert(parent.abstractionErrorType === 'upstream_timeout', `Expected upstream_timeout, got ${parent.abstractionErrorType}`);
+});
+
 test('Phase 4: job progress rolls up correctly across pending/processing/completed/failed', async () => {
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_a', chunkOrder: 0 }),
@@ -1066,6 +1166,34 @@ test('Phase 4: default storage loader allows splittable PDFs up to the split rec
 
   assert(read, 'Expected splittable PDF object to be read for split recovery');
   assert(payload.mediaType === 'application/pdf', 'Expected PDF media type preserved');
+});
+
+test('Phase 4: default storage loader allows whole PDFs without ranges for split recovery', async () => {
+  let read = false;
+  globalThis.__TITLE_ANALYZER_OBJECT_READER__ = async chunk => {
+    read = true;
+    return { bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType };
+  };
+
+  const legacyWholePdf = {
+    ...makeChunk({
+      id: 'chk_whole_split_candidate',
+      sizeBytes: 10_000_000,
+    }),
+    pageStart: null,
+    pageEnd: null,
+  };
+  const payload = await defaultBlobLoader(legacyWholePdf);
+  delete globalThis.__TITLE_ANALYZER_OBJECT_READER__;
+
+  assert(read, 'Expected whole PDF object to be read for split recovery');
+  assert(payload.mediaType === 'application/pdf', 'Expected PDF media type preserved');
+});
+
+test('Phase 4: abstraction progress labels re-segmenting oversized PDFs', () => {
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(jobsSource.includes('Re-segmenting oversized PDF for model limits'), 'Expected split recovery progress label');
+  assert(jobsSource.includes("abstraction_status = 'split_superseded'"), 'Expected progress label to detect superseded split parents');
 });
 
 test('Phase 4: saving an abstract invalidates synthesis only when abstract text changes', () => {
