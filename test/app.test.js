@@ -345,6 +345,12 @@ test('Phase 6: stalled server polls kick /process endpoints', () => {
     'Synthesis poll stall must POST /synthesis/process');
 });
 
+test('Phase 6: synthesis polling waits for merge and reuses batch result', () => {
+  assert(script.includes('status.mergeInProgress'), 'Synthesis terminal check must wait for final merge');
+  assert(script.includes('batchResult?.finalTitleOpinion'), 'Synthesis poll must cache title opinion from /process');
+  assert(script.includes('publicJobResultFromApi(settled)'), 'runServerSynthesis must reuse polled/process result before /result');
+});
+
 test('Phase 6: job actions wire to existing API endpoints', () => {
   // Path components passed to runJobAction(job, '/<endpoint>') — URL is composed
   // inside runJobAction as `/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`.

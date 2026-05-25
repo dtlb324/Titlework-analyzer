@@ -33,6 +33,7 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = clampInt(process.env.SYNTHESIS_UPSTREAM_TIME
 const DEFAULT_MERGE_LEASE_MS = clampInt(process.env.SYNTHESIS_MERGE_LEASE_MS || process.env.WORKFLOW_LEASE_MS, DEFAULT_UPSTREAM_TIMEOUT_MS + 60_000, 5_000, 600_000);
 const DEFAULT_STALE_SYNTHESIS_LEASE_MS = clampInt(process.env.SYNTHESIS_STALE_LEASE_MS || process.env.WORKFLOW_STALE_LEASE_MS, DEFAULT_MERGE_LEASE_MS + 60_000, 5_000, 600_000);
 const DEFAULT_SYNTHESIS_CONCURRENCY = clampInt(process.env.SYNTHESIS_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 16);
+const DEFAULT_MERGE_CONCURRENCY = clampInt(process.env.SYNTHESIS_MERGE_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 8);
 const MAX_RETRY_WAIT_MS = 5 * 60_000;
 const MIN_FINAL_OPINION_CHARS = 500;
 const MIN_SEGMENT_SUMMARY_CHARS = 200;
@@ -95,6 +96,7 @@ export function getSynthesisConfig(overrides = {}) {
     followupHistoryTurns: overrides.followupHistoryTurns || DEFAULT_FOLLOWUP_HISTORY_TURNS,
     upstreamTimeoutMs: overrides.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS,
     concurrency: overrides.concurrency || DEFAULT_SYNTHESIS_CONCURRENCY,
+    mergeConcurrency: overrides.mergeConcurrency || DEFAULT_MERGE_CONCURRENCY,
   };
 }
 
@@ -701,11 +703,18 @@ async function mergeSegmentsIntoOpinion({
       index: idx,
     }));
     while (working.length > 2) {
-      const next = [];
+      const pairSlots = [];
       for (let i = 0; i < working.length; i += 2) {
-        const left = working[i];
-        const right = working[i + 1];
-        if (!right) { next.push(left); continue; }
+        pairSlots.push({
+          slot: i / 2,
+          left: working[i],
+          right: working[i + 1] || null,
+        });
+      }
+      const next = new Array(pairSlots.length);
+      const mergePairs = pairSlots.filter(slot => slot.right);
+      const mergedNodes = await runWithConcurrency(mergePairs, config.mergeConcurrency, async slot => {
+        const { left, right } = slot;
         const pair = [
           { filename: left.filename, abstract: left.abstract },
           { filename: right.filename, abstract: right.abstract },
@@ -722,12 +731,20 @@ async function mergeSegmentsIntoOpinion({
         );
         tokensAccum.inputTokens += result.usage.inputTokens || 0;
         tokensAccum.outputTokens += result.usage.outputTokens || 0;
-        next.push({
-          filename: `Merged (Documents ${left.segmentRange[0] + 1}-${right.segmentRange[1] + 1})`,
-          abstract: result.text,
-          segmentRange: [left.segmentRange[0], right.segmentRange[1]],
-          index: next.length,
-        });
+        return {
+          slot: slot.slot,
+          node: {
+            filename: `Merged (Documents ${left.segmentRange[0] + 1}-${right.segmentRange[1] + 1})`,
+            abstract: result.text,
+            segmentRange: [left.segmentRange[0], right.segmentRange[1]],
+          },
+        };
+      });
+      for (const slot of pairSlots) {
+        if (!slot.right) next[slot.slot] = slot.left;
+      }
+      for (const { slot, node } of mergedNodes) {
+        next[slot] = node;
       }
       working = next;
     }
@@ -913,11 +930,15 @@ export async function processSynthesisJob(jobId, options = {}) {
 
   const storedResult = store.getJobResult ? await store.getJobResult(jobId) : null;
   const existingResult = storedResult?.planId === planId ? storedResult : null;
-  const failedDocumentRefs = await collectFailedDocuments(store, jobId);
   const tract = job.subjectTract || options.tract || '';
   const contextNotes = job.contextNotes || options.contextNotes || '';
 
   let result = existingResult || null;
+  let failedDocumentRefs = null;
+  async function failedDocumentsForMerge() {
+    if (!failedDocumentRefs) failedDocumentRefs = await collectFailedDocuments(store, jobId);
+    return failedDocumentRefs;
+  }
   let mergeRanInThisBatch = false;
   let mergeClaimBlocked = false;
   async function claimFinalWriter() {
@@ -939,14 +960,15 @@ export async function processSynthesisJob(jobId, options = {}) {
       const validation = validateFinalOpinion(onlySummary.summaryText || '');
       const opinionWarnings = [];
       if (!validation.ok) opinionWarnings.push(`final_validation_failed: ${validation.reason}`);
-      if (failedDocumentRefs.length) opinionWarnings.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
-      const status = !validation.ok ? 'failed' : failedDocumentRefs.length ? 'partial_failed' : 'complete';
+      const failedDocs = await failedDocumentsForMerge();
+      if (failedDocs.length) opinionWarnings.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+      const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
       result = await store.saveJobResult(jobId, {
         planId,
         status,
         finalTitleOpinion: validation.ok ? (onlySummary.summaryText || '') : '',
         warnings: opinionWarnings,
-        failedDocuments: failedDocumentRefs,
+        failedDocuments: failedDocs,
         modelUsed: onlySummary.modelUsed || config.model,
         inputTokens: onlySummary.inputTokens || 0,
         outputTokens: onlySummary.outputTokens || 0,
@@ -976,14 +998,15 @@ export async function processSynthesisJob(jobId, options = {}) {
         });
         const validation = validateFinalOpinion(merged.text);
         if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-        if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
-        const status = !validation.ok ? 'failed' : failedDocumentRefs.length ? 'partial_failed' : 'complete';
+        const failedDocs = await failedDocumentsForMerge();
+        if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+        const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
         result = await store.saveJobResult(jobId, {
           planId,
           status,
           finalTitleOpinion: validation.ok ? merged.text : '',
           warnings: warningsAccum,
-          failedDocuments: failedDocumentRefs,
+          failedDocuments: failedDocs,
           modelUsed: merged.model,
           inputTokens: tokensAccum.inputTokens,
           outputTokens: tokensAccum.outputTokens,
@@ -999,7 +1022,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           status: 'failed',
           finalTitleOpinion: '',
           warnings: [`final_merge_failed: ${lastError.errorType}`],
-          failedDocuments: failedDocumentRefs,
+          failedDocuments: await failedDocumentsForMerge(),
           modelUsed: config.model,
           inputTokens: tokensAccum.inputTokens,
           outputTokens: tokensAccum.outputTokens,
@@ -1039,14 +1062,15 @@ export async function processSynthesisJob(jobId, options = {}) {
           });
           const validation = validateFinalOpinion(merged.text);
           if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-          if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
+          const failedDocs = await failedDocumentsForMerge();
+          if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
           const resultStatus = validation.ok ? 'partial_failed' : 'failed';
           result = await store.saveJobResult(jobId, {
             planId,
             status: resultStatus,
             finalTitleOpinion: validation.ok ? merged.text : '',
             warnings: warningsAccum,
-            failedDocuments: failedDocumentRefs,
+            failedDocuments: failedDocs,
             modelUsed: merged.model,
             inputTokens: tokensAccum.inputTokens,
             outputTokens: tokensAccum.outputTokens,
@@ -1062,7 +1086,7 @@ export async function processSynthesisJob(jobId, options = {}) {
             status: 'failed',
             finalTitleOpinion: '',
             warnings: [...warningsAccum, `final_merge_failed: ${lastError.errorType}`],
-            failedDocuments: failedDocumentRefs,
+            failedDocuments: await failedDocumentsForMerge(),
             modelUsed: config.model,
             inputTokens: tokensAccum.inputTokens,
             outputTokens: tokensAccum.outputTokens,
@@ -1082,7 +1106,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           status: 'failed',
           finalTitleOpinion: '',
           warnings: failureWarnings,
-          failedDocuments: failedDocumentRefs,
+          failedDocuments: await failedDocumentsForMerge(),
           modelUsed: config.model,
           inputTokens: 0,
           outputTokens: 0,
@@ -1095,12 +1119,11 @@ export async function processSynthesisJob(jobId, options = {}) {
     }
   }
 
-  const finalSegments = await store.listSynthesisSegments(jobId, planId);
-  const status = await store.getSynthesisStatus(jobId);
+  const status = await store.getSynthesisStatus(jobId, { lightweight: true });
   return {
     planId,
     plan,
-    segments: finalSegments,
+    segments: [],
     completedInBatch,
     failedInBatch,
     retryScheduledInBatch: retryInBatch,
@@ -1109,26 +1132,27 @@ export async function processSynthesisJob(jobId, options = {}) {
     result,
     status,
     lastError: lastError ? { errorType: lastError.errorType, errorMessage: lastError.errorMessage } : null,
-    hasMore: mergeClaimBlocked || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0),
+    hasMore: mergeClaimBlocked
+      || Boolean(status?.mergeInProgress)
+      || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0),
   };
 }
 
 async function collectFailedDocuments(store, jobId) {
-  if (!store.listChunks) return [];
   try {
-    const chunks = await store.listChunks(jobId);
-    return chunks
-      .filter(chunk => chunk.abstractionStatus === 'failed')
-      .map(chunk => ({
-        chunkId: chunk.id,
-        documentId: chunk.documentId,
-        chunkOrder: chunk.chunkOrder,
-        filename: chunk.originalFilename,
-        pageStart: chunk.pageStart,
-        pageEnd: chunk.pageEnd,
-        errorType: chunk.abstractionErrorType,
-        errorMessage: chunk.abstractionErrorMessage,
-      }));
+    const chunks = store.listFailedChunks
+      ? await store.listFailedChunks(jobId)
+      : (store.listChunks ? (await store.listChunks(jobId)).filter(chunk => chunk.abstractionStatus === 'failed') : []);
+    return chunks.map(chunk => ({
+      chunkId: chunk.id,
+      documentId: chunk.documentId,
+      chunkOrder: chunk.chunkOrder,
+      filename: chunk.originalFilename,
+      pageStart: chunk.pageStart,
+      pageEnd: chunk.pageEnd,
+      errorType: chunk.abstractionErrorType,
+      errorMessage: chunk.abstractionErrorMessage,
+    }));
   } catch {
     return [];
   }

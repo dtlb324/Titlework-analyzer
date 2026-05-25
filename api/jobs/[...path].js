@@ -492,7 +492,13 @@ async function handleSynthesisStatus(req, res, requestId, store, jobId) {
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  const snapshot = await synthesisSnapshot(jobId, { store });
+  const detail = req.query?.detail === '1' || req.query?.detail === 'true';
+  const snapshot = await synthesisSnapshot(jobId, {
+    store,
+    lightweight: !detail,
+    includeSegments: detail,
+    includeResult: detail,
+  });
   return res.status(200).json({
     status: publicSynthesisStatusBody(snapshot),
     job: snapshot.job || job,

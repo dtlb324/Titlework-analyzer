@@ -232,6 +232,24 @@ function createMemoryPhase5Store(initialState = {}) {
         .sort((a, b) => a.segmentIndex - b.segmentIndex)
         .map(s => ({ ...s }));
     },
+    async summarizeSynthesisSegments(jobId, planId) {
+      const list = await this.listSynthesisSegments(jobId, planId);
+      const counts = list.reduce((acc, segment) => {
+        acc[segment.status] = (acc[segment.status] || 0) + 1;
+        return acc;
+      }, {});
+      return {
+        total: list.length,
+        pending: counts.pending || 0,
+        processing: counts.processing || 0,
+        complete: counts.complete || 0,
+        failed: counts.failed || 0,
+        retry_wait: counts.retry_wait || 0,
+      };
+    },
+    async listFailedChunks(jobId) {
+      return (await this.listChunks(jobId)).filter(chunk => chunk.abstractionStatus === 'failed');
+    },
     async listReadySynthesisSegments(jobId, planId, limit = 4) {
       const asOf = Date.now();
       return [...segments.values()]
@@ -390,6 +408,18 @@ function createMemoryPhase5Store(initialState = {}) {
     async getJobResult(jobId) {
       return results.has(jobId) ? { ...results.get(jobId) } : null;
     },
+    async getJobResultMeta(jobId) {
+      const result = results.get(jobId);
+      if (!result) return null;
+      return {
+        jobId: result.jobId,
+        planId: result.planId,
+        status: result.status,
+        modelUsed: result.modelUsed,
+        generatedAt: result.generatedAt,
+        hasOpinion: Boolean(result.finalTitleOpinion),
+      };
+    },
     async clearJobResult(jobId) {
       return results.delete(jobId);
     },
@@ -434,23 +464,33 @@ function createMemoryPhase5Store(initialState = {}) {
         .slice(0, limit)
         .map(f => ({ ...f }));
     },
-    async getSynthesisStatus(jobId) {
+    async getSynthesisStatus(jobId, options = {}) {
       const planId = currentPlanIdByJob.get(jobId);
-      const list = planId ? await this.listSynthesisSegments(jobId, planId) : [];
-      const counts = list.reduce((acc, s) => { acc[s.status] = (acc[s.status] || 0) + 1; return acc; }, {});
-      const result = await this.getJobResult(jobId);
+      const lightweight = options.lightweight !== false;
+      const includeSegments = options.includeSegments === true;
+      const includeResult = options.includeResult === true;
+      const counts = planId
+        ? await this.summarizeSynthesisSegments(jobId, planId)
+        : { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0 };
+      const list = includeSegments && planId ? await this.listSynthesisSegments(jobId, planId) : [];
+      const result = includeResult ? await this.getJobResult(jobId) : null;
+      const resultMeta = lightweight && !includeResult ? await this.getJobResultMeta(jobId) : null;
       return {
         job: await this.getJob(jobId),
         planId,
-        total: list.length,
-        pending: counts.pending || 0,
-        processing: counts.processing || 0,
-        complete: counts.complete || 0,
-        failed: counts.failed || 0,
-        retry_wait: counts.retry_wait || 0,
+        total: counts.total,
+        pending: counts.pending,
+        processing: counts.processing,
+        complete: counts.complete,
+        failed: counts.failed,
+        retry_wait: counts.retry_wait,
+        mergeInProgress: false,
         segments: list,
-        hasResult: Boolean(result?.finalTitleOpinion),
+        hasResult: result
+          ? Boolean(result.finalTitleOpinion)
+          : Boolean(resultMeta?.hasOpinion),
         result,
+        resultMeta,
       };
     },
   };
@@ -1250,6 +1290,26 @@ test('Synthesis endpoint returns 503 with fallback hint when ANTHROPIC_API_KEY m
   assert(res.body.fallback === 'browser_synthesis', `Expected browser_synthesis fallback, got ${res.body.fallback}`);
   if (previousKey) process.env.ANTHROPIC_API_KEY = previousKey;
   else process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+});
+
+test('Synthesis status lightweight poll omits full title opinion payload', async () => {
+  const abstracts = manyAbstracts(4);
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
+    text: goodFinalOpinion(),
+    model: 'claude-sonnet-4-6',
+    usage: {},
+  });
+  await processSynthesisJob('job_test_1', { store });
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('GET', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/synthesis/status'), res);
+  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
+  assert(res.body.status.hasResult === true, 'Expected hasResult true');
+  assert(!res.body.status.segments?.length, 'Lightweight status should omit segment rows');
+  const detailRes = mockRes();
+  await jobsRouteHandler(mockReq('GET', null, {}, { detail: 'true', id: 'job_test_1' }, '/api/jobs/job_test_1/synthesis/status?detail=true'), detailRes);
+  assert(detailRes.body.status.segments?.length >= 1, 'Detail status should include segments');
 });
 
 test('Synthesis status reports segment progress and warnings', async () => {

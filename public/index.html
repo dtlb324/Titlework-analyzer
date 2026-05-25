@@ -2199,13 +2199,20 @@ async function askServerFollowup(jobId, question) {
 
 function isServerSynthesisTerminal(status) {
   if (!status) return false;
+  if (status.mergeInProgress) return false;
   if (status.hasResult) return true;
   const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
   return pending === 0 && (status.total || 0) > 0;
 }
 
+function publicJobResultFromApi(payload) {
+  if (!payload) return null;
+  return payload.result || payload || null;
+}
+
 async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   let latest = null;
+  let cachedResult = null;
   let lastSignature = '';
   let stallPolls = 0;
   const STALL_THRESHOLD = 10;
@@ -2227,14 +2234,18 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
       ? `Server synthesis ${complete}/${total} segment(s)${detail.length ? ` (${detail.join(', ')})` : ''}...`
       : 'Server synthesis planning...';
     if (onProgress) onProgress(Math.min(99, pct), phaseLabel);
-    if (isServerSynthesisTerminal(status)) return latest;
-    const signature = `${complete}|${failed}|${processing}|${retryWait}`;
+    if (isServerSynthesisTerminal(status)) {
+      return { ...latest, result: cachedResult || publicJobResultFromApi(latest) };
+    }
+    const signature = `${complete}|${failed}|${processing}|${retryWait}|${status.mergeInProgress ? 1 : 0}`;
     if (signature === lastSignature) stallPolls += 1;
     else { stallPolls = 0; lastSignature = signature; }
-    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait) > 0) {
+    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait > 0 || status.mergeInProgress)) {
       stallPolls = 0;
       try {
-        await processServerSynthesisBatch(jobId);
+        const batch = await processServerSynthesisBatch(jobId);
+        const batchResult = publicJobResultFromApi(batch);
+        if (batchResult?.finalTitleOpinion) cachedResult = batchResult;
       } catch (err) {
         console.warn('Could not kick server synthesis batch', err);
       }
@@ -2251,11 +2262,15 @@ async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
   const settled = isServerSynthesisTerminal(status)
     ? started
     : await pollServerSynthesis(jobId, items, totalDocs, onProgress);
-  const final = await fetchServerJobResult(jobId);
-  if (!final?.result?.finalTitleOpinion) {
+  let result = publicJobResultFromApi(settled);
+  if (!result?.finalTitleOpinion) {
+    const final = await fetchServerJobResult(jobId);
+    result = final?.result || null;
+  }
+  if (!result?.finalTitleOpinion) {
     throw new Error('Server-side synthesis finished without producing a title opinion.');
   }
-  return { result: final.result, status: settled.status };
+  return { result, status: settled.status };
 }
 
 async function runServerDocumentAbstraction(jobId, fileList, items) {

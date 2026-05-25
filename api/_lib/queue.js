@@ -343,7 +343,7 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
       await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Resuming synthesis after failure' });
     } catch { /* ignore */ }
   }
-  const status = await store.getSynthesisStatus(jobId);
+  const status = await store.getSynthesisStatus(jobId, { lightweight: true });
   return {
     job: status?.job || (await store.getJob(jobId)),
     status: publicSynthesisStatus(status),
@@ -358,7 +358,11 @@ export async function synthesisSnapshot(jobId, options = {}) {
   if (store.resetStaleSynthesisSegments) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS);
   }
-  const status = await store.getSynthesisStatus(jobId);
+  const status = await store.getSynthesisStatus(jobId, {
+    lightweight: options.lightweight !== false,
+    includeSegments: options.includeSegments === true,
+    includeResult: options.includeResult === true,
+  });
   return {
     job: status?.job || (await store.getJob(jobId)),
     status: publicSynthesisStatus(status),

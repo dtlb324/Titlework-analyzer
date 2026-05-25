@@ -1799,6 +1799,56 @@ function createPostgresJobStore() {
       return rows.map(rowToSynthesisSegment);
     },
 
+    async summarizeSynthesisSegments(jobId, planId) {
+      await ensureSchema();
+      const effectivePlanId = planId || await this.getCurrentSynthesisPlanId(jobId);
+      if (!effectivePlanId) {
+        return { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0 };
+      }
+      const rows = await sql`
+        SELECT status, COUNT(*)::int AS count
+        FROM synthesis_segments
+        WHERE job_id = ${jobId} AND plan_id = ${effectivePlanId}
+        GROUP BY status
+      `;
+      const counts = rows.reduce((acc, row) => {
+        acc[row.status] = row.count;
+        return acc;
+      }, {});
+      const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+      return {
+        total,
+        pending: counts.pending || 0,
+        processing: counts.processing || 0,
+        complete: counts.complete || 0,
+        failed: counts.failed || 0,
+        retry_wait: counts.retry_wait || 0,
+      };
+    },
+
+    async listFailedChunks(jobId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT
+          id, document_id, chunk_order, original_filename,
+          page_start, page_end, abstraction_error_type, abstraction_error_message
+        FROM document_chunks
+        WHERE job_id = ${jobId}
+          AND abstraction_status = 'failed'
+        ORDER BY chunk_order ASC
+      `;
+      return rows.map(row => ({
+        id: row.id,
+        documentId: row.document_id,
+        chunkOrder: row.chunk_order,
+        originalFilename: row.original_filename,
+        pageStart: row.page_start,
+        pageEnd: row.page_end,
+        abstractionErrorType: row.abstraction_error_type,
+        abstractionErrorMessage: row.abstraction_error_message,
+      }));
+    },
+
     async listReadySynthesisSegments(jobId, planId, limit = 4) {
       await ensureSchema();
       const safeLimit = Math.max(1, Math.min(Number(limit) || 4, 32));
@@ -2135,6 +2185,28 @@ function createPostgresJobStore() {
       return rowToJobResult(rows[0]);
     },
 
+    async getJobResultMeta(jobId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT
+          job_id, plan_id, status, model_used, generated_at,
+          (COALESCE(length(final_title_opinion), 0) > 0) AS has_opinion
+        FROM job_results
+        WHERE job_id = ${jobId}
+        LIMIT 1
+      `;
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        jobId: row.job_id,
+        planId: row.plan_id,
+        status: row.status,
+        modelUsed: row.model_used,
+        generatedAt: row.generated_at instanceof Date ? row.generated_at.toISOString() : row.generated_at,
+        hasOpinion: Boolean(row.has_opinion),
+      };
+    },
+
     async appendFollowupMessage(jobId, payload) {
       await ensureSchema();
       const id = `flw_${randomUUID()}`;
@@ -2167,32 +2239,59 @@ function createPostgresJobStore() {
       return rows.map(rowToFollowupMessage);
     },
 
-    async getSynthesisStatus(jobId) {
+    async getSynthesisStatus(jobId, options = {}) {
       await ensureSchema();
       const job = await this.getJob(jobId);
       if (!job) return null;
       const planId = await this.getCurrentSynthesisPlanId(jobId);
-      const segments = planId ? await this.listSynthesisSegments(jobId, planId) : [];
-      const counts = segments.reduce((acc, segment) => {
-        acc[segment.status] = (acc[segment.status] || 0) + 1;
-        return acc;
-      }, {});
-      const result = await this.getJobResult(jobId);
+      const lightweight = options.lightweight !== false;
+      const includeSegments = options.includeSegments === true;
+      const includeResult = options.includeResult === true;
+      let counts;
+      let segments = [];
+      if (lightweight && !includeSegments) {
+        counts = planId
+          ? await this.summarizeSynthesisSegments(jobId, planId)
+          : { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0 };
+      } else {
+        segments = planId ? await this.listSynthesisSegments(jobId, planId) : [];
+        const tallies = segments.reduce((acc, segment) => {
+          acc[segment.status] = (acc[segment.status] || 0) + 1;
+          return acc;
+        }, {});
+        counts = {
+          total: segments.length,
+          pending: tallies.pending || 0,
+          processing: tallies.processing || 0,
+          complete: tallies.complete || 0,
+          failed: tallies.failed || 0,
+          retry_wait: tallies.retry_wait || 0,
+        };
+      }
+      const resultMeta = lightweight && !includeResult
+        ? await this.getJobResultMeta(jobId)
+        : null;
+      const result = includeResult
+        ? await this.getJobResult(jobId)
+        : null;
       const mergeLeaseExpiresAt = job.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
       const mergeInProgress = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
       return {
         job,
         planId,
-        total: segments.length,
-        pending: counts.pending || 0,
-        processing: counts.processing || 0,
-        complete: counts.complete || 0,
-        failed: counts.failed || 0,
-        retry_wait: counts.retry_wait || 0,
+        total: counts.total,
+        pending: counts.pending,
+        processing: counts.processing,
+        complete: counts.complete,
+        failed: counts.failed,
+        retry_wait: counts.retry_wait,
         mergeInProgress,
-        segments,
-        hasResult: Boolean(result?.finalTitleOpinion),
-        result,
+        segments: includeSegments ? segments : [],
+        hasResult: result
+          ? Boolean(result.finalTitleOpinion)
+          : Boolean(resultMeta?.hasOpinion),
+        result: includeResult ? result : null,
+        resultMeta,
       };
     },
 
