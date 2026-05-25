@@ -2,6 +2,14 @@
 // Protections: rate limiting, input validation, secure password comparison,
 // request size limiting, XSS headers, data leakage prevention
 
+import {
+  invokeModel,
+  isAnthropicModel,
+  isGeminiModel,
+  mapModelResponseToAnalyzeProxy,
+  modelApiKeyError,
+} from './_lib/model-client.js';
+
 export const config = {
   runtime: 'nodejs',
   maxDuration: 60,
@@ -101,8 +109,19 @@ function validateRequestBody(body) {
   if (!body || !Array.isArray(body.messages)) {
     return { valid: false, reason: 'Invalid request structure.' };
   }
-  const allowedModels = ['claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-haiku-4-5'];
-  if (!body.model || !allowedModels.includes(body.model)) {
+  const allowedModels = [
+    'claude-sonnet-4-5',
+    'claude-sonnet-4-6',
+    'claude-opus-4-6',
+    'claude-opus-4-7',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+  ];
+  if (/^claude-haiku/i.test(body.model || '')) {
+    return { valid: false, reason: 'Invalid or disallowed model.' };
+  }
+  if (!body.model || (!allowedModels.includes(body.model) && !isGeminiModel(body.model) && !isAnthropicModel(body.model))) {
     return { valid: false, reason: 'Invalid or disallowed model.' };
   }
   if (body.max_tokens && (typeof body.max_tokens !== 'number' || body.max_tokens > 8000 || body.max_tokens < 1)) {
@@ -212,10 +231,10 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.', requestId });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    logRequestEvent('api_error', { requestId, status: 500, reason: 'missing_api_key', latencyMs: Date.now() - startedAt });
-    return res.status(500).json({ error: 'API key not configured on server.', requestId });
+  const apiKeyError = modelApiKeyError(body.model);
+  if (apiKeyError) {
+    logRequestEvent('api_error', { requestId, status: 500, reason: 'missing_api_key', model: body.model, latencyMs: Date.now() - startedAt });
+    return res.status(500).json({ error: apiKeyError, requestId });
   }
 
   const safeBody = {
@@ -251,38 +270,46 @@ export default async function handler(req, res) {
       messageCount: safeBody.messages.length,
     });
     const timeout = createTimeoutSignal(analyzeConfig.upstreamTimeoutMs);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: serializedBody,
-      signal: timeout.signal,
-    });
-    timeout.cleanup();
-
-    const data = await response.json();
-
-    const safeResponse = {
-      content: data.content,
-      model: data.model,
-      stop_reason: data.stop_reason,
-      usage: data.usage,
-      error: data.error,
-      requestId,
-    };
+    let status = 200;
+    let safeResponse;
+    try {
+      const result = await invokeModel({
+        model: safeBody.model,
+        maxTokens: safeBody.max_tokens,
+        system: safeBody.system,
+        messages: safeBody.messages,
+      }, {
+        timeoutMs: analyzeConfig.upstreamTimeoutMs,
+        createTimeoutSignal: () => timeout,
+      });
+      safeResponse = {
+        ...mapModelResponseToAnalyzeProxy(result),
+        requestId,
+      };
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      status = Number(err?.status) || 500;
+      safeResponse = {
+        content: [],
+        model: safeBody.model,
+        stop_reason: null,
+        usage: {},
+        error: { message: err?.message || 'Model request failed.' },
+        requestId,
+      };
+    } finally {
+      timeout.cleanup();
+    }
 
     logRequestEvent('api_response', {
       requestId,
       model: safeBody.model,
-      status: response.status,
+      status,
       payloadBytes: payloadSize,
       latencyMs: Date.now() - startedAt,
-      errorType: data.error?.type || null,
+      errorType: safeResponse.error?.type || null,
     });
-    return res.status(response.status).json(safeResponse);
+    return res.status(status).json(safeResponse);
   } catch (err) {
     const status = isAbortError(err) ? 504 : 500;
     const reason = isAbortError(err) ? 'upstream_timeout' : 'internal_error';
@@ -297,7 +324,7 @@ export default async function handler(req, res) {
     });
     if (status === 504) {
       return res.status(504).json({
-        error: `Timeout error: Anthropic did not respond within ${Math.round(analyzeConfig.upstreamTimeoutMs / 1000)} seconds. The app will retry smaller batches when possible.`,
+        error: `Timeout error: The model provider did not respond within ${Math.round(analyzeConfig.upstreamTimeoutMs / 1000)} seconds. The app will retry smaller batches when possible.`,
         requestId,
       });
     }

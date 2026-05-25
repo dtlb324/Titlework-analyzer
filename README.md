@@ -1,6 +1,6 @@
 # Mineral Ownership Builder — Title Research Tool
 
-An AI-powered web application for oil and gas landmen to analyze courthouse documents, build chain of title, and determine mineral ownership. Powered by Anthropic's Claude API and deployed on Google Cloud Run.
+An AI-powered web application for oil and gas landmen to analyze courthouse documents, build chain of title, and determine mineral ownership. Document abstraction uses Google Gemini 2.5 Flash; title synthesis and follow-ups use Anthropic Claude. Deployed on Google Cloud Run.
 
 > **Important:** This tool is an AI-assisted research aid, not a legal opinion. Always verify output against source documents and consult a licensed attorney before any drilling, leasing, or division order action.
 
@@ -31,7 +31,12 @@ Set these on both Cloud Run services unless noted otherwise:
 
 | Name | Required | Notes |
 |------|----------|-------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for abstraction, synthesis, and follow-ups. |
+| `GEMINI_API_KEY` | Yes | Google AI Studio API key for abstraction and partial synthesis segments (`gemini-2.5-flash`). Also accepts `GOOGLE_API_KEY`. |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for the final title opinion (Sonnet), follow-ups, and optional abstraction escalation. |
+| `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion and merge step. Gemini/Haiku values are ignored. |
+| `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `gemini-2.5-flash` for large-job segment synthesis only (not the final opinion). Haiku/Claude values are ignored. |
+| `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Claude Haiku is not supported for abstraction. |
+| `GEMINI_THINKING_BUDGET` | Optional | Default `0` (fastest/cheapest). Set to `-1` for Gemini dynamic thinking on abstraction. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
 | `GCS_BUCKET` | Yes | Private bucket for uploaded source chunks and split PDFs. |
@@ -112,7 +117,14 @@ Configure these GitHub repository variables before the first release:
 
 The GitHub deploy service account must be configured for Workload Identity Federation from this repository. Grant it enough IAM to push images and deploy Cloud Run, typically Artifact Registry writer on the image repository, Cloud Run service deployment permissions, `roles/iam.serviceAccountTokenCreator` for the repo-scoped WIF principal, and `roles/iam.serviceAccountUser` on `GCP_RUNTIME_SERVICE_ACCOUNT` when that variable is set. The runtime service account still needs the bucket, Secret Manager, and database/network access required by the app.
 
-Secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
+Secrets such as `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
+
+### Gemini API setup (abstraction)
+
+1. Open [Google AI Studio](https://aistudio.google.com/apikey) and create an API key for your Google account or Cloud project.
+2. In Cloud Run (both API and worker services), add `GEMINI_API_KEY` with that value.
+3. Keep `ANTHROPIC_API_KEY` configured — the **final title opinion** and follow-ups use Claude Sonnet (`claude-sonnet-4-6` by default). Abstraction and partial synthesis segments use Gemini Flash.
+4. Optional: set `ABSTRACT_ESCALATION_MODEL=claude-sonnet-4-6` (default) for harder documents; escalation requires Anthropic even when abstraction uses Gemini.
 
 ### Release Verification
 
@@ -120,7 +132,7 @@ After each release, verify:
 
 - API `/api/healthz` reports the expected `release.version`, `release.gitSha`, `release.imageDigest`, and Cloud Run revision.
 - API and worker latest ready revisions use the same immutable image digest.
-- Both services still have database, GCS, Anthropic, and app password configuration.
+- Both services still have database, GCS, Gemini, Anthropic, and app password configuration.
 - GCS CORS allows `PUT` uploads from the API service origin with the `content-type` header.
 - `gh release list --limit 3` marks the new version as `Latest`.
 
@@ -156,11 +168,12 @@ Browser
 Cloud Run worker
   -> claims ready chunk/segment rows from Neon Postgres
   -> reads source bytes from GCS
-  -> calls Anthropic
+  -> calls Gemini 2.5 Flash (abstraction + partial synthesis segments)
+  -> calls Claude Sonnet (final title opinion, follow-ups, optional escalation/audit)
   -> stores abstracts, synthesis segments, and final result in Postgres
 ```
 
-Anthropic calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
+Model calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
 
 The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **8 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
 
@@ -168,8 +181,8 @@ The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs a
 
 - Bulk upload up to 400 documents per job.
 - Direct browser-to-GCS durable uploads.
-- Server-side abstraction with Claude Haiku 4.5.
-- Server-side synthesis and follow-ups with Claude Sonnet 4.6.
+- Server-side abstraction with Gemini 2.5 Flash.
+- Server-side final title synthesis and follow-ups with Claude Sonnet 4.6; partial segment passes use Gemini 2.5 Flash.
 - Durable job URLs that survive refreshes and closed tabs.
 - Retry, cancellation, partial failure, and failed-chunk recovery.
 - PDF download of final results.
@@ -220,11 +233,35 @@ Set `DATABASE_URL` to your Neon pooled Postgres connection string.
 Configure the GCS bucket CORS policy to allow `PUT` requests from the web/API Cloud Run origin with the `content-type` header.
 
 **Jobs stay queued or abstracting**  
-Confirm the worker service is deployed, has `ANTHROPIC_API_KEY`, `DATABASE_URL`, and `GCS_BUCKET`, and can connect to Neon.
+Confirm the worker service is deployed, has `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, and `GCS_BUCKET`, and can connect to Neon.
 
-**Anthropic timeouts or rate limits**  
-Lower `WORKFLOW_CONCURRENCY`, lower `WORKFLOW_BATCH_LIMIT`, or raise Anthropic limits. Retryable errors are saved as durable `retry_wait` rows.
+**Model timeouts or rate limits**  
+Lower `WORKFLOW_CONCURRENCY`, lower `WORKFLOW_BATCH_LIMIT`, or raise provider rate limits (Gemini or Anthropic). Retryable errors are saved as durable `retry_wait` rows.
 
 ## Cost Notes
 
-Cloud Run and GCS are billed by Google Cloud usage, while Neon can start on its free tier. Anthropic API usage is billed separately through Anthropic. API cost scales with document count, page count, scan resolution, and title complexity.
+Cloud Run and GCS are billed by Google Cloud usage, while Neon can start on its free tier. **Gemini** (abstraction and partial synthesis) and **Anthropic** (final opinion, follow-ups, optional escalation) are billed separately by each provider. API cost scales with document count, page count, scan resolution, and title complexity.
+
+### Typical 300-document job (no PDF splits)
+
+Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthesis segments for bulk chunking + 1 final Sonnet merge). App `/api/*` polling and GCS uploads are separate from token cost.
+
+| Stage | Model | Role |
+|-------|--------|------|
+| Abstraction | `gemini-2.5-flash` | One call per chunk (or fewer with worker batching) |
+| Partial synthesis | `gemini-2.5-flash` | Segment summaries before merge |
+| Final opinion | `claude-sonnet-4-6` | Single merge (and follow-ups) |
+
+**Paid Gemini 2.5 Flash** (indicative): ~$0.30/MTok input, ~$2.50/MTok output. **Sonnet 4.6** remains the dominant cost for the final merge on large runs. A full 300-doc run is typically on the order of **~$2–4** in model tokens on the Gemini + Sonnet stack (varies with page count, scans vs text PDFs, and output length)—well below the old Haiku-heavy estimate (~$6–7) before the Gemini migration.
+
+### Optimizations in this branch
+
+| Knob | Effect |
+|------|--------|
+| `ABSTRACTION_PDF_TEXT_FIRST=true` (default) | Largest savings on text-native PDFs: sends extracted text instead of visual PDF blocks |
+| `ABSTRACTION_BATCH_ENABLED=true` | Fewer abstraction **calls** (up to 8 small chunks per request); modest token savings |
+| `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts |
+| `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash) |
+| `OPUS_AUDIT_ENABLED` off (default) | Keeps Opus off the hot path |
+
+We do **not** use Anthropic or Gemini Batch API (24h window, no completion notification). Reliability and progress polling stay on the durable worker + Neon job model.

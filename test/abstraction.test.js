@@ -5,6 +5,7 @@ import {
   buildAbstractMessagesForChunk,
   defaultBlobLoader,
   getAbstractionConfig,
+  resolveAbstractModel,
   processChunkAbstraction,
   processJobAbstraction,
   tryReuseExistingAbstract,
@@ -458,7 +459,7 @@ test('POST /api/jobs/:id/abstraction/start enqueues quickly for the Cloud Run wo
     assert(request.payloadBytes <= 3_900_000, 'Expected safe payload envelope');
     return {
       text: 'DOCUMENT #1:\nAbstracted deed facts.',
-      model: 'claude-haiku-4-5',
+      model: 'gemini-2.5-flash',
       usage: { input_tokens: 111, output_tokens: 22 },
     };
   };
@@ -487,13 +488,23 @@ test('POST /api/jobs/:id/abstraction/start rejects jobs before uploads are ready
   const store = createMemoryPhase3Store([makeChunk()], { jobStatus: 'uploading' });
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
-  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nnoop', model: 'claude-haiku-4-5', usage: {} });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nnoop', model: 'gemini-2.5-flash', usage: {} });
 
   const res = mockRes();
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
 
   assert(res.statusCode === 409, `Expected 409, got ${res.statusCode}`);
   assert(/finalized/.test(res.body.error), `Expected finalize guidance, got ${res.body.error}`);
+});
+
+test('resolveAbstractModel ignores removed Claude Haiku model ids', () => {
+  const previous = process.env.ABSTRACT_MODEL;
+  process.env.ABSTRACT_MODEL = 'claude-haiku-4-5';
+  assert(resolveAbstractModel() === 'gemini-2.5-flash', 'Expected Haiku override to fall back to Gemini Flash');
+  process.env.ABSTRACT_MODEL = 'claude-haiku-4-5-20251001';
+  assert(resolveAbstractModel() === 'gemini-2.5-flash', 'Expected Haiku version suffix to fall back to Gemini Flash');
+  if (previous) process.env.ABSTRACT_MODEL = previous;
+  else delete process.env.ABSTRACT_MODEL;
 });
 
 test('buildAbstractMessagesForChunk supports PDF, image, and CSV chunks', async () => {
@@ -519,6 +530,9 @@ test('browser abstraction fallback mirrors single-instrument prompt and token bu
   assert(!indexHtml.includes('INSTRUMENT 1 OF M'), 'Browser prompt should not ask for multi-instrument sub-sections');
   assert(!indexHtml.includes('multiple clearly identifiable recorded instruments'), 'Browser prompt should not ask for multi-instrument detection');
   assert(indexHtml.includes('const ABSTRACT_MAX_TOKENS = 2000'), 'Expected browser abstraction token default to match server default');
+  assert(indexHtml.includes("const ABSTRACT_MODEL = 'gemini-2.5-flash'"), 'Expected browser fallback to use Gemini Flash for abstraction');
+  assert(indexHtml.includes("const SYNTHESIS_PARTIAL_MODEL = 'gemini-2.5-flash'"), 'Expected browser partial synthesis to use Gemini Flash');
+  assert(!indexHtml.includes('claude-haiku-4-5'), 'Browser abstraction must not reference Claude Haiku');
   assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6'"), 'Expected browser fallback to define Sonnet escalation model');
   assert(indexHtml.includes('callAbstractionWithEscalation'), 'Expected browser fallback to use abstraction escalation helper');
 });
@@ -534,7 +548,7 @@ test('GET /api/jobs/:id/abstracts returns saved abstracts in chunk order', async
     documentId: 'doc_test_1',
     chunkId: 'chk_second',
     abstractText: 'second',
-    modelUsed: 'claude-haiku-4-5',
+    modelUsed: 'gemini-2.5-flash',
     payloadBytes: 100,
     latencyMs: 10,
     inputTokens: 1,
@@ -547,7 +561,7 @@ test('GET /api/jobs/:id/abstracts returns saved abstracts in chunk order', async
     documentId: 'doc_test_1',
     chunkId: 'chk_first',
     abstractText: 'first',
-    modelUsed: 'claude-haiku-4-5',
+    modelUsed: 'gemini-2.5-flash',
     payloadBytes: 100,
     latencyMs: 10,
     inputTokens: 1,
@@ -588,7 +602,7 @@ test('POST /api/jobs/:id/chunks/:chunkId/retry retries only the failed chunk', a
     documentId: 'doc_test_1',
     chunkId: 'chk_done',
     abstractText: 'already done',
-    modelUsed: 'claude-haiku-4-5',
+    modelUsed: 'gemini-2.5-flash',
     payloadBytes: 100,
     latencyMs: 10,
     inputTokens: null,
@@ -602,7 +616,7 @@ test('POST /api/jobs/:id/chunks/:chunkId/retry retries only the failed chunk', a
   });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({
     text: 'DOCUMENT #2:\nRetried CSV abstract.',
-    model: 'claude-haiku-4-5',
+    model: 'gemini-2.5-flash',
     usage: {},
   });
 
@@ -633,7 +647,7 @@ test('processJobAbstraction preserves completed chunks when another chunk fails'
         err.status = 500;
         throw err;
       }
-      return { text: 'DOCUMENT #1:\nCompleted abstract.', model: 'claude-haiku-4-5', usage: {} };
+      return { text: 'DOCUMENT #1:\nCompleted abstract.', model: 'gemini-2.5-flash', usage: {} };
     },
     maxAttempts: 1,
   });
@@ -651,7 +665,7 @@ test('validateAbstractPersistenceInput rejects raw document and base64 fields', 
     documentId: 'doc_test_1',
     chunkId: 'chk_test_1',
     abstractText: 'safe abstract text',
-    modelUsed: 'claude-haiku-4-5',
+    modelUsed: 'gemini-2.5-flash',
     payloadBytes: 100,
     latencyMs: 10,
     status: 'completed',
@@ -702,7 +716,7 @@ test('Phase 4: worker claims pending chunks under a lease', async () => {
       modelCalls += 1;
       return {
         text: 'DOCUMENT #1:\nClaim test A.\n\nDOCUMENT #2:\nClaim test B.',
-        model: 'claude-haiku-4-5',
+        model: 'gemini-2.5-flash',
         usage: {},
       };
     },
@@ -728,7 +742,7 @@ test('Phase 4: claim sets lease fields while chunk is in flight', async () => {
     blobLoader: async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType }),
     modelClient: async () => {
       observedDuringRun = store.chunks.get('chk_test_1');
-      return { text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} };
+      return { text: 'DOCUMENT #1:\nok.', model: 'gemini-2.5-flash', usage: {} };
     },
     batchLimit: 1,
     concurrency: 1,
@@ -752,7 +766,7 @@ test('Phase 4: abstraction worker logs chunk processing stages without raw paylo
     await processAbstractionBatch('job_test_1', {
       store,
       blobLoader: async chunk => ({ bytes: Buffer.from('owner,interest\nA,1/2'), mediaType: chunk.mediaType }),
-      modelClient: async () => ({ text: 'DOCUMENT #1:\nCSV abstract.', model: 'claude-haiku-4-5', usage: {} }),
+      modelClient: async () => ({ text: 'DOCUMENT #1:\nCSV abstract.', model: 'gemini-2.5-flash', usage: {} }),
       batchLimit: 1,
       concurrency: 1,
       budgetMs: 2000,
@@ -803,7 +817,7 @@ test('Phase 4: stale abstraction worker cannot overwrite a reclaimed chunk', asy
           status: 'completed',
         });
       }
-      return { text: 'DOCUMENT #1:\nstale worker abstract', model: 'claude-haiku-4-5', usage: {} };
+      return { text: 'DOCUMENT #1:\nstale worker abstract', model: 'gemini-2.5-flash', usage: {} };
     },
     maxAttempts: 1,
   });
@@ -823,7 +837,7 @@ test('Phase 4: completed chunks are not reprocessed when /abstraction/process ru
     documentId: 'doc_test_1',
     chunkId: 'chk_done',
     abstractText: 'preserved',
-    modelUsed: 'claude-haiku-4-5',
+    modelUsed: 'gemini-2.5-flash',
     payloadBytes: 100,
     latencyMs: 10,
     inputTokens: null,
@@ -835,7 +849,7 @@ test('Phase 4: completed chunks are not reprocessed when /abstraction/process ru
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
     modelCalls += 1;
-    return { text: 'DOCUMENT #2:\nNew abstract.', model: 'claude-haiku-4-5', usage: {} };
+    return { text: 'DOCUMENT #2:\nNew abstract.', model: 'gemini-2.5-flash', usage: {} };
   };
 
   const res = mockRes();
@@ -855,7 +869,7 @@ test('Phase 4: failed chunks can be retried via /retry-failed', async () => {
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
     modelCalls += 1;
-    return { text: 'DOCUMENT #1:\nRetried.', model: 'claude-haiku-4-5', usage: {} };
+    return { text: 'DOCUMENT #1:\nRetried.', model: 'gemini-2.5-flash', usage: {} };
   };
 
   const res = mockRes();
@@ -947,7 +961,7 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
       err.status = 504;
       throw err;
     }
-    return { text: 'DOCUMENT #1:\nSplit child abstract.', model: 'claude-haiku-4-5', usage: {} };
+    return { text: 'DOCUMENT #1:\nSplit child abstract.', model: 'gemini-2.5-flash', usage: {} };
   };
 
   const result = await processAbstractionBatch('job_test_1', {
@@ -1083,7 +1097,7 @@ test('Phase 4: job progress rolls up correctly across pending/processing/complet
         err.status = 400;
         throw err;
       }
-      return { text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} };
+      return { text: 'DOCUMENT #1:\nok.', model: 'gemini-2.5-flash', usage: {} };
     },
     batchLimit: 5,
     concurrency: 1,
@@ -1127,7 +1141,7 @@ test('Phase 4: cancellation stops future chunk processing', async () => {
     blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
     modelClient: async () => {
       modelCalls += 1;
-      return { text: 'DOCUMENT #1:\nshould not run.', model: 'claude-haiku-4-5', usage: {} };
+      return { text: 'DOCUMENT #1:\nshould not run.', model: 'gemini-2.5-flash', usage: {} };
     },
     batchLimit: 5,
     concurrency: 1,
@@ -1282,7 +1296,7 @@ test('processChunkAbstraction reuses peer abstract with matching fingerprint wit
     documentId: 'doc_test_1',
     chunkId: 'chk_donor',
     abstractText: 'Reusable abstract body.',
-    modelUsed: 'claude-haiku-4-5',
+    modelUsed: 'gemini-2.5-flash',
     payloadBytes: 0,
     latencyMs: 1,
     inputTokens: 0,
@@ -1298,7 +1312,7 @@ test('processChunkAbstraction reuses peer abstract with matching fingerprint wit
   };
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
     modelCalls += 1;
-    return { text: 'DOCUMENT #2:\nShould not run.', model: 'claude-haiku-4-5', usage: {} };
+    return { text: 'DOCUMENT #2:\nShould not run.', model: 'gemini-2.5-flash', usage: {} };
   };
   const result = await processChunkAbstraction(target, { store, workerId: 'wkr_reuse' });
   assert(result.status === 'completed', `Expected completed reuse, got ${result.status}`);
@@ -1326,7 +1340,7 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
       }
       return {
         text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
-        model: 'claude-haiku-4-5',
+        model: 'gemini-2.5-flash',
         usage: { input_tokens: 10, output_tokens: 15 },
       };
     },
@@ -1334,13 +1348,13 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
 
   const saved = store.abstracts.get('chk_flagged');
   assert(result.status === 'completed', `Expected completed escalation, got ${result.status}`);
-  assert(models.join(',') === 'claude-haiku-4-5,claude-sonnet-4-6', `Expected Haiku then Sonnet, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-2.5-flash,claude-sonnet-4-6', `Expected Gemini Flash then Sonnet, got ${models.join(',')}`);
   assert(saved.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet saved, got ${saved.modelUsed}`);
   assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
-  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Haiku and Sonnet calls');
+  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash and Sonnet calls');
 });
 
-test('processChunkAbstraction keeps clean Haiku abstracts on the cheap path', async () => {
+test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {
   const store = createMemoryPhase3Store([makeChunk({ id: 'chk_clean' })]);
   const models = [];
   await processChunkAbstraction(store.chunks.get('chk_clean'), {
@@ -1351,22 +1365,25 @@ test('processChunkAbstraction keeps clean Haiku abstracts on the cheap path', as
       models.push(request.model);
       return {
         text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nGRANTOR: A\nGRANTEE: B\nISSUES: none noted\nCONFIDENCE: Clear, single-instrument abstract.',
-        model: 'claude-haiku-4-5',
+        model: 'gemini-2.5-flash',
         usage: { input_tokens: 10, output_tokens: 15 },
       };
     },
   });
 
   const saved = store.abstracts.get('chk_clean');
-  assert(models.join(',') === 'claude-haiku-4-5', `Expected only Haiku, got ${models.join(',')}`);
-  assert(saved.modelUsed === 'claude-haiku-4-5', `Expected Haiku saved, got ${saved.modelUsed}`);
+  assert(models.join(',') === 'gemini-2.5-flash', `Expected only Gemini Flash, got ${models.join(',')}`);
+  assert(saved.modelUsed === 'gemini-2.5-flash', `Expected Gemini Flash saved, got ${saved.modelUsed}`);
 });
 
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {
   const previousBucket = process.env.GCS_BUCKET;
   const previousApi = process.env.ANTHROPIC_API_KEY;
+  const previousGemini = process.env.GEMINI_API_KEY;
   delete process.env.GCS_BUCKET;
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
   delete globalThis.__TITLE_ANALYZER_BLOB_LOADER__;
   delete globalThis.__TITLE_ANALYZER_MODEL_CLIENT__;
   const store = createMemoryPhase3Store([makeChunk()]);
@@ -1379,6 +1396,7 @@ test('Phase 4: setup error when queue env not configured returns 503 with fallba
 
   if (previousBucket) process.env.GCS_BUCKET = previousBucket;
   if (previousApi) process.env.ANTHROPIC_API_KEY = previousApi;
+  if (previousGemini) process.env.GEMINI_API_KEY = previousGemini;
 });
 
 test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', async () => {
@@ -1387,7 +1405,7 @@ test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', as
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   // Make sure Phase 3 setup error is past
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
-  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nok.', model: 'gemini-2.5-flash', usage: {} });
 
   const res = mockRes();
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/start'), res);
@@ -1503,7 +1521,7 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({
     text: 'DOCUMENT #1:\nok X.\n\nDOCUMENT #2:\nok Y.\n\nDOCUMENT #3:\nok Z.',
-    model: 'claude-haiku-4-5',
+    model: 'gemini-2.5-flash',
     usage: {},
   });
 

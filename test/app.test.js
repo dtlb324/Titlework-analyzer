@@ -49,10 +49,12 @@ test('index.html JavaScript parses', () => {
   assert(result.status === 0, `Syntax error: ${result.stderr}`);
 });
 
-test('uses Haiku for abstraction and Sonnet for synthesis', () => {
-  assert(script.includes("ABSTRACT_MODEL = 'claude-haiku-4-5'"), 'Expected Haiku for abstraction');
-  assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-4-6'"), 'Expected Sonnet for synthesis');
+test('uses Gemini Flash for abstraction and Sonnet for synthesis', () => {
+  assert(script.includes("ABSTRACT_MODEL = 'gemini-2.5-flash'"), 'Expected Gemini Flash for abstraction');
+  assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-2.5-flash'"), 'Expected Gemini Flash for partial synthesis segments');
+  assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-4-6'"), 'Expected Sonnet for final synthesis');
   assert(!script.includes("'claude-opus-4-7'"), 'Opus 4.7 should not be hardcoded');
+  assert(!script.includes('claude-haiku-4-5'), 'Haiku should not be used for abstraction or partial synthesis');
 });
 
 test('uses adaptive batching and parallel abstraction', () => {
@@ -109,6 +111,21 @@ test('API ping validates APP_PASSWORD when password gate is enabled', async () =
   assert(valid.statusCode === 200, `Expected valid ping password to return 200, got ${valid.statusCode}`);
 });
 
+test('API rejects claude-haiku-4-5 (removed from abstraction)', async () => {
+  const prevGemini = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  const req = mockReq({
+    model: 'claude-haiku-4-5',
+    messages: [{ role: 'user', content: 'hello' }],
+  });
+  const res = mockRes();
+  await handler(req, res);
+  if (prevGemini) process.env.GEMINI_API_KEY = prevGemini;
+  else delete process.env.GEMINI_API_KEY;
+  assert(res.statusCode === 400, `Expected 400, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
+  assert(String(res.body?.error).includes('model'), 'Should reject removed Haiku model');
+});
+
 test('API rejects unknown model', async () => {
   const prev = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
@@ -124,23 +141,41 @@ test('API rejects unknown model', async () => {
   assert(String(res.body?.error).includes('model'), 'Should reject unknown model');
 });
 
-test('API accepts claude-haiku-4-5 and claude-sonnet-4-6', async () => {
-  const prev = process.env.ANTHROPIC_API_KEY;
+test('API accepts gemini-2.5-flash and claude-sonnet-4-6', async () => {
+  const prevAnthropic = process.env.ANTHROPIC_API_KEY;
+  const prevGemini = process.env.GEMINI_API_KEY;
   const prevFetch = global.fetch;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
-  global.fetch = async () => ({
-    status: 200,
-    json: async () => ({ content: [{ text: 'ok' }], model: 'test-model', stop_reason: 'end_turn', usage: {} }),
-  });
-  for (const model of ['claude-haiku-4-5', 'claude-sonnet-4-6']) {
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  global.fetch = async (url) => {
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+          usageMetadata: {},
+          modelVersion: 'gemini-2.5-flash',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: 'text', text: 'ok' }], model: 'test-model', stop_reason: 'end_turn', usage: {} }),
+    };
+  };
+  for (const model of ['gemini-2.5-flash', 'claude-sonnet-4-6']) {
     const req = mockReq({ model, messages: [{ role: 'user', content: 'hello' }] });
     const res = mockRes();
     await handler(req, res);
     assert(res.statusCode !== 400 || !String(res.body?.error).includes('model'), `${model} should pass model validation`);
   }
   global.fetch = prevFetch;
-  if (prev) process.env.ANTHROPIC_API_KEY = prev;
+  if (prevAnthropic) process.env.ANTHROPIC_API_KEY = prevAnthropic;
   else delete process.env.ANTHROPIC_API_KEY;
+  if (prevGemini) process.env.GEMINI_API_KEY = prevGemini;
+  else delete process.env.GEMINI_API_KEY;
 });
 
 test('rate limit default allows bulk throughput', () => {

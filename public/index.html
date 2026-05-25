@@ -282,10 +282,12 @@ const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
 const MAX_PDF_CHUNK_RAW_BYTES = 7_500_000;
 
-const ABSTRACT_MODEL = 'claude-haiku-4-5';
+const ABSTRACT_MODEL = 'gemini-2.5-flash';
 const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6';
 const SYNTHESIS_MODEL = 'claude-sonnet-4-6';
+const SYNTHESIS_PARTIAL_MODEL = 'gemini-2.5-flash';
 const ABSTRACT_MAX_TOKENS = 2000;
+const SYNTHESIS_PARTIAL_MAX_TOKENS = 3500;
 const ABSTRACT_ESCALATION_MAX_TOKENS = 4096;
 const SYNTHESIS_MAX_TOKENS = 6000;
 
@@ -2615,7 +2617,11 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   if (!response.ok || data.error) {
     const errMsg = data.error?.message || data.error || '';
     if (response.status === 401 || errMsg.includes('authentication') || errMsg.includes('api key') || errMsg.includes('x-api-key')) {
-      throw new Error('API key error: The Anthropic API key is missing or invalid. Check that ANTHROPIC_API_KEY is set correctly in Cloud Run environment variables, then redeploy.');
+      const needsGemini = (options.model || '').startsWith('gemini-') || ABSTRACT_MODEL.startsWith('gemini-');
+      const keyHint = needsGemini
+        ? 'GEMINI_API_KEY (create one at https://aistudio.google.com/apikey)'
+        : 'ANTHROPIC_API_KEY';
+      throw new Error(`API key error: The model API key is missing or invalid. Check that ${keyHint} is set correctly in Cloud Run environment variables, then redeploy.`);
     }
     if (response.status === 429 || errMsg.includes('rate limit') || errMsg.includes('overloaded')) {
       if (retryCount < MAX_RETRIES) {
@@ -2697,7 +2703,7 @@ async function callAbstractionWithEscalation(messages, options) {
       label: `${options.label || 'Abstraction'} escalation`,
     });
   } catch (err) {
-    console.warn('Abstraction escalation failed; keeping initial Haiku abstract.', err);
+    console.warn('Abstraction escalation failed; keeping initial abstract.', err);
     return initial;
   }
 }
@@ -2969,8 +2975,11 @@ function buildAbstractInput(abstracts, tract, ctx, preamble) {
 async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt) {
   const input = buildAbstractInput(abstracts, tract, ctx, preamble);
   const prompt = systemPrompt || SYNTHESIS_PROMPT;
+  const isPartialSegment = prompt === PARTIAL_SYNTHESIS_PROMPT;
+  const model = isPartialSegment ? SYNTHESIS_PARTIAL_MODEL : SYNTHESIS_MODEL;
+  const max_tokens = isPartialSegment ? SYNTHESIS_PARTIAL_MAX_TOKENS : SYNTHESIS_MAX_TOKENS;
   const messages = [{ role: 'user', content: input }];
-  const requestBytes = estimateRequestBytes(SYNTHESIS_MODEL, SYNTHESIS_MAX_TOKENS, prompt, messages);
+  const requestBytes = estimateRequestBytes(model, max_tokens, prompt, messages);
 
   if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES && abstracts.length > 1) {
     return await synthesizeSplitAndMerge(abstracts, tract, ctx, preamble, prompt, 'safe request budget');
@@ -2981,11 +2990,11 @@ async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt
 
   try {
     return await callBackend(messages, prompt, {
-      model: SYNTHESIS_MODEL,
-      max_tokens: SYNTHESIS_MAX_TOKENS,
-      phase: 'synthesis',
+      model,
+      max_tokens,
+      phase: isPartialSegment ? 'synthesis-partial' : 'synthesis',
       docCount: abstracts.length,
-      label: 'Synthesis request',
+      label: isPartialSegment ? 'Partial synthesis request' : 'Synthesis request',
     });
   } catch (e) {
     if (abstracts.length > 1 && (isEnvelopeError(e) || isTimeoutError(e))) {

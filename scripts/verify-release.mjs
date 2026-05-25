@@ -12,6 +12,7 @@ const ROOT_DIR = join(__dirname, '..');
 export const REQUIRED_ENV_GROUPS = [
   { label: 'database URL', names: ['DATABASE_URL', 'POSTGRES_URL', 'POSTGRES_PRISMA_URL'] },
   { label: 'GCS bucket', names: ['GCS_BUCKET', 'GOOGLE_CLOUD_STORAGE_BUCKET', 'STORAGE_BUCKET'] },
+  { label: 'Gemini API key', names: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'] },
   { label: 'Anthropic API key', names: ['ANTHROPIC_API_KEY'] },
   { label: 'app password', names: ['APP_PASSWORD'] },
 ];

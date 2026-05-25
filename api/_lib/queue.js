@@ -8,7 +8,7 @@
 // Required env vars for the default driver:
 //   - DATABASE_URL (or POSTGRES_URL / POSTGRES_PRISMA_URL)
 //   - GCS_BUCKET (so workers can fetch chunks from Google Cloud Storage)
-//   - ANTHROPIC_API_KEY (so workers can call the abstraction model)
+//   - GEMINI_API_KEY or ANTHROPIC_API_KEY (so workers can call the abstraction model)
 //
 // To select a different driver in the future, set WORKFLOW_DRIVER=inngest
 // and provide INNGEST_EVENT_KEY plus INNGEST_SIGNING_KEY. Until that adapter
