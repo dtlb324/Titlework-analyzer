@@ -15,10 +15,16 @@
 // ships, requests with WORKFLOW_DRIVER=inngest return a 503 setup error.
 
 import { processChunkAbstraction } from './abstraction.js';
+import {
+  isAbstractionBatchingEnabled,
+  planAbstractionWork,
+  processMultiChunkAbstraction,
+} from './abstraction-batch.js';
 import { runWithConcurrency } from './concurrency.js';
 import { processSynthesisJob, planJobSynthesis } from './synthesis.js';
 
 const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 12, 1, 64);
+const ABSTRACTION_FETCH_MULTIPLIER = clampInt(process.env.ABSTRACTION_BATCH_FETCH_MULTIPLIER, 4, 1, 16);
 const DEFAULT_CONCURRENCY = clampInt(process.env.WORKFLOW_CONCURRENCY, 4, 1, 16);
 const DEFAULT_BUDGET_MS = clampInt(process.env.WORKFLOW_BUDGET_MS, 20 * 60_000, 1_000, 55 * 60_000);
 const DEFAULT_UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.SYNTHESIS_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
@@ -189,22 +195,60 @@ export async function processAbstractionBatch(jobId, options = {}) {
     let job = await getJobOrThrow(store, jobId);
     if (isJobCanceled(job)) break;
     const now = Date.now();
-    const ready = await listReadyChunks(store, jobId, config.batchLimit, now);
+    const fetchLimit = isAbstractionBatchingEnabled()
+      ? Math.min(64, config.batchLimit * ABSTRACTION_FETCH_MULTIPLIER)
+      : config.batchLimit;
+    const ready = await listReadyChunks(store, jobId, fetchLimit, now);
     if (!ready.length) break;
 
-    const results = await runWithConcurrency(ready, config.concurrency, async chunk => {
-      if (!job || isJobCanceled(job)) {
-        return { status: 'skipped', chunkId: chunk.id, reason: 'canceled' };
-      }
-      return await processChunkAbstraction(chunk, {
-        ...options,
-        store,
-        workerId,
-        leaseMs: config.leaseMs,
-        maxAttempts: config.maxAttempts,
-        sequenceIndex: chunk.chunkOrder || 0,
+    let results = [];
+    if (isAbstractionBatchingEnabled()) {
+      const { batches, singles } = planAbstractionWork(ready);
+      const tasks = [
+        ...batches.map(batch => async () => {
+          if (!job || isJobCanceled(job)) {
+            return batch.chunks.map(chunk => ({ status: 'skipped', chunkId: chunk.id, reason: 'canceled' }));
+          }
+          return await processMultiChunkAbstraction(batch.chunks, {
+            ...options,
+            store,
+            workerId,
+            leaseMs: config.leaseMs,
+            maxAttempts: config.maxAttempts,
+            globalStart: batch.globalStart,
+          });
+        }),
+        ...singles.map(chunk => async () => {
+          if (!job || isJobCanceled(job)) {
+            return [{ status: 'skipped', chunkId: chunk.id, reason: 'canceled' }];
+          }
+          return [await processChunkAbstraction(chunk, {
+            ...options,
+            store,
+            workerId,
+            leaseMs: config.leaseMs,
+            maxAttempts: config.maxAttempts,
+            sequenceIndex: chunk.chunkOrder || 0,
+          })];
+        }),
+      ];
+      const nested = await runWithConcurrency(tasks, config.concurrency, async task => task());
+      results = nested.flat(2);
+    } else {
+      results = await runWithConcurrency(ready, config.concurrency, async chunk => {
+        if (!job || isJobCanceled(job)) {
+          return { status: 'skipped', chunkId: chunk.id, reason: 'canceled' };
+        }
+        return await processChunkAbstraction(chunk, {
+          ...options,
+          store,
+          workerId,
+          leaseMs: config.leaseMs,
+          maxAttempts: config.maxAttempts,
+          sequenceIndex: chunk.chunkOrder || 0,
+        });
       });
-    });
+    }
 
     let anyClaimed = false;
     for (const result of results) {

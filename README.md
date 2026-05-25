@@ -49,6 +49,13 @@ Set these on both Cloud Run services unless noted otherwise:
 | `SYNTHESIS_MERGE_LEASE_MS` | Optional | Defaults longer than synthesis upstream timeout. |
 | `SYNTHESIS_STALE_LEASE_MS` | Optional | Defaults longer than synthesis merge lease. |
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Default `5000`. |
+| `ABSTRACTION_PDF_TEXT_FIRST` | Optional | Default `true`. Use extracted PDF text when quality checks pass (lower token cost). |
+| `ABSTRACTION_BATCH_ENABLED` | Optional | Default `true`. Batch up to 8 small chunks per abstraction API call on the worker. |
+| `ABSTRACTION_BATCH_MAX_DOCS` | Optional | Default `8`. Max documents per server abstraction batch. |
+| `ABSTRACT_MAX_TOKENS` | Optional | Default `2000` (was 3000). |
+| `SYNTHESIS_MAX_TOKENS` | Optional | Default `6000` (was 8000). |
+| `ABSTRACTION_ESCALATION_ENABLED` | Optional | Default `true`. Set `false` to skip Sonnet re-reads on low-confidence abstracts. |
+| `OPUS_AUDIT_ENABLED` | Optional | Default off. Set `true` only when you want an extra Opus audit pass. |
 | `RELEASE_VERSION` | Release workflow | Set automatically from the release tag. |
 | `GIT_SHA` | Release workflow | Set automatically from the deployed commit. |
 | `IMAGE_DIGEST` | Release workflow | Set automatically from the immutable container digest. |
@@ -155,7 +162,7 @@ Cloud Run worker
 
 Anthropic calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
 
-The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
+The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **8 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
 
 ## Features
 

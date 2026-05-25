@@ -511,14 +511,14 @@ test('abstraction prompt treats each PDF as one recorded instrument', () => {
   assert(ABSTRACTION_PROMPT.includes('abstracting a single courthouse instrument'), 'Expected single-instrument abstraction instruction');
   assert(!ABSTRACTION_PROMPT.includes('INSTRUMENT 1 OF M'), 'Prompt should not ask for multi-instrument sub-sections');
   assert(!ABSTRACTION_PROMPT.includes('multiple clearly identifiable recorded instruments'), 'Prompt should not ask for multi-instrument detection');
-  assert(getAbstractionConfig().maxTokens === 3000, `Expected 3000 token default, got ${getAbstractionConfig().maxTokens}`);
+  assert(getAbstractionConfig().maxTokens === 2000, `Expected 2000 token default, got ${getAbstractionConfig().maxTokens}`);
 });
 
 test('browser abstraction fallback mirrors single-instrument prompt and token budget', () => {
   assert(indexHtml.includes('abstracting a single courthouse instrument'), 'Expected browser prompt to include single-instrument instruction');
   assert(!indexHtml.includes('INSTRUMENT 1 OF M'), 'Browser prompt should not ask for multi-instrument sub-sections');
   assert(!indexHtml.includes('multiple clearly identifiable recorded instruments'), 'Browser prompt should not ask for multi-instrument detection');
-  assert(indexHtml.includes('const ABSTRACT_MAX_TOKENS = 3000'), 'Expected browser abstraction token default to match server default');
+  assert(indexHtml.includes('const ABSTRACT_MAX_TOKENS = 2000'), 'Expected browser abstraction token default to match server default');
   assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6'"), 'Expected browser fallback to define Sonnet escalation model');
   assert(indexHtml.includes('callAbstractionWithEscalation'), 'Expected browser fallback to use abstraction escalation helper');
 });
@@ -700,14 +700,18 @@ test('Phase 4: worker claims pending chunks under a lease', async () => {
     blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
     modelClient: async () => {
       modelCalls += 1;
-      return { text: 'DOCUMENT #1:\nClaim test.', model: 'claude-haiku-4-5', usage: {} };
+      return {
+        text: 'DOCUMENT #1:\nClaim test A.\n\nDOCUMENT #2:\nClaim test B.',
+        model: 'claude-haiku-4-5',
+        usage: {},
+      };
     },
     batchLimit: 4,
     concurrency: 2,
     budgetMs: 5000,
     maxAttempts: 1,
   });
-  assert(modelCalls === 2, `Expected two model calls (one per chunk), got ${modelCalls}`);
+  assert(modelCalls === 1, `Expected one batched model call for two small chunks, got ${modelCalls}`);
   assert(result.completed === 2, `Expected both chunks completed, got ${result.completed}`);
   assert(result.hasMore === false, 'Expected no more work');
   const chunkA = store.chunks.get('chk_a');
@@ -1061,6 +1065,8 @@ test('Phase 4: single-page oversized PDFs fail instead of split', async () => {
 });
 
 test('Phase 4: job progress rolls up correctly across pending/processing/completed/failed', async () => {
+  const previousBatch = process.env.ABSTRACTION_BATCH_ENABLED;
+  process.env.ABSTRACTION_BATCH_ENABLED = 'false';
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_a', chunkOrder: 0 }),
     makeChunk({ id: 'chk_b', chunkOrder: 1 }),
@@ -1089,6 +1095,8 @@ test('Phase 4: job progress rolls up correctly across pending/processing/complet
   assert(status.completed === 2, `Expected 2 completed, got ${status.completed}`);
   assert(status.failed === 1, `Expected 1 failed, got ${status.failed}`);
   assert(job.status === 'partial_failed', `Expected partial_failed rollup, got ${job.status}`);
+  if (previousBatch === undefined) delete process.env.ABSTRACTION_BATCH_ENABLED;
+  else process.env.ABSTRACTION_BATCH_ENABLED = previousBatch;
 });
 
 test('Phase 4: cancel fails pending chunks so canceled jobs leave the worker queue', async () => {
@@ -1493,7 +1501,11 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   ]);
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
-  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nok.', model: 'claude-haiku-4-5', usage: {} });
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({
+    text: 'DOCUMENT #1:\nok X.\n\nDOCUMENT #2:\nok Y.\n\nDOCUMENT #3:\nok Z.',
+    model: 'claude-haiku-4-5',
+    usage: {},
+  });
 
   const res = mockRes();
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/abstraction/process'), res);

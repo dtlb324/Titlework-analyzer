@@ -25,7 +25,7 @@ import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'claude-sonnet-4-6';
 const DEFAULT_PARTIAL_SYNTHESIS_MODEL = process.env.SYNTHESIS_PARTIAL_MODEL || 'claude-haiku-4-5';
-const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 8192);
+const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 6000, 256, 8192);
 const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 3500, 512, 8192);
 const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
 const DEFAULT_OPUS_AUDIT_MAX_TOKENS = clampInt(process.env.OPUS_AUDIT_MAX_TOKENS, 8000, 512, 8192);
@@ -427,6 +427,7 @@ function buildSegmentMessages(abstracts, tract, ctx, preamble) {
   return [{ role: 'user', content: buildAbstractInput(abstracts, tract, ctx, preamble) }];
 }
 
+// Opus audit is opt-in only (OPUS_AUDIT_ENABLED=true) to avoid extra full-job model cost.
 function opusAuditEnabled(options = {}) {
   if (options.opusAuditEnabled === true) return true;
   if (options.opusAuditEnabled === false) return false;
