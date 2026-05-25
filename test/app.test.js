@@ -59,7 +59,7 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('buildAdaptiveBatches'), 'Missing adaptive batching');
   assert(script.includes('runDocumentAbstraction'), 'Missing shared abstraction runner');
   assert(script.includes('ABSTRACT_CONCURRENCY = 2'), 'Missing parallel pool');
-  assert(script.includes('MAX_DOCS_PER_BATCH = 2'), 'Max docs per batch should be 2 for timeout safety');
+  assert(script.includes('MAX_DOCS_PER_BATCH = 8'), 'Max docs per batch should use Cloud Run fallback capacity');
   assert(script.includes('isTimeoutError'), 'Missing timeout error detection');
   assert(script.includes('abstractSinglePdfOnTimeout'), 'Missing timeout PDF split retry');
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
@@ -330,6 +330,25 @@ test('Phase 6: loadJobView fetches the job and hydrates the view', () => {
 test('Phase 6: terminal job hydrates result via /result', () => {
   assert(script.includes('/api/jobs/${encodeURIComponent(job.id)}/result'),
     'Job view must fetch /result on terminal status');
+});
+
+test('Phase 6: durable uploads use bounded concurrency', () => {
+  assert(script.includes('DURABLE_UPLOAD_CONCURRENCY'), 'Must define durable upload concurrency');
+  assert(script.includes('runWithConcurrency(uploadTasks, DURABLE_UPLOAD_CONCURRENCY)'),
+    'registerJobUploads must upload chunks with bounded concurrency');
+});
+
+test('Phase 6: stalled server polls kick /process endpoints', () => {
+  assert(script.includes('processServerAbstractionBatch(jobId)'),
+    'Abstraction poll stall must POST /abstraction/process');
+  assert(script.includes('processServerSynthesisBatch(jobId)'),
+    'Synthesis poll stall must POST /synthesis/process');
+});
+
+test('Phase 6: synthesis polling waits for merge and reuses batch result', () => {
+  assert(script.includes('status.mergeInProgress'), 'Synthesis terminal check must wait for final merge');
+  assert(script.includes('batchResult?.finalTitleOpinion'), 'Synthesis poll must cache title opinion from /process');
+  assert(script.includes('publicJobResultFromApi(settled)'), 'runServerSynthesis must reuse polled/process result before /result');
 });
 
 test('Phase 6: job actions wire to existing API endpoints', () => {

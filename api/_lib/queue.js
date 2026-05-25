@@ -15,6 +15,7 @@
 // ships, requests with WORKFLOW_DRIVER=inngest return a 503 setup error.
 
 import { processChunkAbstraction } from './abstraction.js';
+import { runWithConcurrency } from './concurrency.js';
 import { processSynthesisJob, planJobSynthesis } from './synthesis.js';
 
 const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 12, 1, 64);
@@ -61,27 +62,6 @@ function createWorkerId() {
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-async function runWithConcurrency(items, concurrency, worker) {
-  if (!items.length) return [];
-  const queue = items.slice();
-  const results = [];
-  const workers = [];
-  for (let i = 0; i < Math.min(concurrency, queue.length); i++) {
-    workers.push((async () => {
-      while (queue.length) {
-        const item = queue.shift();
-        try {
-          results.push(await worker(item));
-        } catch (err) {
-          results.push({ status: 'error', error: err });
-        }
-      }
-    })());
-  }
-  await Promise.all(workers);
-  return results;
 }
 
 function chunkIsClaimable(chunk, now) {
@@ -206,14 +186,13 @@ export async function processAbstractionBatch(jobId, options = {}) {
   let lastError = null;
 
   while (Date.now() < deadline) {
-    const job = await getJobOrThrow(store, jobId);
+    let job = await getJobOrThrow(store, jobId);
     if (isJobCanceled(job)) break;
     const now = Date.now();
     const ready = await listReadyChunks(store, jobId, config.batchLimit, now);
     if (!ready.length) break;
 
     const results = await runWithConcurrency(ready, config.concurrency, async chunk => {
-      const job = await store.getJob(jobId);
       if (!job || isJobCanceled(job)) {
         return { status: 'skipped', chunkId: chunk.id, reason: 'canceled' };
       }
@@ -249,9 +228,9 @@ export async function processAbstractionBatch(jobId, options = {}) {
       }
     }
     if (!anyClaimed) break;
+    job = await store.getJob(jobId);
   }
 
-  const snapshot = await getAbstractionSnapshot(store, jobId);
   await refreshAbstractionRollup(store, jobId);
   const finalSnapshot = await getAbstractionSnapshot(store, jobId);
   return {
@@ -264,7 +243,7 @@ export async function processAbstractionBatch(jobId, options = {}) {
     elapsedMs: Date.now() - startedAt,
     hasMore: finalSnapshot.pending > 0 || finalSnapshot.processing > 0 || finalSnapshot.retry_wait > 0,
     lastError: lastError ? sanitize(lastError) : null,
-    snapshot,
+    snapshot: finalSnapshot,
   };
 }
 
@@ -364,7 +343,7 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
       await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Resuming synthesis after failure' });
     } catch { /* ignore */ }
   }
-  const status = await store.getSynthesisStatus(jobId);
+  const status = await store.getSynthesisStatus(jobId, { lightweight: true });
   return {
     job: status?.job || (await store.getJob(jobId)),
     status: publicSynthesisStatus(status),
@@ -379,7 +358,11 @@ export async function synthesisSnapshot(jobId, options = {}) {
   if (store.resetStaleSynthesisSegments) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS);
   }
-  const status = await store.getSynthesisStatus(jobId);
+  const status = await store.getSynthesisStatus(jobId, {
+    lightweight: options.lightweight !== false,
+    includeSegments: options.includeSegments === true,
+    includeResult: options.includeResult === true,
+  });
   return {
     job: status?.job || (await store.getJob(jobId)),
     status: publicSynthesisStatus(status),

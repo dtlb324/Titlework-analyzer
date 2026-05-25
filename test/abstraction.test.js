@@ -5,6 +5,7 @@ import {
   defaultBlobLoader,
   processChunkAbstraction,
   processJobAbstraction,
+  tryReuseExistingAbstract,
   validateAbstractPersistenceInput,
 } from '../api/_lib/abstraction.js';
 import {
@@ -253,7 +254,22 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       rollup(jobId);
       return updated;
     },
-    async saveDocumentAbstract(record) {
+    async getDocumentAbstractByChunkId(jobId, chunkId) {
+      const item = abstracts.get(chunkId);
+      return item && item.jobId === jobId ? item : null;
+    },
+    async findReusableAbstractForChunk(jobId, chunk) {
+      if (!chunk.fingerprint) return null;
+      for (const [chunkId, abs] of abstracts.entries()) {
+        const peer = chunks.get(chunkId);
+        if (!peer || peer.id === chunk.id || peer.abstractionStatus !== 'completed') continue;
+        if (peer.fingerprint === chunk.fingerprint) {
+          return { ...abs, chunkId };
+        }
+      }
+      return null;
+    },
+    async saveDocumentAbstract(record, options = {}) {
       validateAbstractPersistenceInput(record);
       const chunk = chunks.get(record.chunkId);
       if (options.enforceWorkerLease && (!record.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== record.workerId)) {
@@ -738,7 +754,7 @@ test('Phase 4: stale abstraction worker cannot overwrite a reclaimed chunk', asy
         store.chunks.set('chk_race', {
           ...claimed,
           abstractionStatus: 'completed',
-          abstractionWorkerId: null,
+          abstractionWorkerId: 'wkr_new',
           abstractionLeaseExpiresAt: null,
           abstractionCompletedAt: new Date().toISOString(),
         });
@@ -1052,10 +1068,57 @@ test('Phase 4: default storage loader allows splittable PDFs up to the split rec
   assert(payload.mediaType === 'application/pdf', 'Expected PDF media type preserved');
 });
 
-test('Phase 4: saving an abstract invalidates any existing synthesis plan and merge claim', () => {
+test('Phase 4: saving an abstract invalidates synthesis only when abstract text changes', () => {
   const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
-  assert(jobsSource.includes('synthesis_plan_id = NULL'), 'saveDocumentAbstract should clear stale synthesis_plan_id');
-  assert(jobsSource.includes('synthesis_merge_worker_id = NULL'), 'saveDocumentAbstract should clear stale merge claim');
+  assert(jobsSource.includes('abstractChanged'), 'saveDocumentAbstract should detect abstract changes');
+  assert(jobsSource.includes('preserveSynthesisPlan'), 'saveDocumentAbstract should support preserving synthesis plan');
+  assert(jobsSource.includes('synthesis_plan_id = NULL'), 'saveDocumentAbstract should clear stale synthesis_plan_id when changed');
+});
+
+test('processChunkAbstraction reuses peer abstract with matching fingerprint without model call', async () => {
+  const donor = makeChunk({
+    id: 'chk_donor',
+    chunkOrder: 0,
+    fingerprint: 'same-file-fp',
+    abstractionStatus: 'completed',
+  });
+  const target = makeChunk({
+    id: 'chk_target',
+    chunkOrder: 1,
+    fingerprint: 'same-file-fp',
+    abstractionStatus: 'pending',
+  });
+  const store = createMemoryPhase3Store([donor, target]);
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.saveDocumentAbstract({
+    jobId: 'job_test_1',
+    documentId: 'doc_test_1',
+    chunkId: 'chk_donor',
+    abstractText: 'Reusable abstract body.',
+    modelUsed: 'claude-haiku-4-5',
+    payloadBytes: 0,
+    latencyMs: 1,
+    inputTokens: 0,
+    outputTokens: 0,
+    status: 'completed',
+    attemptCount: 1,
+  });
+  let modelCalls = 0;
+  let blobLoads = 0;
+  globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async () => {
+    blobLoads += 1;
+    return { bytes: Buffer.from('%PDF'), mediaType: 'application/pdf' };
+  };
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
+    modelCalls += 1;
+    return { text: 'DOCUMENT #2:\nShould not run.', model: 'claude-haiku-4-5', usage: {} };
+  };
+  const result = await processChunkAbstraction(target, { store, workerId: 'wkr_reuse' });
+  assert(result.status === 'completed', `Expected completed reuse, got ${result.status}`);
+  assert(result.reused === true, 'Expected reused flag');
+  assert(modelCalls === 0, `Expected zero model calls, got ${modelCalls}`);
+  assert(blobLoads === 0, `Expected zero blob loads on reuse, got ${blobLoads}`);
+  assert(store.abstracts.get('chk_target').abstractText.includes('Reusable abstract'), 'Expected copied abstract on target chunk');
 });
 
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {

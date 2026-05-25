@@ -20,10 +20,17 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
+import { buildMessagesRequestBody } from './anthropic-request.js';
+import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'claude-sonnet-4-6';
+const DEFAULT_PARTIAL_SYNTHESIS_MODEL = process.env.SYNTHESIS_PARTIAL_MODEL || 'claude-haiku-4-5';
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 8192);
+const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 3500, 512, 8192);
 const DEFAULT_SYNTHESIS_CHUNK_SIZE = clampInt(process.env.SYNTHESIS_CHUNK_SIZE, 50, 1, 100);
+const DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE = 80;
+const DEFAULT_BULK_JOB_MIN_ABSTRACTS = 100;
+const SYNTHESIS_REPAIR_ENABLED = process.env.SYNTHESIS_REPAIR_ENABLED !== 'false';
 const DEFAULT_REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 12_000_000, 100_000, 20_000_000);
 const DEFAULT_REQUEST_OVERHEAD_BYTES = clampInt(process.env.REQUEST_OVERHEAD_BYTES, 350_000, 0, 1_000_000);
 const DEFAULT_MAX_ATTEMPTS = clampInt(process.env.SYNTHESIS_MAX_ATTEMPTS, 3, 1, 10);
@@ -31,6 +38,8 @@ const DEFAULT_FOLLOWUP_HISTORY_TURNS = clampInt(process.env.SYNTHESIS_FOLLOWUP_H
 const DEFAULT_UPSTREAM_TIMEOUT_MS = clampInt(process.env.SYNTHESIS_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const DEFAULT_MERGE_LEASE_MS = clampInt(process.env.SYNTHESIS_MERGE_LEASE_MS || process.env.WORKFLOW_LEASE_MS, DEFAULT_UPSTREAM_TIMEOUT_MS + 60_000, 5_000, 600_000);
 const DEFAULT_STALE_SYNTHESIS_LEASE_MS = clampInt(process.env.SYNTHESIS_STALE_LEASE_MS || process.env.WORKFLOW_STALE_LEASE_MS, DEFAULT_MERGE_LEASE_MS + 60_000, 5_000, 600_000);
+const DEFAULT_SYNTHESIS_CONCURRENCY = clampInt(process.env.SYNTHESIS_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 16);
+const DEFAULT_MERGE_CONCURRENCY = clampInt(process.env.SYNTHESIS_MERGE_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 8);
 const MAX_RETRY_WAIT_MS = 5 * 60_000;
 const MIN_FINAL_OPINION_CHARS = 500;
 const MIN_SEGMENT_SUMMARY_CHARS = 200;
@@ -87,12 +96,35 @@ export function getSynthesisConfig(overrides = {}) {
     model: overrides.model || DEFAULT_SYNTHESIS_MODEL,
     maxTokens: overrides.maxTokens || DEFAULT_SYNTHESIS_MAX_TOKENS,
     chunkSize: overrides.chunkSize || DEFAULT_SYNTHESIS_CHUNK_SIZE,
+    partialModel: overrides.partialModel || DEFAULT_PARTIAL_SYNTHESIS_MODEL,
+    partialMaxTokens: overrides.partialMaxTokens || DEFAULT_PARTIAL_MAX_TOKENS,
     requestEnvelopeSafeBytes: overrides.requestEnvelopeSafeBytes || DEFAULT_REQUEST_ENVELOPE_SAFE_BYTES,
     requestOverheadBytes: overrides.requestOverheadBytes || DEFAULT_REQUEST_OVERHEAD_BYTES,
     maxAttempts: overrides.maxAttempts || DEFAULT_MAX_ATTEMPTS,
     followupHistoryTurns: overrides.followupHistoryTurns || DEFAULT_FOLLOWUP_HISTORY_TURNS,
     upstreamTimeoutMs: overrides.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS,
+    concurrency: overrides.concurrency || DEFAULT_SYNTHESIS_CONCURRENCY,
+    mergeConcurrency: overrides.mergeConcurrency || DEFAULT_MERGE_CONCURRENCY,
   };
+}
+
+export function getPartialSynthesisConfig(overrides = {}) {
+  const base = getSynthesisConfig(overrides);
+  return {
+    ...base,
+    model: overrides.partialModel || base.partialModel,
+    maxTokens: overrides.partialMaxTokens || base.partialMaxTokens,
+  };
+}
+
+export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
+  const resolved = getSynthesisConfig(config);
+  const bulkMin = clampInt(process.env.BULK_JOB_MIN_ABSTRACTS, DEFAULT_BULK_JOB_MIN_ABSTRACTS, 2, 400);
+  const bulkSize = clampInt(process.env.BULK_SYNTHESIS_CHUNK_SIZE, DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE, 10, 100);
+  if (abstractCount >= bulkMin) {
+    return Math.max(resolved.chunkSize, bulkSize);
+  }
+  return resolved.chunkSize;
 }
 
 function utf8ByteLength(value) {
@@ -186,14 +218,18 @@ export function groupAbstractsByDocument(abstracts) {
 }
 
 export function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemPrompt, configOverrides = {}) {
-  const config = getSynthesisConfig(configOverrides);
+  const config = {
+    ...getSynthesisConfig(configOverrides),
+    chunkSize: effectiveSynthesisChunkSize(abstracts.length, configOverrides),
+  };
+  const estimateModel = systemPrompt === SYNTHESIS_PROMPT ? config.model : config.partialModel;
   const chunks = [];
   let current = [];
   for (const abstract of abstracts) {
     const candidate = [...current, abstract];
     const candidateInput = buildAbstractInput(candidate, tract, ctx, preamble);
     const candidateBytes = estimateRequestBytes(
-      config.model,
+      estimateModel,
       config.maxTokens,
       systemPrompt || SYNTHESIS_PROMPT,
       [{ role: 'user', content: candidateInput }],
@@ -308,12 +344,12 @@ async function defaultModelClient(request) {
     error.statusCode = 503;
     throw error;
   }
-  const body = JSON.stringify({
+  const body = JSON.stringify(buildMessagesRequestBody({
     model: request.model,
-    max_tokens: request.maxTokens,
+    maxTokens: request.maxTokens,
     system: request.system,
     messages: request.messages,
-  });
+  }));
   const timeout = createTimeoutSignal(request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS);
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -509,6 +545,8 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   const store = options.store;
   if (!store) throw new Error('A job store is required to process synthesis segments.');
   const config = getSynthesisConfig(options.config || {});
+  const isSinglePass = options.singlePass === true;
+  const activeConfig = isSinglePass ? config : getPartialSynthesisConfig(options.config || {});
   const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
   const leaseMs = options.leaseMs || 120_000;
   const tract = options.tract || '';
@@ -557,7 +595,6 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   const totalDocs = abstracts.length;
   const start = segment.startSequenceIndex + 1;
   const end = segment.endSequenceIndex + 1;
-  const isSinglePass = options.singlePass === true;
   const systemPrompt = isSinglePass ? SYNTHESIS_PROMPT : PARTIAL_SYNTHESIS_PROMPT;
   const preamble = isSinglePass
     ? `Below are ${totalDocs} document abstracts. Synthesize into a complete title opinion.`
@@ -567,11 +604,11 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   let lastError = null;
   for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
     try {
-      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, config, options);
+      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options);
       const validation = isSinglePass ? validateFinalOpinion(result.text) : validateSegmentSummary(result.text);
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
-      if (!validation.ok && attempt < config.maxAttempts) {
+      if (!validation.ok && attempt < config.maxAttempts && SYNTHESIS_REPAIR_ENABLED) {
         // Repair retry: ask model to be more complete.
         const repairAbstracts = segmentAbstracts;
         const repairPreamble = `${preamble}\n\nPrevious response was incomplete or missing required sections: ${validation.reason} Produce a complete response that includes every required section.`;
@@ -581,7 +618,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
           contextNotes,
           preamble: repairPreamble,
           systemPrompt,
-          config,
+          config: activeConfig,
           options,
         });
         const repairValidation = isSinglePass ? validateFinalOpinion(retry.text) : validateSegmentSummary(retry.text);
@@ -678,16 +715,19 @@ async function mergeSegmentsIntoOpinion({
   tract,
   contextNotes,
   config,
+  partialConfig,
   options,
   warningsAccum,
   tokensAccum,
 }) {
+  const partial = partialConfig || getPartialSynthesisConfig(config || {});
+  const finalConfig = config || getSynthesisConfig();
   const mergeAbstracts = segmentSummaries.map(summary => ({
     filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
     abstract: summary.summaryText,
   }));
   const preamble = `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`;
-  const fit = fitsRequestBudget(mergeAbstracts, tract, contextNotes, preamble, SYNTHESIS_PROMPT, config);
+  const fit = fitsRequestBudget(mergeAbstracts, tract, contextNotes, preamble, SYNTHESIS_PROMPT, finalConfig);
   if (!fit.fits && mergeAbstracts.length > 2) {
     // Tree-merge: pair segments and partial-merge until one summary remains.
     warningsAccum.push('merge_tree_applied');
@@ -698,11 +738,18 @@ async function mergeSegmentsIntoOpinion({
       index: idx,
     }));
     while (working.length > 2) {
-      const next = [];
+      const pairSlots = [];
       for (let i = 0; i < working.length; i += 2) {
-        const left = working[i];
-        const right = working[i + 1];
-        if (!right) { next.push(left); continue; }
+        pairSlots.push({
+          slot: i / 2,
+          left: working[i],
+          right: working[i + 1] || null,
+        });
+      }
+      const next = new Array(pairSlots.length);
+      const mergePairs = pairSlots.filter(slot => slot.right);
+      const mergedNodes = await runWithConcurrency(mergePairs, finalConfig.mergeConcurrency, async slot => {
+        const { left, right } = slot;
         const pair = [
           { filename: left.filename, abstract: left.abstract },
           { filename: right.filename, abstract: right.abstract },
@@ -714,17 +761,25 @@ async function mergeSegmentsIntoOpinion({
           contextNotes,
           partialPreamble,
           PARTIAL_SYNTHESIS_PROMPT,
-          config,
+          partial,
           options,
         );
         tokensAccum.inputTokens += result.usage.inputTokens || 0;
         tokensAccum.outputTokens += result.usage.outputTokens || 0;
-        next.push({
-          filename: `Merged (Documents ${left.segmentRange[0] + 1}-${right.segmentRange[1] + 1})`,
-          abstract: result.text,
-          segmentRange: [left.segmentRange[0], right.segmentRange[1]],
-          index: next.length,
-        });
+        return {
+          slot: slot.slot,
+          node: {
+            filename: `Merged (Documents ${left.segmentRange[0] + 1}-${right.segmentRange[1] + 1})`,
+            abstract: result.text,
+            segmentRange: [left.segmentRange[0], right.segmentRange[1]],
+          },
+        };
+      });
+      for (const slot of pairSlots) {
+        if (!slot.right) next[slot.slot] = slot.left;
+      }
+      for (const { slot, node } of mergedNodes) {
+        next[slot] = node;
       }
       working = next;
     }
@@ -735,7 +790,7 @@ async function mergeSegmentsIntoOpinion({
       contextNotes,
       preamble,
       SYNTHESIS_PROMPT,
-      config,
+      finalConfig,
       options,
     );
     tokensAccum.inputTokens += merged.usage.inputTokens || 0;
@@ -753,7 +808,7 @@ async function mergeSegmentsIntoOpinion({
     contextNotes,
     preamble,
     SYNTHESIS_PROMPT,
-    config,
+    finalConfig,
     options,
   );
   tokensAccum.inputTokens += result.usage.inputTokens || 0;
@@ -872,15 +927,18 @@ export async function processSynthesisJob(jobId, options = {}) {
   let lastError = null;
 
   while (Date.now() < deadline) {
-    const currentJob = await store.getJob(jobId);
+    let currentJob = await store.getJob(jobId);
     if (currentJob?.status === 'canceled') break;
     const ready = await store.listReadySynthesisSegments(jobId, planId, options.batchLimit || 4);
     if (!ready.length) break;
-    for (const segment of ready) {
-      if (Date.now() >= deadline) break;
-      const refreshedJob = await store.getJob(jobId);
-      if (refreshedJob?.status === 'canceled') break;
-      const result = await processSynthesisSegment(jobId, segment, abstracts, {
+    const segmentResults = await runWithConcurrency(ready, config.concurrency, async segment => {
+      if (Date.now() >= deadline) {
+        return { status: 'skipped', segmentId: segment.id, reason: 'deadline' };
+      }
+      if (!currentJob || currentJob.status === 'canceled') {
+        return { status: 'skipped', segmentId: segment.id, reason: 'canceled' };
+      }
+      return await processSynthesisSegment(jobId, segment, abstracts, {
         ...options,
         store,
         config,
@@ -888,10 +946,15 @@ export async function processSynthesisJob(jobId, options = {}) {
         contextNotes: job.contextNotes || options.contextNotes || '',
         singlePass,
       });
+    });
+    currentJob = await store.getJob(jobId);
+    for (const result of segmentResults) {
+      if (!result || result.status === 'skipped' || result.status === 'stale') continue;
       if (result.status === 'complete') completedInBatch += 1;
       else if (result.status === 'failed') { failedInBatch += 1; lastError = result.failure; }
       else if (result.status === 'retry_wait') { retryInBatch += 1; lastError = result.failure; }
     }
+    if (currentJob?.status === 'canceled') break;
   }
 
   // After segment work, attempt the final merge if every segment is complete and no result exists yet.
@@ -902,11 +965,15 @@ export async function processSynthesisJob(jobId, options = {}) {
 
   const storedResult = store.getJobResult ? await store.getJobResult(jobId) : null;
   const existingResult = storedResult?.planId === planId ? storedResult : null;
-  const failedDocumentRefs = await collectFailedDocuments(store, jobId);
   const tract = job.subjectTract || options.tract || '';
   const contextNotes = job.contextNotes || options.contextNotes || '';
 
   let result = existingResult || null;
+  let failedDocumentRefs = null;
+  async function failedDocumentsForMerge() {
+    if (!failedDocumentRefs) failedDocumentRefs = await collectFailedDocuments(store, jobId);
+    return failedDocumentRefs;
+  }
   let mergeRanInThisBatch = false;
   let mergeClaimBlocked = false;
   async function claimFinalWriter() {
@@ -928,14 +995,15 @@ export async function processSynthesisJob(jobId, options = {}) {
       const validation = validateFinalOpinion(onlySummary.summaryText || '');
       const opinionWarnings = [];
       if (!validation.ok) opinionWarnings.push(`final_validation_failed: ${validation.reason}`);
-      if (failedDocumentRefs.length) opinionWarnings.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
-      const status = !validation.ok ? 'failed' : failedDocumentRefs.length ? 'partial_failed' : 'complete';
+      const failedDocs = await failedDocumentsForMerge();
+      if (failedDocs.length) opinionWarnings.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+      const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
       result = await store.saveJobResult(jobId, {
         planId,
         status,
         finalTitleOpinion: validation.ok ? (onlySummary.summaryText || '') : '',
         warnings: opinionWarnings,
-        failedDocuments: failedDocumentRefs,
+        failedDocuments: failedDocs,
         modelUsed: onlySummary.modelUsed || config.model,
         inputTokens: onlySummary.inputTokens || 0,
         outputTokens: onlySummary.outputTokens || 0,
@@ -959,20 +1027,22 @@ export async function processSynthesisJob(jobId, options = {}) {
           tract,
           contextNotes,
           config,
+          partialConfig: getPartialSynthesisConfig(options.config || {}),
           options,
           warningsAccum,
           tokensAccum,
         });
         const validation = validateFinalOpinion(merged.text);
         if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-        if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
-        const status = !validation.ok ? 'failed' : failedDocumentRefs.length ? 'partial_failed' : 'complete';
+        const failedDocs = await failedDocumentsForMerge();
+        if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
+        const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
         result = await store.saveJobResult(jobId, {
           planId,
           status,
           finalTitleOpinion: validation.ok ? merged.text : '',
           warnings: warningsAccum,
-          failedDocuments: failedDocumentRefs,
+          failedDocuments: failedDocs,
           modelUsed: merged.model,
           inputTokens: tokensAccum.inputTokens,
           outputTokens: tokensAccum.outputTokens,
@@ -988,7 +1058,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           status: 'failed',
           finalTitleOpinion: '',
           warnings: [`final_merge_failed: ${lastError.errorType}`],
-          failedDocuments: failedDocumentRefs,
+          failedDocuments: await failedDocumentsForMerge(),
           modelUsed: config.model,
           inputTokens: tokensAccum.inputTokens,
           outputTokens: tokensAccum.outputTokens,
@@ -1022,20 +1092,22 @@ export async function processSynthesisJob(jobId, options = {}) {
             tract,
             contextNotes,
             config,
+            partialConfig: getPartialSynthesisConfig(options.config || {}),
             options,
             warningsAccum,
             tokensAccum,
           });
           const validation = validateFinalOpinion(merged.text);
           if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-          if (failedDocumentRefs.length) warningsAccum.push(`${failedDocumentRefs.length} document abstract(s) excluded due to abstraction failure.`);
+          const failedDocs = await failedDocumentsForMerge();
+          if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
           const resultStatus = validation.ok ? 'partial_failed' : 'failed';
           result = await store.saveJobResult(jobId, {
             planId,
             status: resultStatus,
             finalTitleOpinion: validation.ok ? merged.text : '',
             warnings: warningsAccum,
-            failedDocuments: failedDocumentRefs,
+            failedDocuments: failedDocs,
             modelUsed: merged.model,
             inputTokens: tokensAccum.inputTokens,
             outputTokens: tokensAccum.outputTokens,
@@ -1051,7 +1123,7 @@ export async function processSynthesisJob(jobId, options = {}) {
             status: 'failed',
             finalTitleOpinion: '',
             warnings: [...warningsAccum, `final_merge_failed: ${lastError.errorType}`],
-            failedDocuments: failedDocumentRefs,
+            failedDocuments: await failedDocumentsForMerge(),
             modelUsed: config.model,
             inputTokens: tokensAccum.inputTokens,
             outputTokens: tokensAccum.outputTokens,
@@ -1071,7 +1143,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           status: 'failed',
           finalTitleOpinion: '',
           warnings: failureWarnings,
-          failedDocuments: failedDocumentRefs,
+          failedDocuments: await failedDocumentsForMerge(),
           modelUsed: config.model,
           inputTokens: 0,
           outputTokens: 0,
@@ -1084,12 +1156,11 @@ export async function processSynthesisJob(jobId, options = {}) {
     }
   }
 
-  const finalSegments = await store.listSynthesisSegments(jobId, planId);
-  const status = await store.getSynthesisStatus(jobId);
+  const status = await store.getSynthesisStatus(jobId, { lightweight: true });
   return {
     planId,
     plan,
-    segments: finalSegments,
+    segments: [],
     completedInBatch,
     failedInBatch,
     retryScheduledInBatch: retryInBatch,
@@ -1098,26 +1169,27 @@ export async function processSynthesisJob(jobId, options = {}) {
     result,
     status,
     lastError: lastError ? { errorType: lastError.errorType, errorMessage: lastError.errorMessage } : null,
-    hasMore: mergeClaimBlocked || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0),
+    hasMore: mergeClaimBlocked
+      || Boolean(status?.mergeInProgress)
+      || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0),
   };
 }
 
 async function collectFailedDocuments(store, jobId) {
-  if (!store.listChunks) return [];
   try {
-    const chunks = await store.listChunks(jobId);
-    return chunks
-      .filter(chunk => chunk.abstractionStatus === 'failed')
-      .map(chunk => ({
-        chunkId: chunk.id,
-        documentId: chunk.documentId,
-        chunkOrder: chunk.chunkOrder,
-        filename: chunk.originalFilename,
-        pageStart: chunk.pageStart,
-        pageEnd: chunk.pageEnd,
-        errorType: chunk.abstractionErrorType,
-        errorMessage: chunk.abstractionErrorMessage,
-      }));
+    const chunks = store.listFailedChunks
+      ? await store.listFailedChunks(jobId)
+      : (store.listChunks ? (await store.listChunks(jobId)).filter(chunk => chunk.abstractionStatus === 'failed') : []);
+    return chunks.map(chunk => ({
+      chunkId: chunk.id,
+      documentId: chunk.documentId,
+      chunkOrder: chunk.chunkOrder,
+      filename: chunk.originalFilename,
+      pageStart: chunk.pageStart,
+      pageEnd: chunk.pageEnd,
+      errorType: chunk.abstractionErrorType,
+      errorMessage: chunk.abstractionErrorMessage,
+    }));
   } catch {
     return [];
   }

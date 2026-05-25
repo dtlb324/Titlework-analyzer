@@ -267,12 +267,13 @@ const CLOUD_RUN_MAX_REQUEST_BYTES = 20_000_000;
 const REQUEST_ENVELOPE_SAFE_BYTES = 12_000_000;
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const MAX_PAYLOAD_BYTES = REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES;
-const MAX_DOCS_PER_BATCH = 2;
+const MAX_DOCS_PER_BATCH = 8;
 const LARGE_FILE_BYTES = 800_000;
-const TIMEOUT_SAFE_FILE_BYTES = 350_000;
+const TIMEOUT_SAFE_FILE_BYTES = 800_000;
 const TIMEOUT_SPLIT_CHUNK_RAW = 400_000;
 const CLOUD_RUN_REQUEST_TIMEOUT_MS = 240_000;
 const ABSTRACT_CONCURRENCY = 2;
+const DURABLE_UPLOAD_CONCURRENCY = 4;
 const SYNTHESIS_CHUNK_SIZE = 50;
 const FOLLOWUP_HISTORY_TURNS = 4;
 const MAX_FILE_LIST_DISPLAY = 8;
@@ -1961,9 +1962,19 @@ function durableUploadWarning(reason) {
   return `Durable file resume unavailable.${suffix} Continuing with browser-only analysis; keep this tab open until the run finishes.`;
 }
 
+async function entryChecksum(entry, file = entry.sourceFile) {
+  if (entry._checksumByFile && entry._checksumByFile.has(file)) {
+    return entry._checksumByFile.get(file);
+  }
+  const checksum = await computeFileChecksum(file).catch(() => null);
+  if (!entry._checksumByFile) entry._checksumByFile = new Map();
+  entry._checksumByFile.set(file, checksum);
+  return checksum;
+}
+
 async function registerDocumentForUpload(jobId, entry) {
   const sourceName = entry.splitFrom || entry.name;
-  const checksum = await computeFileChecksum(entry.sourceOriginalFile || entry.sourceFile).catch(() => null);
+  const checksum = await entryChecksum(entry, entry.sourceOriginalFile || entry.sourceFile);
   const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/documents`, {
     method: 'POST',
     body: JSON.stringify({
@@ -1978,7 +1989,7 @@ async function registerDocumentForUpload(jobId, entry) {
 }
 
 async function registerChunkForUpload(jobId, documentId, entry, chunkOrder) {
-  const checksum = await computeFileChecksum(entry.sourceFile).catch(() => null);
+  const checksum = await entryChecksum(entry, entry.sourceFile);
   const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/documents/${encodeURIComponent(documentId)}/chunks`, {
     method: 'POST',
     body: JSON.stringify({
@@ -2135,7 +2146,14 @@ async function pollServerAbstraction(jobId, items, totalDocuments) {
       stallPolls = 0;
       lastTerminalCount = terminalCount;
     }
-    if (stallPolls >= STALL_THRESHOLD && (pending + processing + retryWait) > 0) stallPolls = 0;
+    if (stallPolls >= STALL_THRESHOLD && (pending + processing + retryWait) > 0) {
+      stallPolls = 0;
+      try {
+        await processServerAbstractionBatch(jobId);
+      } catch (err) {
+        console.warn('Could not kick server abstraction batch', err);
+      }
+    }
     await sleep(1000);
   }
   throw new Error('Server-side abstraction did not finish polling in this browser session.');
@@ -2181,13 +2199,20 @@ async function askServerFollowup(jobId, question) {
 
 function isServerSynthesisTerminal(status) {
   if (!status) return false;
+  if (status.mergeInProgress) return false;
   if (status.hasResult) return true;
   const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
   return pending === 0 && (status.total || 0) > 0;
 }
 
+function publicJobResultFromApi(payload) {
+  if (!payload) return null;
+  return payload.result || payload || null;
+}
+
 async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   let latest = null;
+  let cachedResult = null;
   let lastSignature = '';
   let stallPolls = 0;
   const STALL_THRESHOLD = 10;
@@ -2209,11 +2234,22 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
       ? `Server synthesis ${complete}/${total} segment(s)${detail.length ? ` (${detail.join(', ')})` : ''}...`
       : 'Server synthesis planning...';
     if (onProgress) onProgress(Math.min(99, pct), phaseLabel);
-    if (isServerSynthesisTerminal(status)) return latest;
-    const signature = `${complete}|${failed}|${processing}|${retryWait}`;
+    if (isServerSynthesisTerminal(status)) {
+      return { ...latest, result: cachedResult || publicJobResultFromApi(latest) };
+    }
+    const signature = `${complete}|${failed}|${processing}|${retryWait}|${status.mergeInProgress ? 1 : 0}`;
     if (signature === lastSignature) stallPolls += 1;
     else { stallPolls = 0; lastSignature = signature; }
-    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait) > 0) stallPolls = 0;
+    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait > 0 || status.mergeInProgress)) {
+      stallPolls = 0;
+      try {
+        const batch = await processServerSynthesisBatch(jobId);
+        const batchResult = publicJobResultFromApi(batch);
+        if (batchResult?.finalTitleOpinion) cachedResult = batchResult;
+      } catch (err) {
+        console.warn('Could not kick server synthesis batch', err);
+      }
+    }
     await sleep(1000);
   }
   throw new Error('Server-side synthesis did not finish polling in this browser session.');
@@ -2226,11 +2262,15 @@ async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
   const settled = isServerSynthesisTerminal(status)
     ? started
     : await pollServerSynthesis(jobId, items, totalDocs, onProgress);
-  const final = await fetchServerJobResult(jobId);
-  if (!final?.result?.finalTitleOpinion) {
+  let result = publicJobResultFromApi(settled);
+  if (!result?.finalTitleOpinion) {
+    const final = await fetchServerJobResult(jobId);
+    result = final?.result || null;
+  }
+  if (!result?.finalTitleOpinion) {
     throw new Error('Server-side synthesis finished without producing a title opinion.');
   }
-  return { result: final.result, status: settled.status };
+  return { result, status: settled.status };
 }
 
 async function runServerDocumentAbstraction(jobId, fileList, items) {
@@ -2259,6 +2299,7 @@ async function registerJobUploads(jobId, fileList) {
   }
   const maxUploadBytes = status.maxUploadBytes || Infinity;
   const documentIdsBySource = new Map();
+  const documentCreateBySource = new Map();
   let completed = 0;
   const total = fileList.length;
 
@@ -2269,27 +2310,36 @@ async function registerJobUploads(jobId, fileList) {
     currentPhase: `Uploading ${total} document chunk${total === 1 ? '' : 's'}`,
   });
 
-  for (let i = 0; i < fileList.length; i++) {
-    const entry = fileList[i];
+  async function documentIdForEntry(entry) {
+    const sourceKey = entry.splitFrom || entry.name;
+    if (documentIdsBySource.has(sourceKey)) return documentIdsBySource.get(sourceKey);
+    let pending = documentCreateBySource.get(sourceKey);
+    if (!pending) {
+      pending = registerDocumentForUpload(jobId, entry).then(document => {
+        documentIdsBySource.set(sourceKey, document.id);
+        return document.id;
+      });
+      documentCreateBySource.set(sourceKey, pending);
+    }
+    return await pending;
+  }
+
+  const uploadTasks = fileList.map((entry, i) => async () => {
     if ((entry.size || entry.sourceFile?.size || 0) > maxUploadBytes) {
       throw new Error(`${entry.name}: exceeds durable upload limit of ${formatMegabytes(maxUploadBytes)} MB.`);
     }
-    const sourceKey = entry.splitFrom || entry.name;
-    let documentId = documentIdsBySource.get(sourceKey);
-    if (!documentId) {
-      const document = await registerDocumentForUpload(jobId, entry);
-      documentId = document.id;
-      documentIdsBySource.set(sourceKey, documentId);
-    }
+    const documentId = await documentIdForEntry(entry);
     const chunk = await registerChunkForUpload(jobId, documentId, entry, i);
     entry.uploadStatus = 'uploading';
     await uploadChunkToBlob(jobId, documentId, chunk, entry, percentage => {
       const pct = Math.round(((completed + (percentage / 100)) / total) * 8);
-      updateProgress(pct, `Uploading source files to durable storage (${completed + 1} of ${total})...`, null);
+      updateProgress(pct, `Uploading source files to durable storage (${Math.min(completed + 1, total)} of ${total})...`, null);
     });
     completed += 1;
     updateProgress(Math.round((completed / total) * 8), `Uploaded ${completed} of ${total} document chunk${total === 1 ? '' : 's'}...`, null);
-  }
+  });
+
+  await runWithConcurrency(uploadTasks, DURABLE_UPLOAD_CONCURRENCY);
 
   const job = await finalizeJobUploads(jobId);
   renderJobMeta(job);
@@ -2556,7 +2606,6 @@ function isTimeoutError(err) {
 
 function maxDocsForPayload(filePayload) {
   if (filePayload > TIMEOUT_SAFE_FILE_BYTES) return 1;
-  if (filePayload > 300_000) return 1;
   return MAX_DOCS_PER_BATCH;
 }
 
