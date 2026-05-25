@@ -1318,7 +1318,7 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
       }
       return {
         text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
-        model: 'claude-haiku-4-5',
+        model: 'gemini-2.5-flash',
         usage: { input_tokens: 10, output_tokens: 15 },
       };
     },
@@ -1326,13 +1326,13 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
 
   const saved = store.abstracts.get('chk_flagged');
   assert(result.status === 'completed', `Expected completed escalation, got ${result.status}`);
-  assert(models.join(',') === 'claude-haiku-4-5,claude-sonnet-4-6', `Expected Haiku then Sonnet, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-2.5-flash,claude-sonnet-4-6', `Expected Gemini Flash then Sonnet, got ${models.join(',')}`);
   assert(saved.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet saved, got ${saved.modelUsed}`);
   assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
   assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Haiku and Sonnet calls');
 });
 
-test('processChunkAbstraction keeps clean Haiku abstracts on the cheap path', async () => {
+test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {
   const store = createMemoryPhase3Store([makeChunk({ id: 'chk_clean' })]);
   const models = [];
   await processChunkAbstraction(store.chunks.get('chk_clean'), {
@@ -1343,22 +1343,25 @@ test('processChunkAbstraction keeps clean Haiku abstracts on the cheap path', as
       models.push(request.model);
       return {
         text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nGRANTOR: A\nGRANTEE: B\nISSUES: none noted\nCONFIDENCE: Clear, single-instrument abstract.',
-        model: 'claude-haiku-4-5',
+        model: 'gemini-2.5-flash',
         usage: { input_tokens: 10, output_tokens: 15 },
       };
     },
   });
 
   const saved = store.abstracts.get('chk_clean');
-  assert(models.join(',') === 'claude-haiku-4-5', `Expected only Haiku, got ${models.join(',')}`);
-  assert(saved.modelUsed === 'claude-haiku-4-5', `Expected Haiku saved, got ${saved.modelUsed}`);
+  assert(models.join(',') === 'gemini-2.5-flash', `Expected only Gemini Flash, got ${models.join(',')}`);
+  assert(saved.modelUsed === 'gemini-2.5-flash', `Expected Gemini Flash saved, got ${saved.modelUsed}`);
 });
 
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {
   const previousBucket = process.env.GCS_BUCKET;
   const previousApi = process.env.ANTHROPIC_API_KEY;
+  const previousGemini = process.env.GEMINI_API_KEY;
   delete process.env.GCS_BUCKET;
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
   delete globalThis.__TITLE_ANALYZER_BLOB_LOADER__;
   delete globalThis.__TITLE_ANALYZER_MODEL_CLIENT__;
   const store = createMemoryPhase3Store([makeChunk()]);
@@ -1371,6 +1374,7 @@ test('Phase 4: setup error when queue env not configured returns 503 with fallba
 
   if (previousBucket) process.env.GCS_BUCKET = previousBucket;
   if (previousApi) process.env.ANTHROPIC_API_KEY = previousApi;
+  if (previousGemini) process.env.GEMINI_API_KEY = previousGemini;
 });
 
 test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', async () => {
