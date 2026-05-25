@@ -9,6 +9,7 @@ import {
   validateCreateChunkInput,
   validateCreateDocumentInput,
   validateFollowupRequestInput,
+  validateImportContinuationInput,
   validatePatchChunkInput,
   validatePatchJobInput,
   validateSaveJobResultInput,
@@ -241,6 +242,20 @@ async function handleChunkPatch(req, res, requestId, store, jobId, chunkId) {
   const chunk = await store.updateChunk(jobId, chunkId, validation.patch);
   if (!chunk) return res.status(404).json({ error: 'Chunk not found.', requestId });
   return res.status(200).json({ chunk, requestId });
+}
+
+async function handleImportContinuation(req, res, requestId, store, jobId) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
+  if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
+  if (!store.importContinuationAbstracts) {
+    return res.status(503).json({ error: 'Continuation import is not available for this job store.', requestId });
+  }
+  const body = parseBody(req, res, requestId);
+  if (!body) return;
+  const validation = validateImportContinuationInput(body);
+  if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  const result = await store.importContinuationAbstracts(jobId, validation.value.sourceJobId);
+  return res.status(200).json({ ...result, requestId });
 }
 
 async function handleFinalizeUploads(req, res, requestId, store, jobId) {
@@ -652,6 +667,7 @@ export default async function handler(req, res) {
     if (parts.length === 2 && second === 'chunks') return await handleChunkList(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'chunks') return await handleChunkPatch(req, res, requestId, store, jobId, third);
     if (parts.length === 4 && second === 'chunks' && fourth === 'retry') return await handleChunkRetry(req, res, requestId, store, jobId, third);
+    if (parts.length === 2 && second === 'import-continuation') return await handleImportContinuation(req, res, requestId, store, jobId);
     if (parts.length === 2 && second === 'finalize-uploads') return await handleFinalizeUploads(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'abstraction' && third === 'start') return await handleAbstractionStart(req, res, requestId, store, jobId);
     if (parts.length === 3 && second === 'abstraction' && third === 'status') return await handleAbstractionStatus(req, res, requestId, store, jobId);

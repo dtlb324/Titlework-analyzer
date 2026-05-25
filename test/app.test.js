@@ -427,6 +427,30 @@ test('Phase 6: recent jobs store caps at 20 entries', () => {
 
 
 let passed = 0;
+test('analyzeAdditional uses durable upload and server abstraction when storage is available', () => {
+  assert(script.includes('async function analyzeAdditional'), 'Missing analyzeAdditional()');
+  assert(script.includes('async function resolvePriorAbstractsForContinuation'), 'Missing prior abstract resolver');
+  assert(script.includes('async function importContinuationAbstracts'), 'Missing continuation import helper');
+  assert(script.includes('registerJobUploads(job.id, newFiles'), 'Additional analysis should register durable uploads');
+  assert(script.includes('runServerDocumentAbstraction(job.id, newFiles'), 'Additional analysis should prefer server abstraction');
+  assert(script.includes('importContinuationAbstracts(job.id, sourceJobId)'), 'Additional analysis should import prior server abstracts');
+  assert(script.includes('importedContinuation'), 'Additional analysis should track continuation import success');
+});
+
+test('analyzeAdditional falls back to browser abstraction and synthesis', () => {
+  assert(script.includes('falling back to browser abstraction'), 'Additional analysis should warn on server abstraction fallback');
+  assert(script.includes('falling back to browser synthesis'), 'Additional analysis should warn on server synthesis fallback');
+  assert(script.includes('hierarchicalSynthesis(allAbstracts, tract, ctx'), 'Additional analysis should browser-synthesize combined abstracts');
+});
+
+test('import-continuation API route is wired', () => {
+  const routeSource = readFileSync(join(root, 'api/jobs/[...path].js'), 'utf8');
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  assert(routeSource.includes("second === 'import-continuation'"), 'Missing import-continuation route');
+  assert(routeSource.includes('validateImportContinuationInput'), 'Route should validate import-continuation body');
+  assert(jobsSource.includes('async importContinuationAbstracts(targetJobId, sourceJobId)'), 'Job store should implement continuation import');
+});
+
 let failed = 0;
 let skipped = 0;
 

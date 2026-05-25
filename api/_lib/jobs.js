@@ -419,6 +419,20 @@ export function validateCreateChunkInput(input) {
   };
 }
 
+export function validateImportContinuationInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, reason: 'Invalid import-continuation request body.' };
+  }
+  if (hasRawPayloadFields(input)) {
+    return { valid: false, reason: 'Import-continuation must not include raw documents, abstracts, CSV text, base64 payloads, or title opinions.' };
+  }
+  const sourceJobId = truncateText(input.sourceJobId, 200);
+  if (!sourceJobId || !/^job_[a-z0-9_]+$/i.test(sourceJobId)) {
+    return { valid: false, reason: 'sourceJobId must be a valid job id.' };
+  }
+  return { valid: true, value: { sourceJobId } };
+}
+
 export function validatePatchChunkInput(input, context = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { valid: false, reason: 'Invalid chunk update body.' };
@@ -588,6 +602,8 @@ function rowToAbstract(row) {
     pageEnd: row.page_end,
     splitFrom: row.split_from,
     sourceFilename: row.source_filename,
+    blobKey: row.blob_key,
+    blobUrl: row.blob_url,
     abstractText: row.abstract_text,
     modelUsed: row.model_used,
     payloadBytes: row.payload_bytes,
@@ -1684,6 +1700,8 @@ function createPostgresJobStore() {
           dc.page_end,
           dc.split_from,
           dc.original_filename,
+          dc.blob_key,
+          dc.blob_url,
           COALESCE(jd.original_filename, dc.original_filename) AS source_filename
         FROM document_abstracts da
         JOIN document_chunks dc ON dc.id = da.chunk_id
@@ -2332,6 +2350,104 @@ function createPostgresJobStore() {
         result: includeResult ? result : null,
         resultMeta,
       };
+    },
+
+    async importContinuationAbstracts(targetJobId, sourceJobId) {
+      await ensureSchema();
+      const sourceJob = await this.getJob(sourceJobId);
+      if (!sourceJob) {
+        throw new JobApiError('Source job not found.', 404);
+      }
+      if (!TERMINAL_STATUSES.has(sourceJob.status)) {
+        throw new JobApiError('Source job must be complete before importing continuation abstracts.', 409);
+      }
+      const targetJob = await this.getJob(targetJobId);
+      if (!targetJob) {
+        throw new JobApiError('Target job not found.', 404);
+      }
+      if (TERMINAL_STATUSES.has(targetJob.status)) {
+        throw new JobApiError('Cannot import continuation abstracts into a terminal job.', 409);
+      }
+      const sourceRows = await this.listDocumentAbstracts(sourceJobId);
+      const completed = sourceRows.filter(row => String(row.abstractText || '').trim().length > 0);
+      if (!completed.length) {
+        return { imported: 0, sourceJobId, targetJobId };
+      }
+      const targetChunks = await this.listChunks(targetJobId);
+      let orderOffset = targetChunks.reduce((max, chunk) => Math.max(max, Number(chunk.chunkOrder) || 0), -1) + 1;
+      const documentIdsBySource = new Map();
+      let imported = 0;
+      for (const row of completed) {
+        const sourceDocumentKey = `continuation:${sourceJobId}:${row.documentId || row.chunkId}`;
+        let documentId = documentIdsBySource.get(sourceDocumentKey);
+        if (!documentId) {
+          const existing = await this.findDocumentByFingerprint(targetJobId, sourceDocumentKey);
+          if (existing) {
+            documentId = existing.id;
+          } else {
+            const created = await this.createDocument(targetJobId, {
+              originalFilename: row.sourceFilename || row.originalFilename || row.chunkId,
+              mediaType: 'application/pdf',
+              sizeBytes: 0,
+              pageStart: row.pageStart,
+              pageEnd: row.pageEnd,
+              splitFrom: row.splitFrom,
+              fingerprint: sourceDocumentKey,
+              checksumSha256: null,
+              uploadStatus: 'uploaded',
+            });
+            documentId = created.id;
+          }
+          documentIdsBySource.set(sourceDocumentKey, documentId);
+        }
+        const chunkId = `chk_${randomUUID()}`;
+        const chunkFilename = row.originalFilename || row.sourceFilename || row.chunkId;
+        const blobKey = buildChunkBlobKey(targetJobId, chunkId, chunkFilename);
+        const importFingerprint = `continuation:${sourceJobId}:${row.chunkId}`;
+        const existingChunk = await this.findChunkByFingerprint(targetJobId, documentId, importFingerprint, orderOffset);
+        if (existingChunk) {
+          orderOffset += 1;
+          continue;
+        }
+        await sql`
+          INSERT INTO document_chunks (
+            id, job_id, document_id, chunk_order, original_filename, blob_key,
+            blob_url, media_type, size_bytes, page_start, page_end, split_from,
+            fingerprint, checksum_sha256, upload_status, abstraction_status,
+            abstraction_completed_at, model_used
+          )
+          VALUES (
+            ${chunkId}, ${targetJobId}, ${documentId}, ${orderOffset}, ${chunkFilename}, ${blobKey},
+            ${row.blobUrl || null}, 'application/pdf', 0,
+            ${row.pageStart}, ${row.pageEnd}, ${row.splitFrom},
+            ${importFingerprint}, NULL, 'uploaded', 'completed', now(), ${row.modelUsed || null}
+          )
+        `;
+        const abstractId = `abs_${randomUUID()}`;
+        await sql`
+          INSERT INTO document_abstracts (
+            id, job_id, document_id, chunk_id, abstract_text, model_used,
+            payload_bytes, latency_ms, input_tokens, output_tokens,
+            status, attempt_count, error_type, error_message
+          )
+          VALUES (
+            ${abstractId}, ${targetJobId}, ${documentId}, ${chunkId}, ${row.abstractText}, ${row.modelUsed || null},
+            ${row.payloadBytes || null}, ${row.latencyMs || null}, ${row.inputTokens || null}, ${row.outputTokens || null},
+            'completed', ${row.attemptCount || 1}, NULL, NULL
+          )
+          ON CONFLICT (chunk_id) DO UPDATE
+          SET
+            abstract_text = EXCLUDED.abstract_text,
+            model_used = EXCLUDED.model_used,
+            status = 'completed',
+            updated_at = now()
+        `;
+        orderOffset += 1;
+        imported += 1;
+      }
+      await refreshAbstractionCounts(targetJobId);
+      await refreshUploadCounts(targetJobId);
+      return { imported, sourceJobId, targetJobId };
     },
 
     async finalizeUploads(jobId) {
