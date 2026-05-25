@@ -6,7 +6,7 @@ function estimateFilePayload(file) {
 
 function buildAdaptiveBatches(fileList) {
   const MAX_PAYLOAD_BYTES = 11_650_000;
-  const MAX_DOCS_PER_BATCH = 8;
+  const MAX_DOCS_PER_BATCH = 24;
   const LARGE_FILE_BYTES = 800_000;
   const TIMEOUT_SAFE_FILE_BYTES = 800_000;
   const batches = [];
@@ -53,11 +53,11 @@ function assert(condition, message) {
 const small = (n, size = 100000) => ({ name: `doc-${n}.pdf`, size, data: 'x'.repeat(size) });
 
 const smallBatch = buildAdaptiveBatches(Array.from({ length: 10 }, (_, i) => small(i)));
-assert(smallBatch.length === 2, `10 small docs should pack into 2 batches (max 8 docs each), got ${smallBatch.length}`);
-assert(smallBatch[0].files.length === 8, 'First batch should pack up to 8 small docs');
+assert(smallBatch.length === 1, `10 small docs should pack into one batch (max 24 docs), got ${smallBatch.length}`);
+assert(smallBatch[0].files.length === 10, 'Single batch should include all 10 small docs');
 
 const midSized = buildAdaptiveBatches(Array.from({ length: 8 }, (_, i) => small(i, 700000)));
-assert(midSized.length === 1 && midSized[0].files.length === 8, 'Mid-sized docs should batch under Cloud Run fallback limits');
+assert(midSized.length === 1 && midSized[0].files.length === 8, 'Eight mid-sized docs should fit in one batch under Cloud Run limits');
 
 const large = buildAdaptiveBatches([{ name: 'big.pdf', size: 3_000_000, data: 'x'.repeat(3_000_000) }]);
 assert(large.length === 1 && large[0].files.length === 1, 'Large file should batch alone');

@@ -401,8 +401,8 @@ test('checkpoint signatures include content fingerprints', async () => {
 
 test('README bulk-processing constants match code', async () => {
   await runClientScript(`
-    assert(MAX_DOCS_PER_BATCH === 8, 'Expected browser fallback max docs per batch to be 8');
-    assert(maxDocsForPayload(700_000) === 8, 'Expected mid-sized fallback payloads to batch under Cloud Run limits');
+    assert(MAX_DOCS_PER_BATCH === 24, 'Expected browser fallback max docs per batch to be 24');
+    assert(maxDocsForPayload(700_000) === 24, 'Expected mid-sized fallback payloads to batch under Cloud Run limits');
     assert(maxDocsForPayload(900_000) === 1, 'Expected larger fallback payloads to stay isolated');
     const fallbackBatches = buildAdaptiveBatches(Array.from({ length: 10 }, (_, i) => ({
       name: 'small-' + i + '.pdf',
@@ -410,11 +410,11 @@ test('README bulk-processing constants match code', async () => {
       size: 100_000,
       data: 'x'.repeat(100_000),
     })));
-    assert(fallbackBatches.length === 2, 'Expected 10 small fallback docs to fit into 2 batches');
-    assert(fallbackBatches[0].files.length === 8, 'Expected first fallback batch to carry 8 small docs');
+    assert(fallbackBatches.length === 1, 'Expected 10 small fallback docs to fit into one batch');
+    assert(fallbackBatches[0].files.length === 10, 'Expected single fallback batch to carry all 10 small docs');
     assert(MAX_PAYLOAD_BYTES > 10_000_000, 'Expected payload cap to reflect Cloud Run envelope budget');
   `);
-  assert(readme.includes('up to 8 small documents per browser fallback call'), 'README should document current fallback batch size');
+  assert(readme.includes('up to 24 small documents per call'), 'README should document current fallback batch size');
   assert(!readme.includes('up to 2 documents per call'), 'README should not advertise stale 2-document fallback batching');
 });
 

@@ -21,6 +21,26 @@ test('isGeminiModel detects gemini model ids', () => {
   assert(!isGeminiModel('claude-haiku-4-5'), 'Claude should not match');
 });
 
+test('anthropicMessagesToGeminiContents maps file_uri document blocks', () => {
+  const contents = anthropicMessagesToGeminiContents([
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'document',
+          source: {
+            type: 'file_uri',
+            media_type: 'application/pdf',
+            uri: 'https://generativelanguage.googleapis.com/v1beta/files/test123',
+            geminiFileName: 'files/test123',
+          },
+        },
+      ],
+    },
+  ]);
+  assert(contents[0].parts[0].file_data.file_uri.includes('files/test123'), 'Expected Gemini file URI');
+});
+
 test('anthropicMessagesToGeminiContents maps pdf and text blocks', () => {
   const contents = anthropicMessagesToGeminiContents([
     {

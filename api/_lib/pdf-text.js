@@ -7,12 +7,34 @@ function clampInt(raw, fallback, min, max) {
 }
 
 export function getPdfTextConfig() {
+  const strict = process.env.ABSTRACTION_PDF_TEXT_STRICT === 'true';
   return {
     enabled: process.env.ABSTRACTION_PDF_TEXT_FIRST !== 'false',
-    minCharsPerPage: clampInt(process.env.ABSTRACTION_PDF_TEXT_MIN_CHARS_PER_PAGE, 80, 20, 2000),
-    minPrintableRatio: clampNumber(process.env.ABSTRACTION_PDF_TEXT_MIN_PRINTABLE_RATIO, 0.82, 0.5, 1),
-    maxBytesPerChar: clampNumber(process.env.ABSTRACTION_PDF_TEXT_MAX_BYTES_PER_CHAR, 800, 50, 5000),
-    minSparseCharsPerPage: clampInt(process.env.ABSTRACTION_PDF_TEXT_MIN_SPARSE_CHARS_PER_PAGE, 400, 100, 5000),
+    strict,
+    minCharsPerPage: clampInt(
+      process.env.ABSTRACTION_PDF_TEXT_MIN_CHARS_PER_PAGE,
+      strict ? 100 : 80,
+      20,
+      2000,
+    ),
+    minPrintableRatio: clampNumber(
+      process.env.ABSTRACTION_PDF_TEXT_MIN_PRINTABLE_RATIO,
+      strict ? 0.88 : 0.82,
+      0.5,
+      1,
+    ),
+    maxBytesPerChar: clampNumber(
+      process.env.ABSTRACTION_PDF_TEXT_MAX_BYTES_PER_CHAR,
+      strict ? 600 : 800,
+      50,
+      5000,
+    ),
+    minSparseCharsPerPage: clampInt(
+      process.env.ABSTRACTION_PDF_TEXT_MIN_SPARSE_CHARS_PER_PAGE,
+      strict ? 500 : 400,
+      100,
+      5000,
+    ),
     maxExtractedChars: clampInt(process.env.ABSTRACTION_PDF_TEXT_MAX_CHARS, 500_000, 10_000, 2_000_000),
   };
 }
@@ -87,6 +109,10 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, confi
     return { suitable: false, reason: 'likely_scanned_image', bytesPerChar, charsPerPage };
   }
 
+  if (config.strict && bytesPerChar > config.maxBytesPerChar * 0.75 && charsPerPage < config.minSparseCharsPerPage) {
+    return { suitable: false, reason: 'strict_likely_scanned', bytesPerChar, charsPerPage };
+  }
+
   return {
     suitable: true,
     charsPerPage,
@@ -94,6 +120,27 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, confi
     bytesPerChar,
     totalChars: trimmed.length,
   };
+}
+
+/**
+ * Estimate abstraction request payload bytes for batch planning (before loading blobs).
+ */
+export function estimatePdfPlanningPayloadBytes(sizeBytes, options = {}) {
+  const size = Math.max(0, Number(sizeBytes) || 0);
+  if (!size) return 500;
+  const textFirstEnabled = options.textFirstEnabled !== false
+    && (options.textFirstEnabled === true || getPdfTextConfig().enabled);
+  const fileMin = options.geminiFileMinBytes ?? 1_500_000;
+  if (size >= fileMin) {
+    return 6_000;
+  }
+  if (!textFirstEnabled) {
+    return Math.ceil(size * 1.37);
+  }
+  if (size < 2_500_000) {
+    return Math.min(Math.floor(size * 0.12) + 8_000, 400_000);
+  }
+  return Math.ceil(size * 1.37);
 }
 
 export async function resolvePdfTextDelivery(payloadBytes, options = {}) {

@@ -1,5 +1,7 @@
 // Gemini generateContent helpers (Anthropic-shaped messages in, normalized usage out).
 
+import { deleteGeminiFiles } from './gemini-files.js';
+
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function geminiApiKey() {
@@ -27,6 +29,15 @@ export function anthropicMessagesToGeminiContents(messages = []) {
         }
         if (block.type === 'image' || block.type === 'document') {
           const source = block.source || {};
+          if (source.type === 'file_uri' && source.uri && source.media_type) {
+            parts.push({
+              file_data: {
+                mime_type: source.media_type,
+                file_uri: source.uri,
+              },
+            });
+            continue;
+          }
           if (source.type === 'base64' && source.data && source.media_type) {
             parts.push({
               inline_data: {
@@ -113,6 +124,7 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
     ? options.createTimeoutSignal(timeoutMs)
     : null;
 
+  const cleanupFileNames = collectGeminiFileNamesFromMessages(request.messages);
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -140,5 +152,23 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
     };
   } finally {
     timeout?.cleanup?.();
+    if (cleanupFileNames.length) {
+      await deleteGeminiFiles(cleanupFileNames);
+    }
   }
+}
+
+function collectGeminiFileNamesFromMessages(messages = []) {
+  const names = new Set();
+  for (const message of messages) {
+    const content = message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const source = block?.source;
+      if (source?.type === 'file_uri' && source.geminiFileName) {
+        names.add(source.geminiFileName);
+      }
+    }
+  }
+  return [...names];
 }

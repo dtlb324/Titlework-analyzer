@@ -35,6 +35,9 @@ Set these on both Cloud Run services unless noted otherwise:
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for the final title opinion (Sonnet), follow-ups, and optional abstraction escalation. |
 | `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion and merge step. Gemini/Haiku values are ignored. |
 | `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `gemini-2.5-flash` for large-job segment synthesis only (not the final opinion). Haiku/Claude values are ignored. |
+| `SYNTHESIS_CHUNK_SIZE` | Optional | Default `120` (max `250`). Max grouped documents per partial synthesis segment before byte envelope split. |
+| `BULK_SYNTHESIS_CHUNK_SIZE` | Optional | Default `200` for jobs with ≥100 abstracts. |
+| `SYNTHESIS_PARTIAL_MAX_TOKENS` | Optional | Default `5000` for Gemini partial segment output. |
 | `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Claude Haiku is not supported for abstraction. |
 | `GEMINI_THINKING_BUDGET` | Optional | Default `0` (fastest/cheapest). Set to `-1` for Gemini dynamic thinking on abstraction. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
@@ -59,8 +62,13 @@ Set these on both Cloud Run services unless noted otherwise:
 | `WORKFLOW_KICK_ON_START` | API | Default `true`. Runs a bounded background batch when abstraction/synthesis start is called. |
 | `WORKFLOW_KICK_BUDGET_MS` | API kick | Default `50000` per start kick (under the 60s API limit). |
 | `ABSTRACTION_PDF_TEXT_FIRST` | Optional | Default `true`. Use extracted PDF text when quality checks pass (lower token cost). |
-| `ABSTRACTION_BATCH_ENABLED` | Optional | Default `true`. Batch up to 8 small chunks per abstraction API call on the worker. |
-| `ABSTRACTION_BATCH_MAX_DOCS` | Optional | Default `8`. Max documents per server abstraction batch. |
+| `ABSTRACTION_BATCH_ENABLED` | Optional | Default `true`. Batch up to 24 small chunks per abstraction API call on the worker. |
+| `ABSTRACTION_BATCH_MAX_DOCS` | Optional | Default `24` (max `48`). Max documents per server abstraction batch. |
+| `ABSTRACTION_BATCH_MAX_PAGE_SPAN` | Optional | Default `32`. Page-range chunks above this span stay solo. |
+| `ABSTRACTION_PDF_TEXT_STRICT` | Optional | Default `false`. When `true`, tightens text-first quality gates so borderline scans use native visual PDF on Gemini. |
+| `GEMINI_FILE_API_ENABLED` | Optional | Default `true`. Upload large visual PDFs/images via Gemini Files API instead of base64 in JSON. |
+| `GEMINI_FILE_API_MIN_BYTES` | Optional | Default `1500000`. Minimum blob size to use Files API (visual delivery). |
+| `GEMINI_FILE_API_MAX_BYTES` | Optional | Default `48000000`. Maximum upload size for Files API. |
 | `ABSTRACT_MAX_TOKENS` | Optional | Default `2000` (was 3000). |
 | `SYNTHESIS_MAX_TOKENS` | Optional | Default `6000` (was 8000). |
 | `ABSTRACTION_ESCALATION_ENABLED` | Optional | Default `true`. Set `false` to skip Sonnet re-reads on low-confidence abstracts. |
@@ -179,7 +187,7 @@ Cloud Run worker
 
 Model calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
 
-The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **8 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 8 small documents per browser fallback call and still page-splits oversized single PDFs as an escape hatch.
+The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **24 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). Large visual PDFs (≥1.5 MB) are uploaded via the **Gemini Files API** so whole instruments stay unsplit when possible. Text-first extraction is used only when quality checks pass; set `ABSTRACTION_PDF_TEXT_STRICT=true` for stricter scan detection. If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 24 small documents per call and still page-splits oversized single PDFs as an escape hatch.
 
 ## Features
 
@@ -263,7 +271,8 @@ Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthe
 | Knob | Effect |
 |------|--------|
 | `ABSTRACTION_PDF_TEXT_FIRST=true` (default) | Largest savings on text-native PDFs: sends extracted text instead of visual PDF blocks |
-| `ABSTRACTION_BATCH_ENABLED=true` | Fewer abstraction **calls** (up to 8 small chunks per request); modest token savings |
+| `ABSTRACTION_BATCH_ENABLED=true` | Fewer abstraction **calls** (up to 24 small chunks per request); modest token savings |
+| `GEMINI_FILE_API_ENABLED=true` | Keeps large scanned PDFs whole via Files API instead of page-splitting for envelope limits |
 | `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts |
 | `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash) |
 | `OPUS_AUDIT_ENABLED` off (default) | Keeps Opus off the hot path |
