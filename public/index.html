@@ -282,7 +282,7 @@ const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
 const MAX_PDF_CHUNK_RAW_BYTES = 7_500_000;
 
-const ABSTRACT_MODEL = 'claude-haiku-4-5';
+const ABSTRACT_MODEL = 'gemini-2.5-flash';
 const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6';
 const SYNTHESIS_MODEL = 'claude-sonnet-4-6';
 const ABSTRACT_MAX_TOKENS = 3000;
@@ -2615,7 +2615,10 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
   if (!response.ok || data.error) {
     const errMsg = data.error?.message || data.error || '';
     if (response.status === 401 || errMsg.includes('authentication') || errMsg.includes('api key') || errMsg.includes('x-api-key')) {
-      throw new Error('API key error: The Anthropic API key is missing or invalid. Check that ANTHROPIC_API_KEY is set correctly in Cloud Run environment variables, then redeploy.');
+      const keyHint = ABSTRACT_MODEL.startsWith('gemini-')
+        ? 'GEMINI_API_KEY (create one at https://aistudio.google.com/apikey)'
+        : 'ANTHROPIC_API_KEY';
+      throw new Error(`API key error: The model API key is missing or invalid. Check that ${keyHint} is set correctly in Cloud Run environment variables, then redeploy.`);
     }
     if (response.status === 429 || errMsg.includes('rate limit') || errMsg.includes('overloaded')) {
       if (retryCount < MAX_RETRIES) {
@@ -2697,7 +2700,7 @@ async function callAbstractionWithEscalation(messages, options) {
       label: `${options.label || 'Abstraction'} escalation`,
     });
   } catch (err) {
-    console.warn('Abstraction escalation failed; keeping initial Haiku abstract.', err);
+    console.warn('Abstraction escalation failed; keeping initial abstract.', err);
     return initial;
   }
 }

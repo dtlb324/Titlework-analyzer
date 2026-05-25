@@ -1,10 +1,10 @@
 import { createHash } from 'crypto';
-import { buildMessagesRequestBody } from './anthropic-request.js';
+import { abstractionApiKeyError, invokeModel, sanitizeModelClientError } from './model-client.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
-const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'claude-haiku-4-5';
+const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'gemini-2.5-flash';
 const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 3000, 512, 4096);
 const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'claude-sonnet-4-6';
 const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
@@ -215,9 +215,7 @@ function classifyError(err) {
 }
 
 function sanitizeErrorMessage(err) {
-  return String(err?.message || err || 'Unknown error')
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[REDACTED]')
-    .slice(0, 1000);
+  return sanitizeModelClientError(err);
 }
 
 function sleep(ms) {
@@ -273,40 +271,12 @@ export async function defaultBlobLoader(chunk) {
 }
 
 async function defaultModelClient(request) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    const error = new Error('ANTHROPIC_API_KEY is required for server-side abstraction.');
-    error.statusCode = 503;
-    throw error;
-  }
-  const body = JSON.stringify(buildMessagesRequestBody({
-    model: request.model,
-    maxTokens: request.maxTokens,
-    system: request.system,
-    messages: request.messages,
-  }));
   const timeout = createTimeoutSignal(UPSTREAM_TIMEOUT_MS);
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body,
-      signal: timeout.signal,
+    return await invokeModel(request, {
+      timeoutMs: UPSTREAM_TIMEOUT_MS,
+      createTimeoutSignal: () => timeout,
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(data?.error?.message || data?.error || `Anthropic request failed (HTTP ${response.status}).`);
-      error.status = response.status;
-      throw error;
-    }
-    return {
-      text: data.content?.map(block => block.text || '').join('') || '',
-      model: data.model || request.model,
-      usage: data.usage || {},
-    };
   } finally {
     timeout.cleanup();
   }
@@ -798,8 +768,9 @@ export function serverAbstractionSetupError() {
   if (!storageIsConfigured() && !globalThis.__TITLE_ANALYZER_BLOB_LOADER__) {
     return 'Google Cloud Storage is not configured. Set GCS_BUCKET to enable server-side abstraction.';
   }
-  if (!process.env.ANTHROPIC_API_KEY && !globalThis.__TITLE_ANALYZER_MODEL_CLIENT__) {
-    return 'ANTHROPIC_API_KEY is required for server-side abstraction.';
+  if (!globalThis.__TITLE_ANALYZER_MODEL_CLIENT__) {
+    const keyError = abstractionApiKeyError(ABSTRACT_MODEL);
+    if (keyError) return keyError;
   }
   return null;
 }

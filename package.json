@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "start:worker": "node worker.js",
-    "test": "node test/cloud-run.test.js && node test/neon.test.js && node test/worker.test.js && node test/release.test.js && node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/anthropic-cost.test.js && node test/abstraction.test.js && node test/synthesis.test.js"
+    "test": "node test/cloud-run.test.js && node test/neon.test.js && node test/worker.test.js && node test/release.test.js && node test/gemini-request.test.js && node test/model-client.test.js && node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/anthropic-cost.test.js && node test/abstraction.test.js && node test/synthesis.test.js"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",

@@ -1,6 +1,6 @@
 # Mineral Ownership Builder — Title Research Tool
 
-An AI-powered web application for oil and gas landmen to analyze courthouse documents, build chain of title, and determine mineral ownership. Powered by Anthropic's Claude API and deployed on Google Cloud Run.
+An AI-powered web application for oil and gas landmen to analyze courthouse documents, build chain of title, and determine mineral ownership. Document abstraction uses Google Gemini 2.5 Flash; title synthesis and follow-ups use Anthropic Claude. Deployed on Google Cloud Run.
 
 > **Important:** This tool is an AI-assisted research aid, not a legal opinion. Always verify output against source documents and consult a licensed attorney before any drilling, leasing, or division order action.
 
@@ -31,7 +31,10 @@ Set these on both Cloud Run services unless noted otherwise:
 
 | Name | Required | Notes |
 |------|----------|-------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for abstraction, synthesis, and follow-ups. |
+| `GEMINI_API_KEY` | Yes | Google AI Studio API key for document abstraction (`gemini-2.5-flash` by default). Also accepts `GOOGLE_API_KEY`. |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for synthesis, follow-ups, and optional abstraction escalation. |
+| `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Set to `claude-haiku-4-5` to use Anthropic for abstraction instead. |
+| `GEMINI_THINKING_BUDGET` | Optional | Default `0` (fastest/cheapest). Set to `-1` for Gemini dynamic thinking on abstraction. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
 | `GCS_BUCKET` | Yes | Private bucket for uploaded source chunks and split PDFs. |
@@ -105,7 +108,14 @@ Configure these GitHub repository variables before the first release:
 
 The GitHub deploy service account must be configured for Workload Identity Federation from this repository. Grant it enough IAM to push images and deploy Cloud Run, typically Artifact Registry writer on the image repository, Cloud Run service deployment permissions, `roles/iam.serviceAccountTokenCreator` for the repo-scoped WIF principal, and `roles/iam.serviceAccountUser` on `GCP_RUNTIME_SERVICE_ACCOUNT` when that variable is set. The runtime service account still needs the bucket, Secret Manager, and database/network access required by the app.
 
-Secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
+Secrets such as `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
+
+### Gemini API setup (abstraction)
+
+1. Open [Google AI Studio](https://aistudio.google.com/apikey) and create an API key for your Google account or Cloud project.
+2. In Cloud Run (both API and worker services), add `GEMINI_API_KEY` with that value.
+3. Keep `ANTHROPIC_API_KEY` configured — synthesis and follow-ups still use Claude Sonnet.
+4. Optional: set `ABSTRACT_ESCALATION_MODEL=claude-sonnet-4-6` (default) for harder documents; escalation requires Anthropic even when abstraction uses Gemini.
 
 ### Release Verification
 
@@ -113,7 +123,7 @@ After each release, verify:
 
 - API `/api/healthz` reports the expected `release.version`, `release.gitSha`, `release.imageDigest`, and Cloud Run revision.
 - API and worker latest ready revisions use the same immutable image digest.
-- Both services still have database, GCS, Anthropic, and app password configuration.
+- Both services still have database, GCS, Gemini, Anthropic, and app password configuration.
 - GCS CORS allows `PUT` uploads from the API service origin with the `content-type` header.
 - `gh release list --limit 3` marks the new version as `Latest`.
 
@@ -213,10 +223,10 @@ Set `DATABASE_URL` to your Neon pooled Postgres connection string.
 Configure the GCS bucket CORS policy to allow `PUT` requests from the web/API Cloud Run origin with the `content-type` header.
 
 **Jobs stay queued or abstracting**  
-Confirm the worker service is deployed, has `ANTHROPIC_API_KEY`, `DATABASE_URL`, and `GCS_BUCKET`, and can connect to Neon.
+Confirm the worker service is deployed, has `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, and `GCS_BUCKET`, and can connect to Neon.
 
-**Anthropic timeouts or rate limits**  
-Lower `WORKFLOW_CONCURRENCY`, lower `WORKFLOW_BATCH_LIMIT`, or raise Anthropic limits. Retryable errors are saved as durable `retry_wait` rows.
+**Model timeouts or rate limits**  
+Lower `WORKFLOW_CONCURRENCY`, lower `WORKFLOW_BATCH_LIMIT`, or raise provider rate limits (Gemini or Anthropic). Retryable errors are saved as durable `retry_wait` rows.
 
 ## Cost Notes
 
