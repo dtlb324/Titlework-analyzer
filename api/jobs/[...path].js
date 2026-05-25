@@ -26,6 +26,7 @@ import {
   enqueueAbstractionJob,
   enqueueSynthesisJob,
   getWorkflowConfig,
+  kickWorkflowOnStart,
   processAbstractionBatch,
   processSynthesisBatch,
   retryFailedAbstractionChunks,
@@ -315,6 +316,7 @@ async function handleAbstractionStart(req, res, requestId, store, jobId) {
     return res.status(409).json({ error: 'Job has been canceled.', requestId });
   }
   const snapshot = await enqueueAbstractionJob(jobId, { store });
+  kickWorkflowOnStart(jobId, 'abstraction', { store, waitUntil: req.waitUntil });
   const config = getWorkflowConfig();
   return res.status(202).json({
     status: publicStatus(snapshot),
@@ -499,6 +501,7 @@ async function handleSynthesisStart(req, res, requestId, store, jobId) {
     throw err;
   }
   const workflow = getWorkflowConfig();
+  kickWorkflowOnStart(jobId, 'synthesis', { store, waitUntil: req.waitUntil });
   return res.status(202).json({
     status: publicSynthesisStatusBody(snapshot),
     job: snapshot.job,

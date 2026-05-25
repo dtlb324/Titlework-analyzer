@@ -41,6 +41,27 @@ test('Cloud Run worker processes runnable abstraction and synthesis jobs once', 
   assert(calls.join(',') === 'abstract:job_abs_1,abstract:job_abs_2,synthesis:job_syn_1', `Unexpected call order: ${calls.join(',')}`);
 });
 
+test('Cloud Run worker starts synthesis in the same pass when abstraction rolls up to synthesizing', async () => {
+  const calls = [];
+  const store = {
+    async listRunnableAbstractionJobIds() { return ['job_1']; },
+    async listRunnableSynthesisJobIds() { return ['job_1']; },
+    async getJob(id) {
+      return id === 'job_1' ? { id, status: 'synthesizing' } : null;
+    },
+  };
+  await runWorkerOnce({
+    store,
+    processAbstraction: async jobId => {
+      calls.push(`abstract:${jobId}`);
+    },
+    processSynthesis: async jobId => {
+      calls.push(`synthesis:${jobId}`);
+    },
+  });
+  assert(calls.join(',') === 'abstract:job_1,synthesis:job_1', `Expected one synthesis pass after abstraction, got ${calls.join(',')}`);
+});
+
 test('Cloud Run worker loop sleeps when idle and stops on abort', async () => {
   let iterations = 0;
   const controller = new AbortController();

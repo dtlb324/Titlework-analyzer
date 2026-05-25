@@ -400,6 +400,8 @@ test('Phase 6: stalled server polls kick /process endpoints', () => {
     'Abstraction poll stall must POST /abstraction/process');
   assert(script.includes('processServerSynthesisBatch(jobId)'),
     'Synthesis poll stall must POST /synthesis/process');
+  assert(script.includes('kickServerWorkflowBatch'),
+    'Server workflow must kick a batch immediately after start');
 });
 
 test('Phase 6: synthesis polling waits for merge and reuses batch result', () => {

@@ -187,16 +187,15 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   }
 
   try {
-    const preparedItems = [];
-    for (const entry of ready) {
+    const preparedItems = await Promise.all(ready.map(async entry => {
       const payload = await blobLoader(entry.chunk);
       const delivery = await resolveChunkDelivery(entry.chunk, payload.bytes);
-      preparedItems.push({
+      return {
         chunk: entry.chunk,
         payloadBytes: payload.bytes,
         delivery,
-      });
-    }
+      };
+    }));
 
     const messages = buildAbstractMessagesForChunks(preparedItems, globalStart);
     const payloadBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, messages);
