@@ -1,8 +1,10 @@
 import jobsRouteHandler from '../api/jobs/[...path].js';
 import {
+  ABSTRACTION_PROMPT,
   assertSafeBlobUrl,
   buildAbstractMessagesForChunk,
   defaultBlobLoader,
+  getAbstractionConfig,
   processChunkAbstraction,
   processJobAbstraction,
   tryReuseExistingAbstract,
@@ -354,16 +356,16 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     async cancelJob(jobId, reason) {
       const job = jobs.get(jobId);
       if (!job) return null;
+      const cancelReason = reason || 'Job canceled by user.';
       const updated = {
         ...job,
         status: 'canceled',
         currentPhase: 'canceled',
-        errorMessage: reason || 'Job canceled by user.',
+        errorMessage: cancelReason,
         completedAt: job.completedAt || now,
         updatedAt: now,
       };
       jobs.set(jobId, updated);
-      // clear any leases on processing chunks
       for (const chunk of orderedChunks(jobId)) {
         if (chunk.abstractionStatus === 'processing') {
           chunks.set(chunk.id, {
@@ -373,8 +375,21 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
             abstractionWorkerId: null,
             updatedAt: now,
           });
+        } else if (['pending', 'retry_wait'].includes(chunk.abstractionStatus)) {
+          chunks.set(chunk.id, {
+            ...chunk,
+            abstractionStatus: 'failed',
+            abstractionErrorType: 'canceled',
+            abstractionErrorMessage: cancelReason,
+            abstractionRetryAt: null,
+            abstractionClaimedAt: null,
+            abstractionLeaseExpiresAt: null,
+            abstractionWorkerId: null,
+            updatedAt: now,
+          });
         }
       }
+      rollup(jobId);
       return updated;
     },
     async refreshAbstractionRollup(jobId) {
@@ -490,6 +505,22 @@ test('buildAbstractMessagesForChunk supports PDF, image, and CSV chunks', async 
   assert(imageMessages[0].content.some(block => block.type === 'image'), 'Expected image block');
   assert(csvMessages[0].content.some(block => block.type === 'text' && block.text.includes('CSV DATA')), 'Expected CSV text prompt');
   assert(!JSON.stringify(csvMessages).includes('base64'), 'CSV messages should not use base64 document payloads');
+});
+
+test('abstraction prompt treats each PDF as one recorded instrument', () => {
+  assert(ABSTRACTION_PROMPT.includes('abstracting a single courthouse instrument'), 'Expected single-instrument abstraction instruction');
+  assert(!ABSTRACTION_PROMPT.includes('INSTRUMENT 1 OF M'), 'Prompt should not ask for multi-instrument sub-sections');
+  assert(!ABSTRACTION_PROMPT.includes('multiple clearly identifiable recorded instruments'), 'Prompt should not ask for multi-instrument detection');
+  assert(getAbstractionConfig().maxTokens === 3000, `Expected 3000 token default, got ${getAbstractionConfig().maxTokens}`);
+});
+
+test('browser abstraction fallback mirrors single-instrument prompt and token budget', () => {
+  assert(indexHtml.includes('abstracting a single courthouse instrument'), 'Expected browser prompt to include single-instrument instruction');
+  assert(!indexHtml.includes('INSTRUMENT 1 OF M'), 'Browser prompt should not ask for multi-instrument sub-sections');
+  assert(!indexHtml.includes('multiple clearly identifiable recorded instruments'), 'Browser prompt should not ask for multi-instrument detection');
+  assert(indexHtml.includes('const ABSTRACT_MAX_TOKENS = 3000'), 'Expected browser abstraction token default to match server default');
+  assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6'"), 'Expected browser fallback to define Sonnet escalation model');
+  assert(indexHtml.includes('callAbstractionWithEscalation'), 'Expected browser fallback to use abstraction escalation helper');
 });
 
 test('GET /api/jobs/:id/abstracts returns saved abstracts in chunk order', async () => {
@@ -1060,6 +1091,19 @@ test('Phase 4: job progress rolls up correctly across pending/processing/complet
   assert(job.status === 'partial_failed', `Expected partial_failed rollup, got ${job.status}`);
 });
 
+test('Phase 4: cancel fails pending chunks so canceled jobs leave the worker queue', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_one', chunkOrder: 0, abstractionStatus: 'pending' }),
+    makeChunk({ id: 'chk_two', chunkOrder: 1, abstractionStatus: 'retry_wait', abstractionRetryAt: new Date(Date.now() + 60_000).toISOString() }),
+  ]);
+  await store.cancelJob('job_test_1', 'test cancel');
+  const chunks = await store.listChunks('job_test_1');
+  for (const chunk of chunks) {
+    assert(chunk.abstractionStatus === 'failed', `Expected canceled chunk ${chunk.id} to be failed`);
+    assert(chunk.abstractionErrorType === 'canceled', `Expected canceled error type on ${chunk.id}`);
+  }
+});
+
 test('Phase 4: cancellation stops future chunk processing', async () => {
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_one', chunkOrder: 0 }),
@@ -1254,6 +1298,60 @@ test('processChunkAbstraction reuses peer abstract with matching fingerprint wit
   assert(modelCalls === 0, `Expected zero model calls, got ${modelCalls}`);
   assert(blobLoads === 0, `Expected zero blob loads on reuse, got ${blobLoads}`);
   assert(store.abstracts.get('chk_target').abstractText.includes('Reusable abstract'), 'Expected copied abstract on target chunk');
+});
+
+test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves the escalated result', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_flagged' })]);
+  const models = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_flagged'), {
+    store,
+    workerId: 'wkr_escalate',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => {
+      models.push(request.model);
+      if (request.model === 'claude-sonnet-4-6') {
+        return {
+          text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nCONFIDENCE: Sonnet verified the illegible text and low-confidence fields.',
+          model: 'claude-sonnet-4-6',
+          usage: { input_tokens: 20, output_tokens: 30 },
+        };
+      }
+      return {
+        text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
+        model: 'claude-haiku-4-5',
+        usage: { input_tokens: 10, output_tokens: 15 },
+      };
+    },
+  });
+
+  const saved = store.abstracts.get('chk_flagged');
+  assert(result.status === 'completed', `Expected completed escalation, got ${result.status}`);
+  assert(models.join(',') === 'claude-haiku-4-5,claude-sonnet-4-6', `Expected Haiku then Sonnet, got ${models.join(',')}`);
+  assert(saved.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet saved, got ${saved.modelUsed}`);
+  assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
+  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Haiku and Sonnet calls');
+});
+
+test('processChunkAbstraction keeps clean Haiku abstracts on the cheap path', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_clean' })]);
+  const models = [];
+  await processChunkAbstraction(store.chunks.get('chk_clean'), {
+    store,
+    workerId: 'wkr_clean',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => {
+      models.push(request.model);
+      return {
+        text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nGRANTOR: A\nGRANTEE: B\nISSUES: none noted\nCONFIDENCE: Clear, single-instrument abstract.',
+        model: 'claude-haiku-4-5',
+        usage: { input_tokens: 10, output_tokens: 15 },
+      };
+    },
+  });
+
+  const saved = store.abstracts.get('chk_clean');
+  assert(models.join(',') === 'claude-haiku-4-5', `Expected only Haiku, got ${models.join(',')}`);
+  assert(saved.modelUsed === 'claude-haiku-4-5', `Expected Haiku saved, got ${saved.modelUsed}`);
 });
 
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {

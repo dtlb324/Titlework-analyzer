@@ -283,8 +283,10 @@ const MAX_RETRIES = 8;
 const MAX_PDF_CHUNK_RAW_BYTES = 1_500_000;
 
 const ABSTRACT_MODEL = 'claude-haiku-4-5';
+const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6';
 const SYNTHESIS_MODEL = 'claude-sonnet-4-6';
-const ABSTRACT_MAX_TOKENS = 2000;
+const ABSTRACT_MAX_TOKENS = 3000;
+const ABSTRACT_ESCALATION_MAX_TOKENS = 4096;
 const SYNTHESIS_MAX_TOKENS = 8000;
 
 let requestTimestamps = [];
@@ -534,7 +536,7 @@ function clearProgressTimer() {
 }
 
 
-const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
+const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse instrument. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
 Respond in this exact format — no extra commentary:
 
@@ -2671,6 +2673,35 @@ function isTimeoutError(err) {
     || name.includes('Timeout');
 }
 
+function shouldEscalateAbstractText(text) {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(value)) return true;
+  return /CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value);
+}
+
+async function callAbstractionWithEscalation(messages, options) {
+  const initial = await callBackend(messages, ABSTRACT_PROMPT, {
+    ...options,
+    model: ABSTRACT_MODEL,
+    max_tokens: ABSTRACT_MAX_TOKENS,
+  });
+  if (!shouldEscalateAbstractText(initial)) return initial;
+
+  try {
+    return await callBackend(messages, ABSTRACT_PROMPT, {
+      ...options,
+      model: ABSTRACT_ESCALATION_MODEL,
+      max_tokens: ABSTRACT_ESCALATION_MAX_TOKENS,
+      phase: `${options.phase || 'abstraction'}-escalation`,
+      label: `${options.label || 'Abstraction'} escalation`,
+    });
+  } catch (err) {
+    console.warn('Abstraction escalation failed; keeping initial Haiku abstract.', err);
+    return initial;
+  }
+}
+
 function maxDocsForPayload(filePayload) {
   if (filePayload > TIMEOUT_SAFE_FILE_BYTES) return 1;
   return MAX_DOCS_PER_BATCH;
@@ -2687,9 +2718,7 @@ async function abstractSinglePdfOnTimeout(file, globalStartIdx) {
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
     const messages = await buildAbstractMessages([part], globalStartIdx);
-    const partText = await callBackend(messages, ABSTRACT_PROMPT, {
-      model: ABSTRACT_MODEL,
-      max_tokens: ABSTRACT_MAX_TOKENS,
+    const partText = await callAbstractionWithEscalation(messages, {
       phase: 'abstraction-timeout-split',
       docCount: 1,
       label: 'Timeout PDF chunk',
@@ -3145,9 +3174,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
 
   try {
     const startedAt = Date.now();
-    const result = await callBackend(messages, ABSTRACT_PROMPT, {
-      model: ABSTRACT_MODEL,
-      max_tokens: ABSTRACT_MAX_TOKENS,
+    const result = await callAbstractionWithEscalation(messages, {
       phase: 'abstraction',
       docCount: batchFiles.length,
       label: 'Abstraction batch',
