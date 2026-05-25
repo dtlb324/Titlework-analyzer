@@ -157,6 +157,13 @@ test('keeps large PDFs whole at ingest and retains page-split fallback', () => {
   assert(script.includes('ingestUploadedFiles'), 'Missing shared upload ingest helper');
 });
 
+test('browser abstraction prompts split multi-instrument whole PDFs in-model', () => {
+  assert(script.includes('MULTI_INSTRUMENT_ABSTRACTION_HINT'), 'Missing shared multi-instrument hint');
+  assert(script.includes('INSTRUMENT #1:'), 'Expected per-instrument section labels in prompts');
+  assert(script.includes('Do not merge separate instruments'), 'System prompt should forbid merging instruments');
+  assert(script.includes('buildAbstractMessages'), 'Expected batch message builder to carry multi-instrument hint');
+});
+
 
 test('shows estimated processing time during runs', () => {
   assert(indexHtml.includes('id="progressEta"'), 'Missing progress ETA element');

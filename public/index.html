@@ -534,7 +534,11 @@ function clearProgressTimer() {
 }
 
 
-const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
+const MULTI_INSTRUMENT_ABSTRACTION_HINT = 'If any file contains multiple distinct recorded instruments (separate deeds, assignments, releases, etc. with their own recording references or instrument numbers), abstract each instrument separately within that file\'s section using INSTRUMENT #1:, INSTRUMENT #2:, etc., and repeat the full response format for each.';
+
+const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting courthouse document(s) from the provided file(s). Be accurate, concise, and cautious. Extract only what is clearly visible.
+
+If a single file contains multiple distinct recorded instruments, abstract each separately. Use INSTRUMENT #1:, INSTRUMENT #2:, etc. as section headers and repeat the full format below for each instrument. Do not merge separate instruments into one abstract.
 
 Respond in this exact format — no extra commentary:
 
@@ -739,7 +743,7 @@ function estimatePdfChunkRequestBytes(name, rawBytes) {
     role: 'user',
     content: [
       { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: placeholderData } },
-      { type: 'text', text: `Abstract each of the following documents in order: Document #1 (${name}). Label each section clearly as DOCUMENT #1:. Extract every relevant fact. Do not guess at anything illegible.` },
+      { type: 'text', text: `Abstract each of the following documents in order: Document #1 (${name}). Label each section clearly as DOCUMENT #1:. Extract every relevant fact. Do not guess at anything illegible. ${MULTI_INSTRUMENT_ABSTRACTION_HINT}` },
     ],
   }];
   return estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, messages);
@@ -3063,7 +3067,7 @@ async function buildAbstractMessages(batchFiles, globalStartIdx) {
   }
 
   const docList = batchFiles.map((f, i) => 'Document #' + (globalStartIdx + i + 1) + ' (' + f.name + ')').join(', ');
-  let textPrompt = 'Abstract each of the following documents in order: ' + docList + '. Label each section clearly as DOCUMENT #' + (globalStartIdx + 1) + ':, DOCUMENT #' + (globalStartIdx + 2) + ':, etc. Extract every relevant fact. Do not guess at anything illegible.';
+  let textPrompt = 'Abstract each of the following documents in order: ' + docList + '. Label each section clearly as DOCUMENT #' + (globalStartIdx + 1) + ':, DOCUMENT #' + (globalStartIdx + 2) + ':, etc. Extract every relevant fact. Do not guess at anything illegible. ' + MULTI_INSTRUMENT_ABSTRACTION_HINT;
   if (batchFiles.some(f => f.splitFrom || /\(pp\s+\d+/i.test(f.name))) {
     textPrompt += ' Some files are consecutive page ranges from the same original PDF (names include pp X-Y). Abstract each part fully; note they belong to the same source document.';
   }

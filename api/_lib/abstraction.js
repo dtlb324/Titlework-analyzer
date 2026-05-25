@@ -32,7 +32,11 @@ function clampInt(raw, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
-export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
+export const MULTI_INSTRUMENT_ABSTRACTION_HINT = 'If any file contains multiple distinct recorded instruments (separate deeds, assignments, releases, etc. with their own recording references or instrument numbers), abstract each instrument separately within that file\'s section using INSTRUMENT #1:, INSTRUMENT #2:, etc., and repeat the full response format for each.';
+
+export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney abstracting courthouse document(s) from the provided file(s). Be accurate, concise, and cautious. Extract only what is clearly visible.
+
+If a single file contains multiple distinct recorded instruments, abstract each separately. Use INSTRUMENT #1:, INSTRUMENT #2:, etc. as section headers and repeat the full format below for each instrument. Do not merge separate instruments into one abstract.
 
 Respond in this exact format - no extra commentary:
 
@@ -131,7 +135,7 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
   const docNum = sequenceIndex + 1;
   const name = chunkDisplayName(chunk);
   const content = [];
-  let textPrompt = `Abstract the following document as DOCUMENT #${docNum} (${name}). Label the section clearly as DOCUMENT #${docNum}:. Extract every relevant fact. Do not guess at anything illegible.`;
+  let textPrompt = `Abstract the following document as DOCUMENT #${docNum} (${name}). Label the section clearly as DOCUMENT #${docNum}:. Extract every relevant fact. Do not guess at anything illegible. ${MULTI_INSTRUMENT_ABSTRACTION_HINT}`;
 
   if (chunk.splitFrom || (chunk.pageStart && chunk.pageEnd)) {
     textPrompt += ' This file is a page range from a larger PDF. Abstract this part fully and note the source document/page range.';

@@ -1,8 +1,10 @@
 import jobsRouteHandler from '../api/jobs/[...path].js';
 import {
   assertSafeBlobUrl,
+  ABSTRACTION_PROMPT,
   buildAbstractMessagesForChunk,
   defaultBlobLoader,
+  MULTI_INSTRUMENT_ABSTRACTION_HINT,
   processChunkAbstraction,
   processJobAbstraction,
   tryReuseExistingAbstract,
@@ -490,6 +492,16 @@ test('buildAbstractMessagesForChunk supports PDF, image, and CSV chunks', async 
   assert(imageMessages[0].content.some(block => block.type === 'image'), 'Expected image block');
   assert(csvMessages[0].content.some(block => block.type === 'text' && block.text.includes('CSV DATA')), 'Expected CSV text prompt');
   assert(!JSON.stringify(csvMessages).includes('base64'), 'CSV messages should not use base64 document payloads');
+});
+
+test('abstraction prompts require separate abstracts for multi-instrument PDFs', () => {
+  assert(ABSTRACTION_PROMPT.includes('INSTRUMENT #1:'), 'System prompt should define per-instrument sections');
+  assert(ABSTRACTION_PROMPT.includes('Do not merge separate instruments'), 'System prompt should forbid merging instruments');
+
+  const pdfMessages = buildAbstractMessagesForChunk(makeChunk({ mediaType: 'application/pdf' }), Buffer.from('%PDF'), 0);
+  const textBlock = pdfMessages[0].content.find(block => block.type === 'text');
+  assert(textBlock.text.includes(MULTI_INSTRUMENT_ABSTRACTION_HINT), 'Chunk user prompt should include multi-instrument hint');
+  assert(textBlock.text.includes('INSTRUMENT #1:'), 'Chunk user prompt should reference per-instrument labels');
 });
 
 test('GET /api/jobs/:id/abstracts returns saved abstracts in chunk order', async () => {
