@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { buildMessagesRequestBody } from './anthropic-request.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
@@ -340,6 +341,10 @@ function stripDocumentLabel(text, docNum) {
   return value.replace(regex, '').trim() || value;
 }
 
+function sha256Hex(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
 async function splitPdfChunk(parentChunk, bytes, reason, options) {
   if (!isPdfChunk(parentChunk)) {
     return false;
@@ -379,7 +384,7 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
       pageEnd: range.pageEnd,
       splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
       fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
-      checksumSha256: parentChunk.checksumSha256,
+      checksumSha256: sha256Hex(childBytes),
       chunkOrder: parentChunk.chunkOrder,
       blobKey: blob.blobKey,
       blobUrl: blob.blobUrl,

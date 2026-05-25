@@ -195,6 +195,20 @@ test('registers job-linked durable uploads before browser-driven analysis', () =
   assert(script.includes('Durable file resume unavailable'), 'Missing graceful fallback warning copy');
 });
 
+test('durable upload document identity includes checksum to avoid same-name merges', () => {
+  assert(script.includes('async function sourceDocumentKeyForEntry'), 'Missing source document key helper');
+  assert(script.includes('entry.sourceChecksum = checksum'), 'Expected source checksum to be cached on entries');
+  assert(script.includes('fingerprint: sourceKey'), 'Document fingerprint should use the checksum-backed source key');
+  assert(!script.includes('fingerprint: `${sourceName}:${entry.originalSizeBytes || entry.size || 0}`'), 'Filename and size alone should not identify source documents');
+});
+
+test('browser synthesis groups split server abstracts by source document', () => {
+  assert(script.includes('function groupAbstractsBySourceDocument'), 'Missing browser grouping helper');
+  assert(script.includes('sourceFilename: item.sourceFilename'), 'Server abstracts should retain source filenames');
+  assert(script.includes('pageStart: item.pageStart'), 'Server abstracts should retain page ranges');
+  assert(script.includes('abstracts = groupAbstractsBySourceDocument(abstracts)'), 'Browser synthesis should group before planning');
+});
+
 
 // === Phase 6 ===
 

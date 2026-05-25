@@ -830,6 +830,45 @@ test('processSynthesisSegment resolves legacy chunk IDs against grouped chunkIds
   assert(promptContent.includes('legacy grouped abstract'), 'Expected grouped abstract resolved by legacy chunk ID');
 });
 
+test('processSynthesisSegment deduplicates legacy chunk IDs from one grouped document', async () => {
+  const store = createMemoryPhase5Store({ abstracts: [] });
+  const segment = {
+    id: 'seg_legacy_duplicate_chunks',
+    jobId: 'job_test_1',
+    planId: 'plan_legacy_duplicate_chunks',
+    segmentIndex: 0,
+    startSequenceIndex: 0,
+    endSequenceIndex: 1,
+    documentIds: ['chk_legacy_1', 'chk_legacy_2'],
+    filenames: ['Grouped Legacy.pdf', 'Grouped Legacy.pdf'],
+    status: 'pending',
+    attemptCount: 0,
+  };
+  store.segments.set(segment.id, segment);
+
+  let promptContent = '';
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    promptContent = request.messages[0].content;
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+
+  const result = await processSynthesisSegment('job_test_1', segment, [{
+    id: 'doc_legacy',
+    documentId: 'doc_legacy',
+    filename: 'Grouped Legacy.pdf',
+    abstract: 'legacy grouped abstract',
+    chunkIds: ['chk_legacy_1', 'chk_legacy_2'],
+  }], {
+    store,
+    workerId: 'wkr_legacy_dedupe',
+    singlePass: true,
+  });
+
+  assert(result.status === 'complete', `Expected legacy chunk segment to complete, got ${result.status}`);
+  assert((promptContent.match(/legacy grouped abstract/g) || []).length === 1, 'Expected grouped abstract to appear once');
+  assert(!/Document 2:\s+Grouped Legacy\.pdf/.test(promptContent), 'Expected no duplicate document heading for the same grouped source');
+});
+
 test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields title opinion', async () => {
   const abstracts = manyAbstracts(5);
   const store = createMemoryPhase5Store({ abstracts });

@@ -806,6 +806,7 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
       originalSizeBytes: file.size,
       originalMediaType: file.type || 'application/pdf',
       splitFrom: file.name,
+      sourceDocumentKey: `${file.name}:${file.size}:${file.lastModified || ''}`,
       pageRange: [from, to],
     };
     const actualMessages = await buildAbstractMessages([entry], 0);
@@ -835,7 +836,7 @@ async function readPdfPageCount(file) {
 async function prepareFileEntries(file, slotsAvailable) {
   if (isCsvFile(file)) {
     const text = await readFileAsText(file);
-    return [{ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file, originalSizeBytes: file.size, originalMediaType: 'text/csv' }];
+    return [{ name: file.name, type: 'text/csv', size: file.size, data: null, csvText: text, sourceFile: file, originalSizeBytes: file.size, originalMediaType: 'text/csv', sourceDocumentKey: `${file.name}:${file.size}:${file.lastModified || ''}:${hashStringSample(text)}` }];
   }
   const pdfPageCount = isPdfFile(file) ? await readPdfPageCount(file) : null;
   const data = await readFileAsBase64(file);
@@ -848,6 +849,7 @@ async function prepareFileEntries(file, slotsAvailable) {
     sourceFile: file,
     originalSizeBytes: file.size,
     originalMediaType: file.type || (isPdfFile(file) ? 'application/pdf' : file.type),
+    sourceDocumentKey: `${file.name}:${file.size}:${file.lastModified || ''}:${hashStringSample(data)}`,
     pageRange: pdfPageCount ? [1, pdfPageCount] : undefined,
   }];
 }
@@ -1982,16 +1984,29 @@ async function entryChecksum(entry, file = entry.sourceFile) {
   return checksum;
 }
 
+async function sourceDocumentKeyForEntry(entry) {
+  const source = entry.sourceOriginalFile || entry.sourceFile || entry;
+  const sourceName = entry.splitFrom || source?.name || entry.name;
+  const sourceSize = entry.originalSizeBytes || source?.size || entry.size || 0;
+  const sourceModified = source?.lastModified || entry.lastModified || '';
+  const checksum = await entryChecksum(entry, source);
+  entry.sourceChecksum = checksum;
+  entry.sourceDocumentKey = `${sourceName}:${sourceSize}:${checksum || sourceModified}`;
+  return entry.sourceDocumentKey;
+}
+
 async function registerDocumentForUpload(jobId, entry) {
   const sourceName = entry.splitFrom || entry.name;
-  const checksum = await entryChecksum(entry, entry.sourceOriginalFile || entry.sourceFile);
+  const source = entry.sourceOriginalFile || entry.sourceFile;
+  const checksum = await entryChecksum(entry, source);
+  const sourceKey = await sourceDocumentKeyForEntry(entry);
   const data = await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/documents`, {
     method: 'POST',
     body: JSON.stringify({
       originalFilename: sourceName,
       mediaType: entry.originalMediaType || entry.type,
       sizeBytes: entry.originalSizeBytes || entry.size || 0,
-      fingerprint: `${sourceName}:${entry.originalSizeBytes || entry.size || 0}`,
+      fingerprint: sourceKey,
       checksumSha256: checksum,
     }),
   });
@@ -2053,6 +2068,7 @@ async function uploadChunkToBlob(jobId, documentId, chunk, entry, onProgress) {
   });
   entry.documentId = documentId;
   entry.chunkId = chunk.id;
+  entry.sourceDocumentKey = entry.sourceDocumentKey || documentId;
   entry.blobKey = upload.blobKey || upload.objectKey || chunk.blobKey;
   entry.blobUrl = upload.blobUrl || upload.objectUrl;
   entry.uploadStatus = 'uploaded';
@@ -2102,10 +2118,15 @@ async function fetchServerAbstracts(jobId) {
     method: 'GET',
   });
   return (data.abstracts || []).map(item => ({
-    filename: item.filename || item.originalFilename || item.chunkId,
+    filename: item.sourceFilename || item.filename || item.originalFilename || item.chunkId,
+    sourceFilename: item.sourceFilename,
     abstract: item.abstract || item.abstractText || '',
     chunkId: item.chunkId,
     documentId: item.documentId,
+    chunkOrder: item.chunkOrder,
+    pageStart: item.pageStart,
+    pageEnd: item.pageEnd,
+    splitFrom: item.splitFrom,
   }));
 }
 
@@ -2321,7 +2342,7 @@ async function registerJobUploads(jobId, fileList) {
   });
 
   async function documentIdForEntry(entry) {
-    const sourceKey = entry.splitFrom || entry.name;
+    const sourceKey = await sourceDocumentKeyForEntry(entry);
     if (documentIdsBySource.has(sourceKey)) return documentIdsBySource.get(sourceKey);
     let pending = documentCreateBySource.get(sourceKey);
     if (!pending) {
@@ -2339,6 +2360,7 @@ async function registerJobUploads(jobId, fileList) {
       throw new Error(`${entry.name}: exceeds durable upload limit of ${formatMegabytes(maxUploadBytes)} MB.`);
     }
     const documentId = await documentIdForEntry(entry);
+    entry.sourceDocumentKey = documentId;
     const chunk = await registerChunkForUpload(jobId, documentId, entry, i);
     entry.uploadStatus = 'uploading';
     await uploadChunkToBlob(jobId, documentId, chunk, entry, percentage => {
@@ -2407,7 +2429,7 @@ async function handleFiles(newFiles) {
   try {
     const splitParts = await ingestUploadedFiles(Array.from(newFiles), files, statusEl);
     if (splitParts > 0) {
-      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis connects them by filename.`);
+      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis groups them by source document.`);
     } else {
       clearError();
     }
@@ -2802,6 +2824,74 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
   return results.flat();
 }
 
+function compareNullableNumber(a, b) {
+  const aMissing = a == null;
+  const bMissing = b == null;
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return a - b;
+}
+
+function groupAbstractsBySourceDocument(abstracts) {
+  const groups = [];
+  const byKey = new Map();
+  for (const item of abstracts || []) {
+    const text = item.abstract || item.abstractText || '';
+    if (!String(text).trim()) continue;
+    const key = item.documentId
+      || item.sourceDocumentKey
+      || item.sourceFilename
+      || item.splitFrom
+      || item.filename
+      || item.chunkId
+      || `doc_${groups.length + 1}`;
+    let group = byKey.get(key);
+    if (!group) {
+      group = {
+        key,
+        documentId: item.documentId || null,
+        sourceDocumentKey: item.sourceDocumentKey || null,
+        filename: item.sourceFilename || item.splitFrom || item.filename || item.originalFilename || key,
+        chunks: [],
+      };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.chunks.push(item);
+  }
+
+  return groups.map(group => {
+    const chunks = [...group.chunks].sort((a, b) => {
+      const byOrder = compareNullableNumber(a.chunkOrder, b.chunkOrder);
+      if (byOrder !== 0) return byOrder;
+      return compareNullableNumber(a.pageStart, b.pageStart);
+    });
+    if (chunks.length === 1) {
+      return {
+        filename: group.filename,
+        sourceFilename: group.filename,
+        sourceDocumentKey: group.sourceDocumentKey,
+        documentId: group.documentId,
+        chunkIds: chunks.map(chunk => chunk.chunkId).filter(Boolean),
+        abstract: chunks[0].abstract || chunks[0].abstractText || '',
+      };
+    }
+    return {
+      filename: group.filename,
+      sourceFilename: group.filename,
+      sourceDocumentKey: group.sourceDocumentKey,
+      documentId: group.documentId,
+      chunkIds: chunks.map(chunk => chunk.chunkId).filter(Boolean),
+      abstract: chunks.map((chunk, index) => {
+        const label = chunk.pageStart != null && chunk.pageEnd != null
+          ? `Pages ${chunk.pageStart}-${chunk.pageEnd}`
+          : `Chunk ${chunk.chunkOrder != null ? chunk.chunkOrder + 1 : index + 1}`;
+        return `**${label}:**\n\n${chunk.abstract || chunk.abstractText || ''}`;
+      }).join('\n\n'),
+    };
+  });
+}
 
 function buildAbstractInput(abstracts, tract, ctx, preamble) {
   let input = preamble + '\n\n';
@@ -2902,6 +2992,7 @@ function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemPrompt) {
 }
 
 async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
+  abstracts = groupAbstractsBySourceDocument(abstracts);
   const singlePassPreamble = `Below are ${abstracts.length} document abstracts. Synthesize into a complete title opinion.`;
   const dynamicChunks = buildSynthesisChunks(abstracts, tract, ctx, singlePassPreamble, SYNTHESIS_PROMPT);
 
@@ -3050,8 +3141,17 @@ function parseBatchResult(result, batchFiles, globalStartIdx) {
     const nextDocNum = docNum + 1;
     const regex = new RegExp(`DOCUMENT\\s*#${docNum}\\s*:?([\\s\\S]*?)(?=DOCUMENT\\s*#${nextDocNum}\\s*:|$)`, 'i');
     const match = result.match(regex);
+    const pageRange = f.pageRange || [];
     return {
       filename: f.name,
+      sourceFilename: f.splitFrom || f.sourceOriginalFile?.name || f.name,
+      sourceDocumentKey: f.documentId || f.sourceDocumentKey || null,
+      documentId: f.documentId || null,
+      chunkId: f.chunkId || null,
+      chunkOrder: globalStartIdx + j,
+      pageStart: pageRange[0] || null,
+      pageEnd: pageRange[1] || null,
+      splitFrom: f.splitFrom || null,
       abstract: match ? match[1].trim() : result,
     };
   });
@@ -3115,7 +3215,7 @@ async function analyze() {
 
   if (uploadRegistration.durable) {
     try {
-      documentAbstracts = await runServerDocumentAbstraction(job.id, files, items);
+      documentAbstracts = groupAbstractsBySourceDocument(await runServerDocumentAbstraction(job.id, files, items));
       usedServerAbstraction = true;
       serverAbstractionFailedCount = Math.max(0, files.length - documentAbstracts.length);
     } catch (serverErr) {
@@ -3132,7 +3232,7 @@ async function analyze() {
     });
 
     try {
-      documentAbstracts = await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id);
+      documentAbstracts = groupAbstractsBySourceDocument(await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id));
     } catch (e) {
       await safePatchAnalysisJob(job.id, {
         status: 'failed',
@@ -3424,7 +3524,7 @@ async function handleAdditionalFiles(newFiles) {
   try {
     const splitParts = await ingestUploadedFiles(Array.from(newFiles), additionalFiles, statusEl);
     if (splitParts > 0) {
-      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis connects them by filename.`);
+      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis groups them by source document.`);
     } else {
       clearError();
     }
@@ -3480,7 +3580,7 @@ async function analyzeAdditional() {
   updateProgress(0, `Starting analysis of ${additionalFiles.length} additional document${additionalFiles.length === 1 ? '' : 's'}...`, items);
 
   try {
-    newAbstracts = await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress, `additional-${globalOffset}`);
+    newAbstracts = groupAbstractsBySourceDocument(await runDocumentAbstraction(additionalFiles, globalOffset, items, showAllProgress, `additional-${globalOffset}`));
   } catch (e) {
     showError(e.message);
     clearProgressTimer();
@@ -3491,7 +3591,7 @@ async function analyzeAdditional() {
   }
 
   // Combine all abstracts
-  const allAbstracts = [...documentAbstracts, ...newAbstracts];
+  const allAbstracts = groupAbstractsBySourceDocument([...documentAbstracts, ...newAbstracts]);
   if (activeProgressTimer) activeProgressTimer.phase = 'synthesis';
   items[items.length - 1].status = 'active';
   updateProgress(88, 'Updating chain of title with all documents combined...', items);

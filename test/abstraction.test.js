@@ -12,6 +12,7 @@ import {
   getBackgroundPromise,
   processAbstractionBatch,
 } from '../api/_lib/queue.js';
+import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -858,8 +859,11 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
     makeChunk({ id: 'chk_big', pageStart: 1, pageEnd: 4, sizeBytes: 1_200_000 }),
   ]);
   let splitCalls = 0;
+  const expectedChildChecksums = new Map();
   store.createSplitChunk = async (jobId, documentId, input) => {
     splitCalls += 1;
+    assert(input.checksumSha256 === expectedChildChecksums.get(input.originalFilename), 'Expected split child checksum to match child PDF bytes');
+    assert(input.checksumSha256 !== store.chunks.get('chk_big').checksumSha256, 'Expected child checksum not to reuse parent checksum');
     const childId = `chk_split_${splitCalls}`;
     const child = {
       ...makeChunk({
@@ -885,10 +889,13 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
   };
 
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
-  globalThis.__TITLE_ANALYZER_BLOB_WRITER__ = async (parent, name, bytes) => ({
-    blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
-    blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
-  });
+  globalThis.__TITLE_ANALYZER_BLOB_WRITER__ = async (parent, name, bytes) => {
+    expectedChildChecksums.set(name, createHash('sha256').update(bytes).digest('hex'));
+    return {
+      blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+      blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}`,
+    };
+  };
 
   // Build a real multi-page PDF so pdf-lib can split it
   const { PDFDocument } = await import('pdf-lib');
