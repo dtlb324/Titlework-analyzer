@@ -8,7 +8,7 @@ An AI-powered web application for oil and gas landmen to analyze courthouse docu
 
 The Cloud Run deployment uses two Cloud Run services, Google Cloud Storage, and Neon Postgres:
 
-- **Web/API service:** serves `public/index.html`, `/healthz`, and the `/api/*` routes from `server.js`.
+- **Web/API service:** serves `public/index.html`, `/healthz`, `/api/healthz`, and the `/api/*` routes from `server.js`.
 - **Worker service:** runs `worker.js` and drains durable abstraction/synthesis work from Postgres.
 - **Google Cloud Storage:** stores uploaded PDFs, images, CSVs, and split PDF chunks through signed browser uploads.
 - **Neon Postgres:** stores jobs, documents, chunks, abstracts, synthesis segments, final results, and follow-up messages.
@@ -18,7 +18,7 @@ The browser creates a job, uploads files directly to GCS, polls job status, and 
 ## Required Services
 
 1. Create or select a Google Cloud project.
-2. Enable Cloud Run, Artifact Registry, Cloud Build, and Cloud Storage APIs.
+2. Enable Cloud Run, Artifact Registry, Cloud Storage, IAM Credentials, and Security Token Service APIs.
 3. Create a Neon project and copy the pooled Postgres connection string.
 4. Create a private GCS bucket for durable document storage.
 5. Create a Cloud Run service account with:
@@ -88,12 +88,14 @@ git push origin "$VERSION"
 
 The release workflow runs tests on Node 22, builds one Docker image, pushes it to Artifact Registry, resolves the immutable image digest, deploys the worker first, then deploys the API from that same immutable image digest. The worker deploy uses `--min-instances=1`, `--concurrency=1`, `--no-cpu-throttling`, and a 3600 second timeout so long-running batch work is not starved while idle. The workflow creates or updates the GitHub Release only after production verification passes.
 
+GitHub Actions `Release` is the only production deploy path. Do not leave Cloud Build or Cloud Run source-deploy triggers on `main`; they can race the tag workflow and overwrite the verified release image.
+
 Configure these GitHub repository variables before the first release:
 
 | Name | Purpose |
 |------|---------|
 | `GCP_PROJECT_ID` | Google Cloud project ID. |
-| `GCP_REGION` | Cloud Run and Artifact Registry region, usually `us-central1`. |
+| `GCP_REGION` | Cloud Run and Artifact Registry region, currently `us-south1` for this project. |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Federation provider for GitHub OIDC. |
 | `GCP_SERVICE_ACCOUNT` | Deploy service account used by GitHub Actions. |
 | `GCP_RUNTIME_SERVICE_ACCOUNT` | Optional runtime service account assigned to Cloud Run services. |
@@ -101,7 +103,7 @@ Configure these GitHub repository variables before the first release:
 | `API_SERVICE` | API Cloud Run service name, usually `titlework-analyzer-api`. |
 | `WORKER_SERVICE` | Worker Cloud Run service name, usually `titlework-analyzer-worker`. |
 
-The GitHub deploy service account must be configured for Workload Identity Federation from this repository. Grant it enough IAM to push images and deploy Cloud Run, typically Artifact Registry writer on the image repository, Cloud Run service deployment permissions, and `roles/iam.serviceAccountUser` on `GCP_RUNTIME_SERVICE_ACCOUNT` when that variable is set. The runtime service account still needs the bucket, Secret Manager, and database/network access required by the app.
+The GitHub deploy service account must be configured for Workload Identity Federation from this repository. Grant it enough IAM to push images and deploy Cloud Run, typically Artifact Registry writer on the image repository, Cloud Run service deployment permissions, `roles/iam.serviceAccountTokenCreator` for the repo-scoped WIF principal, and `roles/iam.serviceAccountUser` on `GCP_RUNTIME_SERVICE_ACCOUNT` when that variable is set. The runtime service account still needs the bucket, Secret Manager, and database/network access required by the app.
 
 Secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be configured on both Cloud Run services through Cloud Run environment variables or Secret Manager. The release workflow verifies required variable names are present, but it does not store secret values in GitHub.
 
@@ -109,7 +111,7 @@ Secrets such as `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATABASE_URL` must be 
 
 After each release, verify:
 
-- API `/healthz` reports the expected `release.version`, `release.gitSha`, `release.imageDigest`, and Cloud Run revision.
+- API `/api/healthz` reports the expected `release.version`, `release.gitSha`, `release.imageDigest`, and Cloud Run revision.
 - API and worker latest ready revisions use the same immutable image digest.
 - Both services still have database, GCS, Anthropic, and app password configuration.
 - GCS CORS allows `PUT` uploads from the API service origin with the `content-type` header.
@@ -122,14 +124,14 @@ Rollback API and worker together. Either redeploy both services from the same pr
 ```bash
 gcloud run deploy titlework-analyzer-worker \
   --image PREVIOUS_IMAGE_DIGEST_REF \
-  --region us-central1 \
+  --region us-south1 \
   --command npm \
   --args run,start:worker \
   --no-allow-unauthenticated
 
 gcloud run deploy titlework-analyzer-api \
   --image PREVIOUS_IMAGE_DIGEST_REF \
-  --region us-central1 \
+  --region us-south1 \
   --allow-unauthenticated
 ```
 
