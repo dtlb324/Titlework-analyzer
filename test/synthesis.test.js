@@ -886,6 +886,102 @@ test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields ti
   assert(job.status === 'complete', `Expected job complete, got ${job.status}`);
 });
 
+test('Opus audit rewrites exceptional final opinions when enabled', async () => {
+  const previousAudit = process.env.OPUS_AUDIT_ENABLED;
+  process.env.OPUS_AUDIT_ENABLED = 'true';
+  const abstracts = manyAbstracts(1, {
+    abstractTextFor: () => [
+      'DOC TYPE: Warranty Deed',
+      'ISSUES: ILLEGIBLE - VERIFY MANUALLY; legal description partially unreadable.',
+      'CONFIDENCE: low',
+    ].join('\n'),
+  });
+  const store = createMemoryPhase5Store({ abstracts });
+  const models = [];
+  try {
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      models.push(request.model);
+      if (request.model === 'claude-opus-4-7') {
+        return {
+          text: goodFinalOpinion('Opus audited and rewrote the exceptional final opinion.'),
+          model: 'claude-opus-4-7',
+          usage: { input_tokens: 50, output_tokens: 60 },
+        };
+      }
+      return {
+        text: goodFinalOpinion('Sonnet draft before audit.'),
+        model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 1000, output_tokens: 800 },
+      };
+    };
+
+    const result = await processSynthesisJob('job_test_1', { store });
+    assert(models.join(',') === 'claude-sonnet-4-6,claude-opus-4-7', `Expected Sonnet then Opus, got ${models.join(',')}`);
+    assert(result.result?.modelUsed === 'claude-opus-4-7', `Expected Opus model saved, got ${result.result?.modelUsed}`);
+    assert(result.result.finalTitleOpinion.includes('Opus audited'), 'Expected Opus rewritten final opinion to be saved');
+    assert(result.result.inputTokens === 1050 && result.result.outputTokens === 860, 'Expected audit token usage added to synthesis usage');
+    assert(result.result.warnings.some(w => /Opus 4\.7 audit applied/i.test(w)), `Expected audit-applied warning, got ${JSON.stringify(result.result.warnings)}`);
+  } finally {
+    if (previousAudit === undefined) delete process.env.OPUS_AUDIT_ENABLED;
+    else process.env.OPUS_AUDIT_ENABLED = previousAudit;
+  }
+});
+
+test('Opus audit skips clean final opinions even when enabled', async () => {
+  const previousAudit = process.env.OPUS_AUDIT_ENABLED;
+  process.env.OPUS_AUDIT_ENABLED = 'true';
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  const models = [];
+  try {
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      models.push(request.model);
+      return { text: goodFinalOpinion(), model: request.model, usage: {} };
+    };
+
+    const result = await processSynthesisJob('job_test_1', { store });
+    assert(models.join(',') === 'claude-sonnet-4-6', `Expected only Sonnet, got ${models.join(',')}`);
+    assert(result.result?.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet model saved, got ${result.result?.modelUsed}`);
+    assert(!result.result.warnings.some(w => /Opus 4\.7 audit/i.test(w)), `Expected no audit warning, got ${JSON.stringify(result.result.warnings)}`);
+  } finally {
+    if (previousAudit === undefined) delete process.env.OPUS_AUDIT_ENABLED;
+    else process.env.OPUS_AUDIT_ENABLED = previousAudit;
+  }
+});
+
+test('Opus audit failure keeps Sonnet final opinion with warning', async () => {
+  const previousAudit = process.env.OPUS_AUDIT_ENABLED;
+  process.env.OPUS_AUDIT_ENABLED = 'true';
+  const abstracts = manyAbstracts(1, {
+    abstractTextFor: () => 'DOC TYPE: Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
+  });
+  const store = createMemoryPhase5Store({ abstracts });
+  const models = [];
+  try {
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      models.push(request.model);
+      if (request.model === 'claude-opus-4-7') {
+        const err = new Error('audit unavailable');
+        err.status = 503;
+        throw err;
+      }
+      return {
+        text: goodFinalOpinion('Sonnet final opinion retained.'),
+        model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 1000, output_tokens: 800 },
+      };
+    };
+
+    const result = await processSynthesisJob('job_test_1', { store });
+    assert(models.join(',') === 'claude-sonnet-4-6,claude-opus-4-7', `Expected Sonnet then Opus, got ${models.join(',')}`);
+    assert(result.result?.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet model retained, got ${result.result?.modelUsed}`);
+    assert(result.result.finalTitleOpinion.includes('Sonnet final opinion retained'), 'Expected Sonnet final opinion to remain saved');
+    assert(result.result.warnings.some(w => /Opus 4\.7 audit failed/i.test(w)), `Expected audit failure warning, got ${JSON.stringify(result.result.warnings)}`);
+  } finally {
+    if (previousAudit === undefined) delete process.env.OPUS_AUDIT_ENABLED;
+    else process.env.OPUS_AUDIT_ENABLED = previousAudit;
+  }
+});
+
 test('Synthesis segment stale worker cannot overwrite a reclaimed segment', async () => {
   const abstracts = manyAbstracts(1);
   const store = createMemoryPhase5Store({ abstracts, enforceWorkerLease: true });
@@ -1093,6 +1189,7 @@ test('Split-degraded documents produce final result warnings even when all chunk
   assert(result.result.failedDocuments.length === 0, 'Expected no failed documents');
   assert(result.result.warnings.some(w => /page-range segments/i.test(w) && /Deed\.pdf/.test(w)), `Expected split degradation warning, got ${JSON.stringify(result.result.warnings)}`);
   assert(result.result.warnings.some(w => /clause continuity|legal descriptions|exhibits/i.test(w)), 'Expected legal continuity warning language');
+  assert(!result.result.warnings.some(w => /instrument separation/i.test(w)), 'Split warning should not mention multi-instrument separation');
 });
 
 test('Segment timeout triggers binary split retry', async () => {

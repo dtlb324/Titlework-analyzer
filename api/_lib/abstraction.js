@@ -5,7 +5,9 @@ import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } fro
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 12_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'claude-haiku-4-5';
-const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 1600, 512, 4096);
+const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 3000, 512, 4096);
+const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'claude-sonnet-4-6';
+const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
 const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
 const DEFAULT_MAX_ATTEMPTS = 5;
@@ -32,7 +34,7 @@ function clampInt(raw, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
-export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse document. Be accurate, concise, and cautious. Extract only what is clearly visible.
+export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse instrument. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
 Respond in this exact format - no extra commentary:
 
@@ -62,6 +64,8 @@ export function getAbstractionConfig() {
     requestEnvelopeSafeBytes: REQUEST_ENVELOPE_SAFE_BYTES,
     model: ABSTRACT_MODEL,
     maxTokens: ABSTRACT_MAX_TOKENS,
+    escalationModel: ABSTRACT_ESCALATION_MODEL,
+    escalationMaxTokens: ABSTRACT_ESCALATION_MAX_TOKENS,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
   };
 }
@@ -331,6 +335,27 @@ function extractUsage(usage = {}) {
   };
 }
 
+function sumNullableTokenCounts(a, b) {
+  if (a == null && b == null) return null;
+  return (a || 0) + (b || 0);
+}
+
+function addUsage(left, right) {
+  return {
+    inputTokens: sumNullableTokenCounts(left?.inputTokens, right?.inputTokens),
+    outputTokens: sumNullableTokenCounts(left?.outputTokens, right?.outputTokens),
+  };
+}
+
+export function shouldEscalateAbstract(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS) {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(value)) return true;
+  if (/CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value)) return true;
+  const outputTokens = Number(usage.outputTokens ?? usage.output_tokens ?? 0);
+  return Number.isFinite(outputTokens) && maxTokens > 0 && outputTokens >= Math.floor(maxTokens * 0.9);
+}
+
 function stripDocumentLabel(text, docNum) {
   const value = String(text || '').trim();
   const regex = new RegExp(`^DOCUMENT\\s*#${docNum}\\s*:?\\s*`, 'i');
@@ -539,8 +564,9 @@ export async function processChunkAbstraction(chunk, options = {}) {
       error.status = 413;
       throw error;
     }
+    const modelClient = getModelClient(options);
     logChunkStage('model_start', processingChunk, { workerId, attemptCount, model, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
-    const response = await getModelClient(options)({
+    let response = await modelClient({
       model,
       maxTokens,
       system: ABSTRACTION_PROMPT,
@@ -555,7 +581,54 @@ export async function processChunkAbstraction(chunk, options = {}) {
       payloadBytes,
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
-    const usage = extractUsage(response.usage);
+    let usage = extractUsage(response.usage);
+    const escalationModel = options.escalationModel || ABSTRACT_ESCALATION_MODEL;
+    const escalationMaxTokens = options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS;
+    const escalationEnabled = options.escalationEnabled !== false
+      && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
+      && escalationModel
+      && escalationModel !== model;
+    if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
+      logChunkStage('model_escalation_start', processingChunk, {
+        workerId,
+        attemptCount,
+        model: escalationModel,
+        initialModel: response.model || model,
+        payloadBytes,
+        elapsedMs: Date.now() - startedAt,
+      }, stageLoggingEnabled);
+      try {
+        const escalatedResponse = await modelClient({
+          model: escalationModel,
+          maxTokens: escalationMaxTokens,
+          system: ABSTRACTION_PROMPT,
+          messages,
+          payloadBytes,
+          chunk: processingChunk,
+          escalation: true,
+          initialModel: response.model || model,
+        });
+        const escalatedUsage = extractUsage(escalatedResponse.usage);
+        usage = addUsage(usage, escalatedUsage);
+        response = escalatedResponse;
+        logChunkStage('model_escalation_response', processingChunk, {
+          workerId,
+          attemptCount,
+          modelUsed: response.model || escalationModel,
+          payloadBytes,
+          elapsedMs: Date.now() - startedAt,
+        }, stageLoggingEnabled);
+      } catch (err) {
+        logChunkStage('model_escalation_failed', processingChunk, {
+          workerId,
+          attemptCount,
+          model: escalationModel,
+          errorType: classifyError(err),
+          errorMessage: sanitizeErrorMessage(err),
+          elapsedMs: Date.now() - startedAt,
+        }, stageLoggingEnabled);
+      }
+    }
     const record = {
       jobId: processingChunk.jobId,
       documentId: processingChunk.documentId,
