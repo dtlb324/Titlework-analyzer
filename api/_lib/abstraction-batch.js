@@ -3,6 +3,8 @@
 import {
   ABSTRACTION_PROMPT,
   buildAbstractMessagesForChunks,
+  enrichVisualDeliveryForModel,
+  estimateAbstractPayloadBytes,
   estimateRequestBytes,
   getAbstractionConfig,
   parseBatchAbstracts,
@@ -18,8 +20,9 @@ import {
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const MAX_PAYLOAD_BYTES = REQUEST_ENVELOPE_SAFE_BYTES - 350_000;
-const MAX_DOCS_PER_BATCH = clampInt(process.env.ABSTRACTION_BATCH_MAX_DOCS, 8, 1, 16);
-const LARGE_CHUNK_BYTES = clampInt(process.env.ABSTRACTION_BATCH_LARGE_BYTES, 800_000, 100_000, 5_000_000);
+const MAX_DOCS_PER_BATCH = clampInt(process.env.ABSTRACTION_BATCH_MAX_DOCS, 24, 1, 48);
+const LARGE_CHUNK_BYTES = clampInt(process.env.ABSTRACTION_BATCH_LARGE_BYTES, 2_000_000, 100_000, 8_000_000);
+const MAX_BATCH_PAGE_SPAN = clampInt(process.env.ABSTRACTION_BATCH_MAX_PAGE_SPAN, 32, 4, 120);
 function clampInt(raw, fallback, min, max) {
   const value = Number(raw);
   if (!Number.isFinite(value)) return fallback;
@@ -38,16 +41,8 @@ function isPdfChunk(chunk) {
   return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
 }
 
-export function estimateChunkPayloadBytes(chunk, payloadBytes = null) {
-  if (isCsvChunk(chunk)) {
-    const size = (payloadBytes?.byteLength ?? Number(chunk.sizeBytes)) || 0;
-    return size + 500;
-  }
-  const size = Number(chunk.sizeBytes) || 0;
-  if (payloadBytes) {
-    return Math.ceil(payloadBytes.byteLength * 1.37);
-  }
-  return Math.ceil(size * 1.37);
+export function estimateChunkPayloadBytes(chunk, payloadBytes = null, delivery = null) {
+  return estimateAbstractPayloadBytes(chunk, payloadBytes, delivery);
 }
 
 export function chunkRequiresSoloBatch(chunk, estimatedPayload = null) {
@@ -55,7 +50,7 @@ export function chunkRequiresSoloBatch(chunk, estimatedPayload = null) {
   if (payload > LARGE_CHUNK_BYTES) return true;
   if (chunk.pageStart && chunk.pageEnd && isPdfChunk(chunk)) {
     const span = chunk.pageEnd - chunk.pageStart + 1;
-    if (span > 12) return true;
+    if (span > MAX_BATCH_PAGE_SPAN) return true;
   }
   return false;
 }
@@ -190,7 +185,12 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     const preparedItems = [];
     for (const entry of ready) {
       const payload = await blobLoader(entry.chunk);
-      const delivery = await resolveChunkDelivery(entry.chunk, payload.bytes);
+      const delivery = await enrichVisualDeliveryForModel(
+        await resolveChunkDelivery(entry.chunk, payload.bytes),
+        entry.chunk,
+        payload.bytes,
+        config.model,
+      );
       preparedItems.push({
         chunk: entry.chunk,
         payloadBytes: payload.bytes,

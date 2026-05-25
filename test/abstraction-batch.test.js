@@ -18,7 +18,7 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-function makeChunk(id, sizeBytes = 50_000) {
+function makeChunk(id, sizeBytes = 50_000, overrides = {}) {
   return {
     id,
     jobId: 'job_1',
@@ -29,33 +29,36 @@ function makeChunk(id, sizeBytes = 50_000) {
     chunkOrder: Number(id.replace(/\D/g, '')) || 0,
     uploadStatus: 'uploaded',
     abstractionStatus: 'pending',
+    ...overrides,
   };
 }
 
-test('planAbstractionWork groups small chunks up to 8 per batch', () => {
-  const chunks = Array.from({ length: 10 }, (_, i) => makeChunk(`chk_${i}`, 60_000));
+test('planAbstractionWork groups small chunks up to 24 per batch', () => {
+  const chunks = Array.from({ length: 26 }, (_, i) => makeChunk(`chk_${i}`, 60_000));
   const { batches, singles } = planAbstractionWork(chunks);
   assert(batches.length === 2, `Expected 2 batches, got ${batches.length}`);
-  assert(batches[0].chunks.length === 8, 'First batch should have 8 docs');
+  assert(batches[0].chunks.length === 24, 'First batch should have 24 docs');
   assert(batches[1].chunks.length === 2, 'Second batch should have 2 docs');
   assert(singles.length === 0, 'No solo chunks expected for small docs');
 });
 
-test('planAbstractionWork isolates oversized chunks', () => {
+test('planAbstractionWork isolates wide page-range chunks', () => {
   const chunks = [
     ...Array.from({ length: 4 }, (_, i) => makeChunk(`small_${i}`, 50_000)),
-    makeChunk('big', 3_000_000),
+    makeChunk('wide', 500_000, { pageStart: 1, pageEnd: 40 }),
   ];
   const { batches, singles } = planAbstractionWork(chunks);
-  assert(singles.length === 1 && singles[0].id === 'big', 'Expected oversized chunk solo');
+  assert(singles.length === 1 && singles[0].id === 'wide', 'Expected wide page-range chunk solo');
   assert(batches.length === 1 && batches[0].chunks.length === 4, 'Expected one batch for small docs');
 });
 
-test('chunkRequiresSoloBatch respects payload threshold', () => {
+test('chunkRequiresSoloBatch respects page span and CSV payload', () => {
   const small = makeChunk('s', 100_000);
-  const big = makeChunk('b', 3_000_000);
+  const wide = makeChunk('w', 500_000, { pageStart: 1, pageEnd: 40 });
+  const csv = makeChunk('c', 3_000_000, { mediaType: 'text/csv', originalFilename: 'c.csv' });
   assert(chunkRequiresSoloBatch(small) === false, 'Small chunk should batch');
-  assert(chunkRequiresSoloBatch(big) === true, 'Large chunk should stay solo');
+  assert(chunkRequiresSoloBatch(wide) === true, 'Wide page span should stay solo');
+  assert(chunkRequiresSoloBatch(csv) === true, 'Large CSV should stay solo');
 });
 
 test('parseBatchAbstracts splits multi-doc model output', () => {

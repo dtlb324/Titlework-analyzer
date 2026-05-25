@@ -56,11 +56,11 @@ export function resolvePartialSynthesisModel() {
 
 const DEFAULT_PARTIAL_SYNTHESIS_MODEL = resolvePartialSynthesisModel();
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 6000, 256, 8192);
-const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 3500, 512, 8192);
+const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 5000, 512, 8192);
 const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
 const DEFAULT_OPUS_AUDIT_MAX_TOKENS = clampInt(process.env.OPUS_AUDIT_MAX_TOKENS, 8000, 512, 8192);
-const DEFAULT_SYNTHESIS_CHUNK_SIZE = clampInt(process.env.SYNTHESIS_CHUNK_SIZE, 50, 1, 100);
-const DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE = 80;
+const DEFAULT_SYNTHESIS_CHUNK_SIZE = clampInt(process.env.SYNTHESIS_CHUNK_SIZE, 120, 1, 250);
+const DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE = 200;
 const DEFAULT_BULK_JOB_MIN_ABSTRACTS = 100;
 const SYNTHESIS_REPAIR_ENABLED = process.env.SYNTHESIS_REPAIR_ENABLED !== 'false';
 const DEFAULT_REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 12_000_000, 100_000, 20_000_000);
@@ -168,7 +168,7 @@ export function getPartialSynthesisConfig(overrides = {}) {
 export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
   const resolved = getSynthesisConfig(config);
   const bulkMin = clampInt(process.env.BULK_JOB_MIN_ABSTRACTS, DEFAULT_BULK_JOB_MIN_ABSTRACTS, 2, 400);
-  const bulkSize = clampInt(process.env.BULK_SYNTHESIS_CHUNK_SIZE, DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE, 10, 100);
+  const bulkSize = clampInt(process.env.BULK_SYNTHESIS_CHUNK_SIZE, DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE, 10, 250);
   if (abstractCount >= bulkMin) {
     return Math.max(resolved.chunkSize, bulkSize);
   }
@@ -337,10 +337,13 @@ export function planSynthesisSegments(abstracts, tract, contextNotes, configOver
       `Below are document abstracts ${start + 1}-${end + 1} of ${abstracts.length}. Produce a partial chain-of-title segment.`,
     );
     const config = getSynthesisConfig(configOverrides);
+    const segmentModel = chunkLists.length === 1 ? config.model : config.partialModel;
+    const segmentMaxTokens = chunkLists.length === 1 ? config.maxTokens : config.partialMaxTokens;
+    const segmentPrompt = chunkLists.length === 1 ? SYNTHESIS_PROMPT : PARTIAL_SYNTHESIS_PROMPT;
     const estimatedBytes = estimateRequestBytes(
-      config.model,
-      config.maxTokens,
-      chunkLists.length === 1 ? SYNTHESIS_PROMPT : PARTIAL_SYNTHESIS_PROMPT,
+      segmentModel,
+      segmentMaxTokens,
+      segmentPrompt,
       [{ role: 'user', content: segmentInput }],
     );
     return {

@@ -1,6 +1,7 @@
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import {
   assessExtractedPdfText,
+  estimatePdfPlanningPayloadBytes,
   extractPdfText,
   getPdfTextConfig,
   resolvePdfTextDelivery,
@@ -82,6 +83,15 @@ test('buildAbstractMessagesForChunk uses extracted text without document block',
   const textBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, messages);
   const visualBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, visualMessages);
   assert(textBytes < visualBytes, `Expected smaller request for text path (${textBytes} vs ${visualBytes})`);
+});
+
+test('estimatePdfPlanningPayloadBytes favors text-first and file-api heuristics', () => {
+  const textLike = estimatePdfPlanningPayloadBytes(800_000);
+  const inline = estimatePdfPlanningPayloadBytes(800_000, { textFirstEnabled: false });
+  const fileRef = estimatePdfPlanningPayloadBytes(2_000_000);
+  assert(textLike < 200_000, `Expected small planning estimate for text-like PDF, got ${textLike}`);
+  assert(inline > textLike, 'Expected larger inline estimate when text-first is off');
+  assert(fileRef < 10_000, `Expected tiny planning estimate for Files API PDF, got ${fileRef}`);
 });
 
 test('getPdfTextConfig defaults enable text-first', () => {

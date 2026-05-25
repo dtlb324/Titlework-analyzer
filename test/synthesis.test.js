@@ -662,11 +662,15 @@ test('groupAbstractsByDocument falls back to chunk grouping and chunk headings',
   assert(grouped[2].abstract.includes('**Chunk 2:**\n\nsecond missing-pages abstract'), 'Expected second missing page range to use chunk heading');
 });
 
-test('buildSynthesisChunks respects 50-doc cap and byte cap', () => {
-  const small = Array.from({ length: 60 }, (_, i) => ({ filename: `d${i}.pdf`, abstract: 'small abstract' }));
+test('buildSynthesisChunks respects 120-doc cap and byte cap', () => {
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const small = Array.from({ length: 250 }, (_, i) => ({ filename: `d${i}.pdf`, abstract: 'small abstract' }));
   const chunks = buildSynthesisChunks(small, '', '', 'pre', SYNTHESIS_PROMPT);
-  assert(chunks.length >= 2, 'Expected multiple chunks at >50 docs');
-  assert(chunks[0].length === 50, 'Expected first chunk capped at 50');
+  assert(chunks.length >= 2, 'Expected multiple chunks at >120 docs');
+  assert(chunks[0].length === 120, 'Expected first chunk capped at 120');
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
   // Single huge abstract gets its own chunk (b > safe envelope means [a,b] and [b,c] both blow budget).
   const big = [
     { filename: 'a.pdf', abstract: 'a'.repeat(10) },
@@ -1040,10 +1044,10 @@ test('Invalid single-pass model output fails instead of persisting a complete re
   assert(segments[0].errorType === 'validation_failed', `Expected validation_failed, got ${segments[0].errorType}`);
 });
 
-test('Multi-segment: 120 abstracts → segments + merge with checkpoints written', async () => {
+test('Multi-segment: 250 abstracts → segments + merge with checkpoints written', async () => {
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
-  const abstracts = manyAbstracts(120);
+  const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   let segmentCalls = 0;
   let mergeCalls = 0;
@@ -1059,7 +1063,7 @@ test('Multi-segment: 120 abstracts → segments + merge with checkpoints written
     throw new Error('unexpected system prompt');
   };
   const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
-  assert(segmentCalls === 3, `Expected 3 partial syntheses for 120/50, got ${segmentCalls}`);
+  assert(segmentCalls === 3, `Expected 3 partial syntheses for 250/120, got ${segmentCalls}`);
   assert(mergeCalls === 1, `Expected one final merge call, got ${mergeCalls}`);
   const segments = await store.listSynthesisSegments('job_test_1');
   assert(segments.length === 3, `Expected 3 segments stored, got ${segments.length}`);
@@ -1086,7 +1090,9 @@ test('Final merge claim lease exceeds upstream model timeout by default', async 
 });
 
 test('Final merge honors single-writer claim and skips merge when claim is unavailable', async () => {
-  const abstracts = manyAbstracts(120);
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts, mergeClaimResult: false });
   let segmentCalls = 0;
   let mergeCalls = 0;
@@ -1105,10 +1111,14 @@ test('Final merge honors single-writer claim and skips merge when claim is unava
   assert(mergeCalls === 0, `Expected no merge call without claim, got ${mergeCalls}`);
   assert(!result.result, 'Expected no final result when merge claim is unavailable');
   assert(result.hasMore === true, 'Expected caller to keep polling when another worker owns final merge');
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 test('Final merge error persists failed result instead of leaving no-result terminal state', async () => {
-  const abstracts = manyAbstracts(120);
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
@@ -1128,6 +1138,8 @@ test('Final merge error persists failed result instead of leaving no-result term
   assert(result.result?.status === 'failed', `Expected failed result, got ${result.result?.status}`);
   assert(result.result.warnings.some(w => /final_merge_failed/i.test(w)), `Expected final merge warning, got ${JSON.stringify(result.result?.warnings)}`);
   assert(result.hasMore === false, 'Expected terminal failed result rather than polling a no-result state');
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 test('Partial job: failed abstract omitted; warnings list excluded documents', async () => {
@@ -1197,8 +1209,9 @@ test('Split-degraded documents produce final result warnings even when all chunk
 
 test('Segment timeout triggers binary split retry', async () => {
   // Force a 504 on the first segment call so we hit the binary split path.
-  // Many small abstracts so the planner produces multiple segments.
-  const abstracts = manyAbstracts(60);
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   let segmentCalls = 0;
   let mergeCalls = 0;
@@ -1222,13 +1235,15 @@ test('Segment timeout triggers binary split retry', async () => {
   assert(timeoutTriggered, 'Expected a 504 to be issued');
   assert(result.result?.status === 'complete', `Expected complete after split, got ${result.result?.status}`);
   assert(segmentCalls > 2, `Expected extra calls from binary split; saw ${segmentCalls}`);
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 test('Merge too large triggers tree merge of segment summaries', async () => {
   // Force tree merge by making segment summaries huge so the merge call would exceed budget.
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
-  const abstracts = manyAbstracts(120);
+  const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   let mergeCalls = 0;
   let treeMergeCalls = 0;
@@ -1497,8 +1512,8 @@ test('Synthesis endpoint returns 503 with fallback hint when API keys missing', 
 });
 
 test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
-  assert(effectiveSynthesisChunkSize(50, {}) === 50, 'Small jobs should keep default chunk size');
-  assert(effectiveSynthesisChunkSize(120, {}) >= 80, 'Bulk jobs should use larger synthesis segments');
+  assert(effectiveSynthesisChunkSize(50, {}) === 120, 'Small jobs should use default chunk size');
+  assert(effectiveSynthesisChunkSize(150, {}) >= 200, 'Bulk jobs should use larger synthesis segments');
 });
 
 test('resolveFinalSynthesisModel keeps Sonnet for final title opinions', () => {
@@ -1531,7 +1546,7 @@ test('resolvePartialSynthesisModel uses Gemini Flash for segment work', () => {
 test('getPartialSynthesisConfig defaults to Gemini Flash for segment work', () => {
   const partial = getPartialSynthesisConfig();
   assert(partial.model === 'gemini-2.5-flash', `Expected Gemini Flash partial model, got ${partial.model}`);
-  assert(partial.maxTokens <= 4000, 'Partial synthesis should use a smaller output cap');
+  assert(partial.maxTokens === 5000, 'Partial synthesis should use the configured partial output cap');
 });
 
 test('Synthesis status lightweight poll omits full title opinion payload', async () => {

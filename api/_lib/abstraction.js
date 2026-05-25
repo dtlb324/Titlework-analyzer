@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
-import { abstractionApiKeyError, invokeModel, sanitizeModelClientError } from './model-client.js';
-import { resolvePdfTextDelivery } from './pdf-text.js';
+import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError } from './model-client.js';
+import { shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
@@ -158,6 +159,16 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
     textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
   } else if (isPdfChunk(chunk) && delivery?.mode === 'text' && delivery.extractedText) {
     textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES and write ILLEGIBLE - VERIFY MANUALLY where needed.`;
+  } else if (isPdfChunk(chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
+    content.push({
+      type: 'document',
+      source: {
+        type: 'file_uri',
+        media_type: delivery.mimeType || 'application/pdf',
+        uri: delivery.fileUri,
+        geminiFileName: delivery.geminiFileName || null,
+      },
+    });
   } else if (isPdfChunk(chunk)) {
     content.push({
       type: 'document',
@@ -165,6 +176,16 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
         type: 'base64',
         media_type: 'application/pdf',
         data: bytes.toString('base64'),
+      },
+    });
+  } else if (isImageChunk(chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
+    content.push({
+      type: 'image',
+      source: {
+        type: 'file_uri',
+        media_type: delivery.mimeType || chunk.mediaType,
+        uri: delivery.fileUri,
+        geminiFileName: delivery.geminiFileName || null,
       },
     });
   } else if (isImageChunk(chunk)) {
@@ -210,6 +231,16 @@ export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
       textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
     } else if (isPdfChunk(item.chunk) && delivery?.mode === 'text' && delivery.extractedText) {
       textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES.`;
+    } else if (isPdfChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
+      content.push({
+        type: 'document',
+        source: {
+          type: 'file_uri',
+          media_type: delivery.mimeType || 'application/pdf',
+          uri: delivery.fileUri,
+          geminiFileName: delivery.geminiFileName || null,
+        },
+      });
     } else if (isPdfChunk(item.chunk)) {
       content.push({
         type: 'document',
@@ -217,6 +248,16 @@ export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
           type: 'base64',
           media_type: 'application/pdf',
           data: bytes.toString('base64'),
+        },
+      });
+    } else if (isImageChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
+      content.push({
+        type: 'image',
+        source: {
+          type: 'file_uri',
+          media_type: delivery.mimeType || item.chunk.mediaType,
+          uri: delivery.fileUri,
+          geminiFileName: delivery.geminiFileName || null,
         },
       });
     } else if (isImageChunk(item.chunk)) {
@@ -389,6 +430,67 @@ export async function resolveChunkDelivery(chunk, payloadBytes) {
     return await resolvePdfTextDelivery(payloadBytes);
   }
   return { mode: 'visual' };
+}
+
+/**
+ * Upload large visual PDFs/images to Gemini Files API so generateContent stays under JSON envelope limits.
+ */
+export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model) {
+  if (!delivery || delivery.mode !== 'visual' || !isGeminiModel(model)) {
+    return delivery;
+  }
+  const bytes = normalizeBytes(payloadBytes);
+  if (!shouldUseGeminiFileApi(bytes.byteLength)) {
+    return delivery;
+  }
+  if (!isPdfChunk(chunk) && !isImageChunk(chunk)) {
+    return delivery;
+  }
+  const mimeType = isPdfChunk(chunk) ? 'application/pdf' : (chunk.mediaType || 'image/jpeg');
+  try {
+    const uploaded = await uploadGeminiFile(bytes, mimeType, chunkDisplayName(chunk));
+    return {
+      mode: 'gemini_file',
+      fileUri: uploaded.uri,
+      geminiFileName: uploaded.name,
+      mimeType: uploaded.mimeType,
+      reason: 'gemini_file_api',
+      sizeBytes: bytes.byteLength,
+    };
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: 'gemini_file_upload_fallback',
+      chunkId: chunk?.id,
+      message: String(err?.message || err).slice(0, 500),
+    }));
+    return delivery;
+  }
+}
+
+export function estimateAbstractPayloadBytes(chunk, payloadBytes = null, delivery = null) {
+  if (delivery?.mode === 'text') {
+    return Math.min(
+      REQUEST_ENVELOPE_SAFE_BYTES,
+      Buffer.byteLength(String(delivery.extractedText || ''), 'utf8') + 4_000,
+    );
+  }
+  if (delivery?.mode === 'gemini_file') {
+    return 6_000;
+  }
+  if (isCsvChunk(chunk)) {
+    const size = (payloadBytes?.byteLength ?? Number(chunk.sizeBytes)) || 0;
+    return size + 500;
+  }
+  const size = (payloadBytes?.byteLength ?? Number(chunk.sizeBytes)) || 0;
+  if (isPdfChunk(chunk)) {
+    return estimatePdfPlanningPayloadBytes(size, {
+      geminiFileMinBytes: Number(process.env.GEMINI_FILE_API_MIN_BYTES) || 1_500_000,
+    });
+  }
+  if (payloadBytes) {
+    return Math.ceil(payloadBytes.byteLength * 1.37);
+  }
+  return Math.ceil(size * 1.37);
 }
 
 export async function runModelAbstraction({
@@ -725,7 +827,12 @@ export async function processChunkAbstraction(chunk, options = {}) {
       loadedMediaType: payload.mediaType || processingChunk.mediaType || null,
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
-    const delivery = await resolveChunkDelivery(processingChunk, payload.bytes);
+    const delivery = await enrichVisualDeliveryForModel(
+      await resolveChunkDelivery(processingChunk, payload.bytes),
+      processingChunk,
+      payload.bytes,
+      model,
+    );
     const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex, delivery);
     const payloadBytes = estimateRequestBytes(model, maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
