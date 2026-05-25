@@ -238,7 +238,7 @@ test('single PDF timeout fallback uses finer PDF chunks', async () => {
       sourceFile: { name: 'large.pdf', type: 'application/pdf', size: 2_000_000 },
     }, 0);
     assert(observedChunkRaw === TIMEOUT_SPLIT_CHUNK_RAW, 'Expected timeout fallback chunk size');
-    assert(observedChunkRaw <= 400_000, 'Timeout fallback should split finer than upload chunks');
+    assert(observedChunkRaw < MAX_PDF_CHUNK_RAW_BYTES, 'Timeout fallback should split finer than normal oversize chunks');
     assert(result.includes('pp 1-2') && result.includes('pp 3-4'), 'Expected page ranges in merged timeout result');
   `);
 });
@@ -277,6 +277,30 @@ test('large PDF ingest keeps durable uploads whole with page range metadata', as
   `);
 });
 
+test('browser abstraction keeps medium-large single PDFs whole before split fallback', async () => {
+  await runClientScript(`
+    let splitCalled = false;
+    splitPdfIntoEntries = async function() {
+      splitCalled = true;
+      return [];
+    };
+    callBackend = async function(messages) {
+      const docBlocks = messages[0].content.filter(block => block.type === 'document');
+      assert(docBlocks.length === 1, 'Expected one whole PDF document block');
+      return 'DOCUMENT #1:\\nWhole PDF abstract';
+    };
+    const result = await abstractBatch([{
+      name: 'medium-large.pdf',
+      type: 'application/pdf',
+      size: 9_000_000,
+      data: 'x'.repeat(13_000_000),
+      sourceFile: { name: 'medium-large.pdf', type: 'application/pdf', size: 9_000_000 },
+    }], 0, true);
+    assert(splitCalled === false, 'Expected medium-large single PDF to stay whole before split fallback');
+    assert(result.includes('Whole PDF abstract'), 'Expected whole-PDF abstraction result');
+  `);
+});
+
 test('browser fallback splits a single PDF that exceeds the request envelope', async () => {
   await runClientScript(`
     let splitCalled = false;
@@ -296,7 +320,7 @@ test('browser fallback splits a single PDF that exceeds the request envelope', a
       name: 'huge.pdf',
       type: 'application/pdf',
       size: 9_000_000,
-      data: 'x'.repeat(13_000_000),
+      data: 'x'.repeat(19_000_000),
       sourceFile: { name: 'huge.pdf', type: 'application/pdf', size: 9_000_000 },
     }], 0, true);
     assert(splitCalled, 'Expected oversized single PDF to use page-split fallback');

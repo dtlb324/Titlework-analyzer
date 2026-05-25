@@ -65,7 +65,7 @@ test('uses adaptive batching and parallel abstraction', () => {
   assert(script.includes('batchExceedsTimeoutLimit'), 'Missing proactive timeout batch check');
   assert(script.includes('finalizeBatchesForTimeout'), 'Missing timeout batch finalizer');
   assert(script.includes('CLOUD_RUN_REQUEST_TIMEOUT_MS = 240_000'), 'Missing Cloud Run request timeout budget');
-  assert(script.includes('REQUEST_ENVELOPE_SAFE_BYTES = 12_000_000'), 'Missing larger Cloud Run request envelope budget');
+  assert(script.includes('REQUEST_ENVELOPE_SAFE_BYTES = 18_000_000'), 'Missing larger Cloud Run request envelope budget');
   assert(script.includes('CLOUD_RUN_MAX_REQUEST_BYTES'), 'Missing Cloud Run payload guard');
   assert(script.includes('buildAbstractMessages'), 'Missing abstract message builder');
   assert(!script.includes('BATCH_SIZE'), 'Fixed BATCH_SIZE should be removed');
@@ -153,6 +153,8 @@ test('keeps large PDFs whole at ingest and retains page-split fallback', () => {
   assert(script.includes('readPdfPageCount'), 'Missing whole-PDF page count helper');
   assert(script.includes('pageRange: pdfPageCount ? [1, pdfPageCount]'), 'Expected whole-PDF page range metadata');
   assert(script.includes('splitPdfIntoEntries'), 'Missing PDF split fallback helper');
+  assert(script.includes('MAX_PDF_CHUNK_RAW_BYTES = 7_500_000'), 'Expected less aggressive PDF split chunk target');
+  assert(script.includes('TIMEOUT_SPLIT_CHUNK_RAW = 1_500_000'), 'Expected timeout PDF split target to preserve larger page ranges');
   assert(indexHtml.includes('pdf-lib'), 'Missing pdf-lib script');
   assert(script.includes('ingestUploadedFiles'), 'Missing shared upload ingest helper');
 });

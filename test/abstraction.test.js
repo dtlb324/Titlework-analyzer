@@ -1190,7 +1190,7 @@ test('Phase 4: default storage loader rejects oversized content before reading o
 
   let rejected = false;
   try {
-    await defaultBlobLoader(makeChunk({ id: 'chk_large', sizeBytes: 10_000_000 }));
+    await defaultBlobLoader(makeChunk({ id: 'chk_large', sizeBytes: 26_000_000 }));
   } catch (err) {
     rejected = /too large/i.test(err.message);
   }
