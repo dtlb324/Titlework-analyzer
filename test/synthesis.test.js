@@ -15,6 +15,8 @@ import {
   processSynthesisJob,
   SYNTHESIS_PROMPT,
   getSynthesisConfig,
+  getPartialSynthesisConfig,
+  effectiveSynthesisChunkSize,
 } from '../api/_lib/synthesis.js';
 import {
   processSynthesisBatch,
@@ -893,6 +895,8 @@ test('Invalid single-pass model output fails instead of persisting a complete re
 });
 
 test('Multi-segment: 120 abstracts → segments + merge with checkpoints written', async () => {
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
   const abstracts = manyAbstracts(120);
   const store = createMemoryPhase5Store({ abstracts });
   let segmentCalls = 0;
@@ -915,6 +919,8 @@ test('Multi-segment: 120 abstracts → segments + merge with checkpoints written
   assert(segments.length === 3, `Expected 3 segments stored, got ${segments.length}`);
   assert(segments.every(s => s.status === 'complete'), 'Expected all segments complete');
   assert(result.result?.status === 'complete', `Expected complete status, got ${result.result?.status}`);
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 test('Final merge claim lease exceeds upstream model timeout by default', async () => {
@@ -1031,6 +1037,8 @@ test('Segment timeout triggers binary split retry', async () => {
 
 test('Merge too large triggers tree merge of segment summaries', async () => {
   // Force tree merge by making segment summaries huge so the merge call would exceed budget.
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
   const abstracts = manyAbstracts(120);
   const store = createMemoryPhase5Store({ abstracts });
   let mergeCalls = 0;
@@ -1058,6 +1066,8 @@ test('Merge too large triggers tree merge of segment summaries', async () => {
   assert(treeMergeCalls > 0, `Expected tree-merge to run, got ${treeMergeCalls}`);
   assert(result.result?.status === 'complete', `Expected complete after tree merge, got ${result.result?.status}`);
   assert(result.result.warnings.some(w => w === 'merge_tree_applied'), `Expected merge_tree_applied warning, got ${JSON.stringify(result.result.warnings)}`);
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 test('Resume: completed segments are not re-run on a second process pass', async () => {
@@ -1290,6 +1300,17 @@ test('Synthesis endpoint returns 503 with fallback hint when ANTHROPIC_API_KEY m
   assert(res.body.fallback === 'browser_synthesis', `Expected browser_synthesis fallback, got ${res.body.fallback}`);
   if (previousKey) process.env.ANTHROPIC_API_KEY = previousKey;
   else process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+});
+
+test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
+  assert(effectiveSynthesisChunkSize(50, {}) === 50, 'Small jobs should keep default chunk size');
+  assert(effectiveSynthesisChunkSize(120, {}) >= 80, 'Bulk jobs should use larger synthesis segments');
+});
+
+test('getPartialSynthesisConfig defaults to Haiku for segment work', () => {
+  const partial = getPartialSynthesisConfig();
+  assert(partial.model === 'claude-haiku-4-5', `Expected Haiku partial model, got ${partial.model}`);
+  assert(partial.maxTokens <= 4000, 'Partial synthesis should use a smaller output cap');
 });
 
 test('Synthesis status lightweight poll omits full title opinion payload', async () => {

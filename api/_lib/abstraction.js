@@ -1,9 +1,10 @@
+import { buildMessagesRequestBody } from './anthropic-request.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 12_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const ABSTRACT_MODEL = process.env.ABSTRACT_MODEL || 'claude-haiku-4-5';
-const ABSTRACT_MAX_TOKENS = 2000;
+const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 1600, 512, 4096);
 const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
 const DEFAULT_MAX_ATTEMPTS = 5;
@@ -272,12 +273,12 @@ async function defaultModelClient(request) {
     error.statusCode = 503;
     throw error;
   }
-  const body = JSON.stringify({
+  const body = JSON.stringify(buildMessagesRequestBody({
     model: request.model,
-    max_tokens: request.maxTokens,
+    maxTokens: request.maxTokens,
     system: request.system,
     messages: request.messages,
-  });
+  }));
   const timeout = createTimeoutSignal(UPSTREAM_TIMEOUT_MS);
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -429,6 +430,30 @@ async function claimChunkWithLease(store, chunk, workerId, leaseMs) {
   return chunk;
 }
 
+export async function tryReuseExistingAbstract(store, chunk, workerId) {
+  if (!store?.getDocumentAbstractByChunkId) return null;
+  if ((chunk.abstractionStatus || 'pending') !== 'processing') return null;
+  if (chunk.abstractionWorkerId && workerId && chunk.abstractionWorkerId !== workerId) return null;
+  const existing = await store.getDocumentAbstractByChunkId(chunk.jobId, chunk.id);
+  if (existing?.abstractText?.trim()) {
+    return { source: 'same_chunk', abstractText: existing.abstractText, modelUsed: existing.modelUsed || ABSTRACT_MODEL };
+  }
+  // Skip peer reuse on retries (attempt > 1) so failed chunks are re-read and re-abstracted.
+  const attemptCount = Math.max(0, Number(chunk.abstractionAttempts) || 0);
+  if (attemptCount <= 1 && store.findReusableAbstractForChunk) {
+    const donor = await store.findReusableAbstractForChunk(chunk.jobId, chunk);
+    if (donor?.abstractText?.trim()) {
+      return {
+        source: 'peer_chunk',
+        abstractText: donor.abstractText,
+        modelUsed: donor.modelUsed || ABSTRACT_MODEL,
+        donorChunkId: donor.chunkId,
+      };
+    }
+  }
+  return null;
+}
+
 export async function processChunkAbstraction(chunk, options = {}) {
   const store = options.store;
   const model = options.model || ABSTRACT_MODEL;
@@ -448,6 +473,41 @@ export async function processChunkAbstraction(chunk, options = {}) {
 
   let loadedPayload = null;
   try {
+    const reuse = await tryReuseExistingAbstract(store, claimedChunk, workerId);
+    if (reuse) {
+      const record = {
+        jobId: processingChunk.jobId,
+        documentId: processingChunk.documentId,
+        chunkId: processingChunk.id,
+        abstractText: stripDocumentLabel(reuse.abstractText, sequenceIndex + 1),
+        modelUsed: reuse.modelUsed,
+        payloadBytes: 0,
+        latencyMs: Date.now() - startedAt,
+        inputTokens: 0,
+        outputTokens: 0,
+        status: 'completed',
+        attemptCount,
+        workerId,
+      };
+      const validation = validateAbstractPersistenceInput(record);
+      if (!validation.valid) {
+        const error = new Error(validation.reason);
+        error.status = 500;
+        throw error;
+      }
+      const saved = await store.saveDocumentAbstract(record, { reuseSource: reuse.source });
+      if (!saved) {
+        return { status: 'stale', chunkId: processingChunk.id };
+      }
+      logChunkStage('reused_abstract', processingChunk, {
+        workerId,
+        attemptCount,
+        reuseSource: reuse.source,
+        donorChunkId: reuse.donorChunkId || null,
+        elapsedMs: Date.now() - startedAt,
+      }, stageLoggingEnabled);
+      return { status: 'completed', chunkId: processingChunk.id, abstract: record, reused: true };
+    }
     logChunkStage('claimed', processingChunk, { workerId, attemptCount }, stageLoggingEnabled);
     const payload = await getBlobLoader(options)(processingChunk);
     loadedPayload = payload;
@@ -501,6 +561,17 @@ export async function processChunkAbstraction(chunk, options = {}) {
       const error = new Error(validation.reason);
       error.status = 500;
       throw error;
+    }
+    const latestChunk = store.getChunk
+      ? await store.getChunk(processingChunk.jobId, processingChunk.id)
+      : processingChunk;
+    if (
+      !latestChunk
+      || latestChunk.abstractionStatus !== 'processing'
+      || (latestChunk.abstractionWorkerId && latestChunk.abstractionWorkerId !== workerId)
+    ) {
+      logChunkStage('save_stale', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
+      return { status: 'stale', chunkId: processingChunk.id };
     }
     const saved = await store.saveDocumentAbstract(record);
     if (!saved) {

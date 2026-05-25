@@ -1569,8 +1569,11 @@ function createPostgresJobStore() {
       return rowToChunk(rows[0]);
     },
 
-    async saveDocumentAbstract(record) {
+    async saveDocumentAbstract(record, options = {}) {
       await ensureSchema();
+      const existing = await this.getDocumentAbstractByChunkId(record.jobId, record.chunkId);
+      const abstractChanged = !existing
+        || String(existing.abstractText || '') !== String(record.abstractText || '');
       const id = `abs_${randomUUID()}`;
       const rows = await sql`
         WITH claimed AS (
@@ -1621,17 +1624,48 @@ function createPostgresJobStore() {
         RETURNING *
       `;
       if (!rows[0]) return null;
-      await sql`DELETE FROM job_results WHERE job_id = ${record.jobId}`;
-      await sql`
-        UPDATE analysis_jobs
-        SET synthesis_plan_id = NULL,
-            synthesis_merge_worker_id = NULL,
-            synthesis_merge_lease_expires_at = NULL,
-            updated_at = now()
-        WHERE id = ${record.jobId}
-      `;
+      if (abstractChanged && !options.preserveSynthesisPlan) {
+        await sql`DELETE FROM job_results WHERE job_id = ${record.jobId}`;
+        await sql`
+          UPDATE analysis_jobs
+          SET synthesis_plan_id = NULL,
+              synthesis_merge_worker_id = NULL,
+              synthesis_merge_lease_expires_at = NULL,
+              updated_at = now()
+          WHERE id = ${record.jobId}
+        `;
+      }
       await refreshAbstractionCounts(record.jobId);
       return rowToAbstract(rows[0]);
+    },
+
+    async getDocumentAbstractByChunkId(jobId, chunkId) {
+      await ensureSchema();
+      const rows = await sql`
+        SELECT * FROM document_abstracts
+        WHERE job_id = ${jobId} AND chunk_id = ${chunkId}
+        LIMIT 1
+      `;
+      return rowToAbstract(rows[0]);
+    },
+
+    async findReusableAbstractForChunk(jobId, chunk) {
+      await ensureSchema();
+      if (!chunk) return null;
+      if (!chunk.fingerprint) return null;
+      const byFingerprint = await sql`
+        SELECT da.*, dc.id AS chunk_id_ref
+        FROM document_abstracts da
+        INNER JOIN document_chunks dc ON dc.id = da.chunk_id
+        WHERE da.job_id = ${jobId}
+          AND dc.fingerprint = ${chunk.fingerprint}
+          AND dc.id <> ${chunk.id}
+          AND dc.abstraction_status = 'completed'
+          AND COALESCE(length(da.abstract_text), 0) > 0
+        ORDER BY da.updated_at DESC
+        LIMIT 1
+      `;
+      return rowToAbstract(byFingerprint[0]);
     },
 
     async listDocumentAbstracts(jobId) {

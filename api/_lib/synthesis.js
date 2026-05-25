@@ -20,11 +20,17 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
+import { buildMessagesRequestBody } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_SYNTHESIS_MODEL = process.env.SYNTHESIS_MODEL || 'claude-sonnet-4-6';
+const DEFAULT_PARTIAL_SYNTHESIS_MODEL = process.env.SYNTHESIS_PARTIAL_MODEL || 'claude-haiku-4-5';
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 8192);
+const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 3500, 512, 8192);
 const DEFAULT_SYNTHESIS_CHUNK_SIZE = clampInt(process.env.SYNTHESIS_CHUNK_SIZE, 50, 1, 100);
+const DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE = 80;
+const DEFAULT_BULK_JOB_MIN_ABSTRACTS = 100;
+const SYNTHESIS_REPAIR_ENABLED = process.env.SYNTHESIS_REPAIR_ENABLED !== 'false';
 const DEFAULT_REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 12_000_000, 100_000, 20_000_000);
 const DEFAULT_REQUEST_OVERHEAD_BYTES = clampInt(process.env.REQUEST_OVERHEAD_BYTES, 350_000, 0, 1_000_000);
 const DEFAULT_MAX_ATTEMPTS = clampInt(process.env.SYNTHESIS_MAX_ATTEMPTS, 3, 1, 10);
@@ -90,6 +96,8 @@ export function getSynthesisConfig(overrides = {}) {
     model: overrides.model || DEFAULT_SYNTHESIS_MODEL,
     maxTokens: overrides.maxTokens || DEFAULT_SYNTHESIS_MAX_TOKENS,
     chunkSize: overrides.chunkSize || DEFAULT_SYNTHESIS_CHUNK_SIZE,
+    partialModel: overrides.partialModel || DEFAULT_PARTIAL_SYNTHESIS_MODEL,
+    partialMaxTokens: overrides.partialMaxTokens || DEFAULT_PARTIAL_MAX_TOKENS,
     requestEnvelopeSafeBytes: overrides.requestEnvelopeSafeBytes || DEFAULT_REQUEST_ENVELOPE_SAFE_BYTES,
     requestOverheadBytes: overrides.requestOverheadBytes || DEFAULT_REQUEST_OVERHEAD_BYTES,
     maxAttempts: overrides.maxAttempts || DEFAULT_MAX_ATTEMPTS,
@@ -98,6 +106,25 @@ export function getSynthesisConfig(overrides = {}) {
     concurrency: overrides.concurrency || DEFAULT_SYNTHESIS_CONCURRENCY,
     mergeConcurrency: overrides.mergeConcurrency || DEFAULT_MERGE_CONCURRENCY,
   };
+}
+
+export function getPartialSynthesisConfig(overrides = {}) {
+  const base = getSynthesisConfig(overrides);
+  return {
+    ...base,
+    model: overrides.partialModel || base.partialModel,
+    maxTokens: overrides.partialMaxTokens || base.partialMaxTokens,
+  };
+}
+
+export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
+  const resolved = getSynthesisConfig(config);
+  const bulkMin = clampInt(process.env.BULK_JOB_MIN_ABSTRACTS, DEFAULT_BULK_JOB_MIN_ABSTRACTS, 2, 400);
+  const bulkSize = clampInt(process.env.BULK_SYNTHESIS_CHUNK_SIZE, DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE, 10, 100);
+  if (abstractCount >= bulkMin) {
+    return Math.max(resolved.chunkSize, bulkSize);
+  }
+  return resolved.chunkSize;
 }
 
 function utf8ByteLength(value) {
@@ -191,14 +218,18 @@ export function groupAbstractsByDocument(abstracts) {
 }
 
 export function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemPrompt, configOverrides = {}) {
-  const config = getSynthesisConfig(configOverrides);
+  const config = {
+    ...getSynthesisConfig(configOverrides),
+    chunkSize: effectiveSynthesisChunkSize(abstracts.length, configOverrides),
+  };
+  const estimateModel = systemPrompt === SYNTHESIS_PROMPT ? config.model : config.partialModel;
   const chunks = [];
   let current = [];
   for (const abstract of abstracts) {
     const candidate = [...current, abstract];
     const candidateInput = buildAbstractInput(candidate, tract, ctx, preamble);
     const candidateBytes = estimateRequestBytes(
-      config.model,
+      estimateModel,
       config.maxTokens,
       systemPrompt || SYNTHESIS_PROMPT,
       [{ role: 'user', content: candidateInput }],
@@ -313,12 +344,12 @@ async function defaultModelClient(request) {
     error.statusCode = 503;
     throw error;
   }
-  const body = JSON.stringify({
+  const body = JSON.stringify(buildMessagesRequestBody({
     model: request.model,
-    max_tokens: request.maxTokens,
+    maxTokens: request.maxTokens,
     system: request.system,
     messages: request.messages,
-  });
+  }));
   const timeout = createTimeoutSignal(request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS);
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -514,6 +545,8 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   const store = options.store;
   if (!store) throw new Error('A job store is required to process synthesis segments.');
   const config = getSynthesisConfig(options.config || {});
+  const isSinglePass = options.singlePass === true;
+  const activeConfig = isSinglePass ? config : getPartialSynthesisConfig(options.config || {});
   const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
   const leaseMs = options.leaseMs || 120_000;
   const tract = options.tract || '';
@@ -562,7 +595,6 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   const totalDocs = abstracts.length;
   const start = segment.startSequenceIndex + 1;
   const end = segment.endSequenceIndex + 1;
-  const isSinglePass = options.singlePass === true;
   const systemPrompt = isSinglePass ? SYNTHESIS_PROMPT : PARTIAL_SYNTHESIS_PROMPT;
   const preamble = isSinglePass
     ? `Below are ${totalDocs} document abstracts. Synthesize into a complete title opinion.`
@@ -572,11 +604,11 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   let lastError = null;
   for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
     try {
-      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, config, options);
+      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options);
       const validation = isSinglePass ? validateFinalOpinion(result.text) : validateSegmentSummary(result.text);
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
-      if (!validation.ok && attempt < config.maxAttempts) {
+      if (!validation.ok && attempt < config.maxAttempts && SYNTHESIS_REPAIR_ENABLED) {
         // Repair retry: ask model to be more complete.
         const repairAbstracts = segmentAbstracts;
         const repairPreamble = `${preamble}\n\nPrevious response was incomplete or missing required sections: ${validation.reason} Produce a complete response that includes every required section.`;
@@ -586,7 +618,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
           contextNotes,
           preamble: repairPreamble,
           systemPrompt,
-          config,
+          config: activeConfig,
           options,
         });
         const repairValidation = isSinglePass ? validateFinalOpinion(retry.text) : validateSegmentSummary(retry.text);
@@ -683,16 +715,19 @@ async function mergeSegmentsIntoOpinion({
   tract,
   contextNotes,
   config,
+  partialConfig,
   options,
   warningsAccum,
   tokensAccum,
 }) {
+  const partial = partialConfig || getPartialSynthesisConfig(config || {});
+  const finalConfig = config || getSynthesisConfig();
   const mergeAbstracts = segmentSummaries.map(summary => ({
     filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
     abstract: summary.summaryText,
   }));
   const preamble = `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`;
-  const fit = fitsRequestBudget(mergeAbstracts, tract, contextNotes, preamble, SYNTHESIS_PROMPT, config);
+  const fit = fitsRequestBudget(mergeAbstracts, tract, contextNotes, preamble, SYNTHESIS_PROMPT, finalConfig);
   if (!fit.fits && mergeAbstracts.length > 2) {
     // Tree-merge: pair segments and partial-merge until one summary remains.
     warningsAccum.push('merge_tree_applied');
@@ -713,7 +748,7 @@ async function mergeSegmentsIntoOpinion({
       }
       const next = new Array(pairSlots.length);
       const mergePairs = pairSlots.filter(slot => slot.right);
-      const mergedNodes = await runWithConcurrency(mergePairs, config.mergeConcurrency, async slot => {
+      const mergedNodes = await runWithConcurrency(mergePairs, finalConfig.mergeConcurrency, async slot => {
         const { left, right } = slot;
         const pair = [
           { filename: left.filename, abstract: left.abstract },
@@ -726,7 +761,7 @@ async function mergeSegmentsIntoOpinion({
           contextNotes,
           partialPreamble,
           PARTIAL_SYNTHESIS_PROMPT,
-          config,
+          partial,
           options,
         );
         tokensAccum.inputTokens += result.usage.inputTokens || 0;
@@ -755,7 +790,7 @@ async function mergeSegmentsIntoOpinion({
       contextNotes,
       preamble,
       SYNTHESIS_PROMPT,
-      config,
+      finalConfig,
       options,
     );
     tokensAccum.inputTokens += merged.usage.inputTokens || 0;
@@ -773,7 +808,7 @@ async function mergeSegmentsIntoOpinion({
     contextNotes,
     preamble,
     SYNTHESIS_PROMPT,
-    config,
+    finalConfig,
     options,
   );
   tokensAccum.inputTokens += result.usage.inputTokens || 0;
@@ -992,6 +1027,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           tract,
           contextNotes,
           config,
+          partialConfig: getPartialSynthesisConfig(options.config || {}),
           options,
           warningsAccum,
           tokensAccum,
@@ -1056,6 +1092,7 @@ export async function processSynthesisJob(jobId, options = {}) {
             tract,
             contextNotes,
             config,
+            partialConfig: getPartialSynthesisConfig(options.config || {}),
             options,
             warningsAccum,
             tokensAccum,
