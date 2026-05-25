@@ -1417,15 +1417,17 @@ function createPostgresJobStore() {
       await ensureSchema();
       const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
       const rows = await sql`
-        SELECT DISTINCT job_id
-        FROM document_chunks
-        WHERE upload_status = 'uploaded'
+        SELECT DISTINCT dc.job_id
+        FROM document_chunks dc
+        INNER JOIN analysis_jobs j ON j.id = dc.job_id
+        WHERE j.status <> 'canceled'
+          AND dc.upload_status = 'uploaded'
           AND (
-            abstraction_status = 'pending'
-            OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
-            OR (abstraction_status = 'processing' AND (abstraction_lease_expires_at IS NULL OR abstraction_lease_expires_at <= now()))
+            dc.abstraction_status = 'pending'
+            OR (dc.abstraction_status = 'retry_wait' AND (dc.abstraction_retry_at IS NULL OR dc.abstraction_retry_at <= now()))
+            OR (dc.abstraction_status = 'processing' AND (dc.abstraction_lease_expires_at IS NULL OR dc.abstraction_lease_expires_at <= now()))
           )
-        ORDER BY job_id ASC
+        ORDER BY dc.job_id ASC
         LIMIT ${safeLimit}
       `;
       return rows.map(row => row.job_id);
@@ -1438,11 +1440,12 @@ function createPostgresJobStore() {
 
     async cancelJob(jobId, reason = null) {
       await ensureSchema();
+      const cancelReason = reason || 'Job canceled by user.';
       const rows = await sql`
         UPDATE analysis_jobs
         SET status = 'canceled',
             current_phase = 'canceled',
-            error_message = ${reason || 'Job canceled by user.'},
+            error_message = ${cancelReason},
             completed_at = COALESCE(completed_at, now()),
             updated_at = now()
         WHERE id = ${jobId}
@@ -1457,6 +1460,20 @@ function createPostgresJobStore() {
         WHERE job_id = ${jobId}
           AND abstraction_status = 'processing'
       `;
+      await sql`
+        UPDATE document_chunks
+        SET abstraction_status = 'failed',
+            abstraction_error_type = 'canceled',
+            abstraction_error_message = ${cancelReason},
+            abstraction_retry_at = NULL,
+            abstraction_claimed_at = NULL,
+            abstraction_lease_expires_at = NULL,
+            abstraction_worker_id = NULL,
+            updated_at = now()
+        WHERE job_id = ${jobId}
+          AND abstraction_status IN ('pending', 'retry_wait')
+      `;
+      await refreshAbstractionCounts(jobId);
       return rowToJob(rows[0]);
     },
 

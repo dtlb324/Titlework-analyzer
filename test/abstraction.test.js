@@ -354,16 +354,16 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     async cancelJob(jobId, reason) {
       const job = jobs.get(jobId);
       if (!job) return null;
+      const cancelReason = reason || 'Job canceled by user.';
       const updated = {
         ...job,
         status: 'canceled',
         currentPhase: 'canceled',
-        errorMessage: reason || 'Job canceled by user.',
+        errorMessage: cancelReason,
         completedAt: job.completedAt || now,
         updatedAt: now,
       };
       jobs.set(jobId, updated);
-      // clear any leases on processing chunks
       for (const chunk of orderedChunks(jobId)) {
         if (chunk.abstractionStatus === 'processing') {
           chunks.set(chunk.id, {
@@ -373,8 +373,21 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
             abstractionWorkerId: null,
             updatedAt: now,
           });
+        } else if (['pending', 'retry_wait'].includes(chunk.abstractionStatus)) {
+          chunks.set(chunk.id, {
+            ...chunk,
+            abstractionStatus: 'failed',
+            abstractionErrorType: 'canceled',
+            abstractionErrorMessage: cancelReason,
+            abstractionRetryAt: null,
+            abstractionClaimedAt: null,
+            abstractionLeaseExpiresAt: null,
+            abstractionWorkerId: null,
+            updatedAt: now,
+          });
         }
       }
+      rollup(jobId);
       return updated;
     },
     async refreshAbstractionRollup(jobId) {
@@ -1058,6 +1071,19 @@ test('Phase 4: job progress rolls up correctly across pending/processing/complet
   assert(status.completed === 2, `Expected 2 completed, got ${status.completed}`);
   assert(status.failed === 1, `Expected 1 failed, got ${status.failed}`);
   assert(job.status === 'partial_failed', `Expected partial_failed rollup, got ${job.status}`);
+});
+
+test('Phase 4: cancel fails pending chunks so canceled jobs leave the worker queue', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_one', chunkOrder: 0, abstractionStatus: 'pending' }),
+    makeChunk({ id: 'chk_two', chunkOrder: 1, abstractionStatus: 'retry_wait', abstractionRetryAt: new Date(Date.now() + 60_000).toISOString() }),
+  ]);
+  await store.cancelJob('job_test_1', 'test cancel');
+  const chunks = await store.listChunks('job_test_1');
+  for (const chunk of chunks) {
+    assert(chunk.abstractionStatus === 'failed', `Expected canceled chunk ${chunk.id} to be failed`);
+    assert(chunk.abstractionErrorType === 'canceled', `Expected canceled error type on ${chunk.id}`);
+  }
 });
 
 test('Phase 4: cancellation stops future chunk processing', async () => {
