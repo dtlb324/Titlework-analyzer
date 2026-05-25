@@ -114,11 +114,13 @@ function validateRequestBody(body) {
     'claude-sonnet-4-6',
     'claude-opus-4-6',
     'claude-opus-4-7',
-    'claude-haiku-4-5',
     'gemini-2.5-flash',
     'gemini-2.5-pro',
     'gemini-2.0-flash',
   ];
+  if (/^claude-haiku/i.test(body.model || '')) {
+    return { valid: false, reason: 'Invalid or disallowed model.' };
+  }
   if (!body.model || (!allowedModels.includes(body.model) && !isGeminiModel(body.model) && !isAnthropicModel(body.model))) {
     return { valid: false, reason: 'Invalid or disallowed model.' };
   }

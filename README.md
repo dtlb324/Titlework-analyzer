@@ -33,7 +33,7 @@ Set these on both Cloud Run services unless noted otherwise:
 |------|----------|-------|
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key for document abstraction (`gemini-2.5-flash` by default). Also accepts `GOOGLE_API_KEY`. |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for synthesis, follow-ups, and optional abstraction escalation. |
-| `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Set to `claude-haiku-4-5` to use Anthropic for abstraction instead. |
+| `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Claude Haiku is not supported for abstraction. |
 | `GEMINI_THINKING_BUDGET` | Optional | Default `0` (fastest/cheapest). Set to `-1` for Gemini dynamic thinking on abstraction. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
@@ -171,7 +171,7 @@ The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs a
 
 - Bulk upload up to 400 documents per job.
 - Direct browser-to-GCS durable uploads.
-- Server-side abstraction with Claude Haiku 4.5.
+- Server-side abstraction with Gemini 2.5 Flash.
 - Server-side synthesis and follow-ups with Claude Sonnet 4.6.
 - Durable job URLs that survive refreshes and closed tabs.
 - Retry, cancellation, partial failure, and failed-chunk recovery.

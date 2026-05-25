@@ -109,6 +109,21 @@ test('API ping validates APP_PASSWORD when password gate is enabled', async () =
   assert(valid.statusCode === 200, `Expected valid ping password to return 200, got ${valid.statusCode}`);
 });
 
+test('API rejects claude-haiku-4-5 (removed from abstraction)', async () => {
+  const prevGemini = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  const req = mockReq({
+    model: 'claude-haiku-4-5',
+    messages: [{ role: 'user', content: 'hello' }],
+  });
+  const res = mockRes();
+  await handler(req, res);
+  if (prevGemini) process.env.GEMINI_API_KEY = prevGemini;
+  else delete process.env.GEMINI_API_KEY;
+  assert(res.statusCode === 400, `Expected 400, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
+  assert(String(res.body?.error).includes('model'), 'Should reject removed Haiku model');
+});
+
 test('API rejects unknown model', async () => {
   const prev = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
