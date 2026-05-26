@@ -1,6 +1,7 @@
 import {
   abstractionApiKeyError,
   invokeModel,
+  invokeAnthropicModelStream,
   isGeminiModel,
   mapModelResponseToAnalyzeProxy,
 } from '../api/_lib/model-client.js';
@@ -62,6 +63,57 @@ test('invokeModel routes Gemini models to Gemini API', async () => {
   assert(requestedUrl.includes('gemini-2.5-flash:generateContent'), `Expected Gemini endpoint, got ${requestedUrl}`);
   assert(result.text === 'abstract ok', 'Expected model text');
   assert(result.usage.input_tokens === 10, 'Expected usage mapping');
+});
+
+test('invokeAnthropicModelStream requests stream=true and forwards deltas', async () => {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevFetch = global.fetch;
+  process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+  let requestBody = null;
+  global.fetch = async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    const encoder = new TextEncoder();
+    const chunk = encoder.encode([
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+      '',
+    ].join('\n'));
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader() {
+          let done = false;
+          return {
+            async read() {
+              if (done) return { done: true, value: undefined };
+              done = true;
+              return { done: false, value: chunk };
+            },
+          };
+        },
+      },
+    };
+  };
+  const deltas = [];
+  const result = await invokeAnthropicModelStream({
+    model: 'claude-sonnet-4-6',
+    maxTokens: 100,
+    system: 'system prompt',
+    messages: [{ role: 'user', content: 'hello' }],
+  }, {
+    onDelta: (delta) => { deltas.push(delta); },
+  });
+  global.fetch = prevFetch;
+  if (prevKey) process.env.ANTHROPIC_API_KEY = prevKey;
+  else delete process.env.ANTHROPIC_API_KEY;
+
+  assert(requestBody?.stream === true, 'Expected stream flag on Anthropic request');
+  assert(result.text === 'Hi', 'Expected streamed text');
+  assert(deltas.join('') === 'Hi', 'Expected onDelta callbacks');
 });
 
 test('mapModelResponseToAnalyzeProxy preserves analyze.js response shape', () => {

@@ -22,7 +22,7 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
-import { isGeminiModel, invokeModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
+import { isGeminiModel, invokeModel, invokeAnthropicModelStream, isAnthropicModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
 import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-4-6';
@@ -106,6 +106,61 @@ export function summarizeSynthesisWarningFlags(warnings = []) {
 
 export function buildSynthesisMetricsEvent(fields) {
   return { ...fields, ts: new Date().toISOString() };
+}
+
+export function synthesisStreamEnabled(options = {}) {
+  if (options.streamFinalOpinion === true) return true;
+  if (options.streamFinalOpinion === false) return false;
+  return process.env.SYNTHESIS_STREAM_ENABLED === 'true';
+}
+
+function createPreviewWriter(store, jobId) {
+  if (!store?.setSynthesisPreview || !jobId) {
+    return {
+      async begin() {},
+      async flush() {},
+      async complete() {},
+      async discard() {},
+    };
+  }
+  let buffer = '';
+  let lastFlushAt = 0;
+  const minFlushMs = 250;
+  async function flush(force = false) {
+    const now = Date.now();
+    if (!force && now - lastFlushAt < minFlushMs) return;
+    lastFlushAt = now;
+    await store.setSynthesisPreview(jobId, {
+      text: buffer,
+      complete: false,
+      bytesReceived: buffer.length,
+    });
+  }
+  return {
+    async begin() {
+      buffer = '';
+      lastFlushAt = 0;
+      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0 });
+    },
+    async onDelta(_delta, fullText) {
+      buffer = fullText;
+      await flush(false);
+    },
+    async complete() {
+      await store.setSynthesisPreview(jobId, {
+        text: buffer,
+        complete: true,
+        bytesReceived: buffer.length,
+      });
+    },
+    async discard() {
+      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+    },
+    get text() {
+      return buffer;
+    },
+  };
 }
 
 export function logSynthesisMetrics(fields) {
@@ -421,6 +476,14 @@ async function defaultModelClient(request) {
   const timeoutMs = request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS;
   const timeout = createTimeoutSignal(timeoutMs);
   try {
+    if (request.stream && isAnthropicModel(request.model)) {
+      return await invokeAnthropicModelStream(request, {
+        timeoutMs,
+        createTimeoutSignal: () => timeout,
+        onDelta: request.onDelta,
+        onEvent: request.onEvent,
+      });
+    }
     return await invokeModel(request, {
       timeoutMs,
       createTimeoutSignal: () => timeout,
@@ -597,22 +660,48 @@ async function callSynthesisModel({
     err.status = 413;
     throw err;
   }
+  const shouldStream = Boolean(options.enableFinalStream)
+    && synthesisStreamEnabled(options)
+    && systemPrompt === SYNTHESIS_PROMPT
+    && isAnthropicModel(config.model);
+  const previewWriter = shouldStream
+    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId))
+    : null;
+  if (previewWriter?.begin) await previewWriter.begin();
   const started = Date.now();
-  const response = await getModelClient(options)({
-    model: config.model,
-    maxTokens: config.maxTokens,
-    system: systemPrompt,
-    messages,
-    payloadBytes,
-    upstreamTimeoutMs: config.upstreamTimeoutMs,
-  });
-  return {
-    text: response.text || '',
-    model: response.model || config.model,
-    usage: extractUsage(response.usage),
-    payloadBytes,
-    latencyMs: Date.now() - started,
-  };
+  try {
+    const response = await getModelClient(options)({
+      model: config.model,
+      maxTokens: config.maxTokens,
+      system: systemPrompt,
+      messages,
+      payloadBytes,
+      upstreamTimeoutMs: config.upstreamTimeoutMs,
+      stream: shouldStream,
+      onDelta: previewWriter ? (delta, fullText) => previewWriter.onDelta(delta, fullText) : undefined,
+    });
+    if (previewWriter?.complete) await previewWriter.complete();
+    if (shouldStream && response.timeToFirstDeltaMs != null) {
+      logSynthesisMetrics({
+        event: 'synthesis_merge_stream_delta',
+        jobId: options.jobId || null,
+        timeToFirstDeltaMs: response.timeToFirstDeltaMs,
+        outputBytes: (response.text || '').length,
+      });
+    }
+    return {
+      text: response.text || '',
+      model: response.model || config.model,
+      usage: extractUsage(response.usage),
+      payloadBytes,
+      latencyMs: Date.now() - started,
+      streamed: shouldStream,
+      timeToFirstDeltaMs: response.timeToFirstDeltaMs ?? null,
+    };
+  } catch (err) {
+    if (previewWriter?.discard) await previewWriter.discard();
+    throw err;
+  }
 }
 
 async function synthesizeWithBinarySplit({
@@ -969,7 +1058,11 @@ async function mergeSegmentsIntoOpinion({
       preamble,
       SYNTHESIS_PROMPT,
       finalConfig,
-      options,
+      {
+        ...options,
+        enableFinalStream: true,
+        jobId: options.jobId,
+      },
     );
     tokensAccum.inputTokens += merged.usage.inputTokens || 0;
     tokensAccum.outputTokens += merged.usage.outputTokens || 0;
@@ -978,6 +1071,8 @@ async function mergeSegmentsIntoOpinion({
       model: merged.model,
       payloadBytes: merged.payloadBytes,
       latencyMs: merged.latencyMs,
+      streamed: Boolean(merged.streamed),
+      timeToFirstDeltaMs: merged.timeToFirstDeltaMs ?? null,
     };
   }
   const result = await tryRecursiveSegment(
@@ -987,7 +1082,11 @@ async function mergeSegmentsIntoOpinion({
     preamble,
     SYNTHESIS_PROMPT,
     finalConfig,
-    options,
+    {
+      ...options,
+      enableFinalStream: true,
+      jobId: options.jobId,
+    },
   );
   tokensAccum.inputTokens += result.usage.inputTokens || 0;
   tokensAccum.outputTokens += result.usage.outputTokens || 0;
@@ -996,6 +1095,8 @@ async function mergeSegmentsIntoOpinion({
     model: result.model,
     payloadBytes: result.payloadBytes,
     latencyMs: result.latencyMs,
+    streamed: Boolean(result.streamed),
+    timeToFirstDeltaMs: result.timeToFirstDeltaMs ?? null,
   };
 }
 
@@ -1170,6 +1271,7 @@ export async function processSynthesisJob(jobId, options = {}) {
   }
   let mergeRanInThisBatch = false;
   let mergeClaimBlocked = false;
+  let lastMergeStreamMeta = null;
   async function claimFinalWriter() {
     if (!store.claimSynthesisMerge) return { workerId: null };
     const claim = await store.claimSynthesisMerge(jobId, planId, { workerId: mergeWorkerId, leaseMs: options.mergeLeaseMs || DEFAULT_MERGE_LEASE_MS });
@@ -1231,12 +1333,16 @@ export async function processSynthesisJob(jobId, options = {}) {
           contextNotes,
           config,
           partialConfig: getPartialSynthesisConfig(options.config || {}),
-          options,
+          options: { ...options, store, jobId },
           warningsAccum,
           tokensAccum,
         });
         const validation = validateFinalOpinion(merged.text);
-        if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
+        if (!validation.ok) {
+          warningsAccum.push(`final_validation_failed: ${validation.reason}`);
+          if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+        }
+        lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
         const failedDocs = await failedDocumentsForMerge();
         if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
         await appendResultWarnings(warningsAccum);
@@ -1306,12 +1412,16 @@ export async function processSynthesisJob(jobId, options = {}) {
             contextNotes,
             config,
             partialConfig: getPartialSynthesisConfig(options.config || {}),
-            options,
+            options: { ...options, store, jobId },
             warningsAccum,
             tokensAccum,
           });
           const validation = validateFinalOpinion(merged.text);
-          if (!validation.ok) warningsAccum.push(`final_validation_failed: ${validation.reason}`);
+          if (!validation.ok) {
+            warningsAccum.push(`final_validation_failed: ${validation.reason}`);
+            if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+          }
+          lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
           const failedDocs = await failedDocumentsForMerge();
           if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
           await appendResultWarnings(warningsAccum);
@@ -1396,6 +1506,8 @@ export async function processSynthesisJob(jobId, options = {}) {
       modelUsed: result.modelUsed || null,
       warningFlags: summarizeSynthesisWarningFlags(result.warnings),
       synthesisDriver: 'server',
+      streamed: Boolean(lastMergeStreamMeta?.streamed),
+      timeToFirstDeltaMs: lastMergeStreamMeta?.timeToFirstDeltaMs ?? null,
     });
   }
   logSynthesisMetrics({

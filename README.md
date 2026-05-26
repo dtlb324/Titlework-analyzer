@@ -51,6 +51,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `STORAGE_MAX_UPLOAD_BYTES` | Optional | Default `104857600` (100 MB). |
 | `WORKFLOW_BATCH_LIMIT` | Optional | Default `12`. |
 | `SYNTHESIS_BATCH_LIMIT` | Optional | Default `4` (max `16`). Ready synthesis segments claimed per `/synthesis/process` batch. Production releases set `8`. |
+| `SYNTHESIS_STREAM_ENABLED` | Optional | Default off. When `true`, streams the final Sonnet merge to `GET /api/jobs/:id/synthesis/preview` while merge is in progress; validated opinion is saved only after the stream completes. |
 | `WORKFLOW_CONCURRENCY` | Optional | Default `4`. |
 | `WORKFLOW_BUDGET_MS` | Optional | Default `1200000` (20 min). |
 | `WORKFLOW_LEASE_MS` | Optional | Default is longer than the model upstream timeout. |

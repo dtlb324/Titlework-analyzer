@@ -537,6 +537,12 @@ function rowToJob(row) {
     synthesisMergeLeaseExpiresAt: row.synthesis_merge_lease_expires_at instanceof Date
       ? row.synthesis_merge_lease_expires_at.toISOString()
       : row.synthesis_merge_lease_expires_at,
+    synthesisPreviewText: row.synthesis_preview_text || null,
+    synthesisPreviewComplete: Boolean(row.synthesis_preview_complete),
+    synthesisPreviewBytes: row.synthesis_preview_bytes ?? 0,
+    synthesisPreviewUpdatedAt: row.synthesis_preview_updated_at instanceof Date
+      ? row.synthesis_preview_updated_at.toISOString()
+      : row.synthesis_preview_updated_at,
   };
 }
 
@@ -915,6 +921,10 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_plan_id text`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_merge_worker_id text`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_merge_lease_expires_at timestamptz`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_text text`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_complete boolean NOT NULL DEFAULT false`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_bytes integer NOT NULL DEFAULT 0 CHECK (synthesis_preview_bytes >= 0)`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_updated_at timestamptz`;
         await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_chunks_split_child_unique ON document_chunks(job_id, split_parent_chunk_id, fingerprint) WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL`;
         await sql`
           CREATE TABLE IF NOT EXISTS synthesis_segments (
@@ -1829,6 +1839,10 @@ function createPostgresJobStore() {
         SET synthesis_plan_id = ${planId},
             synthesis_merge_worker_id = NULL,
             synthesis_merge_lease_expires_at = NULL,
+            synthesis_preview_text = NULL,
+            synthesis_preview_complete = false,
+            synthesis_preview_bytes = 0,
+            synthesis_preview_updated_at = NULL,
             updated_at = now()
         WHERE id = ${jobId}
       `;
@@ -2147,6 +2161,61 @@ function createPostgresJobStore() {
       return rows.map(rowToSynthesisSegment);
     },
 
+    async setSynthesisPreview(jobId, patch = {}) {
+      await ensureSchema();
+      const text = typeof patch.text === 'string' ? patch.text : '';
+      const complete = Boolean(patch.complete);
+      const bytesReceived = Number.isFinite(Number(patch.bytesReceived))
+        ? Math.max(0, Math.floor(Number(patch.bytesReceived)))
+        : text.length;
+      const rows = await sql`
+        UPDATE analysis_jobs
+        SET
+          synthesis_preview_text = ${text},
+          synthesis_preview_complete = ${complete},
+          synthesis_preview_bytes = ${bytesReceived},
+          synthesis_preview_updated_at = now(),
+          updated_at = now()
+        WHERE id = ${jobId}
+        RETURNING synthesis_preview_text, synthesis_preview_complete, synthesis_preview_bytes
+      `;
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        text: row.synthesis_preview_text || '',
+        complete: Boolean(row.synthesis_preview_complete),
+        bytesReceived: row.synthesis_preview_bytes ?? 0,
+      };
+    },
+
+    async getSynthesisPreview(jobId) {
+      await ensureSchema();
+      const job = await this.getJob(jobId);
+      if (!job) return null;
+      return {
+        text: job.synthesisPreviewText || '',
+        complete: Boolean(job.synthesisPreviewComplete),
+        bytesReceived: job.synthesisPreviewBytes || 0,
+        updatedAt: job.synthesisPreviewUpdatedAt || null,
+      };
+    },
+
+    async clearSynthesisPreview(jobId) {
+      await ensureSchema();
+      const rows = await sql`
+        UPDATE analysis_jobs
+        SET
+          synthesis_preview_text = NULL,
+          synthesis_preview_complete = false,
+          synthesis_preview_bytes = 0,
+          synthesis_preview_updated_at = NULL,
+          updated_at = now()
+        WHERE id = ${jobId}
+        RETURNING id
+      `;
+      return rows.length > 0;
+    },
+
     async claimSynthesisMerge(jobId, planId, options = {}) {
       await ensureSchema();
       const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
@@ -2218,6 +2287,7 @@ function createPostgresJobStore() {
         RETURNING *
       `;
       if (!rows[0]) return null;
+      await this.clearSynthesisPreview(jobId);
       // Roll the job into its terminal status. assertValidStatusTransition
       // forbids regressing once a job has reached 'complete'.
       const desiredJobStatus = status === 'complete' ? 'complete'

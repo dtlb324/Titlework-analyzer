@@ -1,4 +1,5 @@
 import { buildMessagesRequestBody } from './anthropic-request.js';
+import { consumeAnthropicMessageStream } from './anthropic-stream.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, isGeminiModel } from './gemini-request.js';
 
 export { isGeminiModel, geminiApiKeyError };
@@ -37,6 +38,63 @@ function createDefaultTimeoutSignal(ms) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
   return { signal: controller.signal, cleanup: () => clearTimeout(timeout) };
+}
+
+export async function invokeAnthropicModelStream(request, options = {}) {
+  const keyError = modelApiKeyError(request.model);
+  if (keyError) {
+    const error = new Error(keyError);
+    error.statusCode = 503;
+    throw error;
+  }
+  const body = JSON.stringify({
+    ...buildMessagesRequestBody({
+      model: request.model,
+      maxTokens: request.maxTokens,
+      system: request.system,
+      messages: request.messages,
+    }),
+    stream: true,
+  });
+  const timeoutMs = Number(options.timeoutMs) || 240_000;
+  const timeout = options.createTimeoutSignal
+    ? options.createTimeoutSignal(timeoutMs)
+    : createDefaultTimeoutSignal(timeoutMs);
+  const started = Date.now();
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anthropicApiKey(),
+        'anthropic-version': '2023-06-01',
+      },
+      body,
+      signal: timeout.signal,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(data?.error?.message || data?.error || `Anthropic request failed (HTTP ${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
+    const streamResult = await consumeAnthropicMessageStream(response.body, {
+      model: request.model,
+      onDelta: options.onDelta,
+      onEvent: options.onEvent,
+    });
+    return {
+      text: streamResult.text || '',
+      model: streamResult.model || request.model,
+      usage: streamResult.usage || {},
+      stopReason: streamResult.stopReason || null,
+      firstDeltaAt: streamResult.firstDeltaAt,
+      latencyMs: Date.now() - started,
+      timeToFirstDeltaMs: streamResult.firstDeltaAt != null ? streamResult.firstDeltaAt - started : null,
+    };
+  } finally {
+    timeout.cleanup?.();
+  }
 }
 
 async function invokeAnthropicModel(request, options = {}) {
