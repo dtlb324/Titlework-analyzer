@@ -308,6 +308,10 @@ export function validateSaveJobResultInput(input) {
   const outputTokens = toInteger(input.outputTokens, null);
   const payloadBytes = toInteger(input.payloadBytes, null);
   const synthesisDurationMs = toInteger(input.synthesisDurationMs, null);
+  const synthesisDriver = input.synthesisDriver === 'browser' ? 'browser' : null;
+  if (synthesisDriver === 'browser' && !warnings.some(w => String(w).startsWith('synthesis_driver:'))) {
+    warnings.unshift('synthesis_driver:browser');
+  }
   return {
     valid: true,
     payload: {
@@ -321,6 +325,7 @@ export function validateSaveJobResultInput(input) {
       outputTokens: Number.isInteger(outputTokens) && outputTokens >= 0 ? outputTokens : null,
       payloadBytes: Number.isInteger(payloadBytes) && payloadBytes >= 0 ? payloadBytes : null,
       synthesisDurationMs: Number.isInteger(synthesisDurationMs) && synthesisDurationMs >= 0 ? synthesisDurationMs : null,
+      synthesisDriver,
     },
   };
 }

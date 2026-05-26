@@ -455,6 +455,13 @@ test('Phase 6: job follow-up posts to /followup endpoint', () => {
     'Follow-up must render Q&A history');
 });
 
+test('Phase 0: durable jobs show keep-tab-open notice during server processing', () => {
+  assert(indexHtml.includes('id="infoBox"'), 'Expected info banner container');
+  assert(script.includes('function showKeepOpenNotice'), 'Expected keep-tab-open helper');
+  assert(script.includes('runServerSynthesis'), 'Expected server synthesis entry point');
+  assert(script.includes('showKeepOpenNotice()'), 'Server synthesis must show keep-tab-open notice');
+});
+
 test('Phase 6: recent jobs store caps at 20 entries', () => {
   assert(script.includes('title-analyzer:recent-jobs:v1'),
     'Must use a versioned localStorage key for recent jobs');

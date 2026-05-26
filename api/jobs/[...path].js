@@ -591,6 +591,14 @@ async function handleJobResult(req, res, requestId, store, jobId) {
     }
     const result = await store.saveJobResult(jobId, validation.payload);
     if (!result) return res.status(404).json({ error: 'Job not found.', requestId });
+    if (validation.payload.synthesisDriver === 'browser') {
+      console.log(JSON.stringify({
+        event: 'synthesis_driver_browser_fallback',
+        jobId,
+        requestId,
+        ts: new Date().toISOString(),
+      }));
+    }
     const updatedJob = await store.getJob(jobId);
     return res.status(200).json({
       result: publicJobResult(result),

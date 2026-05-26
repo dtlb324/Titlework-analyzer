@@ -1,7 +1,8 @@
 # Synthesis Speed & Latency Optimization — Design Specification
 
-**Status:** Draft for review  
+**Status:** Phase 0 in progress  
 **Date:** 2026-05-26  
+**Runbook:** [synthesis-speed-phase-0-runbook.md](../../synthesis-speed-phase-0-runbook.md)
 **Product decisions (2026-05-26):**
 - **`OPUS_AUDIT_ENABLED`** stays **off** in production. Opus audit is out of scope; do not enable unless explicitly re-requested.
 - **Background worker** stays **disabled for now** (`WORKER_DISABLED=true`, scale-to-zero). Jobs run via API kicks + browser polling while the tab is open. Worker enablement is deferred — revisit later if unattended processing is needed.
@@ -155,10 +156,13 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 
 #### 0.2 Operational checklist (browser-driven)
 
-- [ ] Confirm jobs use **server synthesis**, not browser fallback; investigate any fallback errors.
-- [ ] Users keep the tab open through synthesis (especially the final Sonnet merge).
-- [ ] Log/monitor: segment count, `retry_wait`, `repair_retry`, `merge_tree_applied`, `final_validation_failed`, merge `latencyMs`.
-- [ ] Verify Anthropic/Gemini rate-limit headroom (429 → `retry_wait` adds up to 5 min backoff).
+- [x] Phase 0 runbook published (`docs/synthesis-speed-phase-0-runbook.md`).
+- [x] Release workflow sets Phase 0 API env vars; worker keeps `WORKER_DISABLED=true` and `OPUS_AUDIT_ENABLED=false`.
+- [x] Structured logs: `synthesis_batch_complete`, `synthesis_merge_complete`, `synthesis_driver_browser_fallback`.
+- [x] UI keep-tab-open notice during server abstraction/synthesis.
+- [ ] Confirm jobs use **server synthesis**, not browser fallback; investigate any fallback errors in logs.
+- [ ] Baseline P50 merge duration for 100-doc and 300-doc jobs from `synthesis_merge_complete` logs.
+- [ ] Verify Gemini/Anthropic rate-limit headroom (`retry_wait` in synthesis status).
 
 **Phase 0 success metrics:**
 - Zero browser-fallback synthesis on durable jobs.
