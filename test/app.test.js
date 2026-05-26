@@ -437,6 +437,21 @@ test('Phase 6: job actions wire to existing API endpoints', () => {
   assert(script.includes('actionInFlight'), 'Must guard against concurrent actions');
   assert(script.includes("confirm('Cancel this job"),
     'Cancel action must confirm');
+  assert(script.includes('handleJobCanceled'),
+    'Cancel job must reset home and abort in-flight analysis');
+  assert(script.includes('prepareHomeForAnalysisRun'),
+    'New analysis runs must clear prior home results and notices');
+  assert(script.includes('clearKeepOpenNotice()'),
+    'Home reset must clear keep-tab-open notice');
+});
+
+test('cancel job resets home instead of leaving prior results visible', () => {
+  assert(script.includes("endpointPath === '/cancel'"),
+    'Cancel action must be handled explicitly');
+  assert(script.includes("navigate('#/')"),
+    'Canceled jobs must return to home');
+  assert(script.includes('isAnalysisCanceled'),
+    'In-flight analyze loops must stop after cancel');
 });
 
 test('Phase 6: home view presents recent jobs as a utility toolbar action', () => {
