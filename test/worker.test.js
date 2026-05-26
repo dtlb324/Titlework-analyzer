@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { request } from 'http';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { createWorkerHealthServer } from '../worker.js';
+import { createWorkerHealthServer, isWorkerLoopDisabled } from '../worker.js';
 import { runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-run-worker.js';
 import { getWorkflowConfig } from '../api/_lib/queue.js';
 
@@ -155,6 +155,13 @@ test('worker exposes an HTTP health server for Cloud Run service readiness', asy
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+test('worker loop can be disabled for scale-to-zero browser-driven deployments', () => {
+  assert(isWorkerLoopDisabled({ WORKER_DISABLED: 'true' }) === true, 'Expected WORKER_DISABLED=true to disable worker loop');
+  assert(isWorkerLoopDisabled({ WORKER_DISABLED: '1' }) === true, 'Expected WORKER_DISABLED=1 to disable worker loop');
+  assert(isWorkerLoopDisabled({ WORKER_DISABLED: 'false' }) === false, 'Expected WORKER_DISABLED=false to allow worker loop');
+  assert(isWorkerLoopDisabled({}) === false, 'Expected worker loop to remain enabled by default');
 });
 
 test('package exposes a Cloud Run worker start script', async () => {

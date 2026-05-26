@@ -12,6 +12,18 @@ function closeServer(server) {
   });
 }
 
+function waitForAbort(signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    signal?.addEventListener('abort', resolve, { once: true });
+  });
+}
+
+export function isWorkerLoopDisabled(env = process.env) {
+  const value = String(env.WORKER_DISABLED || '').trim().toLowerCase();
+  return value === 'true' || value === '1' || value === 'yes';
+}
+
 export function createWorkerHealthServer() {
   return createServer((req, res) => {
     if (req.url === '/healthz') {
@@ -41,6 +53,13 @@ export async function startWorker() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
   process.once('SIGINT', () => shutdown('SIGINT'));
   console.log(JSON.stringify({ event: 'worker_starting', port }));
+  if (isWorkerLoopDisabled()) {
+    console.log(JSON.stringify({ event: 'worker_disabled', reason: 'WORKER_DISABLED' }));
+    await waitForAbort(controller.signal);
+    await closeServer(healthServer);
+    console.log(JSON.stringify({ event: 'worker_stopped', disabled: true, aborted: Boolean(controller.signal.aborted) }));
+    return { disabled: true, aborted: Boolean(controller.signal.aborted) };
+  }
   const result = await runWorkerLoop({ signal: controller.signal });
   await closeServer(healthServer);
   console.log(JSON.stringify({ event: 'worker_stopped', ...result }));

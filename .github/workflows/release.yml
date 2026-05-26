@@ -109,7 +109,7 @@ jobs:
             --command npm \
             --args run,start:worker \
             --labels "managed-by=github-actions,release=${RELEASE_LABEL},git-sha=${GITHUB_SHA}" \
-            --update-env-vars "RELEASE_VERSION=${GITHUB_REF_NAME},GIT_SHA=${GITHUB_SHA},IMAGE_DIGEST=${IMAGE_DIGEST}" \
+            --update-env-vars "RELEASE_VERSION=${GITHUB_REF_NAME},GIT_SHA=${GITHUB_SHA},IMAGE_DIGEST=${IMAGE_DIGEST},WORKER_DISABLED=true" \
             "${SERVICE_ACCOUNT_FLAGS[@]}"
 
       - name: Deploy API from immutable image

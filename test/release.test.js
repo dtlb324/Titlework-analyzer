@@ -298,6 +298,7 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(releaseWorkflow.includes('--image "${IMAGE_DIGEST_REF}"'), 'Expected Cloud Run deploys to use an immutable digest image');
   assert(releaseWorkflow.includes('--min-instances 0'), 'Expected worker deploy to scale to zero by default');
   assert(!releaseWorkflow.includes('--min-instances 1'), 'Expected worker deploy not to keep an always-on instance');
+  assert(releaseWorkflow.includes('WORKER_DISABLED=true'), 'Expected worker service loop to be disabled by default');
   assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
   assert(releaseWorkflow.includes('--json tagName,isLatest'), 'Expected workflow to enforce that the GitHub Release is marked Latest');
   assert(releaseWorkflow.includes('verify-release.mjs'), 'Expected workflow to verify production before release creation');
