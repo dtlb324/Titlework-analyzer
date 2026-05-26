@@ -110,7 +110,17 @@ export async function runWorkerLoop(options = {}) {
 
   while (!options.signal?.aborted && iterations < maxIterations) {
     iterations += 1;
-    const result = await runWorkerOnce(options);
+    let result;
+    try {
+      result = await runWorkerOnce(options);
+    } catch (err) {
+      console.error(JSON.stringify({
+        event: 'worker_loop_error',
+        reason: err?.message || String(err),
+      }));
+      await sleep(idleMs, options.signal);
+      continue;
+    }
     if (result.hasWork) {
       idleCycles = 0;
       if (result.errors.length) {

@@ -57,7 +57,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `SYNTHESIS_MERGE_LEASE_MS` | Optional | Defaults longer than synthesis upstream timeout. |
 | `SYNTHESIS_STALE_LEASE_MS` | Optional | Defaults longer than synthesis merge lease. |
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Legacy idle poll fallback. Default `5000`; prefer `WORKER_POLL_IDLE_MS`. |
-| `WORKER_POLL_IDLE_MS` | Worker only | Default `2000` when idle (no runnable jobs). |
+| `WORKER_POLL_IDLE_MS` | Worker only | Default `2000` when a worker instance is running and idle. Production releases scale the worker to zero by default. |
 | `WORKER_POLL_ACTIVE_MS` | Worker only | Default `0` (no sleep between busy worker passes). |
 | `WORKFLOW_KICK_ON_START` | API | Default `true`. Runs a bounded background batch when abstraction/synthesis start is called. |
 | `WORKFLOW_KICK_BUDGET_MS` | API kick | Default `50000` per start kick (under the 60s API limit). |
@@ -110,7 +110,7 @@ git tag "$VERSION"
 git push origin "$VERSION"
 ```
 
-The release workflow runs tests on Node 22, builds one Docker image, pushes it to Artifact Registry, resolves the immutable image digest, deploys the worker first, then deploys the API from that same immutable image digest. The worker deploy uses `--min-instances=1`, `--concurrency=1`, `--no-cpu-throttling`, and a 3600 second timeout so long-running batch work is not starved while idle. The workflow creates or updates the GitHub Release only after production verification passes.
+The release workflow runs tests on Node 22, builds one Docker image, pushes it to Artifact Registry, resolves the immutable image digest, deploys the worker first, then deploys the API from that same immutable image digest. The worker deploy uses `--min-instances=0`, `--concurrency=1`, `--no-cpu-throttling`, and a 3600 second timeout. This keeps the worker scale-to-zero by default so it does not spend database network quota while idle. The workflow creates or updates the GitHub Release only after production verification passes.
 
 GitHub Actions `Release` is the only production deploy path. Do not leave Cloud Build or Cloud Run source-deploy triggers on `main`; they can race the tag workflow and overwrite the verified release image.
 
@@ -186,6 +186,8 @@ Cloud Run worker
 ```
 
 Model calls still use document/chunk/segment work units. Cloud Run removes the Vercel request and function ceilings, but the app still preserves safe model request budgets, retries, cancellation, leases, and checkpoints.
+
+Production releases keep the worker scale-to-zero by default. While the browser session is open, the API start/process endpoints kick bounded abstraction and synthesis batches and the browser polls progress. Jobs are not guaranteed to continue unattended after the browser is closed unless you intentionally run background worker capacity or add a future event-driven worker.
 
 The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **24 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). Large visual PDFs (≥1.5 MB) are uploaded via the **Gemini Files API** so whole instruments stay unsplit when possible. Text-first extraction is used only when quality checks pass; set `ABSTRACTION_PDF_TEXT_STRICT=true` for stricter scan detection. If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 24 small documents per call and still page-splits oversized single PDFs as an escape hatch.
 

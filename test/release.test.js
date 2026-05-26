@@ -296,6 +296,8 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(releaseWorkflow.includes('id-token: write'), 'Expected release workflow to use OIDC auth');
   assert(releaseWorkflow.includes('google-github-actions/auth'), 'Expected release workflow to authenticate to Google Cloud');
   assert(releaseWorkflow.includes('--image "${IMAGE_DIGEST_REF}"'), 'Expected Cloud Run deploys to use an immutable digest image');
+  assert(releaseWorkflow.includes('--min-instances 0'), 'Expected worker deploy to scale to zero by default');
+  assert(!releaseWorkflow.includes('--min-instances 1'), 'Expected worker deploy not to keep an always-on instance');
   assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
   assert(releaseWorkflow.includes('--json tagName,isLatest'), 'Expected workflow to enforce that the GitHub Release is marked Latest');
   assert(releaseWorkflow.includes('verify-release.mjs'), 'Expected workflow to verify production before release creation');
@@ -312,6 +314,7 @@ test('release documentation describes automated deploy, verification, and rollba
   assert(readme.includes('same immutable image digest'), 'Expected README to document API/worker digest parity');
   assert(readme.includes('Workload Identity Federation'), 'Expected README to document WIF setup');
   assert(readme.includes('APP_PASSWORD` | Yes for production'), 'Expected README production password policy to match release verification');
+  assert(readme.includes('scale-to-zero'), 'Expected README to document worker scale-to-zero behavior');
   assert(readme.includes('Rollback API and worker together'), 'Expected README to document paired rollback');
   assert(readme.includes('GCS CORS'), 'Expected README to call out GCS CORS release verification');
 

@@ -102,6 +102,27 @@ test('Cloud Run worker loop backs off after failed work instead of hot-looping',
   assert(sleeps === 2, `Expected backoff sleep after each failed work pass, got ${sleeps}`);
 });
 
+test('Cloud Run worker loop backs off after database listing errors instead of exiting', async () => {
+  let listAttempts = 0;
+  let sleeps = 0;
+  const result = await runWorkerLoop({
+    store: {
+      async listRunnableAbstractionJobIds() {
+        listAttempts += 1;
+        if (listAttempts === 1) throw new Error('neon quota exceeded');
+        return [];
+      },
+      async listRunnableSynthesisJobIds() { return []; },
+    },
+    pollIntervalMs: 1,
+    maxIterations: 2,
+    sleep: async () => { sleeps += 1; },
+  });
+
+  assert(result.iterations === 2, `Expected loop to continue after listing error, got ${result.iterations}`);
+  assert(sleeps === 2, `Expected sleep after failed and idle passes, got ${sleeps}`);
+});
+
 test('default worker leases exceed upstream model call timeout', () => {
   const config = getWorkflowConfig();
   const defaultModelTimeoutMs = 240_000;
