@@ -1412,7 +1412,13 @@ function renderJobResults(job, result) {
   }
   const warnings = Array.isArray(result.warnings) ? result.warnings : [];
   const failedDocs = Array.isArray(result.failedDocuments) ? result.failedDocuments : [];
+  const synthesisDriver = result.synthesisDriver
+    || (warnings.some(w => String(w) === 'synthesis_driver:browser') ? 'browser' : 'server');
+  const browserFallbackBanner = synthesisDriver === 'browser'
+    ? `<div class="error-msg"><strong>Browser synthesis fallback.</strong> This opinion was generated in the browser because server-side synthesis was unavailable. Re-run on a durable job or investigate server synthesis errors before relying on this result for large runs.</div>`
+    : '';
   el.innerHTML = `
+    ${browserFallbackBanner}
     ${warnings.length ? `<div class="verify-note"><strong>Warnings:</strong><ul style="margin:.4rem 0 0 1.2rem">${warnings.map(w => `<li>${esc(typeof w === 'string' ? w : (w.message || ''))}</li>`).join('')}</ul></div>` : ''}
     ${failedDocs.length ? `<div class="verify-note"><strong>Excluded ${failedDocs.length} failed document${failedDocs.length === 1 ? '' : 's'}.</strong></div>` : ''}
     <div class="analysis-card"><div class="ac">${md(String(result.finalTitleOpinion))}</div></div>`;

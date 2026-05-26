@@ -286,6 +286,16 @@ function sanitizeResultFailedDocument(value) {
   };
 }
 
+export function inferSynthesisDriver(result) {
+  if (!result) return null;
+  if (result.synthesisDriver === 'browser' || result.synthesisDriver === 'server') return result.synthesisDriver;
+  const warnings = (result.warnings || []).map(w => String(w));
+  if (warnings.includes('synthesis_driver:browser')) return 'browser';
+  if (warnings.includes('synthesis_driver:server')) return 'server';
+  if (result.finalTitleOpinion) return 'server';
+  return null;
+}
+
 export function validateSaveJobResultInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { valid: false, statusCode: 400, reason: 'Invalid job result body.' };

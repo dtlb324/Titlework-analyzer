@@ -50,6 +50,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` | Optional | Shared fallback for abstraction and synthesis upstream timeouts. |
 | `STORAGE_MAX_UPLOAD_BYTES` | Optional | Default `104857600` (100 MB). |
 | `WORKFLOW_BATCH_LIMIT` | Optional | Default `12`. |
+| `SYNTHESIS_BATCH_LIMIT` | Optional | Default `4` (max `16`). Ready synthesis segments claimed per `/synthesis/process` batch. Production releases set `8`. |
 | `WORKFLOW_CONCURRENCY` | Optional | Default `4`. |
 | `WORKFLOW_BUDGET_MS` | Optional | Default `1200000` (20 min). |
 | `WORKFLOW_LEASE_MS` | Optional | Default is longer than the model upstream timeout. |

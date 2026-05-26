@@ -19,6 +19,7 @@ import {
   resolveFinalSynthesisModel,
   resolvePartialSynthesisModel,
   effectiveSynthesisChunkSize,
+  resolveSynthesisBatchLimit,
   summarizeSynthesisWarningFlags,
   buildSynthesisMetricsEvent,
 } from '../api/_lib/synthesis.js';
@@ -1693,6 +1694,40 @@ test('buildSynthesisMetricsEvent includes event name and timestamp', () => {
   const event = buildSynthesisMetricsEvent({ event: 'synthesis_merge_complete', jobId: 'job_test_1' });
   assert(event.event === 'synthesis_merge_complete', 'Expected event name');
   assert(typeof event.ts === 'string' && event.ts.includes('T'), 'Expected ISO timestamp');
+});
+
+test('resolveSynthesisBatchLimit defaults to 4 and honors SYNTHESIS_BATCH_LIMIT', () => {
+  const previous = process.env.SYNTHESIS_BATCH_LIMIT;
+  delete process.env.SYNTHESIS_BATCH_LIMIT;
+  assert(resolveSynthesisBatchLimit() === 4, 'Expected default synthesis batch limit of 4');
+  assert(resolveSynthesisBatchLimit({ batchLimit: 8 }) === 8, 'Expected explicit batchLimit override');
+  process.env.SYNTHESIS_BATCH_LIMIT = '8';
+  assert(resolveSynthesisBatchLimit() === 8, 'Expected env SYNTHESIS_BATCH_LIMIT=8');
+  if (previous === undefined) delete process.env.SYNTHESIS_BATCH_LIMIT;
+  else process.env.SYNTHESIS_BATCH_LIMIT = previous;
+});
+
+test('processSynthesisBatch claims up to configured batchLimit ready segments per pass', async () => {
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
+  let maxReadyLimit = 0;
+  const store = createMemoryPhase5Store({ abstracts });
+  const originalListReady = store.listReadySynthesisSegments.bind(store);
+  store.listReadySynthesisSegments = async (jobId, planId, limit = 4) => {
+    maxReadyLimit = Math.max(maxReadyLimit, limit);
+    return originalListReady(jobId, planId, limit);
+  };
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+    }
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+  await processSynthesisBatch('job_test_1', { store, budgetMs: 5_000, batchLimit: 8 });
+  assert(maxReadyLimit === 8, `Expected batch limit 8, saw ${maxReadyLimit}`);
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 // --- Run --------------------------------------------------------------------

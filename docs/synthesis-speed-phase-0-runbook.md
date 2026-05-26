@@ -34,6 +34,7 @@ Set on **both API and worker** services unless noted.
 | `OPUS_AUDIT_ENABLED` | `false` | **Required** — do not enable |
 | `WORKFLOW_KICK_ON_START` | `true` | Default; start endpoints kick first batch |
 | `SYNTHESIS_CONCURRENCY` | `8` | Trial: partial segments only (max 16); lower if Gemini 429s |
+| `SYNTHESIS_BATCH_LIMIT` | `8` | Ready segments per `/synthesis/process` batch (max 16) |
 | `SYNTHESIS_MAX_TOKENS` | `5000` | Trial: final Sonnet output cap |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | `4000` | Trial: smaller merge input |
 | `ABSTRACTION_ESCALATION_ENABLED` | `false` | Skips extra Sonnet re-reads on low-confidence abstracts |
@@ -75,6 +76,7 @@ Filter on JSON `event` field:
 | `synthesis_batch_complete` | Each `/synthesis/process` batch finishes |
 | `synthesis_merge_complete` | Final opinion saved after merge |
 | `synthesis_driver_browser_fallback` | Browser saved result via POST `/result` (avoid on durable jobs) |
+| `server_synthesis_fallback` | Same event as above (Phase 1 alias for log filters) |
 
 **Merge event fields:** `jobId`, `segmentCount`, `singlePass`, `synthesisDurationMs`, `inputTokens`, `outputTokens`, `payloadBytes`, `status`, `warningFlags` (e.g. `repair_retry`, `merge_tree_applied`, `final_validation_failed`).
 
