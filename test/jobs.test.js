@@ -506,6 +506,69 @@ test('frontend guards authenticated initial job route until password succeeds', 
   `);
 });
 
+test('frontend can remember access password on this device', async () => {
+  const session = new Map();
+  const local = new Map();
+  const storageApi = (map) => ({
+    getItem(key) { return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) { map.set(key, String(value)); },
+    removeItem(key) { map.delete(key); },
+  });
+  await vm.runInNewContext(`${script}\n(async () => {\n${`
+    assert(typeof loadStoredPassword === 'function', 'Expected loadStoredPassword helper');
+    assert(typeof persistPassword === 'function', 'Expected persistPassword helper');
+    assert(typeof clearStoredPassword === 'function', 'Expected clearStoredPassword helper');
+
+    persistPassword('saved-secret', true);
+    assert(appPassword === 'saved-secret', 'Expected in-memory password after persist');
+    assert(localStorage.getItem('app_password') === 'saved-secret', 'Expected remembered password in localStorage');
+    assert(localStorage.getItem('app_password_remember') === '1', 'Expected remember flag in localStorage');
+    assert(sessionStorage.getItem('app_password') === 'saved-secret', 'Expected session copy after remember');
+
+    appPassword = '';
+    assert(loadStoredPassword() === 'saved-secret', 'Expected remembered password on reload');
+
+    persistPassword('session-only', false);
+    assert(localStorage.getItem('app_password') === null, 'Expected local password cleared when not remembering');
+    assert(localStorage.getItem('app_password_remember') === null, 'Expected remember flag cleared');
+    assert(sessionStorage.getItem('app_password') === 'session-only', 'Expected session password without remember');
+
+    clearStoredPassword();
+    assert(appPassword === '', 'Expected in-memory password cleared');
+    assert(loadStoredPassword() === '', 'Expected no password after clear');
+  `}\n})()`, {
+    console: { log() {}, error() {}, warn() {}, debug() {} },
+    assert,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    Date,
+    Math,
+    JSON,
+    RegExp,
+    Error,
+    Promise,
+    Array,
+    String,
+    Number,
+    URLSearchParams,
+    encodeURIComponent,
+    alert() {},
+    confirm() { return true; },
+    location: { search: '', hash: '' },
+    document: { addEventListener() {}, getElementById() { return { style: {}, addEventListener() {}, checked: false }; } },
+    window: { addEventListener() {}, location: { search: '', hash: '', origin: 'https://example.test', pathname: '/' } },
+    history: { replaceState() {} },
+    sessionStorage: storageApi(session),
+    localStorage: storageApi(local),
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => '{}' }),
+  });
+
+  assert(indexHtml.includes('id="rememberPassword"'), 'Expected remember-password checkbox in password gate');
+  assert(indexHtml.includes('Remember password on this device'), 'Expected remember-password label');
+});
+
 test('Bug fix: synthesis progress caps completedDocuments at files.length after splits', async () => {
   await runClientScript(`
     const source = ${JSON.stringify(script)};
