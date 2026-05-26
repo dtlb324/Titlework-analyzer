@@ -23,6 +23,7 @@
 
 import { createHash } from 'crypto';
 import { isGeminiModel, invokeModel, invokeAnthropicModelStream, isAnthropicModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
+import { buildMergeUserMessageContent } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-4-6';
@@ -85,6 +86,8 @@ const DEFAULT_STALE_SYNTHESIS_LEASE_MS = clampInt(process.env.SYNTHESIS_STALE_LE
 const DEFAULT_SYNTHESIS_CONCURRENCY = clampInt(process.env.SYNTHESIS_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 16);
 const DEFAULT_MERGE_CONCURRENCY = clampInt(process.env.SYNTHESIS_MERGE_CONCURRENCY || process.env.WORKFLOW_CONCURRENCY, 4, 1, 8);
 const MAX_RETRY_WAIT_MS = 5 * 60_000;
+const DEFAULT_COMPACTION_MIN_SEGMENTS = 6;
+const DEFAULT_COMPACTION_MIN_MERGE_TOKENS = 40_000;
 const MIN_FINAL_OPINION_CHARS = 500;
 const MIN_SEGMENT_SUMMARY_CHARS = 200;
 
@@ -99,6 +102,7 @@ export function summarizeSynthesisWarningFlags(warnings = []) {
   const flags = [];
   if (/repair_retry/i.test(text)) flags.push('repair_retry');
   if (/merge_tree_applied/i.test(text)) flags.push('merge_tree_applied');
+  if (/merge_compaction_applied/i.test(text)) flags.push('merge_compaction_applied');
   if (/final_validation_failed/i.test(text)) flags.push('final_validation_failed');
   if (/segment_split|retry_wait/i.test(text)) flags.push('segment_split_or_retry');
   return flags;
@@ -112,6 +116,36 @@ export function synthesisStreamEnabled(options = {}) {
   if (options.streamFinalOpinion === true) return true;
   if (options.streamFinalOpinion === false) return false;
   return process.env.SYNTHESIS_STREAM_ENABLED === 'true';
+}
+
+export function synthesisCompactionEnabled(options = {}) {
+  if (options.compactionEnabled === true) return true;
+  if (options.compactionEnabled === false) return false;
+  return process.env.SYNTHESIS_COMPACTION_ENABLED !== 'false';
+}
+
+export function resolveCompactionMinSegments() {
+  return clampInt(process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS, DEFAULT_COMPACTION_MIN_SEGMENTS, 2, 64);
+}
+
+export function resolveCompactionMinMergeTokens() {
+  return clampInt(process.env.SYNTHESIS_COMPACTION_MIN_MERGE_TOKENS, DEFAULT_COMPACTION_MIN_MERGE_TOKENS, 1024, 500_000);
+}
+
+export function shouldForceMultiSegmentPlanning(abstractCount) {
+  if (process.env.SYNTHESIS_FORCE_SINGLE_PASS === 'true') return false;
+  if (process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT !== 'true') return false;
+  const bulkMin = clampInt(process.env.BULK_JOB_MIN_ABSTRACTS, DEFAULT_BULK_JOB_MIN_ABSTRACTS, 2, 400);
+  return abstractCount >= bulkMin;
+}
+
+export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeInputTokens } = {}) {
+  if (!synthesisCompactionEnabled()) return false;
+  if ((segmentCount || 0) >= resolveCompactionMinSegments()) return true;
+  const tokens = Number.isFinite(Number(mergeInputTokens))
+    ? Number(mergeInputTokens)
+    : Math.ceil((mergeInputBytes || 0) / 4);
+  return tokens >= resolveCompactionMinMergeTokens();
 }
 
 function createPreviewWriter(store, jobId) {
@@ -196,15 +230,47 @@ List every assumption. List every illegible or unclear document. State: "This is
 
 export const PARTIAL_SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney synthesizing one segment of a larger chain of title.
 
-You will receive abstracts for a subset of documents from a full run. Produce a partial chain-of-title analysis for this segment only.
+You will receive abstracts for a subset of documents from a full run. Produce a partial chain-of-title segment summary only.
 
-Include:
-- Chronological ownership flow for these documents
-- Fractional math at each step
-- Title defects and curative items found in this segment
-- Running fractional balance at the end of this segment
+OUTPUT FORMAT (strict — no preamble, intro, or prose between sections):
 
-Do NOT produce a final ownership determination table — a later pass merges all segments. Only use facts from the abstracts provided. Flag gaps explicitly.`;
+## CHAIN ROWS
+| Date | Doc Type | Recording Ref | Grantor | Grantee | Interest Conveyed | Running Balance | Flags |
+(one row per instrument; show fractional math in Interest Conveyed or Running Balance)
+
+## DEFECTS
+| Issue | Curative Needed | Source Doc |
+(list every defect, gap, illegible flag, or manual-verify item; write "none" if empty)
+
+## RUNNING BALANCE
+| Owner/Interest | Mineral Balance | Notes |
+
+Rules:
+- Only use facts from the abstracts provided.
+- Do NOT produce a final ownership determination table — a later pass merges all segments.
+- Do NOT add narrative paragraphs between table rows.
+- Flag gaps explicitly instead of inventing links.`;
+
+export const COMPACTION_SYNTHESIS_PROMPT = `You are compressing multiple partial chain-of-title segment summaries into one dense scaffold for a final title opinion merge.
+
+You will receive N partial segment summaries. Merge them into a single compact scaffold preserving every chain row, defect, gap, fractional balance, and manual-verify flag.
+
+OUTPUT FORMAT (strict — tables only, no preamble prose):
+
+## CHAIN ROWS
+| Date | Doc Type | Recording Ref | Grantor | Grantee | Interest Conveyed | Running Balance | Flags |
+
+## DEFECTS
+| Issue | Curative Needed | Source Doc |
+
+## RUNNING BALANCE
+| Owner/Interest | Mineral Balance | Notes |
+
+Rules:
+- Preserve all material facts from every segment.
+- Do NOT produce final ownership determination prose — Sonnet expands this scaffold later.
+- Do NOT add narrative between rows.
+- Flag unresolved gaps explicitly.`;
 
 export const FOLLOWUP_PROMPT = SYNTHESIS_PROMPT;
 
@@ -351,9 +417,12 @@ export function groupAbstractsByDocument(abstracts) {
 }
 
 export function buildSynthesisChunks(abstracts, tract, ctx, preamble, systemPrompt, configOverrides = {}) {
+  const baseConfig = getSynthesisConfig(configOverrides);
   const config = {
-    ...getSynthesisConfig(configOverrides),
-    chunkSize: effectiveSynthesisChunkSize(abstracts.length, configOverrides),
+    ...baseConfig,
+    chunkSize: configOverrides.forceChunkSize != null
+      ? clampInt(configOverrides.forceChunkSize, baseConfig.chunkSize, 1, 250)
+      : effectiveSynthesisChunkSize(abstracts.length, configOverrides),
   };
   const estimateModel = systemPrompt === SYNTHESIS_PROMPT ? config.model : config.partialModel;
   const chunks = [];
@@ -402,7 +471,7 @@ function computeAbstractDigest(item) {
 
 export function planSynthesisSegments(abstracts, tract, contextNotes, configOverrides = {}) {
   const preamble = `Below are ${abstracts.length} document abstracts. Synthesize into a complete title opinion.`;
-  const chunkLists = buildSynthesisChunks(
+  let chunkLists = buildSynthesisChunks(
     abstracts,
     tract,
     contextNotes,
@@ -410,6 +479,17 @@ export function planSynthesisSegments(abstracts, tract, contextNotes, configOver
     SYNTHESIS_PROMPT,
     configOverrides,
   );
+  if (chunkLists.length === 1 && shouldForceMultiSegmentPlanning(abstracts.length)) {
+    const baseConfig = getSynthesisConfig(configOverrides);
+    chunkLists = buildSynthesisChunks(
+      abstracts,
+      tract,
+      contextNotes,
+      preamble,
+      SYNTHESIS_PROMPT,
+      { ...configOverrides, forceChunkSize: baseConfig.chunkSize },
+    );
+  }
   let cursor = 0;
   const segments = chunkLists.map((chunk, index) => {
     const start = cursor;
@@ -469,6 +549,12 @@ function extractUsage(usage = {}) {
   return {
     inputTokens: Number.isInteger(usage.input_tokens) ? usage.input_tokens : Number.isInteger(usage.inputTokens) ? usage.inputTokens : null,
     outputTokens: Number.isInteger(usage.output_tokens) ? usage.output_tokens : Number.isInteger(usage.outputTokens) ? usage.outputTokens : null,
+    cacheCreationInputTokens: Number.isInteger(usage.cache_creation_input_tokens)
+      ? usage.cache_creation_input_tokens
+      : Number.isInteger(usage.cacheCreationInputTokens) ? usage.cacheCreationInputTokens : null,
+    cacheReadInputTokens: Number.isInteger(usage.cache_read_input_tokens)
+      ? usage.cache_read_input_tokens
+      : Number.isInteger(usage.cacheReadInputTokens) ? usage.cacheReadInputTokens : null,
   };
 }
 
@@ -514,13 +600,33 @@ function validateSegmentSummary(text) {
   const trimmed = text.trim();
   if (trimmed.length < MIN_SEGMENT_SUMMARY_CHARS) return { ok: false, reason: 'Segment summary is too short.' };
   const lower = trimmed.toLowerCase();
-  if (!lower.includes('chain') && !lower.includes('ownership')) {
+  const hasChainContent = lower.includes('chain') || lower.includes('ownership') || lower.includes('grantor');
+  const hasTableShape = trimmed.includes('|') && (lower.includes('running balance') || lower.includes('chain rows'));
+  if (!hasChainContent && !hasTableShape) {
     return { ok: false, reason: 'Segment summary missing chain/ownership content.' };
   }
   return { ok: true };
 }
 
-function buildSegmentMessages(abstracts, tract, ctx, preamble) {
+function buildSegmentSummaryBlock(abstracts) {
+  let block = '';
+  abstracts.forEach((d, i) => {
+    block += `### Document ${i + 1}: ${d.filename}\n\n${d.abstract}\n\n---\n\n`;
+  });
+  return block;
+}
+
+function buildSegmentMessages(abstracts, tract, ctx, preamble, options = {}) {
+  if (options.cacheMergeSegments) {
+    const content = buildMergeUserMessageContent({
+      preamble,
+      tract,
+      contextNotes: ctx,
+      segmentBlock: buildSegmentSummaryBlock(abstracts),
+      cacheSegments: true,
+    });
+    return [{ role: 'user', content }];
+  }
   return [{ role: 'user', content: buildAbstractInput(abstracts, tract, ctx, preamble) }];
 }
 
@@ -653,7 +759,9 @@ async function callSynthesisModel({
   config,
   options,
 }) {
-  const messages = buildSegmentMessages(abstracts, tract, contextNotes, preamble);
+  const messages = buildSegmentMessages(abstracts, tract, contextNotes, preamble, {
+    cacheMergeSegments: Boolean(options.cacheMergeSegments),
+  });
   const payloadBytes = estimateRequestBytes(config.model, config.maxTokens, systemPrompt, messages);
   if (payloadBytes > config.requestEnvelopeSafeBytes) {
     const err = new Error(`Synthesis request too large (${(payloadBytes / 1024 / 1024).toFixed(1)} MB).`);
@@ -689,10 +797,21 @@ async function callSynthesisModel({
         outputBytes: (response.text || '').length,
       });
     }
+    const usage = extractUsage(response.usage);
+    if ((usage.cacheReadInputTokens || 0) > 0 || (usage.cacheCreationInputTokens || 0) > 0) {
+      logSynthesisMetrics({
+        event: 'synthesis_prompt_cache_usage',
+        jobId: options.jobId || null,
+        model: response.model || config.model,
+        cacheReadInputTokens: usage.cacheReadInputTokens,
+        cacheCreationInputTokens: usage.cacheCreationInputTokens,
+        mergeCached: Boolean(options.cacheMergeSegments),
+      });
+    }
     return {
       text: response.text || '',
       model: response.model || config.model,
-      usage: extractUsage(response.usage),
+      usage,
       payloadBytes,
       latencyMs: Date.now() - started,
       streamed: shouldStream,
@@ -970,10 +1089,51 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   return { status: 'failed', segmentId: segment.id, failure: { errorType: 'unknown', errorMessage: sanitizeErrorMessage(lastError) } };
 }
 
-function fitsRequestBudget(abstracts, tract, contextNotes, preamble, systemPrompt, config) {
-  const messages = buildSegmentMessages(abstracts, tract, contextNotes, preamble);
+function fitsRequestBudget(abstracts, tract, contextNotes, preamble, systemPrompt, config, options = {}) {
+  const messages = buildSegmentMessages(abstracts, tract, contextNotes, preamble, {
+    cacheMergeSegments: Boolean(options.cacheMergeSegments),
+  });
   const bytes = estimateRequestBytes(config.model, config.maxTokens, systemPrompt, messages);
   return { fits: bytes <= config.requestEnvelopeSafeBytes, bytes };
+}
+
+async function compactSegmentSummariesForMerge({
+  segmentSummaries,
+  totalAbstracts,
+  tract,
+  contextNotes,
+  partialConfig,
+  options,
+  tokensAccum,
+}) {
+  const mergeAbstracts = segmentSummaries.map(summary => ({
+    filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
+    abstract: summary.summaryText,
+  }));
+  const preamble = `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${totalAbstracts} documents. Compact them into one dense scaffold for final title opinion merge.`;
+  const result = await callSynthesisModel({
+    abstracts: mergeAbstracts,
+    tract,
+    contextNotes,
+    preamble,
+    systemPrompt: COMPACTION_SYNTHESIS_PROMPT,
+    config: partialConfig,
+    options: {
+      ...options,
+      enableFinalStream: false,
+      cacheMergeSegments: false,
+    },
+  });
+  tokensAccum.inputTokens += result.usage.inputTokens || 0;
+  tokensAccum.outputTokens += result.usage.outputTokens || 0;
+  const first = segmentSummaries[0];
+  const last = segmentSummaries[segmentSummaries.length - 1];
+  return [{
+    segmentIndex: 0,
+    startSequenceIndex: first?.startSequenceIndex ?? 0,
+    endSequenceIndex: last?.endSequenceIndex ?? Math.max(0, totalAbstracts - 1),
+    summaryText: result.text,
+  }];
 }
 
 async function mergeSegmentsIntoOpinion({
@@ -989,16 +1149,59 @@ async function mergeSegmentsIntoOpinion({
 }) {
   const partial = partialConfig || getPartialSynthesisConfig(config || {});
   const finalConfig = config || getSynthesisConfig();
-  const mergeAbstracts = segmentSummaries.map(summary => ({
+  let workingSummaries = segmentSummaries;
+  const mergeAbstractsPreview = workingSummaries.map(summary => ({
     filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
     abstract: summary.summaryText,
   }));
-  const preamble = `Below are ${segmentSummaries.length} partial chain-of-title segments covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`;
-  const fit = fitsRequestBudget(mergeAbstracts, tract, contextNotes, preamble, SYNTHESIS_PROMPT, finalConfig);
+  const preamble = `Below are ${workingSummaries.length} partial chain-of-title segments covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`;
+  let fit = fitsRequestBudget(mergeAbstractsPreview, tract, contextNotes, preamble, SYNTHESIS_PROMPT, finalConfig, {
+    cacheMergeSegments: true,
+  });
+  if (shouldCompactBeforeMerge({
+    segmentCount: workingSummaries.length,
+    mergeInputBytes: fit.bytes,
+  })) {
+    warningsAccum.push('merge_compaction_applied');
+    logSynthesisMetrics({
+      event: 'synthesis_merge_compaction_start',
+      jobId: options.jobId || null,
+      segmentCount: workingSummaries.length,
+      mergeInputBytes: fit.bytes,
+    });
+    workingSummaries = await compactSegmentSummariesForMerge({
+      segmentSummaries: workingSummaries,
+      totalAbstracts,
+      tract,
+      contextNotes,
+      partialConfig: partial,
+      options,
+      tokensAccum,
+    });
+    fit = fitsRequestBudget(
+      workingSummaries.map(summary => ({
+        filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
+        abstract: summary.summaryText,
+      })),
+      tract,
+      contextNotes,
+      `Below are ${workingSummaries.length} compacted partial chain-of-title segment(s) covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`,
+      SYNTHESIS_PROMPT,
+      finalConfig,
+      { cacheMergeSegments: true },
+    );
+  }
+  const mergeAbstracts = workingSummaries.map(summary => ({
+    filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
+    abstract: summary.summaryText,
+  }));
+  const mergePreamble = workingSummaries.length === segmentSummaries.length
+    ? preamble
+    : `Below are ${workingSummaries.length} compacted partial chain-of-title segment(s) covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`;
   if (!fit.fits && mergeAbstracts.length > 2) {
     // Tree-merge: pair segments and partial-merge until one summary remains.
     warningsAccum.push('merge_tree_applied');
-    let working = segmentSummaries.map((summary, idx) => ({
+    let working = workingSummaries.map((summary, idx) => ({
       filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
       abstract: summary.summaryText,
       segmentRange: [summary.startSequenceIndex, summary.endSequenceIndex],
@@ -1055,12 +1258,13 @@ async function mergeSegmentsIntoOpinion({
       mergedPair,
       tract,
       contextNotes,
-      preamble,
+      mergePreamble,
       SYNTHESIS_PROMPT,
       finalConfig,
       {
         ...options,
         enableFinalStream: true,
+        cacheMergeSegments: true,
         jobId: options.jobId,
       },
     );
@@ -1079,12 +1283,13 @@ async function mergeSegmentsIntoOpinion({
     mergeAbstracts,
     tract,
     contextNotes,
-    preamble,
+    mergePreamble,
     SYNTHESIS_PROMPT,
     finalConfig,
     {
       ...options,
       enableFinalStream: true,
+      cacheMergeSegments: true,
       jobId: options.jobId,
     },
   );

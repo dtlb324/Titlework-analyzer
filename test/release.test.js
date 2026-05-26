@@ -303,6 +303,7 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(releaseWorkflow.includes('SYNTHESIS_CONCURRENCY=8'), 'Expected Phase 0 synthesis concurrency on API deploy');
   assert(releaseWorkflow.includes('SYNTHESIS_BATCH_LIMIT=8'), 'Expected Phase 1 synthesis batch limit on API deploy');
   assert(releaseWorkflow.includes('SYNTHESIS_STREAM_ENABLED=true'), 'Expected Phase 2 synthesis streaming on API deploy');
+  assert(releaseWorkflow.includes('SYNTHESIS_COMPACTION_ENABLED=true'), 'Expected Phase 3 synthesis compaction on API deploy');
   assert(releaseWorkflow.includes('ABSTRACTION_ESCALATION_ENABLED=false'), 'Expected Phase 0 abstraction escalation off on API deploy');
   assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
   assert(releaseWorkflow.includes('--json tagName,isLatest'), 'Expected workflow to enforce that the GitHub Release is marked Latest');
