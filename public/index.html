@@ -83,6 +83,8 @@
   .password-gate { max-width: 420px; margin: 4rem auto; padding: 2.2rem; background: #fff; border: 1px solid #d9c9a8; border-top: 4px solid #b8631e; border-radius: 6px; text-align: center; box-shadow: 0 4px 12px rgba(74,60,40,.1); }
   .password-gate h2 { color: #6b3410; margin-bottom: .8rem; font-weight: normal; font-size: 1.4rem; }
   .password-gate p { color: #8a6f4a; font-size: .9rem; margin-bottom: 1.5rem; line-height: 1.5; }
+  .password-gate .remember-password { display: flex; align-items: center; justify-content: center; gap: .5rem; margin: 1rem 0 1.2rem; font-size: .88rem; color: #6b5840; cursor: pointer; user-select: none; }
+  .password-gate .remember-password input { width: auto; margin: 0; cursor: pointer; }
   .status-badge { display:inline-block; padding:.18rem .65rem; border-radius:999px;
     font-size:.78rem; font-weight:600; background:#f3e7d8; color:#6b3410; }
   .status-badge--active { background:#fce8d4; color:#b8631e; }
@@ -145,6 +147,10 @@
     <div class="field">
       <input type="password" id="passwordInput" placeholder="Password..." />
     </div>
+    <label class="remember-password" for="rememberPassword">
+      <input type="checkbox" id="rememberPassword" />
+      Remember password on this device
+    </label>
     <button class="btn-primary" onclick="checkPassword()">Enter</button>
     <div id="passwordError"></div>
   </div>
@@ -618,7 +624,50 @@ Include:
 
 Do NOT produce a final ownership determination table — a later pass merges all segments. Only use facts from the abstracts provided. Flag gaps explicitly.`;
 
-let appPassword = sessionStorage.getItem('app_password') || '';
+const APP_PASSWORD_STORAGE_KEY = 'app_password';
+const APP_PASSWORD_REMEMBER_KEY = 'app_password_remember';
+
+function loadStoredPassword() {
+  try {
+    if (localStorage.getItem(APP_PASSWORD_REMEMBER_KEY) === '1') {
+      const saved = localStorage.getItem(APP_PASSWORD_STORAGE_KEY);
+      if (saved) return saved;
+    }
+  } catch {}
+  try {
+    return sessionStorage.getItem(APP_PASSWORD_STORAGE_KEY) || '';
+  } catch {}
+  return '';
+}
+
+function persistPassword(pw, remember) {
+  appPassword = pw;
+  try {
+    if (remember) {
+      localStorage.setItem(APP_PASSWORD_STORAGE_KEY, pw);
+      localStorage.setItem(APP_PASSWORD_REMEMBER_KEY, '1');
+    } else {
+      localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
+      localStorage.removeItem(APP_PASSWORD_REMEMBER_KEY);
+    }
+  } catch {}
+  try {
+    sessionStorage.setItem(APP_PASSWORD_STORAGE_KEY, pw);
+  } catch {}
+}
+
+function clearStoredPassword() {
+  appPassword = '';
+  try {
+    localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
+    localStorage.removeItem(APP_PASSWORD_REMEMBER_KEY);
+  } catch {}
+  try {
+    sessionStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
+  } catch {}
+}
+
+let appPassword = loadStoredPassword();
 let files = [];
 let conversationHistory = [];
 let documentAbstracts = [];
@@ -650,6 +699,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('followupInput').addEventListener('keydown', e => { if (e.key === 'Enter') askFollowup(); });
   document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') checkPassword(); });
+  const rememberPasswordEl = document.getElementById('rememberPassword');
+  if (rememberPasswordEl) {
+    try {
+      rememberPasswordEl.checked = localStorage.getItem(APP_PASSWORD_REMEMBER_KEY) === '1';
+    } catch {}
+  }
   window.addEventListener('hashchange', () => applyRoute(parseRoute()));
   if (canLoadInitialRoute) applyRoute(parseRoute());
 });
@@ -681,8 +736,8 @@ function showMain() {
 function checkPassword() {
   const pw = document.getElementById('passwordInput').value.trim();
   if (!pw) return;
-  appPassword = pw;
-  sessionStorage.setItem('app_password', pw);
+  const remember = document.getElementById('rememberPassword')?.checked === true;
+  persistPassword(pw, remember);
   fetch('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
@@ -690,8 +745,7 @@ function checkPassword() {
   }).then(r => {
     if (r.status === 401) {
       document.getElementById('passwordError').innerHTML = '<div class="error-msg">Incorrect password.</div>';
-      sessionStorage.removeItem('app_password');
-      appPassword = '';
+      clearStoredPassword();
     } else {
       document.getElementById('passwordGate').style.display = 'none';
       showMain();
