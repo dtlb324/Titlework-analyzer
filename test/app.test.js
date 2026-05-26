@@ -426,15 +426,32 @@ test('Phase 6: job actions wire to existing API endpoints', () => {
     'Cancel button must POST /cancel');
   assert(script.includes("runJobAction(job, '/retry-failed')"),
     'Retry-failed button must POST /retry-failed');
-  assert(script.includes("runJobAction(job, '/abstraction/process')"),
-    'Kick abstraction must POST /abstraction/process');
-  assert(script.includes("runJobAction(job, '/synthesis/process')"),
-    'Kick synthesis must POST /synthesis/process');
+  assert(script.includes('maybeKickStalledJobWorkflow'),
+    'Job poller must auto-continue stalled abstraction/synthesis');
+  assert(!script.includes("runJobAction(job, '/synthesis/process')"),
+    'Synthesis process must not be exposed as a manual job action');
+  assert(!script.includes("runJobAction(job, '/abstraction/process')"),
+    'Abstraction process must not be exposed as a manual job action');
   assert(script.includes("runJobAction(job, '/synthesis/start')"),
     'Retry/skip-failed synthesis must POST /synthesis/start');
   assert(script.includes('actionInFlight'), 'Must guard against concurrent actions');
   assert(script.includes("confirm('Cancel this job"),
     'Cancel action must confirm');
+  assert(script.includes('handleJobCanceled'),
+    'Cancel job must reset home and abort in-flight analysis');
+  assert(script.includes('prepareHomeForAnalysisRun'),
+    'New analysis runs must clear prior home results and notices');
+  assert(script.includes('clearKeepOpenNotice()'),
+    'Home reset must clear keep-tab-open notice');
+});
+
+test('cancel job resets home instead of leaving prior results visible', () => {
+  assert(script.includes("endpointPath === '/cancel'"),
+    'Cancel action must be handled explicitly');
+  assert(script.includes("navigate('#/')"),
+    'Canceled jobs must return to home');
+  assert(script.includes('isAnalysisCanceled'),
+    'In-flight analyze loops must stop after cancel');
 });
 
 test('Phase 6: home view presents recent jobs as a utility toolbar action', () => {
