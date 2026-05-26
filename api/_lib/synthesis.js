@@ -431,7 +431,7 @@ function buildSegmentMessages(abstracts, tract, ctx, preamble) {
   return [{ role: 'user', content: buildAbstractInput(abstracts, tract, ctx, preamble) }];
 }
 
-// Opus audit is opt-in only (OPUS_AUDIT_ENABLED=true) to avoid extra full-job model cost.
+// Opus audit is opt-in only (OPUS_AUDIT_ENABLED=true). Production keeps this off.
 function opusAuditEnabled(options = {}) {
   if (options.opusAuditEnabled === true) return true;
   if (options.opusAuditEnabled === false) return false;

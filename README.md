@@ -73,7 +73,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `ABSTRACT_MAX_TOKENS` | Optional | Default `2000` (was 3000). |
 | `SYNTHESIS_MAX_TOKENS` | Optional | Default `6000` (was 8000). |
 | `ABSTRACTION_ESCALATION_ENABLED` | Optional | Default `true`. Set `false` to skip Sonnet re-reads on low-confidence abstracts. |
-| `OPUS_AUDIT_ENABLED` | Optional | Default off. Set `true` only when you want an extra Opus audit pass. |
+| `OPUS_AUDIT_ENABLED` | Optional | Default off. **Production: keep `false`.** Do not enable unless explicitly re-requested; not part of synthesis speed work. |
 | `RELEASE_VERSION` | Release workflow | Set automatically from the release tag. |
 | `GIT_SHA` | Release workflow | Set automatically from the deployed commit. |
 | `IMAGE_DIGEST` | Release workflow | Set automatically from the immutable container digest. |
@@ -278,6 +278,6 @@ Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthe
 | `GEMINI_FILE_API_ENABLED=true` | Keeps large scanned PDFs whole via Files API instead of page-splitting for envelope limits |
 | `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts |
 | `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash) |
-| `OPUS_AUDIT_ENABLED` off (default) | Keeps Opus off the hot path |
+| `OPUS_AUDIT_ENABLED` off (required in production) | Keeps Opus off the hot path; no second full-model pass after merge |
 
 We do **not** use Anthropic or Gemini Batch API (24h window, no completion notification). Reliability and progress polling stay on the durable worker + Neon job model.
