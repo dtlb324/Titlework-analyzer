@@ -23,6 +23,10 @@ import {
   summarizeSynthesisWarningFlags,
   buildSynthesisMetricsEvent,
   synthesisStreamEnabled,
+  synthesisCompactionEnabled,
+  shouldForceMultiSegmentPlanning,
+  shouldCompactBeforeMerge,
+  COMPACTION_SYNTHESIS_PROMPT,
 } from '../api/_lib/synthesis.js';
 import {
   processSynthesisBatch,
@@ -546,10 +550,15 @@ function manyAbstracts(count, opts = {}) {
 
 function goodSegmentSummary(idx) {
   return [
-    `## Chain Summary segment ${idx + 1}`,
-    'This segment documents the chronological flow of deeds and partial conveyances.',
-    'Running fractional balance at segment end: 1/4 mineral interest.',
-    'No defects noted in this segment.',
+    '## CHAIN ROWS',
+    '| Date | Doc Type | Recording Ref | Grantor | Grantee | Interest Conveyed | Running Balance | Flags |',
+    `| 1900 | Deed | Vol 1 p 2 | Person ${idx + 1} | Person ${idx + 2} | 1/4 mineral | 1/4 | |`,
+    '## DEFECTS',
+    '| Issue | Curative Needed | Source Doc |',
+    '| none | | |',
+    '## RUNNING BALANCE',
+    '| Owner/Interest | Mineral Balance | Notes |',
+    `| Person ${idx + 2} | 1/4 | end of segment ${idx + 1} |`,
     'x'.repeat(220),
   ].join('\n');
 }
@@ -1266,7 +1275,9 @@ test('Segment timeout triggers binary split retry', async () => {
 test('Merge too large triggers tree merge of segment summaries', async () => {
   // Force tree merge by making segment summaries huge so the merge call would exceed budget.
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const previousCompaction = process.env.SYNTHESIS_COMPACTION_ENABLED;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'false';
   const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   let mergeCalls = 0;
@@ -1296,6 +1307,8 @@ test('Merge too large triggers tree merge of segment summaries', async () => {
   assert(result.result.warnings.some(w => w === 'merge_tree_applied'), `Expected merge_tree_applied warning, got ${JSON.stringify(result.result.warnings)}`);
   if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+  if (previousCompaction === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED;
+  else process.env.SYNTHESIS_COMPACTION_ENABLED = previousCompaction;
 });
 
 test('Resume: completed segments are not re-run on a second process pass', async () => {
@@ -1536,8 +1549,12 @@ test('Synthesis endpoint returns 503 with fallback hint when API keys missing', 
 });
 
 test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  delete process.env.BULK_JOB_MIN_ABSTRACTS;
   assert(effectiveSynthesisChunkSize(50, {}) === 120, 'Small jobs should use default chunk size');
   assert(effectiveSynthesisChunkSize(150, {}) >= 200, 'Bulk jobs should use larger synthesis segments');
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
 test('resolveFinalSynthesisModel keeps Sonnet for final title opinions', () => {
@@ -1831,6 +1848,81 @@ test('GET /api/jobs/:id/synthesis/preview returns buffered merge text', async ()
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.preview.text === 'Draft opinion preview', 'Expected preview text');
   assert(res.body.preview.bytesReceived === 21, 'Expected preview byte count');
+});
+
+test('shouldForceMultiSegmentPlanning is gated by SYNTHESIS_LARGE_JOB_MULTI_SEGMENT', () => {
+  const previousMulti = process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  const previousForce = process.env.SYNTHESIS_FORCE_SINGLE_PASS;
+  const previousBulk = process.env.BULK_JOB_MIN_ABSTRACTS;
+  delete process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  delete process.env.SYNTHESIS_FORCE_SINGLE_PASS;
+  process.env.BULK_JOB_MIN_ABSTRACTS = '50';
+  assert(shouldForceMultiSegmentPlanning(100) === false, 'Expected multi-segment forcing off by default');
+  process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = 'true';
+  assert(shouldForceMultiSegmentPlanning(100) === true, 'Expected forcing when enabled and above bulk min');
+  process.env.SYNTHESIS_FORCE_SINGLE_PASS = 'true';
+  assert(shouldForceMultiSegmentPlanning(100) === false, 'Expected opt-out via SYNTHESIS_FORCE_SINGLE_PASS');
+  if (previousMulti === undefined) delete process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  else process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = previousMulti;
+  if (previousForce === undefined) delete process.env.SYNTHESIS_FORCE_SINGLE_PASS;
+  else process.env.SYNTHESIS_FORCE_SINGLE_PASS = previousForce;
+  if (previousBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulk;
+});
+
+test('shouldCompactBeforeMerge triggers at segment threshold', () => {
+  const previous = process.env.SYNTHESIS_COMPACTION_ENABLED;
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'true';
+  assert(shouldCompactBeforeMerge({ segmentCount: 6, mergeInputBytes: 1000 }) === true, 'Expected compaction at 6 segments');
+  assert(shouldCompactBeforeMerge({ segmentCount: 2, mergeInputBytes: 200_000 }) === true, 'Expected compaction for large merge input');
+  assert(shouldCompactBeforeMerge({ segmentCount: 2, mergeInputBytes: 1000 }) === false, 'Expected no compaction for small jobs');
+  if (previous === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED;
+  else process.env.SYNTHESIS_COMPACTION_ENABLED = previous;
+});
+
+test('merge compaction applies Gemini scaffold before final Sonnet merge', async () => {
+  const previousCompaction = process.env.SYNTHESIS_COMPACTION_ENABLED;
+  const previousMinSegments = process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS;
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'true';
+  process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS = '3';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
+  let compactionCalls = 0;
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === COMPACTION_SYNTHESIS_PROMPT) {
+      compactionCalls += 1;
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: { input_tokens: 1, output_tokens: 1 } };
+    }
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+    }
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+  const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 120_000, batchLimit: 8 });
+  assert(compactionCalls >= 1, `Expected compaction call, saw ${compactionCalls}`);
+  assert((batch.result?.warnings || []).some(w => String(w).includes('merge_compaction_applied')), 'Expected compaction warning');
+  if (previousCompaction === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED;
+  else process.env.SYNTHESIS_COMPACTION_ENABLED = previousCompaction;
+  if (previousMinSegments === undefined) delete process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS;
+  else process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS = previousMinSegments;
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+});
+
+test('planSynthesisSegments splits large single-pass jobs when multi-segment forcing enabled', () => {
+  const previousMulti = process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  const previousBulk = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '50';
+  const abstracts = manyAbstracts(200);
+  const plan = planSynthesisSegments(abstracts, 'Tract A', 'Notes');
+  assert(plan.segments.length > 1, `Expected multiple segments, got ${plan.segments.length}`);
+  if (previousMulti === undefined) delete process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  else process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = previousMulti;
+  if (previousBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulk;
 });
 
 // --- Run --------------------------------------------------------------------

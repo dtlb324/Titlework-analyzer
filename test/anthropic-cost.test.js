@@ -1,4 +1,4 @@
-import { buildMessagesRequestBody, buildSystemParam } from '../api/_lib/anthropic-request.js';
+import { buildMessagesRequestBody, buildSystemParam, buildMergeUserMessageContent, estimateTextTokens } from '../api/_lib/anthropic-request.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -28,6 +28,21 @@ test('buildMessagesRequestBody passes through cached system blocks', () => {
   });
   assert(body.model === 'claude-haiku-4-5', 'Expected model preserved');
   assert(Array.isArray(body.system), 'Expected system array in request body');
+});
+
+test('buildMergeUserMessageContent caches large segment blocks', () => {
+  process.env.ANTHROPIC_PROMPT_CACHE = 'true';
+  const segments = 'x'.repeat(5000);
+  assert(estimateTextTokens(segments) >= 1024, 'Expected test segment block above cache threshold');
+  const content = buildMergeUserMessageContent({
+    preamble: 'Merge these segments.',
+    tract: 'Tract A',
+    contextNotes: 'Notes',
+    segmentBlock: segments,
+    cacheSegments: true,
+  });
+  assert(Array.isArray(content), 'Expected structured user content with cache block');
+  assert(content.some(block => block.cache_control?.type === 'ephemeral'), 'Expected ephemeral cache on segment block');
 });
 
 let passed = 0;
