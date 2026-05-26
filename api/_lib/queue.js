@@ -22,7 +22,7 @@ import {
 } from './abstraction-batch.js';
 import { runWithConcurrency } from './concurrency.js';
 import { createBlobReadCache } from './storage.js';
-import { processSynthesisJob, planJobSynthesis } from './synthesis.js';
+import { processSynthesisJob, planJobSynthesis, resolveSynthesisBatchLimit } from './synthesis.js';
 
 const DEFAULT_BATCH_LIMIT = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 12, 1, 64);
 const ABSTRACTION_FETCH_MULTIPLIER = clampInt(process.env.ABSTRACTION_BATCH_FETCH_MULTIPLIER, 4, 1, 16);
@@ -442,7 +442,7 @@ export async function processSynthesisBatch(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process synthesis.');
   const config = {
-    batchLimit: options.batchLimit ?? Math.max(1, Math.min(4, DEFAULT_BATCH_LIMIT)),
+    batchLimit: resolveSynthesisBatchLimit(options),
     budgetMs: options.budgetMs ?? DEFAULT_BUDGET_MS,
     leaseMs: options.leaseMs ?? Math.max(60_000, DEFAULT_LEASE_MS),
     maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
@@ -561,3 +561,4 @@ export async function abstractionSnapshot(jobId, options = {}) {
 }
 
 export { DEFAULT_LEASE_MS, DEFAULT_MAX_ATTEMPTS, DEFAULT_BATCH_LIMIT, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_MS, DEFAULT_STALE_LEASE_MS };
+export { resolveSynthesisBatchLimit } from './synthesis.js';

@@ -1,6 +1,6 @@
 import jobsHandler from '../api/jobs.js';
 import jobHandler from '../api/jobs/[...path].js';
-import { validateSaveJobResultInput } from '../api/_lib/jobs.js';
+import { validateSaveJobResultInput, inferSynthesisDriver } from '../api/_lib/jobs.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -587,6 +587,12 @@ test('validateSaveJobResultInput tags browser synthesis driver warning', () => {
   });
   assert(result.valid === true, 'Expected valid browser result payload');
   assert(result.payload.warnings.some(w => w === 'synthesis_driver:browser'), 'Expected synthesis_driver warning');
+});
+
+test('inferSynthesisDriver detects browser and server results', () => {
+  assert(inferSynthesisDriver({ warnings: ['synthesis_driver:browser'], finalTitleOpinion: 'x' }) === 'browser', 'Expected browser driver');
+  assert(inferSynthesisDriver({ warnings: [], finalTitleOpinion: 'opinion' }) === 'server', 'Expected server driver for stored opinions');
+  assert(inferSynthesisDriver(null) === null, 'Expected null for missing result');
 });
 
 let passed = 0;

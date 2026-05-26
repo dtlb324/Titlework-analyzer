@@ -1,6 +1,6 @@
 # Synthesis Speed & Latency Optimization — Design Specification
 
-**Status:** Phase 0 in progress  
+**Status:** Phase 1 complete (Phase 2 next)  
 **Date:** 2026-05-26  
 **Runbook:** [synthesis-speed-phase-0-runbook.md](../../synthesis-speed-phase-0-runbook.md)
 **Product decisions (2026-05-26):**
@@ -178,6 +178,8 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 
 #### 1.1 Un-cap synthesis batch limit
 
+**Status:** Done on `main` (`SYNTHESIS_BATCH_LIMIT`, release default `8`).
+
 **Problem:** [`processSynthesisBatch`](../../../api/_lib/queue.js) forces `batchLimit: Math.min(4, DEFAULT_BATCH_LIMIT)` while abstraction allows up to 12 (or 64 fetch multiplier).
 
 **Change:**
@@ -196,6 +198,8 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 - Existing tests pass with default still effectively 4 unless env set.
 
 #### 1.2 Harden server-synthesis path visibility
+
+**Status:** Done — `synthesisDriver` on `/result`, `server_synthesis_fallback` log, job-view banner.
 
 **Change:**
 - Log structured event when browser fallback triggers (`server_synthesis_fallback`).

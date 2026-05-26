@@ -14,6 +14,7 @@ import {
   validatePatchJobInput,
   validateSaveJobResultInput,
   validateSynthesisRequestInput,
+  inferSynthesisDriver,
 } from '../_lib/jobs.js';
 import {
   processJobAbstraction,
@@ -454,6 +455,7 @@ function publicSynthesisStatusBody(snapshot) {
 
 function publicJobResult(result) {
   if (!result) return null;
+  const synthesisDriver = inferSynthesisDriver(result);
   return {
     jobId: result.jobId,
     planId: result.planId,
@@ -467,6 +469,7 @@ function publicJobResult(result) {
     payloadBytes: result.payloadBytes,
     synthesisDurationMs: result.synthesisDurationMs,
     generatedAt: result.generatedAt,
+    synthesisDriver,
   };
 }
 
@@ -592,12 +595,15 @@ async function handleJobResult(req, res, requestId, store, jobId) {
     const result = await store.saveJobResult(jobId, validation.payload);
     if (!result) return res.status(404).json({ error: 'Job not found.', requestId });
     if (validation.payload.synthesisDriver === 'browser') {
-      console.log(JSON.stringify({
-        event: 'synthesis_driver_browser_fallback',
+      const fallbackPayload = {
+        event: 'server_synthesis_fallback',
         jobId,
         requestId,
+        synthesisDriver: 'browser',
         ts: new Date().toISOString(),
-      }));
+      };
+      console.log(JSON.stringify(fallbackPayload));
+      console.log(JSON.stringify({ ...fallbackPayload, event: 'synthesis_driver_browser_fallback' }));
     }
     const updatedJob = await store.getJob(jobId);
     return res.status(200).json({

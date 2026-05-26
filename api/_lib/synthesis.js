@@ -55,6 +55,18 @@ export function resolvePartialSynthesisModel() {
 }
 
 const DEFAULT_PARTIAL_SYNTHESIS_MODEL = resolvePartialSynthesisModel();
+function defaultSynthesisBatchLimit() {
+  const workflowBatch = clampInt(process.env.WORKFLOW_BATCH_LIMIT, 12, 1, 64);
+  return clampInt(process.env.SYNTHESIS_BATCH_LIMIT, Math.min(4, workflowBatch), 1, 16);
+}
+
+export function resolveSynthesisBatchLimit(options = {}) {
+  if (options.batchLimit != null) {
+    return clampInt(options.batchLimit, defaultSynthesisBatchLimit(), 1, 16);
+  }
+  return defaultSynthesisBatchLimit();
+}
+
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 6000, 256, 8192);
 const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 5000, 512, 8192);
 const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
@@ -1095,7 +1107,11 @@ export async function processSynthesisJob(jobId, options = {}) {
   while (Date.now() < deadline) {
     let currentJob = await store.getJob(jobId);
     if (currentJob?.status === 'canceled') break;
-    const ready = await store.listReadySynthesisSegments(jobId, planId, options.batchLimit || 4);
+    const ready = await store.listReadySynthesisSegments(
+      jobId,
+      planId,
+      resolveSynthesisBatchLimit(options),
+    );
     if (!ready.length) break;
     const segmentResults = await runWithConcurrency(ready, config.concurrency, async segment => {
       if (Date.now() >= deadline) {
