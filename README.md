@@ -13,7 +13,7 @@ The Cloud Run deployment uses two Cloud Run services, Google Cloud Storage, and 
 - **Google Cloud Storage:** stores uploaded PDFs, images, CSVs, and split PDF chunks through signed browser uploads.
 - **Neon Postgres:** stores jobs, documents, chunks, abstracts, synthesis segments, final results, and follow-up messages.
 
-The browser creates a job, uploads files directly to GCS, polls job status, and renders results. The worker owns long-running processing, so large jobs can continue after the browser tab closes.
+The browser creates a job, uploads files directly to GCS, polls job status, and renders results. With the background worker disabled (current production default), processing is driven by API kicks while the browser tab is open. Enable the worker (`WORKER_DISABLED=false`) when jobs should continue after the tab closes.
 
 ## Required Services
 
@@ -59,7 +59,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Legacy idle poll fallback. Default `5000`; prefer `WORKER_POLL_IDLE_MS`. |
 | `WORKER_POLL_IDLE_MS` | Worker only | Default `2000` when a worker instance is running and idle. Production releases scale the worker to zero by default. |
 | `WORKER_POLL_ACTIVE_MS` | Worker only | Default `0` (no sleep between busy worker passes). |
-| `WORKER_DISABLED` | Worker only | Production release default `true`; keeps the standalone worker health endpoint available without polling Neon. Set to `false` only when intentionally running background worker capacity. |
+| `WORKER_DISABLED` | Worker only | Production default `true` (loop disabled, scale-to-zero). **Current ops: keep disabled.** Set `false` only when you intentionally want unattended background processing. |
 | `WORKFLOW_KICK_ON_START` | API | Default `true`. Runs a bounded background batch when abstraction/synthesis start is called. |
 | `WORKFLOW_KICK_BUDGET_MS` | API kick | Default `50000` per start kick (under the 60s API limit). |
 | `ABSTRACTION_PDF_TEXT_FIRST` | Optional | Default `true`. Use extracted PDF text when quality checks pass (lower token cost). |

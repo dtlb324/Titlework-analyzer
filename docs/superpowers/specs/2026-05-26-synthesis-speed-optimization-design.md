@@ -2,7 +2,9 @@
 
 **Status:** Draft for review  
 **Date:** 2026-05-26  
-**Product decision (2026-05-26):** `OPUS_AUDIT_ENABLED` stays **off** in production. Opus audit is out of scope for this optimization plan; do not enable it or schedule async Opus work unless explicitly re-requested.
+**Product decisions (2026-05-26):**
+- **`OPUS_AUDIT_ENABLED`** stays **off** in production. Opus audit is out of scope; do not enable unless explicitly re-requested.
+- **Background worker** stays **disabled for now** (`WORKER_DISABLED=true`, scale-to-zero). Jobs run via API kicks + browser polling while the tab is open. Worker enablement is deferred — revisit later if unattended processing is needed.
 **Related code:** [`api/_lib/synthesis.js`](../../../api/_lib/synthesis.js), [`api/_lib/queue.js`](../../../api/_lib/queue.js), [`api/_lib/model-client.js`](../../../api/_lib/model-client.js), [`api/_lib/cloud-run-worker.js`](../../../api/_lib/cloud-run-worker.js), [`worker.js`](../../../worker.js), [`public/index.html`](../../../public/index.html), [`.github/workflows/release.yml`](../../../.github/workflows/release.yml)  
 **Related docs:** [phase-5-durable-server-side-synthesis.md](../../phase-5-durable-server-side-synthesis.md), [README.md](../../../README.md)
 
@@ -16,14 +18,16 @@ This spec consolidates the highest-impact recommendations from three independent
 
 | Phase | Focus | Code changes | Primary win |
 |-------|--------|--------------|-------------|
-| **0** | Production deployment & env tuning | None | Remove orchestration gaps; tune existing knobs |
+| **0** | Env tuning & ops checklist (browser-driven mode) | None | Smaller merge inputs; reliable server synthesis path |
 | **1** | Orchestration hardening | Small | Faster segment waves; reliable server path |
 | **2** | Streaming final opinion | Medium | Perceived latency (~100s → ~2s time-to-first-text) |
 | **3** | Merge input/output optimization | Medium–large | Shorter Sonnet generation; fewer retries |
 
-**Recommended first ship:** Phase 0 immediately, Phase 1 in the next release, Phase 2 as the highest-ROI code change.
+**Recommended first ship:** Phase 0 env tuning immediately, Phase 2 (streaming) as the highest-ROI code change. Phase 1 batch-limit work still helps under browser-driven kicks.
 
-**Opus audit:** Keep `OPUS_AUDIT_ENABLED=false` on all Cloud Run services. The code path remains for tests and future opt-in, but this plan does **not** include enabling Opus or building async Opus infrastructure.
+**Opus audit:** Keep `OPUS_AUDIT_ENABLED=false` on all Cloud Run services.
+
+**Worker:** Keep `WORKER_DISABLED=true` on the worker service (current release default). Do **not** change release workflow or `min-instances` as part of this initiative. See §5.0 for how jobs run without a background worker.
 
 ---
 
@@ -48,7 +52,7 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 | Serial final merge | `mergeSegmentsIntoOpinion` → `invokeAnthropicModel` | Cannot parallelize without quality/architecture tradeoffs |
 | No streaming | `model-client.js` awaits full JSON response | Perceived latency = full generation time |
 | Synthesis batch cap | `processSynthesisBatch` hard-caps `batchLimit` at 4 | Segment waves stall at `ceil(N/4)` even if `WORKFLOW_BATCH_LIMIT=12` |
-| Worker disabled in prod | `release.yml`: `WORKER_DISABLED=true`, `min-instances=0` | Jobs depend on browser poll kicks unless worker is intentionally enabled |
+| Worker disabled (intentional) | `release.yml`: `WORKER_DISABLED=true`, `min-instances=0` | Accepted for now — jobs need an open browser tab; API `/process` kicks + poll stall recovery (~4s) drive work |
 | Browser fallback | `hierarchicalSynthesis` serial `for` loop | Partial segments run one-at-a-time if server synthesis fails |
 
 ### 2.3 What will not help much
@@ -66,7 +70,7 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 
 | Fix | Retained? | Phase |
 |-----|-----------|-------|
-| Enable worker loop (`WORKER_DISABLED=false`, warm instance) | **Yes** | 0 |
+| Enable worker loop (`WORKER_DISABLED=false`, warm instance) | **Deferred** — not enabling for now | — |
 | Confirm server synthesis path (not browser fallback) | **Yes** | 0, 1 |
 | Job log diagnostics (segments, retries, merge duration) | **Yes** | 0, 1 |
 | Raise synthesis `batchLimit` above 4 | **Yes** | 1 |
@@ -91,7 +95,7 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 | Keep `OPUS_AUDIT_ENABLED=false` in production | **Yes — permanent for this initiative** | 0 |
 | `ABSTRACTION_ESCALATION_ENABLED=false` when speed > escalation quality | **Yes** | 0 |
 | Upstream token reduction (text-first PDF, batch abstraction, File API) | **Yes** — already defaults on | 0 |
-| Single-segment Sonnet path awareness (≤~120 docs, no Gemini partials) | **Yes** | 0, 4 |
+| Single-segment Sonnet path awareness (≤~120 docs, no Gemini partials) | **Yes** | 0, 3 |
 | `SYNTHESIS_MAX_TOKENS` / `SYNTHESIS_PARTIAL_MAX_TOKENS` tuning | **Yes** | 0 |
 
 ---
@@ -101,13 +105,13 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 ### Goals
 
 - Reduce **time-to-first-visible-opinion** from ~60–120s to a few seconds on large jobs.
-- Reduce **total job wall-clock** on retry-heavy jobs by ≥30% (orchestration + merge tuning).
-- Eliminate orchestration stalls between segment waves in production.
+- Reduce **total job wall-clock** on retry-heavy jobs via env tuning and merge optimization (not worker orchestration).
 - Preserve final opinion quality bar (Sonnet for merge; no silent model downgrade).
 - Keep durable job semantics: checkpointing, leases, cancellation, validation.
 
 ### Non-goals
 
+- Enabling the background worker or changing worker `min-instances` (deferred).
 - Enabling Opus audit or building async Opus infrastructure.
 - Replacing Sonnet with Haiku/Gemini for the final legal opinion.
 - Removing validation, repair, or tree-merge overflow behavior.
@@ -121,32 +125,21 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 
 ---
 
-### Phase 0 — Deployment & configuration (no code)
+### Phase 0 — Configuration & ops (no code, no worker)
 
-**Impact:** High for orchestration reliability; moderate indirect effect on Sonnet merge time via smaller inputs.  
+**Impact:** Moderate indirect effect on Sonnet merge time via smaller inputs; keeps browser-driven jobs healthy.  
 **Risk:** Low.  
-**Owner:** Ops / release config.
+**Owner:** Ops / Cloud Run env config.
 
-#### 0.1 Enable background worker
+**Operating mode (current, intentional):** The API service handles synthesis. When a user starts a job, the browser calls `/synthesis/start`, kicks `/synthesis/process` (50s budget on start), polls status, and re-kicks `/synthesis/process` after ~4s of stall. **Keep the browser tab open** until the job finishes. The worker service remains deployed for health/future use but its loop stays disabled.
 
-| Setting | Current (release) | Target |
-|---------|-------------------|--------|
-| `WORKER_DISABLED` | `true` | `false` |
-| Worker `--min-instances` | `0` | `1` (recommended for production) or `0` (cost-sensitive) |
-| `WORKER_POLL_ACTIVE_MS` | `0` | Keep `0` (no sleep between busy passes) |
-
-**Change:** Update [`.github/workflows/release.yml`](../../../.github/workflows/release.yml) worker deploy env vars and optionally `min-instances`. Document in [README.md](../../../README.md).
-
-**Acceptance criteria:**
-- Worker logs show `worker_starting` without `worker_disabled`.
-- Synthesis jobs complete with browser tab closed after abstraction finishes.
-- No increase in Neon idle connection quota incidents (monitor after enablement).
-
-#### 0.2 Production env defaults (document + set on Cloud Run)
+#### 0.1 Production env defaults (set on API + worker services)
 
 | Variable | Recommendation | Rationale |
 |----------|----------------|-----------|
-| `OPUS_AUDIT_ENABLED` | **`false` (required)** | Do not enable in production; Opus is out of scope for this plan |
+| `WORKER_DISABLED` | **`true` (keep)** | Worker not enabled for now; revisit later |
+| `WORKFLOW_KICK_ON_START` | `true` | Start kick runs first synthesis/abstraction batch |
+| `OPUS_AUDIT_ENABLED` | **`false` (required)** | Do not enable in production |
 | `ABSTRACTION_ESCALATION_ENABLED` | `false` if speed-critical | Cuts pre-synthesis Sonnet re-reads |
 | `SYNTHESIS_CONCURRENCY` | `8` (if Gemini rate limits allow) | Speeds partial segment phase only; max 16 |
 | `SYNTHESIS_MAX_TOKENS` | `5000` (trial) | Slightly shorter generation; monitor truncation |
@@ -160,16 +153,17 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 - **Bulk (≥100 docs):** try `BULK_SYNTHESIS_CHUNK_SIZE=180` if merge input is huge; try `200` if segment wave count dominates.
 - **Avoid single-segment Sonnet-on-raw-abstracts** for 80–120 doc jobs where segment+merge may beat one giant pass — tune `SYNTHESIS_CHUNK_SIZE` downward (e.g. 80–100) based on measured merge duration.
 
-#### 0.3 Operational checklist
+#### 0.2 Operational checklist (browser-driven)
 
-- [ ] Confirm jobs use server synthesis (`usedServerSynthesis=true` path); investigate any browser fallback errors.
-- [ ] Dashboard or log query for: `segment count`, `retry_wait`, `repair_retry`, `merge_tree_applied`, `final_validation_failed`, merge `latencyMs`.
-- [ ] Verify Anthropic rate-limit headroom (429 → `retry_wait` adds up to 5 min backoff).
+- [ ] Confirm jobs use **server synthesis**, not browser fallback; investigate any fallback errors.
+- [ ] Users keep the tab open through synthesis (especially the final Sonnet merge).
+- [ ] Log/monitor: segment count, `retry_wait`, `repair_retry`, `merge_tree_applied`, `final_validation_failed`, merge `latencyMs`.
+- [ ] Verify Anthropic/Gemini rate-limit headroom (429 → `retry_wait` adds up to 5 min backoff).
 
 **Phase 0 success metrics:**
-- Segment idle gaps between waves < 5s (worker enabled).
 - Zero browser-fallback synthesis on durable jobs.
 - P50 merge duration baseline recorded for 100-doc and 300-doc canonical test jobs.
+- Jobs complete end-to-end with tab open (expected mode until worker is enabled later).
 
 ---
 
@@ -209,12 +203,9 @@ For a typical 300-document bulk job: ~4 Gemini segment calls + **1 Sonnet merge*
 - `api/jobs/[...path].js` (result save validation)
 - `test/app.test.js`
 
-#### 1.3 Release workflow defaults
+#### 1.3 Release workflow
 
-**Change:** After Phase 0 validation, flip release worker deploy to `WORKER_DISABLED=false` and document `min-instances` recommendation.
-
-**Acceptance criteria:**
-- Fresh release deploys an active worker by default (or documents explicit opt-in with migration note).
+**No change** to worker defaults in [`.github/workflows/release.yml`](../../../.github/workflows/release.yml) — keep `WORKER_DISABLED=true` and `min-instances=0` until worker enablement is explicitly approved later.
 
 ---
 
@@ -320,9 +311,9 @@ Reuse tree-merge pairing infrastructure but default to Flash, not Sonnet, for co
 
 ```text
                     ┌─────────────────────────────────────┐
-                    │           Cloud Run Worker           │
-                    │  WORKER_DISABLED=false, min≥1       │
-                    │  SYNTHESIS_BATCH_LIMIT=8            │
+                    │     API (browser-driven kicks)       │
+                    │  WORKFLOW_KICK_ON_START, /process    │
+                    │  Worker: WORKER_DISABLED=true        │
                     └──────────────┬──────────────────────┘
                                    │
      Abstraction (Gemini)         │         Partial synthesis (Gemini, concurrent)
@@ -343,6 +334,17 @@ Reuse tree-merge pairing infrastructure but default to Flash, not Sonnet, for co
 Opus audit (`OPUS_AUDIT_ENABLED=true`) adds a second full Claude Opus pass after Sonnet merge. It is **opt-in in code** but **disabled in production** and excluded from this initiative.
 
 If Opus is ever revisited, the likely approach is async audit (save Sonnet draft first, audit in background). That work is **not scheduled** unless explicitly requested. Do not enable `OPUS_AUDIT_ENABLED` on Cloud Run as part of synthesis speed work.
+
+### Deferred — Background worker (not planned for now)
+
+The worker loop (`WORKER_DISABLED=false`) would drain abstraction/synthesis continuously from Neon and allow jobs to finish after the browser closes. **Current decision: keep the worker disabled** (`WORKER_DISABLED=true`, scale-to-zero). This matches the release workflow default.
+
+When revisited later:
+- Set `WORKER_DISABLED=false` on the worker Cloud Run service.
+- Optionally set `--min-instances=1` to avoid cold starts.
+- Confirm Neon connection quota and Cloud Run cost are acceptable.
+
+Until then, speed work assumes **browser tab open** + API `/synthesis/process` kicks. Streaming (Phase 2) and env tuning still apply in this mode.
 
 ---
 
@@ -394,27 +396,28 @@ If Opus is ever revisited, the likely approach is async audit (save Sonnet draft
 | Time-to-first opinion text | ~60–120s | < 5s (Phase 2) |
 | Total job time (300 doc) | TBD | ≥10% reduction via orchestration (Phase 0–1) |
 | Browser-fallback synthesis rate | TBD | 0% on durable jobs |
-| Segment wave idle gap | ~4s+ without worker | < 2s with worker |
 | `final_validation_failed` rate | TBD | No regression > 1% absolute |
 
 ---
 
 ## 11. Open questions for review
 
-1. **Worker cost vs reliability:** Is `min-instances=1` acceptable for production, or should we use min=0 with faster poll only?
-2. **Streaming transport:** SSE (`/synthesis/stream`) vs poll buffer — any proxy constraints on the deployed API?
-3. **Phase 3 prompt tightening:** Who signs off on quality regression testing (legal/landman review)?
-4. **Single-segment forced split:** Worth doing, or rely on chunk env tuning only?
+1. **Streaming transport:** SSE (`/synthesis/stream`) vs poll buffer — any proxy constraints on the deployed API?
+2. **Phase 3 prompt tightening:** Who signs off on quality regression testing (legal/landman review)?
+3. **Single-segment forced split:** Worth doing, or rely on chunk env tuning only?
+
+**Deferred (not in scope now):** Background worker enablement (`WORKER_DISABLED=false`, `min-instances`) — revisit when unattended jobs are required.
 
 ---
 
 ## 12. Recommended execution order
 
 ```text
-Week 0 (immediate):  Phase 0 — deploy worker + env tuning + baseline metrics
-Week 1:              Phase 1 — batch limit + fallback visibility + release defaults
+Week 0 (immediate):  Phase 0 — env tuning + baseline metrics (browser tab open)
+Week 1:              Phase 1 — batch limit + fallback visibility (no worker change)
 Week 2–3:            Phase 2 — streaming merge (feature-flagged)
 Week 4+:             Phase 3 — prompt/compaction/cache (flagged, quality-gated)
+Later (optional):    Enable background worker when unattended jobs are needed
 ```
 
 *Timeline expressed as sequencing dependency, not calendar commitment.*
@@ -425,7 +428,7 @@ Week 4+:             Phase 3 — prompt/compaction/cache (flagged, quality-gated
 
 | Variable | Default | Phase | Notes |
 |----------|---------|-------|-------|
-| `WORKER_DISABLED` | `true` (release) | 0, 1 | Set `false` for background processing |
+| `WORKER_DISABLED` | `true` (keep) | — | Worker deferred; browser + API kicks drive work |
 | `SYNTHESIS_CONCURRENCY` | 4 | 0 | Partial segments only; max 16 |
 | `SYNTHESIS_BATCH_LIMIT` | *new* 4→8 | 1 | Segments claimed per batch |
 | `SYNTHESIS_MAX_TOKENS` | 6000 | 0, 3 | Final opinion cap |
