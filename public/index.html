@@ -1378,13 +1378,6 @@ function renderJobActions(job) {
       },
     });
   }
-  if (job.status === 'abstracting' || job.status === 'queued' || job.status === 'planning') {
-    buttons.push({
-      label: 'Kick abstraction',
-      class: 'btn-secondary',
-      onClick: () => runJobAction(job, '/abstraction/process'),
-    });
-  }
   if (failedDocs > 0 && (job.status === 'abstracting' || job.status === 'partial_failed' || job.status === 'failed')) {
     buttons.push({
       label: `Retry ${failedDocs} failed`,
@@ -1401,13 +1394,6 @@ function renderJobActions(job) {
           runJobAction(job, '/synthesis/start');
         }
       },
-    });
-  }
-  if (job.status === 'synthesizing') {
-    buttons.push({
-      label: 'Kick synthesis',
-      class: 'btn-secondary',
-      onClick: () => runJobAction(job, '/synthesis/process'),
     });
   }
   if (job.status === 'failed') {
@@ -1733,7 +1719,74 @@ const JOB_POLL_INTERVALS = {
   hiddenMultiplier: 3,
 };
 
+const WORKFLOW_STALL_THRESHOLD = 4;
+
 let activeJobPollState = null;
+
+function abstractionWorkflowSignature(status) {
+  if (!status) return '';
+  return `${status.completed || 0}|${status.failed || 0}|${status.processing || 0}|${status.retry_wait || 0}|${status.pending || 0}`;
+}
+
+function synthesisWorkflowSignature(status) {
+  if (!status) return '';
+  return `${status.complete || 0}|${status.failed || 0}|${status.processing || 0}|${status.retry_wait || 0}|${status.mergeInProgress ? 1 : 0}|${status.pending || 0}`;
+}
+
+async function maybeKickStalledJobWorkflow(state, job) {
+  if (!job || state.workflowKickInFlight) return;
+  const needsAbstraction = ['abstracting', 'queued', 'planning'].includes(job.status);
+  const needsSynthesis = job.status === 'synthesizing';
+  if (!needsAbstraction && !needsSynthesis) {
+    state.workflowStatus = '';
+    state.workflowSignature = '';
+    state.workflowStallPolls = 0;
+    return;
+  }
+  if (state.workflowStatus !== job.status) {
+    state.workflowStatus = job.status;
+    state.workflowSignature = '';
+    state.workflowStallPolls = 0;
+  }
+
+  try {
+    let signature = '';
+    let shouldKick = false;
+    if (needsSynthesis) {
+      const payload = await fetchServerSynthesisStatus(job.id);
+      const status = payload?.status || {};
+      signature = synthesisWorkflowSignature(status);
+      const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
+      if (signature === state.workflowSignature) state.workflowStallPolls += 1;
+      else {
+        state.workflowStallPolls = 0;
+        state.workflowSignature = signature;
+      }
+      shouldKick = state.workflowStallPolls >= WORKFLOW_STALL_THRESHOLD
+        && (pending > 0 || status.mergeInProgress);
+    } else {
+      const payload = await fetchServerAbstractionStatus(job.id);
+      const status = payload?.status || {};
+      signature = abstractionWorkflowSignature(status);
+      const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
+      if (signature === state.workflowSignature) state.workflowStallPolls += 1;
+      else {
+        state.workflowStallPolls = 0;
+        state.workflowSignature = signature;
+      }
+      shouldKick = state.workflowStallPolls >= WORKFLOW_STALL_THRESHOLD && pending > 0;
+    }
+    if (!shouldKick) return;
+    state.workflowStallPolls = 0;
+    state.workflowKickInFlight = true;
+    if (needsSynthesis) await processServerSynthesisBatch(job.id);
+    else await processServerAbstractionBatch(job.id);
+  } catch (err) {
+    console.warn('Could not auto-continue stalled job workflow', err);
+  } finally {
+    state.workflowKickInFlight = false;
+  }
+}
 
 function pollerKey(job) {
   if (!job) return '';
@@ -1802,6 +1855,8 @@ async function runJobPollTick(state) {
       }
       return;
     }
+    await maybeKickStalledJobWorkflow(state, job);
+    if (state.cancelled) return;
     scheduleJobPoll(state, nextPollDelay(state));
   } catch (err) {
     console.warn('Job poll failed', err);
@@ -1823,6 +1878,10 @@ function startJobPoller(jobId, onUpdate, onTerminal) {
     lastKey: '',
     lastChangeAt: Date.now(),
     errorBackoffMs: 0,
+    workflowStatus: '',
+    workflowSignature: '',
+    workflowStallPolls: 0,
+    workflowKickInFlight: false,
     onUpdate,
     onTerminal,
   };

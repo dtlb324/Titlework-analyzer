@@ -426,10 +426,12 @@ test('Phase 6: job actions wire to existing API endpoints', () => {
     'Cancel button must POST /cancel');
   assert(script.includes("runJobAction(job, '/retry-failed')"),
     'Retry-failed button must POST /retry-failed');
-  assert(script.includes("runJobAction(job, '/abstraction/process')"),
-    'Kick abstraction must POST /abstraction/process');
-  assert(script.includes("runJobAction(job, '/synthesis/process')"),
-    'Kick synthesis must POST /synthesis/process');
+  assert(script.includes('maybeKickStalledJobWorkflow'),
+    'Job poller must auto-continue stalled abstraction/synthesis');
+  assert(!script.includes("runJobAction(job, '/synthesis/process')"),
+    'Synthesis process must not be exposed as a manual job action');
+  assert(!script.includes("runJobAction(job, '/abstraction/process')"),
+    'Abstraction process must not be exposed as a manual job action');
   assert(script.includes("runJobAction(job, '/synthesis/start')"),
     'Retry/skip-failed synthesis must POST /synthesis/start');
   assert(script.includes('actionInFlight'), 'Must guard against concurrent actions');
