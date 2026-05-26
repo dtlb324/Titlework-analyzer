@@ -14,6 +14,7 @@
   .eyebrow { font-size: .7rem; letter-spacing: .3em; color: #b8915e; text-transform: uppercase; margin-bottom: .5rem; font-weight: bold; }
   h1 { font-size: 2.2rem; font-weight: normal; color: #6b3410; margin-bottom: .3rem; }
   .tagline { color: #8a6f4a; font-size: .9rem; font-style: italic; }
+  .app-version { color: #a08a6a; font-size: .78rem; margin-top: .4rem; letter-spacing: .04em; font-style: normal; }
   .disclaimer { background: #fff8eb; border: 1px solid #c8a96e; border-left: 4px solid #b8631e; color: #6b3410; padding: .85rem 1.1rem; margin: 1rem auto 0; max-width: 860px; border-radius: 4px; font-size: .85rem; line-height: 1.5; }
   .container { max-width: 860px; margin: 0 auto; padding: 1.8rem 1.5rem; }
   .card { background: #fff; border: 1px solid #d9c9a8; border-radius: 6px; padding: 1.8rem; margin-bottom: 1.5rem; box-shadow: 0 2px 8px rgba(74,60,40,.06); }
@@ -128,6 +129,7 @@
 <div class="header">
   <h1>Mineral Ownership Builder</h1>
   <div class="tagline">Title Research Tool</div>
+  <div class="app-version" id="appVersion" hidden></div>
 
 </div>
 
@@ -618,7 +620,24 @@ let files = [];
 let conversationHistory = [];
 let documentAbstracts = [];
 
+async function loadAppVersion() {
+  const el = document.getElementById('appVersion');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/healthz');
+    if (!r.ok) return;
+    const data = await r.json();
+    const version = data?.release?.version;
+    if (!version) return;
+    el.textContent = version;
+    el.hidden = false;
+  } catch {
+    // Omit version when health check is unavailable (e.g. offline file preview).
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
+  loadAppVersion();
   const canLoadInitialRoute = await checkPasswordRequired();
   setupDragDrop();
   document.getElementById('fileInput').addEventListener('change', async e => {

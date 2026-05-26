@@ -49,6 +49,13 @@ test('index.html JavaScript parses', () => {
   assert(result.status === 0, `Syntax error: ${result.stderr}`);
 });
 
+test('index.html shows deployed release version under the tagline', () => {
+  assert(indexHtml.includes('id="appVersion"'), 'Expected app version element in header');
+  assert(indexHtml.includes('Title Research Tool'), 'Expected tagline above version');
+  assert(script.includes("fetch('/api/healthz')"), 'Expected version loader to call health endpoint');
+  assert(script.includes('release?.version'), 'Expected version loader to read release.version');
+});
+
 test('uses Gemini Flash for abstraction and Sonnet for synthesis', () => {
   assert(script.includes("ABSTRACT_MODEL = 'gemini-2.5-flash'"), 'Expected Gemini Flash for abstraction');
   assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-2.5-flash'"), 'Expected Gemini Flash for partial synthesis segments');
