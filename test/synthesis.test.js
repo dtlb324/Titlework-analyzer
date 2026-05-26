@@ -19,6 +19,8 @@ import {
   resolveFinalSynthesisModel,
   resolvePartialSynthesisModel,
   effectiveSynthesisChunkSize,
+  summarizeSynthesisWarningFlags,
+  buildSynthesisMetricsEvent,
 } from '../api/_lib/synthesis.js';
 import {
   processSynthesisBatch,
@@ -1674,6 +1676,23 @@ test('Synthesis /process drains next batch and reports result for the route', as
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
   assert(res.body.result?.status === 'complete', `Expected complete after process, got ${res.body.result?.status}`);
   assert(res.body.hasMore === false, 'Expected no more work after batch drain');
+});
+
+test('summarizeSynthesisWarningFlags extracts repair and merge flags', () => {
+  const flags = summarizeSynthesisWarningFlags([
+    'segment_1:repair_retry',
+    'merge_tree_applied',
+    'final_validation_failed: missing section',
+  ]);
+  assert(flags.includes('repair_retry'), 'Expected repair_retry flag');
+  assert(flags.includes('merge_tree_applied'), 'Expected merge_tree_applied flag');
+  assert(flags.includes('final_validation_failed'), 'Expected final_validation_failed flag');
+});
+
+test('buildSynthesisMetricsEvent includes event name and timestamp', () => {
+  const event = buildSynthesisMetricsEvent({ event: 'synthesis_merge_complete', jobId: 'job_test_1' });
+  assert(event.event === 'synthesis_merge_complete', 'Expected event name');
+  assert(typeof event.ts === 'string' && event.ts.includes('T'), 'Expected ISO timestamp');
 });
 
 // --- Run --------------------------------------------------------------------

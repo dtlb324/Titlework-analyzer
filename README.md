@@ -13,7 +13,7 @@ The Cloud Run deployment uses two Cloud Run services, Google Cloud Storage, and 
 - **Google Cloud Storage:** stores uploaded PDFs, images, CSVs, and split PDF chunks through signed browser uploads.
 - **Neon Postgres:** stores jobs, documents, chunks, abstracts, synthesis segments, final results, and follow-up messages.
 
-The browser creates a job, uploads files directly to GCS, polls job status, and renders results. The worker owns long-running processing, so large jobs can continue after the browser tab closes.
+The browser creates a job, uploads files directly to GCS, polls job status, and renders results. With the background worker disabled (current production default), processing is driven by API kicks while the browser tab is open. Enable the worker (`WORKER_DISABLED=false`) when jobs should continue after the tab closes.
 
 ## Required Services
 
@@ -59,7 +59,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `WORKER_POLL_INTERVAL_MS` | Worker only | Legacy idle poll fallback. Default `5000`; prefer `WORKER_POLL_IDLE_MS`. |
 | `WORKER_POLL_IDLE_MS` | Worker only | Default `2000` when a worker instance is running and idle. Production releases scale the worker to zero by default. |
 | `WORKER_POLL_ACTIVE_MS` | Worker only | Default `0` (no sleep between busy worker passes). |
-| `WORKER_DISABLED` | Worker only | Production release default `true`; keeps the standalone worker health endpoint available without polling Neon. Set to `false` only when intentionally running background worker capacity. |
+| `WORKER_DISABLED` | Worker only | Production default `true` (loop disabled, scale-to-zero). **Current ops: keep disabled.** Set `false` only when you intentionally want unattended background processing. |
 | `WORKFLOW_KICK_ON_START` | API | Default `true`. Runs a bounded background batch when abstraction/synthesis start is called. |
 | `WORKFLOW_KICK_BUDGET_MS` | API kick | Default `50000` per start kick (under the 60s API limit). |
 | `ABSTRACTION_PDF_TEXT_FIRST` | Optional | Default `true`. Use extracted PDF text when quality checks pass (lower token cost). |
@@ -73,7 +73,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `ABSTRACT_MAX_TOKENS` | Optional | Default `2000` (was 3000). |
 | `SYNTHESIS_MAX_TOKENS` | Optional | Default `6000` (was 8000). |
 | `ABSTRACTION_ESCALATION_ENABLED` | Optional | Default `true`. Set `false` to skip Sonnet re-reads on low-confidence abstracts. |
-| `OPUS_AUDIT_ENABLED` | Optional | Default off. Set `true` only when you want an extra Opus audit pass. |
+| `OPUS_AUDIT_ENABLED` | Optional | Default off. **Production: keep `false`.** Do not enable unless explicitly re-requested; not part of synthesis speed work. |
 | `RELEASE_VERSION` | Release workflow | Set automatically from the release tag. |
 | `GIT_SHA` | Release workflow | Set automatically from the deployed commit. |
 | `IMAGE_DIGEST` | Release workflow | Set automatically from the immutable container digest. |
@@ -190,6 +190,8 @@ Model calls still use document/chunk/segment work units. Cloud Run removes the V
 
 Production releases keep the worker scale-to-zero and set `WORKER_DISABLED=true` by default. While the browser session is open, the API start/process endpoints kick bounded abstraction and synthesis batches and the browser polls progress. Jobs are not guaranteed to continue unattended after the browser is closed unless you intentionally run background worker capacity or add a future event-driven worker.
 
+**Synthesis speed Phase 0:** See [docs/synthesis-speed-phase-0-runbook.md](docs/synthesis-speed-phase-0-runbook.md) for production env defaults, structured log events, and the browser-driven ops checklist. Design spec: [docs/superpowers/specs/2026-05-26-synthesis-speed-optimization-design.md](docs/superpowers/specs/2026-05-26-synthesis-speed-optimization-design.md).
+
 The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs are uploaded as whole documents when possible so legal instruments keep their full context. When extracted text passes quality checks, the worker sends **text-first** prompts (lower token cost than full visual PDF blocks). Up to **24 small chunks** can share one abstraction API call on the worker (same batching idea as the browser fallback). Large visual PDFs (≥1.5 MB) are uploaded via the **Gemini Files API** so whole instruments stay unsplit when possible. Text-first extraction is used only when quality checks pass; set `ABSTRACTION_PDF_TEXT_STRICT=true` for stricter scan detection. If a PDF still exceeds model request limits or times out, the worker can degrade to page-range split recovery and the final result warns that clause continuity, legal descriptions, and exhibits need manual verification. Browser-only fallback can group up to 24 small documents per call and still page-splits oversized single PDFs as an escape hatch.
 
 ## Features
@@ -278,6 +280,6 @@ Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthe
 | `GEMINI_FILE_API_ENABLED=true` | Keeps large scanned PDFs whole via Files API instead of page-splitting for envelope limits |
 | `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts |
 | `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash) |
-| `OPUS_AUDIT_ENABLED` off (default) | Keeps Opus off the hot path |
+| `OPUS_AUDIT_ENABLED` off (required in production) | Keeps Opus off the hot path; no second full-model pass after merge |
 
 We do **not** use Anthropic or Gemini Batch API (24h window, no completion notification). Reliability and progress polling stay on the durable worker + Neon job model.

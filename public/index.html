@@ -75,6 +75,7 @@
   .followup-row { display: flex; gap: .6rem; flex-wrap: wrap; }
   .followup-row input { flex: 1; min-width: 200px; }
   .error-msg { background: #fce8e0; border: 1px solid #d97755; border-left: 4px solid #b8631e; color: #6b3410; padding: .85rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: .9rem; }
+  .info-msg { background: #e8f4fc; border: 1px solid #6ba3c7; border-left: 4px solid #3d7ea6; color: #1e4a63; padding: .85rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: .9rem; }
   .password-gate { max-width: 420px; margin: 4rem auto; padding: 2.2rem; background: #fff; border: 1px solid #d9c9a8; border-top: 4px solid #b8631e; border-radius: 6px; text-align: center; box-shadow: 0 4px 12px rgba(74,60,40,.1); }
   .password-gate h2 { color: #6b3410; margin-bottom: .8rem; font-weight: normal; font-size: 1.4rem; }
   .password-gate p { color: #8a6f4a; font-size: .9rem; margin-bottom: 1.5rem; line-height: 1.5; }
@@ -179,6 +180,7 @@
     </div>
 
     <div id="errorBox"></div>
+    <div id="infoBox"></div>
 
     <div id="progressSection" style="display:none">
       <div class="progress-card">
@@ -1822,7 +1824,7 @@ if (typeof document !== 'undefined') {
 function startJobPolling(jobId) {
   startJobPoller(jobId, job => renderPolledJobStatus(job), null);
 }
-function stopJobPolling() { stopJobPoller(); }
+function stopJobPolling() { stopJobPoller(); clearKeepOpenNotice(); }
 
 function getJobStorageKey() {
   return 'title-analyzer:last-job';
@@ -2295,6 +2297,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
 }
 
 async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
+  showKeepOpenNotice();
   if (onProgress) onProgress(88, 'Starting server-side synthesis from saved abstracts...');
   const started = await startServerSynthesis(jobId);
   kickServerWorkflowBatch(() => processServerSynthesisBatch(jobId));
@@ -2314,6 +2317,7 @@ async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
 }
 
 async function runServerDocumentAbstraction(jobId, fileList, items) {
+  showKeepOpenNotice();
   updateProgress(8, 'Starting server-side abstraction from durable chunks...', items);
   const start = await startServerAbstraction(jobId);
   kickServerWorkflowBatch(() => processServerAbstractionBatch(jobId));
@@ -2530,6 +2534,16 @@ function showError(msg) {
     </div>`;
 }
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
+
+const KEEP_OPEN_NOTICE = 'Keep this browser tab open until the job finishes. The server processes your job while this tab stays connected.';
+
+function showKeepOpenNotice() {
+  document.getElementById('infoBox').innerHTML = `<div class="info-msg">${esc(KEEP_OPEN_NOTICE)}</div>`;
+}
+
+function clearKeepOpenNotice() {
+  document.getElementById('infoBox').innerHTML = '';
+}
 
 function updateProgress(pct, status, items) {
   const displayPct = activeProgressTimer && pct < 100
@@ -3411,6 +3425,7 @@ async function analyze() {
           : [],
         failedDocuments: [],
         modelUsed: SYNTHESIS_MODEL,
+        synthesisDriver: 'browser',
       });
     }
     clearProgressTimer();
@@ -3827,6 +3842,7 @@ async function analyzeAdditional() {
           : [],
         failedDocuments: [],
         modelUsed: SYNTHESIS_MODEL,
+        synthesisDriver: 'browser',
       });
     }
     items[items.length - 1].status = 'done';

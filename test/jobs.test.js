@@ -1,5 +1,6 @@
 import jobsHandler from '../api/jobs.js';
 import jobHandler from '../api/jobs/[...path].js';
+import { validateSaveJobResultInput } from '../api/_lib/jobs.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -532,6 +533,7 @@ test('frontend saves browser synthesis fallback before terminal status', async (
     const source = ${JSON.stringify(script)};
     assert(source.includes('async function saveBrowserJobResult'), 'Missing browser result persistence helper');
     assert(source.includes('await saveBrowserJobResult(job.id'), 'Browser synthesis fallback must save /result before marking complete');
+    assert(source.includes('synthesisDriver: \\'browser\\''), 'Browser synthesis fallback must tag synthesisDriver');
   `);
 });
 
@@ -575,6 +577,16 @@ test('frontend disables recent jobs toolbar until a completed local job exists',
     assert(button.getAttribute('href') === '#/jobs', 'Enabled recent jobs toolbar button should link to history');
     assert(hint.textContent.includes('Resume'), 'Expected enabled card copy to invite resuming jobs');
   `);
+});
+
+test('validateSaveJobResultInput tags browser synthesis driver warning', () => {
+  const opinion = 'CHAIN OF TITLE\n\nFINAL OWNERSHIP\n\nOPINION QUALIFICATIONS\n' + 'x'.repeat(600);
+  const result = validateSaveJobResultInput({
+    finalTitleOpinion: opinion,
+    synthesisDriver: 'browser',
+  });
+  assert(result.valid === true, 'Expected valid browser result payload');
+  assert(result.payload.warnings.some(w => w === 'synthesis_driver:browser'), 'Expected synthesis_driver warning');
 });
 
 let passed = 0;

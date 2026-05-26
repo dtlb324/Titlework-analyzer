@@ -82,6 +82,24 @@ function clampInt(raw, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
+export function summarizeSynthesisWarningFlags(warnings = []) {
+  const text = (warnings || []).map(w => String(w)).join('\n');
+  const flags = [];
+  if (/repair_retry/i.test(text)) flags.push('repair_retry');
+  if (/merge_tree_applied/i.test(text)) flags.push('merge_tree_applied');
+  if (/final_validation_failed/i.test(text)) flags.push('final_validation_failed');
+  if (/segment_split|retry_wait/i.test(text)) flags.push('segment_split_or_retry');
+  return flags;
+}
+
+export function buildSynthesisMetricsEvent(fields) {
+  return { ...fields, ts: new Date().toISOString() };
+}
+
+export function logSynthesisMetrics(fields) {
+  console.log(JSON.stringify(buildSynthesisMetricsEvent(fields)));
+}
+
 export const SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions.
 
 Synthesize the provided document abstracts into a complete title opinion analysis.
@@ -431,7 +449,7 @@ function buildSegmentMessages(abstracts, tract, ctx, preamble) {
   return [{ role: 'user', content: buildAbstractInput(abstracts, tract, ctx, preamble) }];
 }
 
-// Opus audit is opt-in only (OPUS_AUDIT_ENABLED=true) to avoid extra full-job model cost.
+// Opus audit is opt-in only (OPUS_AUDIT_ENABLED=true). Production keeps this off.
 function opusAuditEnabled(options = {}) {
   if (options.opusAuditEnabled === true) return true;
   if (options.opusAuditEnabled === false) return false;
@@ -1347,6 +1365,38 @@ export async function processSynthesisJob(jobId, options = {}) {
   }
 
   const status = await store.getSynthesisStatus(jobId, { lightweight: true });
+  if (mergeRanInThisBatch && result) {
+    logSynthesisMetrics({
+      event: 'synthesis_merge_complete',
+      jobId,
+      planId: result.planId || planId,
+      segmentCount: plan.segments.length,
+      singlePass,
+      status: result.status,
+      synthesisDurationMs: result.synthesisDurationMs ?? null,
+      inputTokens: result.inputTokens ?? null,
+      outputTokens: result.outputTokens ?? null,
+      payloadBytes: result.payloadBytes ?? null,
+      modelUsed: result.modelUsed || null,
+      warningFlags: summarizeSynthesisWarningFlags(result.warnings),
+      synthesisDriver: 'server',
+    });
+  }
+  logSynthesisMetrics({
+    event: 'synthesis_batch_complete',
+    jobId,
+    planId,
+    segmentCount: plan.segments.length,
+    singlePass,
+    completedInBatch,
+    failedInBatch,
+    retryScheduledInBatch: retryInBatch,
+    mergeRan: mergeRanInThisBatch,
+    elapsedMs: Date.now() - startedAt,
+    pendingSegments: (status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0),
+    mergeInProgress: Boolean(status?.mergeInProgress),
+    synthesisDriver: 'server',
+  });
   return {
     planId,
     plan,
