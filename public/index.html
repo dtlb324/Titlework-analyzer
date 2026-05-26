@@ -51,6 +51,9 @@
   .progress-bar { width: 100%; height: 8px; background: #f0e3c8; border-radius: 4px; overflow: hidden; }
   .progress-fill { height: 100%; background: linear-gradient(90deg,#b8631e,#d07628); transition: width .4s ease; }
   .progress-list { margin-top: 1rem; font-size: .85rem; }
+  .synthesis-preview-card { margin-top: 1rem; background: #fff; border: 1px solid #d9c9a8; border-left: 4px solid #2f6b3a; border-radius: 6px; padding: 1rem 1.2rem; max-height: 320px; overflow: auto; }
+  .synthesis-preview-label { font-size: .78rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: #2f6b3a; margin-bottom: .6rem; }
+  .synthesis-preview-body { font-size: .92rem; line-height: 1.55; color: #3a2f22; white-space: pre-wrap; }
   .pi { padding: .3rem 0; color: #6b5840; display: flex; align-items: center; gap: .5rem; }
   .pi.done { color: #4a7c4e; }
   .pi.active { color: #b8631e; font-weight: bold; }
@@ -189,6 +192,12 @@
         <div class="progress-eta" id="progressEta"></div>
         <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
         <div class="progress-list" id="progressList"></div>
+        <div id="synthesisPreviewSection" style="display:none">
+          <div class="synthesis-preview-card">
+            <div class="synthesis-preview-label">Draft title opinion (streaming preview)</div>
+            <div class="synthesis-preview-body" id="synthesisPreviewBody"></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -2224,6 +2233,30 @@ async function fetchServerSynthesisStatus(jobId) {
   });
 }
 
+async function fetchServerSynthesisPreview(jobId) {
+  return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/synthesis/preview`, {
+    method: 'GET',
+  });
+}
+
+function renderSynthesisPreview(text, visible) {
+  const section = document.getElementById('synthesisPreviewSection');
+  const body = document.getElementById('synthesisPreviewBody');
+  if (!section || !body) return;
+  if (!visible || !text) {
+    section.style.display = 'none';
+    body.textContent = '';
+    return;
+  }
+  section.style.display = 'block';
+  body.textContent = text;
+  body.scrollTop = body.scrollHeight;
+}
+
+function clearSynthesisPreview() {
+  renderSynthesisPreview('', false);
+}
+
 async function fetchServerJobResult(jobId) {
   return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/result`, {
     method: 'GET',
@@ -2262,6 +2295,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   let cachedResult = null;
   let lastSignature = '';
   let stallPolls = 0;
+  let lastPreviewBytes = 0;
   const STALL_THRESHOLD = 4;
   for (let attempt = 0; attempt < 1800; attempt++) {
     latest = await fetchServerSynthesisStatus(jobId);
@@ -2277,9 +2311,25 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
     if (processing) detail.push(`${processing} segment(s) running`);
     if (retryWait) detail.push(`${retryWait} awaiting retry`);
     if (failed) detail.push(`${failed} failed`);
-    const phaseLabel = total > 0
+    let phaseLabel = total > 0
       ? `Server synthesis ${complete}/${total} segment(s)${detail.length ? ` (${detail.join(', ')})` : ''}...`
       : 'Server synthesis planning...';
+    if (status.mergeInProgress) {
+      phaseLabel = 'Final title opinion merge in progress (streaming preview below)...';
+      try {
+        const previewPayload = await fetchServerSynthesisPreview(jobId);
+        const preview = previewPayload?.preview || {};
+        if ((preview.bytesReceived || 0) > lastPreviewBytes || preview.complete) {
+          lastPreviewBytes = preview.bytesReceived || 0;
+          renderSynthesisPreview(preview.text || '', Boolean(preview.text));
+        }
+      } catch (err) {
+        console.warn('Could not fetch synthesis preview', err);
+      }
+    } else if (lastPreviewBytes > 0) {
+      clearSynthesisPreview();
+      lastPreviewBytes = 0;
+    }
     if (onProgress) onProgress(Math.min(99, pct), phaseLabel);
     if (isServerSynthesisTerminal(status)) {
       return { ...latest, result: cachedResult || publicJobResultFromApi(latest) };
@@ -2299,6 +2349,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
     }
     await sleep(stallPolls > 0 ? 1000 : 750);
   }
+  clearSynthesisPreview();
   throw new Error('Server-side synthesis did not finish polling in this browser session.');
 }
 

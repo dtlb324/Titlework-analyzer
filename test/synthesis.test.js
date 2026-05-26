@@ -22,6 +22,7 @@ import {
   resolveSynthesisBatchLimit,
   summarizeSynthesisWarningFlags,
   buildSynthesisMetricsEvent,
+  synthesisStreamEnabled,
 } from '../api/_lib/synthesis.js';
 import {
   processSynthesisBatch,
@@ -108,6 +109,7 @@ function createMemoryPhase5Store(initialState = {}) {
   const segments = new Map(); // segmentId -> row
   const results = new Map(); // jobId -> result row
   const followups = []; // ordered
+  const synthesisPreviews = new Map(); // jobId -> preview
   let currentPlanIdByJob = new Map();
   let mergeClaimCalls = 0;
   let lastMergeLeaseMs = null;
@@ -438,6 +440,25 @@ function createMemoryPhase5Store(initialState = {}) {
     },
     async clearJobResult(jobId) {
       return results.delete(jobId);
+    },
+    async setSynthesisPreview(jobId, patch = {}) {
+      const text = typeof patch.text === 'string' ? patch.text : '';
+      const preview = {
+        text,
+        complete: Boolean(patch.complete),
+        bytesReceived: Number.isFinite(Number(patch.bytesReceived)) ? Number(patch.bytesReceived) : text.length,
+        updatedAt: now(),
+      };
+      synthesisPreviews.set(jobId, preview);
+      return { ...preview };
+    },
+    async getSynthesisPreview(jobId) {
+      const preview = synthesisPreviews.get(jobId);
+      if (!preview) return { text: '', complete: false, bytesReceived: 0, updatedAt: null };
+      return { ...preview };
+    },
+    async clearSynthesisPreview(jobId) {
+      return synthesisPreviews.delete(jobId);
     },
     async claimSynthesisMerge(jobId, planId, options = {}) {
       mergeClaimCalls += 1;
@@ -1728,6 +1749,88 @@ test('processSynthesisBatch claims up to configured batchLimit ready segments pe
   assert(maxReadyLimit === 8, `Expected batch limit 8, saw ${maxReadyLimit}`);
   if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+});
+
+test('synthesisStreamEnabled respects env and option overrides', () => {
+  const previous = process.env.SYNTHESIS_STREAM_ENABLED;
+  delete process.env.SYNTHESIS_STREAM_ENABLED;
+  assert(synthesisStreamEnabled() === false, 'Expected streaming disabled by default');
+  process.env.SYNTHESIS_STREAM_ENABLED = 'true';
+  assert(synthesisStreamEnabled() === true, 'Expected streaming enabled from env');
+  assert(synthesisStreamEnabled({ streamFinalOpinion: false }) === false, 'Expected option override off');
+  if (previous === undefined) delete process.env.SYNTHESIS_STREAM_ENABLED;
+  else process.env.SYNTHESIS_STREAM_ENABLED = previous;
+});
+
+test('final merge writes streaming preview during Sonnet merge when enabled', async () => {
+  const previousStream = process.env.SYNTHESIS_STREAM_ENABLED;
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.SYNTHESIS_STREAM_ENABLED = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
+  let maxPreviewBytes = 0;
+  let streamCalled = false;
+  const store = createMemoryPhase5Store({ abstracts });
+  const originalSetPreview = store.setSynthesisPreview.bind(store);
+  store.setSynthesisPreview = async (...args) => {
+    const preview = await originalSetPreview(...args);
+    maxPreviewBytes = Math.max(maxPreviewBytes, preview.bytesReceived || 0);
+    return preview;
+  };
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+    }
+    if (request.stream) {
+      streamCalled = true;
+      if (request.onDelta) {
+        await request.onDelta('## CHAIN', '## CHAIN');
+        await request.onDelta(' OF TITLE\n', '## CHAIN OF TITLE\n');
+      }
+      return {
+        text: goodFinalOpinion(),
+        model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 10, output_tokens: 20 },
+        timeToFirstDeltaMs: 12,
+      };
+    }
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+  const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
+  assert(streamCalled, 'Expected streaming final merge call');
+  assert(maxPreviewBytes > 0, 'Expected preview bytes while streaming');
+  assert(batch.result?.finalTitleOpinion, 'Expected saved final opinion after streamed merge');
+  if (previousStream === undefined) delete process.env.SYNTHESIS_STREAM_ENABLED;
+  else process.env.SYNTHESIS_STREAM_ENABLED = previousStream;
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+});
+
+test('GET /api/jobs/:id/synthesis/preview returns buffered merge text', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  await store.setSynthesisPreview('job_test_1', {
+    text: 'Draft opinion preview',
+    complete: false,
+    bytesReceived: 21,
+  });
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  const req = {
+    method: 'GET',
+    url: '/api/jobs/job_test_1/synthesis/preview',
+    query: { path: ['job_test_1', 'synthesis', 'preview'] },
+    headers: { 'x-app-password': process.env.APP_PASSWORD || 'test-password' },
+  };
+  const res = {
+    statusCode: 200,
+    headers: {},
+    setHeader(name, value) { this.headers[name.toLowerCase()] = value; },
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { this.body = payload; return this; },
+  };
+  await jobsRouteHandler(req, res);
+  assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
+  assert(res.body.preview.text === 'Draft opinion preview', 'Expected preview text');
+  assert(res.body.preview.bytesReceived === 21, 'Expected preview byte count');
 });
 
 // --- Run --------------------------------------------------------------------

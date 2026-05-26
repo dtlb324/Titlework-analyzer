@@ -467,6 +467,13 @@ test('Phase 1: job view warns when synthesis used browser fallback', () => {
   assert(script.includes('result.synthesisDriver'), 'Job results must read synthesisDriver from API result');
 });
 
+test('Phase 2: synthesis polling renders streaming merge preview', () => {
+  assert(script.includes('fetchServerSynthesisPreview'), 'Must fetch synthesis preview during merge');
+  assert(script.includes('status.mergeInProgress'), 'Preview polling must key off mergeInProgress');
+  assert(script.includes('synthesisPreviewSection'), 'Must include streaming preview container');
+  assert(script.includes('renderSynthesisPreview'), 'Must render incremental merge preview text');
+});
+
 test('Phase 6: recent jobs store caps at 20 entries', () => {
   assert(script.includes('title-analyzer:recent-jobs:v1'),
     'Must use a versioned localStorage key for recent jobs');
