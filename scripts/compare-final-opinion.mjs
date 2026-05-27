@@ -20,6 +20,7 @@ import { join } from 'path';
 import { buildMergeUserMessageContent } from '../api/_lib/anthropic-request.js';
 import { getJobStore } from '../api/_lib/jobs.js';
 import { invokeModel } from '../api/_lib/model-client.js';
+import { isGemini3SeriesModel } from '../api/_lib/gemini-request.js';
 import {
   SYNTHESIS_PROMPT,
   buildAbstractInput,
@@ -123,6 +124,12 @@ function resolveMode(ctx) {
 async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
   const config = getSynthesisConfig({ model });
   const started = Date.now();
+  // Gemini 3.x always runs thinking by default (medium), which eats into maxTokens
+  // and leaves almost no budget for output. Default to minimal unless the caller
+  // explicitly requested a level, so both models get a fair output token budget.
+  if (isGemini3SeriesModel(model) && !thinkingLevel) {
+    thinkingLevel = 'minimal';
+  }
   let messages;
 
   if (mode === 'single-pass') {
