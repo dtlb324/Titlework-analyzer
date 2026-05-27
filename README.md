@@ -33,7 +33,7 @@ Set these on both Cloud Run services unless noted otherwise:
 |------|----------|-------|
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key for abstraction and partial synthesis segments (`gemini-2.5-flash`). Also accepts `GOOGLE_API_KEY`. |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for the final title opinion (Sonnet), follow-ups, and optional abstraction escalation. |
-| `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion and merge step. Gemini/Haiku values are ignored. |
+| `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion, merge, and follow-ups. Set to e.g. `gemini-3.5-flash` to use Gemini for the final opinion (requires `GEMINI_API_KEY`). Haiku is not allowed for final synthesis. |
 | `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `gemini-2.5-flash` for large-job segment synthesis only (not the final opinion). Haiku/Claude values are ignored. |
 | `SYNTHESIS_CHUNK_SIZE` | Optional | Default `120` (max `250`). Max grouped documents per partial synthesis segment before byte envelope split. |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | Optional | Default `200` for jobs with ≥100 abstracts. |
@@ -145,7 +145,7 @@ Secrets such as `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATA
 
 1. Open [Google AI Studio](https://aistudio.google.com/apikey) and create an API key for your Google account or Cloud project.
 2. In Cloud Run (both API and worker services), add `GEMINI_API_KEY` with that value.
-3. Keep `ANTHROPIC_API_KEY` configured — the **final title opinion** and follow-ups use Claude Sonnet (`claude-sonnet-4-6` by default). Abstraction and partial synthesis segments use Gemini Flash.
+3. Configure `ANTHROPIC_API_KEY` when using Claude for the final opinion (default `SYNTHESIS_MODEL=claude-sonnet-4-6`). For `SYNTHESIS_MODEL=gemini-3.5-flash`, the final opinion and follow-ups use Gemini instead. Abstraction and partial segments use Gemini Flash by default.
 4. Optional: set `ABSTRACT_ESCALATION_MODEL=claude-sonnet-4-6` (default) for harder documents; escalation requires Anthropic even when abstraction uses Gemini.
 
 ### Release Verification

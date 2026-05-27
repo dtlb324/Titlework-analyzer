@@ -7,12 +7,12 @@
 // would exceed the safe request envelope.
 //
 // Required env vars:
-//   - GEMINI_API_KEY (partial segment synthesis)
-//   - ANTHROPIC_API_KEY (final title opinion, follow-ups, optional audit)
+//   - GEMINI_API_KEY (partial segment synthesis; also final opinion when SYNTHESIS_MODEL is Gemini)
+//   - ANTHROPIC_API_KEY (final title opinion / follow-ups when SYNTHESIS_MODEL is Claude; optional audit)
 //   Override per call with options.modelClient
 //
 // Configurable (env):
-//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6 for final title opinion; Gemini/Haiku ignored)
+//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6; e.g. gemini-3.5-flash — Haiku is not allowed for final)
 //   - SYNTHESIS_MAX_TOKENS (default: 6000)
 //   - SYNTHESIS_CHUNK_SIZE (default: 50)
 //   - REQUEST_ENVELOPE_SAFE_BYTES (default: 3_900_000)
@@ -30,7 +30,7 @@ const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-4-6';
 
 export function resolveFinalSynthesisModel() {
   const configured = String(process.env.SYNTHESIS_MODEL || DEFAULT_FINAL_SYNTHESIS_MODEL).trim();
-  if (isGeminiModel(configured) || /^claude-haiku/i.test(configured)) {
+  if (/^claude-haiku/i.test(configured)) {
     return DEFAULT_FINAL_SYNTHESIS_MODEL;
   }
   return configured || DEFAULT_FINAL_SYNTHESIS_MODEL;
@@ -1935,10 +1935,18 @@ export function synthesisSetupError() {
     return null;
   }
   const missing = [];
-  const geminiError = geminiApiKeyError();
-  if (geminiError) missing.push(geminiError);
-  if (!process.env.ANTHROPIC_API_KEY) {
-    missing.push('ANTHROPIC_API_KEY is required for final title synthesis and follow-ups.');
+  const finalModel = resolveFinalSynthesisModel();
+  const partialModel = resolvePartialSynthesisModel();
+  if (isGeminiModel(finalModel) || isGeminiModel(partialModel)) {
+    const geminiError = geminiApiKeyError();
+    if (geminiError) missing.push(geminiError);
+  }
+  if (isAnthropicModel(finalModel)) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      missing.push('ANTHROPIC_API_KEY is required when SYNTHESIS_MODEL is a Claude model.');
+    }
+  } else if (!isGeminiModel(finalModel)) {
+    missing.push(`Unsupported SYNTHESIS_MODEL: ${finalModel}`);
   }
   return missing.length ? missing.join(' ') : null;
 }
