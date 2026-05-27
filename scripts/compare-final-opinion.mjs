@@ -8,13 +8,12 @@
  *   DATABASE_URL=... GEMINI_API_KEY=... ANTHROPIC_API_KEY=... \
  *     node scripts/compare-final-opinion.mjs --job-id job_abc123
  *
- * Gemini thinking levels side by side (e.g. medium vs high):
+ * Gemini medium + high only:
  *   node scripts/compare-final-opinion.mjs --job-id job_abc123 \
  *     --gemini-thinking-levels medium,high --skip-sonnet
  *
- * Sonnet + medium + high in one run:
- *   node scripts/compare-final-opinion.mjs --job-id job_abc123 \
- *     --gemini-thinking-levels medium,high
+ * Sonnet only (separate run):
+ *   node scripts/compare-final-opinion.mjs --job-id job_abc123 --sonnet-only
  */
 
 import { mkdir, writeFile } from 'fs/promises';
@@ -56,6 +55,7 @@ function parseArgs(argv) {
     geminiThinkingLevel: null,
     geminiThinkingLevels: [],
     skipSonnet: false,
+    sonnetOnly: false,
     noHtml: false,
   };
   for (let i = 2; i < argv.length; i++) {
@@ -67,14 +67,35 @@ function parseArgs(argv) {
     else if (a === '--gemini-thinking-level') args.geminiThinkingLevel = argv[++i];
     else if (a === '--gemini-thinking-levels') args.geminiThinkingLevels = parseThinkingLevelsCsv(argv[++i]);
     else if (a === '--skip-sonnet') args.skipSonnet = true;
+    else if (a === '--sonnet-only') args.sonnetOnly = true;
     else if (a === '--no-html') args.noHtml = true;
     else if (a === '--help' || a === '-h') args.help = true;
   }
   return args;
 }
 
+function validateCompareArgs(args) {
+  if (args.sonnetOnly && args.skipSonnet) {
+    throw new Error('Use either --sonnet-only or --skip-sonnet, not both.');
+  }
+  if (args.sonnetOnly && (args.geminiThinkingLevels.length || args.geminiThinkingLevel)) {
+    throw new Error('--sonnet-only cannot be combined with --gemini-thinking-level or --gemini-thinking-levels.');
+  }
+  if (args.sonnetOnly && process.env.GEMINI_THINKING_LEVEL) {
+    throw new Error('Unset GEMINI_THINKING_LEVEL when using --sonnet-only, or pass --sonnet-only in a clean shell.');
+  }
+}
+
 /** @returns {{ id: string, label: string, model: string, thinkingLevel?: string }[]} */
 export function buildCompareArms(args) {
+  const arms = [];
+  if (!args.skipSonnet) {
+    arms.push({ id: 'sonnet', label: 'Claude Sonnet 4.6', model: args.sonnetModel });
+  }
+  if (args.sonnetOnly) {
+    return arms;
+  }
+
   const levels = args.geminiThinkingLevels.length
     ? args.geminiThinkingLevels
     : (args.geminiThinkingLevel || process.env.GEMINI_THINKING_LEVEL
@@ -85,11 +106,6 @@ export function buildCompareArms(args) {
     if (level && !GEMINI_THINKING_LEVELS.has(level)) {
       throw new Error(`Invalid Gemini thinking level "${level}". Use: minimal, low, medium, high.`);
     }
-  }
-
-  const arms = [];
-  if (!args.skipSonnet) {
-    arms.push({ id: 'sonnet', label: 'Claude Sonnet 4.6', model: args.sonnetModel });
   }
 
   for (const level of levels) {
@@ -113,8 +129,8 @@ export function buildCompareArms(args) {
 function usage() {
   console.log(`Compare final title opinions on frozen abstracts (writes markdown + compare.html).
 
-Required env: DATABASE_URL, GEMINI_API_KEY
-Anthropic key required when Sonnet arm runs (default unless --skip-sonnet).
+Required env: DATABASE_URL
+GEMINI_API_KEY when any Gemini arm runs. ANTHROPIC_API_KEY when Sonnet runs.
 
 Options:
   --job-id <id>                      Job with completed abstracts (merge needs segment summaries)
@@ -123,18 +139,19 @@ Options:
   --sonnet-model <id>                Default: claude-sonnet-4-6
   --gemini-thinking-level <lvl>      Single Gemini arm: minimal|low|medium|high
   --gemini-thinking-levels <a,b,...> Multiple Gemini arms, e.g. medium,high
-  --skip-sonnet                      Only run Gemini arm(s)
+  --skip-sonnet                      Gemini arm(s) only (no Sonnet)
+  --sonnet-only                      Sonnet only (no Gemini) — use in a separate run
   --no-html                          Skip compare.html side-by-side viewer
 
 Examples:
-  Sonnet vs Gemini (high):
-    --gemini-thinking-level high
+  Run 1 — Gemini medium vs high:
+    --job-id job_xxx --gemini-thinking-levels medium,high --skip-sonnet
 
-  Gemini medium vs high only:
-    --gemini-thinking-levels medium,high --skip-sonnet
+  Run 2 — Sonnet only:
+    --job-id job_xxx --sonnet-only
 
-  Sonnet + medium + high:
-    --gemini-thinking-levels medium,high
+  Default (both models, one Gemini thinking level):
+    --job-id job_xxx
 `);
 }
 
@@ -332,9 +349,16 @@ async function main() {
     process.exit(1);
   }
 
+  try {
+    validateCompareArgs(args);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+
   const arms = buildCompareArms(args);
   if (!arms.length) {
-    console.error('No comparison arms configured. Remove --skip-sonnet or add --gemini-thinking-level(s).');
+    console.error('No comparison arms configured. Use --sonnet-only, --skip-sonnet + --gemini-thinking-level(s), or defaults.');
     process.exit(1);
   }
 
