@@ -279,6 +279,13 @@ function buildCompareHtml(panels) {
     )
     .join('\n');
 
+  const count = Math.max(1, panels.length);
+  const gridColumns = count === 2
+    ? '1fr 1fr'
+    : count === 3
+      ? '1fr 1fr 1fr'
+      : `repeat(${count}, minmax(0, 1fr))`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -291,10 +298,13 @@ function buildCompareHtml(panels) {
     header { padding: 12px 16px; background: #1a1a2e; color: #fff; font-size: 14px; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+      grid-template-columns: ${gridColumns};
       gap: 12px;
       padding: 12px;
       min-height: calc(100vh - 48px);
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr !important; }
     }
     .panel {
       display: flex;
