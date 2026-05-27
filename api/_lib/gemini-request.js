@@ -12,6 +12,43 @@ export function isGeminiModel(model) {
   return /^gemini-/i.test(String(model || '').trim());
 }
 
+const GEMINI_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
+
+/** Gemini 3+ uses thinkingLevel; Gemini 2.5 uses thinkingBudget (see Google thinking docs). */
+export function isGemini3SeriesModel(model) {
+  return /^gemini-3/i.test(String(model || '').trim());
+}
+
+function normalizeThinkingLevel(raw) {
+  const level = String(raw || '').trim().toLowerCase();
+  return GEMINI_THINKING_LEVELS.has(level) ? level : null;
+}
+
+/**
+ * Resolve thinkingConfig for generateContent.
+ * - Gemini 3.x: GEMINI_THINKING_LEVEL (minimal|low|medium|high); omit for API default (medium on 3.5 Flash).
+ * - Gemini 2.5: GEMINI_THINKING_BUDGET (0 off, -1 dynamic, or token count).
+ */
+export function resolveGeminiThinkingConfig(model, overrides = {}) {
+  if (!isGeminiModel(model)) return null;
+
+  if (isGemini3SeriesModel(model)) {
+    const level = normalizeThinkingLevel(
+      overrides.thinkingLevel ?? process.env.GEMINI_THINKING_LEVEL,
+    );
+    if (!level) return null;
+    const config = { thinkingLevel: level };
+    if (overrides.includeThoughts === true || process.env.GEMINI_INCLUDE_THOUGHTS === 'true') {
+      config.includeThoughts = true;
+    }
+    return config;
+  }
+
+  const budgetRaw = overrides.thinkingBudget ?? process.env.GEMINI_THINKING_BUDGET;
+  const budget = Number.isFinite(Number(budgetRaw)) ? Number(budgetRaw) : 0;
+  return { thinkingBudget: budget };
+}
+
 export function anthropicMessagesToGeminiContents(messages = []) {
   const contents = [];
   for (const message of messages) {
@@ -54,7 +91,15 @@ export function anthropicMessagesToGeminiContents(messages = []) {
   return contents;
 }
 
-export function buildGeminiGenerateContentBody({ model, maxTokens, system, messages, thinkingBudget }) {
+export function buildGeminiGenerateContentBody({
+  model,
+  maxTokens,
+  system,
+  messages,
+  thinkingConfig = null,
+  thinkingBudget,
+  thinkingLevel,
+}) {
   const body = {
     contents: anthropicMessagesToGeminiContents(messages),
     generationConfig: {
@@ -69,9 +114,13 @@ export function buildGeminiGenerateContentBody({ model, maxTokens, system, messa
   if (systemText.trim()) {
     body.systemInstruction = { parts: [{ text: systemText }] };
   }
-  const budget = Number(thinkingBudget);
-  if (Number.isFinite(budget)) {
-    body.generationConfig.thinkingConfig = { thinkingBudget: budget };
+  const resolvedThinking = thinkingConfig
+    ?? resolveGeminiThinkingConfig(model, { thinkingBudget, thinkingLevel });
+  if (resolvedThinking && Object.keys(resolvedThinking).length) {
+    body.generationConfig.thinkingConfig = resolvedThinking;
+  } else if (Number.isFinite(Number(thinkingBudget))) {
+    // Explicit legacy call sites may still pass thinkingBudget directly.
+    body.generationConfig.thinkingConfig = { thinkingBudget: Number(thinkingBudget) };
   }
   return body;
 }
@@ -79,15 +128,26 @@ export function buildGeminiGenerateContentBody({ model, maxTokens, system, messa
 export function normalizeGeminiUsage(usageMetadata = {}) {
   const input = Number(usageMetadata.promptTokenCount);
   const output = Number(usageMetadata.candidatesTokenCount);
+  const thinking = Number(usageMetadata.thoughtsTokenCount);
   return {
     input_tokens: Number.isFinite(input) ? input : null,
     output_tokens: Number.isFinite(output) ? output : null,
+    thinking_tokens: Number.isFinite(thinking) ? thinking : null,
   };
 }
 
 export function extractGeminiText(data = {}) {
   const parts = data?.candidates?.[0]?.content?.parts || [];
-  return parts.map(part => part.text || '').join('');
+  return parts
+    .filter(part => !part.thought)
+    .map(part => part.text || '')
+    .join('');
+}
+
+/** Thought summaries when includeThoughts is enabled (debug / eval only). */
+export function extractGeminiThoughtSummaries(data = {}) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts.filter(part => part.thought && part.text).map(part => String(part.text));
 }
 
 export function geminiApiKeyError() {
@@ -105,17 +165,19 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
 
   const model = request.model;
   const maxTokens = request.maxTokens;
-  const thinkingBudget = request.thinkingBudget ?? (
-    Number.isFinite(Number(process.env.GEMINI_THINKING_BUDGET))
-      ? Number(process.env.GEMINI_THINKING_BUDGET)
-      : 0
-  );
+  const thinkingConfig = resolveGeminiThinkingConfig(model, {
+    thinkingLevel: request.thinkingLevel,
+    thinkingBudget: request.thinkingBudget,
+    includeThoughts: request.includeThoughts,
+  });
   const body = buildGeminiGenerateContentBody({
     model,
     maxTokens,
     system: request.system,
     messages: request.messages,
-    thinkingBudget,
+    thinkingConfig,
+    thinkingBudget: request.thinkingBudget,
+    thinkingLevel: request.thinkingLevel,
   });
   const baseUrl = String(process.env.GEMINI_API_BASE_URL || DEFAULT_GEMINI_BASE_URL).replace(/\/$/, '');
   const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
@@ -143,11 +205,14 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
       throw error;
     }
     const text = extractGeminiText(data);
+    const thoughtSummaries = extractGeminiThoughtSummaries(data);
     return {
       text,
       model: data.modelVersion || model,
       usage: normalizeGeminiUsage(data.usageMetadata),
       stopReason: data?.candidates?.[0]?.finishReason || null,
+      thoughtSummaries: thoughtSummaries.length ? thoughtSummaries : undefined,
+      thinkingConfig: thinkingConfig || undefined,
       raw: data,
     };
   } finally {

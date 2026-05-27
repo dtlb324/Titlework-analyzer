@@ -2,8 +2,11 @@ import {
   anthropicMessagesToGeminiContents,
   buildGeminiGenerateContentBody,
   extractGeminiText,
+  extractGeminiThoughtSummaries,
+  isGemini3SeriesModel,
   isGeminiModel,
   normalizeGeminiUsage,
+  resolveGeminiThinkingConfig,
 } from '../api/_lib/gemini-request.js';
 
 function assert(condition, message) {
@@ -61,17 +64,72 @@ test('anthropicMessagesToGeminiContents maps pdf and text blocks', () => {
   assert(contents[0].parts[1].text === 'Abstract this deed.', 'Expected prompt text');
 });
 
-test('buildGeminiGenerateContentBody includes system and thinking budget', () => {
+test('buildGeminiGenerateContentBody includes system and thinking budget for 2.5', () => {
   const body = buildGeminiGenerateContentBody({
     model: 'gemini-2.5-flash',
     maxTokens: 3000,
     system: 'You are a title attorney.',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
-    thinkingBudget: 0,
+    thinkingConfig: { thinkingBudget: 0 },
   });
   assert(body.systemInstruction.parts[0].text === 'You are a title attorney.', 'Expected system instruction');
   assert(body.generationConfig.maxOutputTokens === 3000, 'Expected max output tokens');
   assert(body.generationConfig.thinkingConfig.thinkingBudget === 0, 'Expected thinking budget');
+});
+
+test('resolveGeminiThinkingConfig uses thinkingLevel for Gemini 3.5', () => {
+  const prevLevel = process.env.GEMINI_THINKING_LEVEL;
+  process.env.GEMINI_THINKING_LEVEL = 'high';
+  try {
+    const config = resolveGeminiThinkingConfig('gemini-3.5-flash');
+    assert(config.thinkingLevel === 'high', 'Expected high thinking level');
+    assert(config.thinkingBudget === undefined, 'Gemini 3.5 must not use thinkingBudget from env');
+    const body = buildGeminiGenerateContentBody({
+      model: 'gemini-3.5-flash',
+      maxTokens: 2000,
+      system: 'Test',
+      messages: [{ role: 'user', content: 'Hi' }],
+      thinkingConfig: config,
+    });
+    assert(body.generationConfig.thinkingConfig.thinkingLevel === 'high', 'Expected high in request body');
+  } finally {
+    if (prevLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = prevLevel;
+  }
+});
+
+test('isGemini3SeriesModel distinguishes 2.5 and 3.5', () => {
+  assert(isGemini3SeriesModel('gemini-3.5-flash'), 'Expected 3.5');
+  assert(!isGemini3SeriesModel('gemini-2.5-flash'), 'Expected 2.5 false');
+});
+
+test('extractGeminiText omits thought summary parts', () => {
+  const text = extractGeminiText({
+    candidates: [{
+      content: {
+        parts: [
+          { thought: true, text: 'internal reasoning' },
+          { text: 'DOC TYPE: deed' },
+        ],
+      },
+    }],
+  });
+  assert(!text.includes('internal reasoning'), 'Thought parts must not appear in output text');
+  assert(text.includes('DOC TYPE: deed'), 'Expected answer text');
+});
+
+test('extractGeminiThoughtSummaries returns thought parts only', () => {
+  const thoughts = extractGeminiThoughtSummaries({
+    candidates: [{
+      content: {
+        parts: [
+          { thought: true, text: 'Step 1: check grantor.' },
+          { text: 'Final answer' },
+        ],
+      },
+    }],
+  });
+  assert(thoughts.length === 1 && thoughts[0].includes('grantor'), 'Expected thought summary');
 });
 
 test('normalizeGeminiUsage maps token counts', () => {
