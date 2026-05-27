@@ -44,9 +44,23 @@ test('buildCompareArms can include sonnet with multiple gemini levels', () => {
     geminiThinkingLevels: ['medium', 'high'],
     geminiThinkingLevel: null,
     skipSonnet: false,
+    sonnetOnly: false,
   });
   assert(arms.length === 3, `Expected 3 arms, got ${arms.length}`);
   assert(arms[0].id === 'sonnet', 'Sonnet should be first');
+});
+
+test('buildCompareArms sonnet-only returns a single sonnet arm', () => {
+  const arms = buildCompareArms({
+    sonnetModel: 'claude-sonnet-4-6',
+    geminiModel: 'gemini-3.5-flash',
+    geminiThinkingLevels: [],
+    geminiThinkingLevel: null,
+    skipSonnet: false,
+    sonnetOnly: true,
+  });
+  assert(arms.length === 1, `Expected 1 arm, got ${arms.length}`);
+  assert(arms[0].id === 'sonnet', 'Expected sonnet-only arm');
 });
 
 let failed = 0;
