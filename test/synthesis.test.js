@@ -1825,6 +1825,50 @@ test('final merge writes streaming preview during Sonnet merge when enabled', as
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
+test('final merge streams preview when SYNTHESIS_MODEL is Gemini 3.5 Flash', async () => {
+  const previousStream = process.env.SYNTHESIS_STREAM_ENABLED;
+  const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.SYNTHESIS_STREAM_ENABLED = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  const abstracts = manyAbstracts(250);
+  let streamCalled = false;
+  let streamModel = null;
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+    }
+    if (request.stream) {
+      streamCalled = true;
+      streamModel = request.model;
+      if (request.onDelta) {
+        await request.onDelta('## CHAIN', '## CHAIN');
+        await request.onDelta(' OF TITLE\n', '## CHAIN OF TITLE\n');
+      }
+      return {
+        text: goodFinalOpinion(),
+        model: 'gemini-3.5-flash',
+        usage: { input_tokens: 10, output_tokens: 20 },
+        timeToFirstDeltaMs: 8,
+      };
+    }
+    return { text: goodFinalOpinion(), model: request.model, usage: {} };
+  };
+  const batch = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 60_000,
+    batchLimit: 8,
+    config: { model: 'gemini-3.5-flash' },
+  });
+  assert(streamCalled, 'Expected streaming final merge for Gemini');
+  assert(streamModel === 'gemini-3.5-flash', `Expected Gemini model in stream call, got ${streamModel}`);
+  assert(batch.result?.finalTitleOpinion, 'Expected saved final opinion after Gemini streamed merge');
+  if (previousStream === undefined) delete process.env.SYNTHESIS_STREAM_ENABLED;
+  else process.env.SYNTHESIS_STREAM_ENABLED = previousStream;
+  if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+});
+
 test('GET /api/jobs/:id/synthesis/preview returns buffered merge text', async () => {
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
   await store.setSynthesisPreview('job_test_1', {

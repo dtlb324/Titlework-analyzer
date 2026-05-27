@@ -1,6 +1,11 @@
 import { buildMessagesRequestBody } from './anthropic-request.js';
 import { consumeAnthropicMessageStream } from './anthropic-stream.js';
-import { geminiApiKeyError, invokeGeminiGenerateContent, isGeminiModel } from './gemini-request.js';
+import {
+  geminiApiKeyError,
+  invokeGeminiGenerateContent,
+  invokeGeminiGenerateContentStream,
+  isGeminiModel,
+} from './gemini-request.js';
 
 export { isGeminiModel, geminiApiKeyError };
 
@@ -151,9 +156,15 @@ export async function invokeModel(request, options = {}) {
     throw error;
   }
   if (isGeminiModel(model)) {
+    if (request.stream) {
+      return await invokeGeminiGenerateContentStream(request, options);
+    }
     return await invokeGeminiGenerateContent(request, options);
   }
   if (isAnthropicModel(model)) {
+    if (request.stream) {
+      return await invokeAnthropicModelStream(request, options);
+    }
     return await invokeAnthropicModel(request, options);
   }
   const error = new Error(`Unsupported model: ${model}`);

@@ -53,7 +53,7 @@ Set these on both Cloud Run services unless noted otherwise:
 | `STORAGE_MAX_UPLOAD_BYTES` | Optional | Default `104857600` (100 MB). |
 | `WORKFLOW_BATCH_LIMIT` | Optional | Default `12`. |
 | `SYNTHESIS_BATCH_LIMIT` | Optional | Default `4` (max `16`). Ready synthesis segments claimed per `/synthesis/process` batch. Production releases set `8`. |
-| `SYNTHESIS_STREAM_ENABLED` | Optional | Default off. When `true`, streams the final Sonnet merge to `GET /api/jobs/:id/synthesis/preview` while merge is in progress; validated opinion is saved only after the stream completes. |
+| `SYNTHESIS_STREAM_ENABLED` | Optional | Default off. When `true`, streams the final merge (Claude Sonnet or Gemini, per `SYNTHESIS_MODEL`) to `GET /api/jobs/:id/synthesis/preview` while merge is in progress; validated opinion is saved only after the stream completes. |
 | `SYNTHESIS_COMPACTION_ENABLED` | Optional | Default on. When enabled, compacts ≥6 segments (or large merge input) via Gemini Flash before the final Sonnet merge. |
 | `SYNTHESIS_COMPACTION_MIN_SEGMENTS` | Optional | Default `6`. Minimum segment count before compaction runs. |
 | `SYNTHESIS_COMPACTION_MIN_MERGE_TOKENS` | Optional | Default `40000`. Estimated merge input token threshold for compaction. |

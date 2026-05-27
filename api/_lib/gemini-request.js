@@ -1,6 +1,7 @@
 // Gemini generateContent helpers (Anthropic-shaped messages in, normalized usage out).
 
 import { deleteGeminiFiles } from './gemini-files.js';
+import { consumeGeminiGenerateContentStream } from './gemini-stream.js';
 
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -153,6 +154,77 @@ export function extractGeminiThoughtSummaries(data = {}) {
 export function geminiApiKeyError() {
   if (geminiApiKey()) return null;
   return 'GEMINI_API_KEY is required for Gemini models. Create a key at https://aistudio.google.com/apikey and set GEMINI_API_KEY on Cloud Run.';
+}
+
+export async function invokeGeminiGenerateContentStream(request, options = {}) {
+  const apiKeyError = geminiApiKeyError();
+  if (apiKeyError) {
+    const error = new Error(apiKeyError);
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const model = request.model;
+  const maxTokens = request.maxTokens;
+  const thinkingConfig = resolveGeminiThinkingConfig(model, {
+    thinkingLevel: request.thinkingLevel,
+    thinkingBudget: request.thinkingBudget,
+    includeThoughts: request.includeThoughts,
+  });
+  const body = buildGeminiGenerateContentBody({
+    model,
+    maxTokens,
+    system: request.system,
+    messages: request.messages,
+    thinkingConfig,
+    thinkingBudget: request.thinkingBudget,
+    thinkingLevel: request.thinkingLevel,
+  });
+  const baseUrl = String(process.env.GEMINI_API_BASE_URL || DEFAULT_GEMINI_BASE_URL).replace(/\/$/, '');
+  const url = `${baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+  const timeoutMs = Number(options.timeoutMs) || 240_000;
+  const timeout = options.createTimeoutSignal
+    ? options.createTimeoutSignal(timeoutMs)
+    : null;
+  const started = Date.now();
+  const cleanupFileNames = collectGeminiFileNamesFromMessages(request.messages);
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': geminiApiKey(),
+      },
+      body: JSON.stringify(body),
+      signal: timeout?.signal,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const message = data?.error?.message || data?.error || `Gemini stream request failed (HTTP ${response.status}).`;
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
+    }
+    const streamResult = await consumeGeminiGenerateContentStream(response.body, {
+      model,
+      onDelta: options.onDelta,
+    });
+    return {
+      text: streamResult.text || '',
+      model: streamResult.model || model,
+      usage: normalizeGeminiUsage(streamResult.usageMetadata),
+      stopReason: streamResult.stopReason || null,
+      firstDeltaAt: streamResult.firstDeltaAt,
+      latencyMs: Date.now() - started,
+      timeToFirstDeltaMs: streamResult.firstDeltaAt != null ? streamResult.firstDeltaAt - started : null,
+    };
+  } finally {
+    timeout?.cleanup?.();
+    if (cleanupFileNames.length) {
+      await deleteGeminiFiles(cleanupFileNames);
+    }
+  }
 }
 
 export async function invokeGeminiGenerateContent(request, options = {}) {

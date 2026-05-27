@@ -22,7 +22,7 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
-import { isGeminiModel, invokeModel, invokeAnthropicModelStream, isAnthropicModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
+import { isGeminiModel, invokeModel, isAnthropicModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
 import { buildMergeUserMessageContent } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
@@ -562,10 +562,11 @@ async function defaultModelClient(request) {
   const timeoutMs = request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS;
   const timeout = createTimeoutSignal(timeoutMs);
   try {
-    if (request.stream && isAnthropicModel(request.model)) {
-      return await invokeAnthropicModelStream(request, {
+    if (request.stream && (isAnthropicModel(request.model) || isGeminiModel(request.model))) {
+      return await invokeModel(request, {
         timeoutMs,
         createTimeoutSignal: () => timeout,
+        stream: true,
         onDelta: request.onDelta,
         onEvent: request.onEvent,
       });
@@ -771,7 +772,7 @@ async function callSynthesisModel({
   const shouldStream = Boolean(options.enableFinalStream)
     && synthesisStreamEnabled(options)
     && systemPrompt === SYNTHESIS_PROMPT
-    && isAnthropicModel(config.model);
+    && (isAnthropicModel(config.model) || isGeminiModel(config.model));
   const previewWriter = shouldStream
     ? (options.previewWriter || createPreviewWriter(options.store, options.jobId))
     : null;
@@ -986,11 +987,23 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
     ? `Below are ${totalDocs} document abstracts. Synthesize into a complete title opinion.`
     : `Below are document abstracts ${start}-${end} of ${totalDocs}. Produce a partial chain-of-title segment.`;
 
+  const segmentCallOptions = {
+    ...options,
+    enableFinalStream: isSinglePass && options.enableFinalStream !== false,
+  };
   const startedAt = Date.now();
   let lastError = null;
   for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
     try {
-      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options);
+      const result = await tryRecursiveSegment(
+        segmentAbstracts,
+        tract,
+        contextNotes,
+        preamble,
+        systemPrompt,
+        activeConfig,
+        segmentCallOptions,
+      );
       const validation = isSinglePass ? validateFinalOpinion(result.text) : validateSegmentSummary(result.text);
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
@@ -1005,7 +1018,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
           preamble: repairPreamble,
           systemPrompt,
           config: activeConfig,
-          options,
+          options: segmentCallOptions,
         });
         const repairValidation = isSinglePass ? validateFinalOpinion(retry.text) : validateSegmentSummary(retry.text);
         if (repairValidation.ok) {
@@ -1433,6 +1446,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         tract: job.subjectTract || options.tract || '',
         contextNotes: job.contextNotes || options.contextNotes || '',
         singlePass,
+        enableFinalStream: true,
       });
     });
     currentJob = await store.getJob(jobId);
