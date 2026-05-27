@@ -39,7 +39,9 @@ Set these on both Cloud Run services unless noted otherwise:
 | `BULK_SYNTHESIS_CHUNK_SIZE` | Optional | Default `200` for jobs with ≥100 abstracts. |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | Optional | Default `5000` for Gemini partial segment output. |
 | `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Claude Haiku is not supported for abstraction. |
-| `GEMINI_THINKING_BUDGET` | Optional | Default `0` (fastest/cheapest). Set to `-1` for Gemini dynamic thinking on abstraction. |
+| `GEMINI_THINKING_BUDGET` | Optional | **Gemini 2.5 only.** Default `0` (thinking off). Set to `-1` for dynamic thinking, or a token count (e.g. `1024`). Ignored for Gemini 3.x models. |
+| `GEMINI_THINKING_LEVEL` | Optional | **Gemini 3.x only** (e.g. `gemini-3.5-flash`). One of `minimal`, `low`, `medium`, `high`. Use `high` for hardest title/fraction work. If unset, the API default applies (`medium` on 3.5 Flash). |
+| `GEMINI_INCLUDE_THOUGHTS` | Optional | When `true`, Gemini may return thought summaries; they are exposed on the model response as `thoughtSummaries` and are **not** mixed into abstracts/opinions. For debugging/eval. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
 | `GCS_BUCKET` | Yes | Private bucket for uploaded source chunks and split PDFs. |
