@@ -162,6 +162,110 @@ async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
   };
 }
 
+function escHtml(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function mdToHtml(md) {
+  // Escape HTML first, then convert markdown patterns to tags.
+  const escaped = String(md || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return escaped
+    .split(/\n{2,}/)
+    .map(block => {
+      const t = block.trim();
+      if (!t) return '';
+      if (t.startsWith('### ')) return `<h3>${t.slice(4)}</h3>`;
+      if (t.startsWith('## ')) return `<h2>${t.slice(3)}</h2>`;
+      if (t === '---') return '<hr>';
+      return `<p>${t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')}</p>`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildComparisonHtml(meta, sonnetText, geminiText) {
+  const sonnetArm = meta.arms?.sonnet || {};
+  const geminiArm = meta.arms?.['gemini-35-flash'] || {};
+
+  function fmtStats(arm) {
+    const latency = arm.latencyMs != null ? `${(arm.latencyMs / 1000).toFixed(1)}s` : '—';
+    const tokens = arm.usage?.output_tokens != null
+      ? `${Number(arm.usage.output_tokens).toLocaleString()} tok out`
+      : '—';
+    return `${latency} · ${tokens}`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Model Comparison — ${escHtml(meta.jobId)}</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Georgia, serif; background: #f5f5f0; color: #1a1a1a; }
+  .top-bar {
+    position: sticky; top: 0; z-index: 10;
+    background: #1a1a1a; color: #f5f5f0;
+    padding: 10px 20px; font-family: monospace; font-size: 13px;
+    display: flex; gap: 24px; align-items: center; flex-wrap: wrap;
+  }
+  .top-bar strong { color: #f0c040; }
+  .columns {
+    display: grid; grid-template-columns: 1fr 1fr;
+    height: calc(100vh - 40px);
+  }
+  .col { display: flex; flex-direction: column; border-right: 1px solid #ccc; }
+  .col:last-child { border-right: none; }
+  .col-header {
+    background: #2d2d2d; color: #fff;
+    padding: 10px 16px; font-family: monospace; font-size: 13px;
+    border-bottom: 3px solid;
+    flex-shrink: 0;
+  }
+  .col:first-child .col-header { border-color: #4a9eff; }
+  .col:last-child  .col-header { border-color: #34c97e; }
+  .col-name  { font-weight: bold; font-size: 14px; }
+  .col-stats { color: #aaa; font-size: 12px; margin-top: 3px; }
+  .col-body  { padding: 24px; overflow-y: auto; flex: 1; line-height: 1.75; }
+  h2 { font-size: 1.05em; margin: 1.5em 0 0.4em; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+  h3 { font-size: 1em; margin: 1.2em 0 0.3em; color: #444; }
+  p  { margin: 0.65em 0; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 1.2em 0; }
+  strong { font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <span><strong>Job:</strong> ${escHtml(meta.jobId)}</span>
+  ${meta.tract ? `<span><strong>Tract:</strong> ${escHtml(meta.tract)}</span>` : ''}
+  <span><strong>Mode:</strong> ${escHtml(meta.mode)}</span>
+  <span><strong>Abstracts:</strong> ${escHtml(String(meta.abstractCount ?? '—'))}</span>
+</div>
+<div class="columns">
+  <div class="col">
+    <div class="col-header">
+      <div class="col-name">Claude Sonnet 4.6</div>
+      <div class="col-stats">${escHtml(fmtStats(sonnetArm))}</div>
+    </div>
+    <div class="col-body">${mdToHtml(sonnetText)}</div>
+  </div>
+  <div class="col">
+    <div class="col-header">
+      <div class="col-name">Gemini 3.5 Flash</div>
+      <div class="col-stats">${escHtml(fmtStats(geminiArm))}</div>
+    </div>
+    <div class="col-body">${mdToHtml(geminiText)}</div>
+  </div>
+</div>
+</body>
+</html>`;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help || !args.jobId) {
@@ -195,6 +299,7 @@ async function main() {
   ];
 
   const results = {};
+  const opinionTexts = {};
   for (const arm of arms) {
     console.log(`Running ${arm.label} (${arm.model})...`);
     const result = await generateFinalOpinion({
@@ -205,6 +310,7 @@ async function main() {
     });
     const opinionPath = join(outDir, `${arm.id}-opinion.md`);
     await writeFile(opinionPath, result.text, 'utf8');
+    opinionTexts[arm.id] = result.text;
     if (result.thoughtSummaries?.length) {
       await writeFile(
         join(outDir, `${arm.id}-thoughts.md`),
@@ -241,12 +347,15 @@ async function main() {
     arms: results,
   };
   await writeFile(join(outDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');
+  const html = buildComparisonHtml(meta, opinionTexts['sonnet'] || '', opinionTexts['gemini-35-flash'] || '');
+  const htmlPath = join(outDir, 'comparison.html');
+  await writeFile(htmlPath, html, 'utf8');
 
   if (baseline?.finalTitleOpinion) {
     await writeFile(join(outDir, 'production-baseline-opinion.md'), baseline.finalTitleOpinion, 'utf8');
   }
 
-  console.log('Done. Compare sonnet-opinion.md vs gemini-35-flash-opinion.md (production baseline saved if present).');
+  console.log(`Done. Open ${htmlPath} in a browser to compare side by side.`);
 }
 
 main().catch(err => {
