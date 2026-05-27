@@ -1,22 +1,25 @@
 #!/usr/bin/env node
 /**
- * Compare final title opinions: Claude Sonnet 4.6 vs Gemini 3.5 Flash on the same abstracts.
+ * Compare final title opinions on frozen job abstracts (does not write job_results).
  *
- * Does NOT write to job_results — outputs markdown files for blind review.
+ * Default: Claude Sonnet 4.6 vs Gemini 3.5 Flash (one Gemini thinking level).
  *
  * Usage:
  *   DATABASE_URL=... GEMINI_API_KEY=... ANTHROPIC_API_KEY=... \
  *     node scripts/compare-final-opinion.mjs --job-id job_abc123
  *
- * Optional:
- *   --out-dir eval/compare/my-run
- *   --gemini-model gemini-3.5-flash
- *   --sonnet-model claude-sonnet-4-6
- *   --gemini-thinking-level high   (or env GEMINI_THINKING_LEVEL)
+ * Gemini thinking levels side by side (e.g. medium vs high):
+ *   node scripts/compare-final-opinion.mjs --job-id job_abc123 \
+ *     --gemini-thinking-levels medium,high --skip-sonnet
+ *
+ * Sonnet + medium + high in one run:
+ *   node scripts/compare-final-opinion.mjs --job-id job_abc123 \
+ *     --gemini-thinking-levels medium,high
  */
 
 import { mkdir, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { join, resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { buildMergeUserMessageContent } from '../api/_lib/anthropic-request.js';
 import { getJobStore } from '../api/_lib/jobs.js';
 import { invokeModel } from '../api/_lib/model-client.js';
@@ -28,8 +31,33 @@ import {
   planSynthesisSegments,
 } from '../api/_lib/synthesis.js';
 
+const GEMINI_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
+
+function parseThinkingLevelsCsv(raw) {
+  if (!raw) return [];
+  const levels = [];
+  for (const part of String(raw).split(',')) {
+    const level = part.trim().toLowerCase();
+    if (!level) continue;
+    if (!GEMINI_THINKING_LEVELS.has(level)) {
+      throw new Error(`Invalid Gemini thinking level "${part.trim()}". Use: minimal, low, medium, high.`);
+    }
+    if (!levels.includes(level)) levels.push(level);
+  }
+  return levels;
+}
+
 function parseArgs(argv) {
-  const args = { jobId: null, outDir: null, geminiModel: 'gemini-3.5-flash', sonnetModel: 'claude-sonnet-4-6', geminiThinkingLevel: null };
+  const args = {
+    jobId: null,
+    outDir: null,
+    geminiModel: 'gemini-3.5-flash',
+    sonnetModel: 'claude-sonnet-4-6',
+    geminiThinkingLevel: null,
+    geminiThinkingLevels: [],
+    skipSonnet: false,
+    noHtml: false,
+  };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--job-id') args.jobId = argv[++i];
@@ -37,22 +65,76 @@ function parseArgs(argv) {
     else if (a === '--gemini-model') args.geminiModel = argv[++i];
     else if (a === '--sonnet-model') args.sonnetModel = argv[++i];
     else if (a === '--gemini-thinking-level') args.geminiThinkingLevel = argv[++i];
+    else if (a === '--gemini-thinking-levels') args.geminiThinkingLevels = parseThinkingLevelsCsv(argv[++i]);
+    else if (a === '--skip-sonnet') args.skipSonnet = true;
+    else if (a === '--no-html') args.noHtml = true;
     else if (a === '--help' || a === '-h') args.help = true;
   }
   return args;
 }
 
-function usage() {
-  console.log(`Compare final title opinions (Sonnet vs Gemini) on frozen abstracts.
+/** @returns {{ id: string, label: string, model: string, thinkingLevel?: string }[]} */
+export function buildCompareArms(args) {
+  const levels = args.geminiThinkingLevels.length
+    ? args.geminiThinkingLevels
+    : (args.geminiThinkingLevel || process.env.GEMINI_THINKING_LEVEL
+      ? [String(args.geminiThinkingLevel || process.env.GEMINI_THINKING_LEVEL).trim().toLowerCase()]
+      : [null]);
 
-Required env: DATABASE_URL, GEMINI_API_KEY, ANTHROPIC_API_KEY
+  for (const level of levels) {
+    if (level && !GEMINI_THINKING_LEVELS.has(level)) {
+      throw new Error(`Invalid Gemini thinking level "${level}". Use: minimal, low, medium, high.`);
+    }
+  }
+
+  const arms = [];
+  if (!args.skipSonnet) {
+    arms.push({ id: 'sonnet', label: 'Claude Sonnet 4.6', model: args.sonnetModel });
+  }
+
+  for (const level of levels) {
+    const suffix = level || 'default';
+    const id = level ? `gemini-35-flash-${level}` : 'gemini-35-flash';
+    const levelLabel = level
+      ? `Gemini 3.5 Flash (${level} thinking)`
+      : 'Gemini 3.5 Flash (API default thinking)';
+    arms.push({
+      id,
+      label: levelLabel,
+      model: args.geminiModel,
+      thinkingLevel: level || undefined,
+      geminiThinkingSuffix: suffix,
+    });
+  }
+
+  return arms;
+}
+
+function usage() {
+  console.log(`Compare final title opinions on frozen abstracts (writes markdown + compare.html).
+
+Required env: DATABASE_URL, GEMINI_API_KEY
+Anthropic key required when Sonnet arm runs (default unless --skip-sonnet).
 
 Options:
-  --job-id <id>                 Completed or abstracted job (abstracts required)
-  --out-dir <path>              Output directory (default: eval/compare/<jobId>-<ts>)
-  --gemini-model <id>           Default: gemini-3.5-flash
-  --sonnet-model <id>           Default: claude-sonnet-4-6
-  --gemini-thinking-level <lvl> minimal|low|medium|high (or GEMINI_THINKING_LEVEL)
+  --job-id <id>                      Job with completed abstracts (merge needs segment summaries)
+  --out-dir <path>                   Output directory (default: eval/compare/<jobId>-<ts>)
+  --gemini-model <id>                Default: gemini-3.5-flash
+  --sonnet-model <id>                Default: claude-sonnet-4-6
+  --gemini-thinking-level <lvl>      Single Gemini arm: minimal|low|medium|high
+  --gemini-thinking-levels <a,b,...> Multiple Gemini arms, e.g. medium,high
+  --skip-sonnet                      Only run Gemini arm(s)
+  --no-html                          Skip compare.html side-by-side viewer
+
+Examples:
+  Sonnet vs Gemini (high):
+    --gemini-thinking-level high
+
+  Gemini medium vs high only:
+    --gemini-thinking-levels medium,high --skip-sonnet
+
+  Sonnet + medium + high:
+    --gemini-thinking-levels medium,high
 `);
 }
 
@@ -159,7 +241,83 @@ async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
     thoughtSummaries: response.thoughtSummaries,
     latencyMs: Date.now() - started,
     mode,
+    thinkingLevel: thinkingLevel || null,
   };
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function buildCompareHtml(panels) {
+  const columns = panels
+    .map(
+      p => `<section class="panel">
+  <h2>${escapeHtml(p.label)}</h2>
+  <pre>${escapeHtml(p.text)}</pre>
+</section>`,
+    )
+    .join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Title opinion compare</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f0f2f5; color: #111; }
+    header { padding: 12px 16px; background: #1a1a2e; color: #fff; font-size: 14px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+      gap: 12px;
+      padding: 12px;
+      min-height: calc(100vh - 48px);
+    }
+    .panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 320px;
+      max-height: calc(100vh - 72px);
+      background: #fff;
+      border: 1px solid #d0d5dd;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      background: #f8f9fb;
+      border-bottom: 1px solid #e4e7ec;
+    }
+    .panel pre {
+      flex: 1;
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <header>Title opinion compare — open panels side by side (scroll independently)</header>
+  <div class="grid">
+${columns}
+  </div>
+</body>
+</html>
+`;
 }
 
 async function main() {
@@ -174,8 +332,11 @@ async function main() {
     process.exit(1);
   }
 
-  const thinkingLevel = args.geminiThinkingLevel || process.env.GEMINI_THINKING_LEVEL || null;
-  if (thinkingLevel) process.env.GEMINI_THINKING_LEVEL = thinkingLevel;
+  const arms = buildCompareArms(args);
+  if (!arms.length) {
+    console.error('No comparison arms configured. Remove --skip-sonnet or add --gemini-thinking-level(s).');
+    process.exit(1);
+  }
 
   const store = getJobStore();
   const ctx = await loadJobContext(store, args.jobId);
@@ -187,16 +348,15 @@ async function main() {
 
   console.log(`Job: ${args.jobId}`);
   console.log(`Mode: ${mode} (${ctx.abstracts.length} abstracts, ${ctx.segmentSummaries.length} segment summaries)`);
+  console.log(`Arms: ${arms.map(a => a.label).join(' | ')}`);
   console.log(`Output: ${outDir}\n`);
 
-  const arms = [
-    { id: 'sonnet', label: 'Claude Sonnet 4.6', model: args.sonnetModel },
-    { id: 'gemini-35-flash', label: 'Gemini 3.5 Flash', model: args.geminiModel, thinkingLevel },
-  ];
-
   const results = {};
+  const htmlPanels = [];
+
   for (const arm of arms) {
-    console.log(`Running ${arm.label} (${arm.model})...`);
+    const thinkingNote = arm.thinkingLevel ? `, thinking=${arm.thinkingLevel}` : '';
+    console.log(`Running ${arm.label} (${arm.model}${thinkingNote})...`);
     const result = await generateFinalOpinion({
       mode,
       ctx,
@@ -213,12 +373,15 @@ async function main() {
       );
     }
     results[arm.id] = {
+      label: arm.label,
       model: result.model,
+      thinkingLevel: result.thinkingLevel,
       mode: result.mode,
       latencyMs: result.latencyMs,
       usage: result.usage,
       opinionFile: opinionPath,
     };
+    htmlPanels.push({ label: arm.label, text: result.text });
     console.log(`  Wrote ${opinionPath} (${result.latencyMs} ms)\n`);
   }
 
@@ -229,7 +392,9 @@ async function main() {
     abstractCount: ctx.abstracts.length,
     segmentSummaryCount: ctx.segmentSummaries.length,
     mode,
-    geminiThinkingLevel: thinkingLevel,
+    geminiThinkingLevels: args.geminiThinkingLevels.length
+      ? args.geminiThinkingLevels
+      : (args.geminiThinkingLevel || process.env.GEMINI_THINKING_LEVEL || null),
     productionBaseline: baseline
       ? {
           modelUsed: baseline.modelUsed,
@@ -244,12 +409,26 @@ async function main() {
 
   if (baseline?.finalTitleOpinion) {
     await writeFile(join(outDir, 'production-baseline-opinion.md'), baseline.finalTitleOpinion, 'utf8');
+    htmlPanels.push({ label: 'Production baseline (saved job result)', text: baseline.finalTitleOpinion });
   }
 
-  console.log('Done. Compare sonnet-opinion.md vs gemini-35-flash-opinion.md (production baseline saved if present).');
+  if (!args.noHtml && htmlPanels.length) {
+    const htmlPath = join(outDir, 'compare.html');
+    await writeFile(htmlPath, buildCompareHtml(htmlPanels), 'utf8');
+    console.log(`Side-by-side viewer: file://${htmlPath}`);
+  }
+
+  const mdFiles = arms.map(a => `${a.id}-opinion.md`).join(', ');
+  console.log(`Done. Compare: ${mdFiles}`);
+  if (baseline?.finalTitleOpinion) console.log('(plus production-baseline-opinion.md if present)');
 }
 
-main().catch(err => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+const isMain = process.argv[1]
+  && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMain) {
+  main().catch(err => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
