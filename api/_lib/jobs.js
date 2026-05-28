@@ -2434,7 +2434,17 @@ function createPostgresJobStore() {
         ? await this.getJobResult(jobId)
         : null;
       const mergeLeaseExpiresAt = job.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
-      const mergeInProgress = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
+      const mergeLeaseHeld = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
+      const hasResult = result
+        ? Boolean(result.finalTitleOpinion)
+        : Boolean(resultMeta?.hasOpinion);
+      // Treat the post-segments / pre-result window as "merge in progress" so
+      // pollers don't declare the job terminal before a server worker has
+      // claimed the final merge. Without this, clients can race the claim and
+      // fall back to browser synthesis even though the server would have run it.
+      const segmentsAllFinished = counts.total > 0
+        && (counts.pending + counts.processing + counts.retry_wait) === 0;
+      const mergeInProgress = mergeLeaseHeld || (segmentsAllFinished && !hasResult);
       return {
         job,
         planId,
@@ -2446,9 +2456,7 @@ function createPostgresJobStore() {
         retry_wait: counts.retry_wait,
         mergeInProgress,
         segments: includeSegments ? segments : [],
-        hasResult: result
-          ? Boolean(result.finalTitleOpinion)
-          : Boolean(resultMeta?.hasOpinion),
+        hasResult,
         result: includeResult ? result : null,
         resultMeta,
       };

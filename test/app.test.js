@@ -351,10 +351,14 @@ test('Phase 6: job stepper renders visual stage cards with active progress accen
   assert(indexHtml.includes('.job-stepper .step-card'), 'Stepper should render each stage as a card');
   assert(indexHtml.includes('.job-stepper .step-meta'), 'Stepper cards should include Done/Now/Next metadata');
   assert(indexHtml.includes('.job-stepper .step-progress'), 'Active step should include a progress accent');
+  assert(indexHtml.includes('.job-stepper .step-spinner'), 'Synthesis step should have a spinner style');
+  assert(indexHtml.includes('@keyframes step-spin'), 'Synthesis spinner should animate clockwise');
   assert(script.includes("const meta = i < activeIdx ? 'Done' : i === activeIdx ? 'Now' : 'Next';"),
     'Stepper renderer should label each phase by progress state');
   assert(script.includes('step-card active') && script.includes('step-progress'),
     'Active step card should render the active progress accent');
+  assert(script.includes("p === 'Synthesize' && i === activeIdx"),
+    'Active synthesis step should render the spinner next to Synthesize');
   assert(!script.includes('<span class="sep">→</span>'),
     'Stage-card stepper should not use arrow separators');
 });

@@ -99,7 +99,9 @@
   .job-stepper .step-card.active { background:#fff6e8; border-color:#b8631e; color:#6b3410; }
   .job-stepper .step-meta { display:block; margin-bottom:.18rem; color:#8a6f4a; font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
   .job-stepper .step-name { display:block; color:inherit; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .job-stepper .step-spinner { display:inline-block; width:.7rem; height:.7rem; margin-left:.35rem; border:2px solid rgba(184,99,30,.22); border-top-color:#b8631e; border-radius:50%; vertical-align:-.08rem; animation:step-spin .75s linear infinite; }
   .job-stepper .step-progress { display:block; height:.24rem; margin-top:.5rem; border-radius:999px; background:#b8631e; }
+  @keyframes step-spin { to { transform: rotate(360deg); } }
   @media (max-width: 620px) { .job-stepper { grid-template-columns:1fr; } }
   .job-actions { display:flex; flex-wrap:wrap; gap:.55rem; margin-top:.8rem; }
   .job-actions button[disabled] { opacity:.55; cursor:not-allowed; }
@@ -1412,7 +1414,8 @@ function renderJobStepper(job) {
                 (typeof activeIdx === 'number' && i < activeIdx) ? 'step-card done' : 'step-card';
     const meta = i < activeIdx ? 'Done' : i === activeIdx ? 'Now' : 'Next';
     const progress = i === activeIdx ? '<span class="step-progress" aria-hidden="true"></span>' : '';
-    return `<span class="${cls}"><span class="step-meta">${esc(meta)}</span><span class="step-name">${esc(p)}</span>${progress}</span>`;
+    const spinner = p === 'Synthesize' && i === activeIdx ? '<span class="step-spinner" aria-hidden="true"></span>' : '';
+    return `<span class="${cls}"><span class="step-meta">${esc(meta)}</span><span class="step-name">${esc(p)}${spinner}</span>${progress}</span>`;
   }).join('');
 }
 
