@@ -2473,6 +2473,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   let lastSignature = '';
   let stallPolls = 0;
   let lastPreviewBytes = 0;
+  let mergeStartedAt = null;
   const STALL_THRESHOLD = 4;
   for (let attempt = 0; attempt < 1800; attempt++) {
     if (isAnalysisCanceled(jobId)) throw new Error('Job canceled.');
@@ -2483,7 +2484,18 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
     const failed = status.failed || 0;
     const processing = status.processing || 0;
     const retryWait = status.retry_wait || 0;
-    const pct = total ? 88 + Math.round((complete / total) * 10) : 88;
+    const effectiveDone = total
+      ? Math.min(total, complete + failed + processing * 0.5)
+      : 0;
+    let pct = total ? 88 + (effectiveDone / total) * 8 : 88;
+    if (status.mergeInProgress) {
+      if (mergeStartedAt === null) mergeStartedAt = Date.now();
+      const mergeFrac = 1 - Math.exp(-(Date.now() - mergeStartedAt) / 90000);
+      pct = Math.max(pct, 96 + mergeFrac * 3);
+    } else {
+      mergeStartedAt = null;
+    }
+    pct = Math.min(99, Math.round(pct));
     if (items && items.length) items[items.length - 1].status = isServerSynthesisTerminal(status) ? 'done' : 'active';
     const detail = [];
     if (processing) detail.push(`${processing} segment(s) running`);
@@ -2639,6 +2651,12 @@ async function registerJobUploads(jobId, fileList, options = {}) {
     return await pending;
   }
 
+  const perEntryFraction = new Array(total).fill(0);
+  const emitUploadProgress = label => {
+    const aggregate = perEntryFraction.reduce((a, b) => a + b, 0) / total;
+    updateProgress(Math.round(aggregate * 8), label, null);
+  };
+
   const uploadTasks = fileList.map((entry, i) => async () => {
     if ((entry.size || entry.sourceFile?.size || 0) > maxUploadBytes) {
       throw new Error(`${entry.name}: exceeds durable upload limit of ${formatMegabytes(maxUploadBytes)} MB.`);
@@ -2648,11 +2666,12 @@ async function registerJobUploads(jobId, fileList, options = {}) {
     const chunk = await registerChunkForUpload(jobId, documentId, entry, chunkOrderOffset + i);
     entry.uploadStatus = 'uploading';
     await uploadChunkToBlob(jobId, documentId, chunk, entry, percentage => {
-      const pct = Math.round(((completed + (percentage / 100)) / total) * 8);
-      updateProgress(pct, `Uploading source files to durable storage (${Math.min(completed + 1, total)} of ${total})...`, null);
+      perEntryFraction[i] = Math.min(1, Math.max(0, percentage / 100));
+      emitUploadProgress(`Uploading source files to durable storage (${completed} of ${total})...`);
     });
+    perEntryFraction[i] = 1;
     completed += 1;
-    updateProgress(Math.round((completed / total) * 8), `Uploaded ${completed} of ${total} document chunk${total === 1 ? '' : 's'}...`, null);
+    emitUploadProgress(`Uploaded ${completed} of ${total} document chunk${total === 1 ? '' : 's'}...`);
   });
 
   await runWithConcurrency(uploadTasks, DURABLE_UPLOAD_CONCURRENCY);
@@ -2780,10 +2799,14 @@ function clearKeepOpenNotice() {
   document.getElementById('infoBox').innerHTML = '';
 }
 
+let lastDisplayedPct = 0;
 function updateProgress(pct, status, items) {
-  const displayPct = activeProgressTimer && pct < 100
+  if (pct <= 0) lastDisplayedPct = 0;
+  let displayPct = activeProgressTimer && pct < 100
     ? Math.max(pct, Math.round(getProgressFraction(activeProgressTimer) * 100))
     : pct;
+  if (pct < 100) displayPct = Math.max(displayPct, lastDisplayedPct);
+  lastDisplayedPct = displayPct;
   document.getElementById('progressFill').style.width = displayPct + '%';
   document.getElementById('progressStatus').textContent = status;
   if (activeProgressTimer && pct < 100) {
