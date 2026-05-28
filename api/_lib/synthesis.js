@@ -1329,6 +1329,21 @@ export async function tryRecoverMergePreview(store, jobId, config) {
   };
 }
 
+// Single funnel for the final merge so both merge branches recover identically.
+async function runOrRecoverMerge(mergeArgs) {
+  const store = mergeArgs.options?.store;
+  const jobId = mergeArgs.options?.jobId;
+  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config);
+  if (recovered) {
+    if (Array.isArray(mergeArgs.warningsAccum)) {
+      mergeArgs.warningsAccum.push('merge_recovered: reused completed merge preview from an interrupted attempt');
+    }
+    logSynthesisMetrics({ event: 'synthesis_merge_recovered', jobId, payloadBytes: recovered.payloadBytes });
+    return recovered;
+  }
+  return mergeSegmentsIntoOpinion(mergeArgs);
+}
+
 export async function processSynthesisJob(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process synthesis.');
@@ -1466,7 +1481,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
       });
       try {
-        const merged = await mergeSegmentsIntoOpinion({
+        const merged = await runOrRecoverMerge({
           segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
           totalAbstracts: abstracts.length,
           tract,
@@ -1538,7 +1553,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
         });
         try {
-          const merged = await mergeSegmentsIntoOpinion({
+          const merged = await runOrRecoverMerge({
             segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
             totalAbstracts: abstracts.length,
             tract,

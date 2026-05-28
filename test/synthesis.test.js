@@ -1759,6 +1759,53 @@ test('final merge writes streaming preview during Sonnet merge when enabled', as
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
 });
 
+test('merge recovers a completed preview after a lost save without re-running Sonnet', async () => {
+  const prevStream = process.env.SYNTHESIS_STREAM_ENABLED;
+  const prevBulk = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const prevCompact = process.env.SYNTHESIS_COMPACTION_ENABLED;
+  process.env.SYNTHESIS_STREAM_ENABLED = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'false';
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(250) });
+
+  let mergeCalls = 0;
+  const opinion = goodFinalOpinion('Recovered merge output.');
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+    }
+    mergeCalls += 1; // final Sonnet merge
+    if (request.onDelta) await request.onDelta(opinion, opinion);
+    return { text: opinion, model: 'claude-sonnet-4-6', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
+  };
+
+  // First pass: simulate the worker dying after the preview is marked complete
+  // but before the result row commits (drop the first saveJobResult write).
+  const realSave = store.saveJobResult.bind(store);
+  let saveAttempts = 0;
+  store.saveJobResult = async (...args) => {
+    saveAttempts += 1;
+    if (saveAttempts === 1) return null; // lost write == crash before commit
+    return realSave(...args);
+  };
+  await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
+  assert(mergeCalls === 1, `Expected exactly one Sonnet merge on the first pass, got ${mergeCalls}`);
+  assert((await store.getSynthesisPreview('job_test_1')).complete === true, 'Expected a completed preview after the crashed first pass');
+  assert((await store.getJobResult('job_test_1')) === null, 'Expected no saved result after the crashed first pass');
+
+  // Second pass: must recover from the completed preview and NOT call Sonnet again.
+  const mergeCallsBefore = mergeCalls;
+  await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
+  assert(mergeCalls === mergeCallsBefore, `Expected NO additional Sonnet merge on recovery, got ${mergeCalls - mergeCallsBefore}`);
+  const saved = await store.getJobResult('job_test_1');
+  assert(saved && saved.finalTitleOpinion.includes('Recovered merge output.'), 'Expected the recovered preview text saved as the result');
+  assert(saved.warnings.some(w => /merge_recovered/.test(w)), `Expected a merge_recovered warning, got ${JSON.stringify(saved?.warnings)}`);
+
+  if (prevStream === undefined) delete process.env.SYNTHESIS_STREAM_ENABLED; else process.env.SYNTHESIS_STREAM_ENABLED = prevStream;
+  if (prevBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS; else process.env.BULK_JOB_MIN_ABSTRACTS = prevBulk;
+  if (prevCompact === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED; else process.env.SYNTHESIS_COMPACTION_ENABLED = prevCompact;
+});
+
 test('GET /api/jobs/:id/synthesis/preview returns buffered merge text', async () => {
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
   await store.setSynthesisPreview('job_test_1', {
