@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Compare final title opinions: Claude Sonnet 4.6 vs Gemini 3.5 Flash on the same abstracts.
+ * Compare final title opinions: Claude Sonnet 4.6 vs Gemini 2.5 Pro on the same abstracts.
  *
  * Does NOT write to job_results — outputs markdown files for blind review.
  *
@@ -10,7 +10,7 @@
  *
  * Optional:
  *   --out-dir eval/compare/my-run
- *   --gemini-model gemini-3.5-flash
+ *   --gemini-model gemini-2.5-pro
  *   --sonnet-model claude-sonnet-4-6
  *   --gemini-thinking-level high   (or env GEMINI_THINKING_LEVEL)
  */
@@ -30,7 +30,7 @@ import {
 } from '../api/_lib/synthesis.js';
 
 function parseArgs(argv) {
-  const args = { jobId: null, outDir: null, geminiModel: 'gemini-3.5-flash', sonnetModel: 'claude-sonnet-4-6', geminiThinkingLevel: null };
+  const args = { jobId: null, outDir: null, geminiModel: 'gemini-2.5-pro', sonnetModel: 'claude-sonnet-4-6', geminiThinkingLevel: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--job-id') args.jobId = argv[++i];
@@ -51,7 +51,7 @@ Required env: DATABASE_URL, GEMINI_API_KEY, ANTHROPIC_API_KEY
 Options:
   --job-id <id>                 Completed or abstracted job (abstracts required)
   --out-dir <path>              Output directory (default: eval/compare/<jobId>-<ts>)
-  --gemini-model <id>           Default: gemini-3.5-flash
+  --gemini-model <id>           Default: gemini-2.5-pro
   --sonnet-model <id>           Default: claude-sonnet-4-6
   --gemini-thinking-level <lvl> minimal|low|medium|high (or GEMINI_THINKING_LEVEL)
 `);
@@ -124,11 +124,16 @@ function resolveMode(ctx) {
 async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
   const config = getSynthesisConfig({ model });
   const started = Date.now();
-  // Gemini 3.x always runs thinking by default (medium), which eats into maxTokens
-  // and leaves almost no budget for output. Default to minimal unless the caller
-  // explicitly requested a level, so both models get a fair output token budget.
+  // Gemini 3.x uses thinkingLevel and defaults to 'medium', which eats output tokens.
+  // Default to 'minimal' so output budget is preserved.
+  // Gemini 2.5.x uses thinkingBudget and refuses budget=0 (Pro requires thinking).
+  // Default to -1 (dynamic) so the model picks its own budget.
+  let thinkingBudget;
+  const isGemini = /^gemini-/i.test(String(model || ''));
   if (isGemini3SeriesModel(model) && !thinkingLevel) {
     thinkingLevel = 'minimal';
+  } else if (isGemini && !isGemini3SeriesModel(model) && process.env.GEMINI_THINKING_BUDGET == null) {
+    thinkingBudget = -1;
   }
   let messages;
 
@@ -157,6 +162,7 @@ async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
     system: SYNTHESIS_PROMPT,
     messages,
     thinkingLevel: thinkingLevel || undefined,
+    thinkingBudget: thinkingBudget !== undefined ? thinkingBudget : undefined,
   });
 
   return {
@@ -194,9 +200,17 @@ function mdToHtml(md) {
     .join('\n');
 }
 
+function slugifyModel(id) {
+  return String(id || 'model').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
 function buildComparisonHtml(meta, sonnetText, geminiText) {
-  const sonnetArm = meta.arms?.sonnet || {};
-  const geminiArm = meta.arms?.['gemini-35-flash'] || {};
+  const sonnetArmId = meta.armIds?.sonnet || 'sonnet';
+  const geminiArmId = meta.armIds?.gemini || 'gemini';
+  const sonnetArm = meta.arms?.[sonnetArmId] || {};
+  const geminiArm = meta.arms?.[geminiArmId] || {};
+  const sonnetLabel = meta.armLabels?.sonnet || 'Claude Sonnet 4.6';
+  const geminiLabel = meta.armLabels?.gemini || 'Gemini';
 
   function fmtStats(arm) {
     const latency = arm.latencyMs != null ? `${(arm.latencyMs / 1000).toFixed(1)}s` : '—';
@@ -256,14 +270,14 @@ function buildComparisonHtml(meta, sonnetText, geminiText) {
 <div class="columns">
   <div class="col">
     <div class="col-header">
-      <div class="col-name">Claude Sonnet 4.6</div>
+      <div class="col-name">${escHtml(sonnetLabel)}</div>
       <div class="col-stats">${escHtml(fmtStats(sonnetArm))}</div>
     </div>
     <div class="col-body">${mdToHtml(sonnetText)}</div>
   </div>
   <div class="col">
     <div class="col-header">
-      <div class="col-name">Gemini 3.5 Flash</div>
+      <div class="col-name">${escHtml(geminiLabel)}</div>
       <div class="col-stats">${escHtml(fmtStats(geminiArm))}</div>
     </div>
     <div class="col-body">${mdToHtml(geminiText)}</div>
@@ -300,9 +314,11 @@ async function main() {
   console.log(`Mode: ${mode} (${ctx.abstracts.length} abstracts, ${ctx.segmentSummaries.length} segment summaries)`);
   console.log(`Output: ${outDir}\n`);
 
+  const sonnetArmId = slugifyModel(args.sonnetModel);
+  const geminiArmId = slugifyModel(args.geminiModel);
   const arms = [
-    { id: 'sonnet', label: 'Claude Sonnet 4.6', model: args.sonnetModel },
-    { id: 'gemini-35-flash', label: 'Gemini 3.5 Flash', model: args.geminiModel, thinkingLevel },
+    { id: sonnetArmId, label: args.sonnetModel, model: args.sonnetModel },
+    { id: geminiArmId, label: args.geminiModel, model: args.geminiModel, thinkingLevel },
   ];
 
   const results = {};
@@ -352,9 +368,11 @@ async function main() {
         }
       : null,
     arms: results,
+    armIds: { sonnet: sonnetArmId, gemini: geminiArmId },
+    armLabels: { sonnet: args.sonnetModel, gemini: args.geminiModel },
   };
   await writeFile(join(outDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');
-  const html = buildComparisonHtml(meta, opinionTexts['sonnet'] || '', opinionTexts['gemini-35-flash'] || '');
+  const html = buildComparisonHtml(meta, opinionTexts[sonnetArmId] || '', opinionTexts[geminiArmId] || '');
   const htmlPath = join(outDir, 'comparison.html');
   await writeFile(htmlPath, html, 'utf8');
 

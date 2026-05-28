@@ -208,32 +208,32 @@ Synthesize the provided document abstracts into a complete title opinion analysi
 CRITICAL RULES:
 1. Only use facts from the abstracts. Do NOT invent dates, parties, fractions, or recording references.
 2. If an abstract flagged something as illegible or unclear, treat it as a curative item — do not guess.
-3. Show every fractional calculation step by step.
+3. Show fractional math terse-in-cell (e.g. "1/2 × 1/4 = 1/8"). No multi-paragraph derivations.
 4. If the chain has gaps you cannot bridge, say so explicitly — do not fill gaps with assumptions.
 
-## CHAIN OF TITLE
-Chronological flow. Number each document. For each entry use this format:
+OUTPUT FORMAT (strict — tables where indicated, no narrative between sections):
 
-**[N]. [Date] · [Document Type] · [Recording Ref]**
-- **Grantor:** name
-- **Grantee:** name
-- **Interest Conveyed:** fraction
-- **Running Balance:** math shown step by step
-- **Flags:** ⚠️ LABEL: description — or "None"
+## CHAIN OF TITLE
+| # | Date | Doc Type | Recording Ref | Grantor | Grantee | Interest Conveyed | Running Balance | Flags |
+One row per instrument, chronological. Running Balance shows the math result; Flags is a short code (e.g. "Gap", "Illegible", "Curative-Needed") or "None".
 
 ## MINERAL INTEREST CALCULATION
-Step-by-step math. Use a table. Track separately: surface estate, mineral estate (executive rights), royalty interest, NPRI, outstanding leasehold, term interests. Show uncertainty ranges where applicable.
+| Estate Component | Calculation | Resulting Interest |
+Track separately: surface, mineral (executive rights), royalty, NPRI, outstanding leasehold, term interests. Show uncertainty ranges where applicable.
 
 ## TITLE DEFECTS & CURATIVE REQUIREMENTS
-Every defect formally listed with the curative document needed (Affidavit of Heirship, Stipulation of Interest, Release, Quitclaim, etc.).
+| Defect | Curative Needed | Source Doc |
+Curative examples: Affidavit of Heirship, Stipulation of Interest, Release, Quitclaim.
 
 ## FINAL OWNERSHIP DETERMINATION
 | Owner | Claimed Interest | Reconciled Interest | Royalty/NPRI | Subject To |
 
-In the Reconciled Interest column: apply Texas law to determine what each party actually holds. Where a chain traces to a void root (sovereign double grant, stranger to title) enter 0. Where gaps or partial abstracts prevent quantification, enter the range or "unknown". Make a definitive call wherever the law is clear — don't hedge when the answer is knowable. If ownership cannot be determined at all, state so and list what additional records are needed.
+Apply Texas law for Reconciled Interest. Void root (sovereign double grant, stranger to title) → 0. Gaps preventing quantification → range or "unknown". Make a definitive call where the law is clear; don't hedge when the answer is knowable. If ownership cannot be determined at all, state so and list what additional records are needed.
 
 ## OPINION QUALIFICATIONS
-List every assumption. List every illegible or unclear document. State: "This is an AI-assisted analytical aid. It is not a formal title opinion and should not be relied upon for drilling, leasing, division order, or any other action without verification by a licensed attorney in the state where the land lies."`;
+- List every assumption.
+- List every illegible or unclear document.
+- Include verbatim: "This is an AI-assisted analytical aid. It is not a formal title opinion and should not be relied upon for drilling, leasing, division order, or any other action without verification by a licensed attorney in the state where the land lies."`;
 
 export const PARTIAL_SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney synthesizing one segment of a larger chain of title.
 

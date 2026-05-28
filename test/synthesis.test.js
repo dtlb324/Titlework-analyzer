@@ -930,18 +930,22 @@ test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields ti
   assert(job.status === 'complete', `Expected job complete, got ${job.status}`);
 });
 
-test('SYNTHESIS_PROMPT uses numbered entry format for chain of title', () => {
+test('SYNTHESIS_PROMPT uses table format for chain of title', () => {
   assert(
-    SYNTHESIS_PROMPT.includes('Number each document'),
-    'SYNTHESIS_PROMPT must instruct numbered document entries',
+    SYNTHESIS_PROMPT.includes('## CHAIN OF TITLE'),
+    'SYNTHESIS_PROMPT must include CHAIN OF TITLE heading',
   );
   assert(
-    SYNTHESIS_PROMPT.includes('**Flags:**'),
-    'SYNTHESIS_PROMPT must include Flags bullet format',
+    /\| # \| Date \| Doc Type \| Recording Ref \| Grantor \| Grantee \| Interest Conveyed \| Running Balance \| Flags \|/.test(SYNTHESIS_PROMPT),
+    'SYNTHESIS_PROMPT must include the full chain-of-title table header',
   );
   assert(
     SYNTHESIS_PROMPT.includes('Reconciled Interest'),
     'SYNTHESIS_PROMPT must include Reconciled Interest column',
+  );
+  assert(
+    SYNTHESIS_PROMPT.includes('AI-assisted analytical aid'),
+    'SYNTHESIS_PROMPT must include the AI-disclaimer text verbatim',
   );
 });
 
