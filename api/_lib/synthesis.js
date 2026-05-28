@@ -602,9 +602,15 @@ function validateFinalOpinion(text) {
   const trimmed = text.trim();
   if (trimmed.length < MIN_FINAL_OPINION_CHARS) return { ok: false, reason: 'Final opinion is too short.' };
   const lower = trimmed.toLowerCase();
-  const required = ['chain of title', 'final ownership', 'opinion qualifications'];
-  for (const heading of required) {
-    if (!lower.includes(heading)) return { ok: false, reason: `Missing required section: ${heading}.` };
+  const requiredGroups = [
+    ['chain of title', 'title chain'],
+    ['final ownership', 'ownership determination', 'ownership conclusion', 'final mineral ownership'],
+    ['opinion qualifications', 'qualifications', 'limitations and qualifications', 'assumptions and qualifications'],
+  ];
+  for (const group of requiredGroups) {
+    if (!group.some(h => lower.includes(h))) {
+      return { ok: false, reason: `Missing required section: ${group[0]}.` };
+    }
   }
   return { ok: true };
 }
