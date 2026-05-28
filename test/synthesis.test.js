@@ -697,13 +697,17 @@ test('groupAbstractsByDocument falls back to chunk grouping and chunk headings',
 
 test('buildSynthesisChunks respects 120-doc cap and byte cap', () => {
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const previousChunkSize = process.env.SYNTHESIS_CHUNK_SIZE;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  process.env.SYNTHESIS_CHUNK_SIZE = '120';
   const small = Array.from({ length: 250 }, (_, i) => ({ filename: `d${i}.pdf`, abstract: 'small abstract' }));
   const chunks = buildSynthesisChunks(small, '', '', 'pre', SYNTHESIS_PROMPT);
   assert(chunks.length >= 2, 'Expected multiple chunks at >120 docs');
   assert(chunks[0].length === 120, 'Expected first chunk capped at 120');
   if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+  if (previousChunkSize === undefined) delete process.env.SYNTHESIS_CHUNK_SIZE;
+  else process.env.SYNTHESIS_CHUNK_SIZE = previousChunkSize;
   // Single huge abstract gets its own chunk (b > safe envelope means [a,b] and [b,c] both blow budget).
   const big = [
     { filename: 'a.pdf', abstract: 'a'.repeat(10) },
@@ -1094,7 +1098,9 @@ test('Invalid single-pass model output fails instead of persisting a complete re
 
 test('Multi-segment: 250 abstracts → segments + merge with checkpoints written', async () => {
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const previousChunkSize = process.env.SYNTHESIS_CHUNK_SIZE;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  process.env.SYNTHESIS_CHUNK_SIZE = '120';
   const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   let segmentCalls = 0;
@@ -1119,6 +1125,8 @@ test('Multi-segment: 250 abstracts → segments + merge with checkpoints written
   assert(result.result?.status === 'complete', `Expected complete status, got ${result.result?.status}`);
   if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+  if (previousChunkSize === undefined) delete process.env.SYNTHESIS_CHUNK_SIZE;
+  else process.env.SYNTHESIS_CHUNK_SIZE = previousChunkSize;
 });
 
 test('Final merge claim lease exceeds upstream model timeout by default', async () => {
@@ -1565,11 +1573,15 @@ test('Synthesis endpoint returns 503 with fallback hint when API keys missing', 
 
 test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const previousChunkSize = process.env.SYNTHESIS_CHUNK_SIZE;
   delete process.env.BULK_JOB_MIN_ABSTRACTS;
-  assert(effectiveSynthesisChunkSize(50, {}) === 120, 'Small jobs should use default chunk size');
+  process.env.SYNTHESIS_CHUNK_SIZE = '120';
+  assert(effectiveSynthesisChunkSize(50, {}) === 120, 'Small jobs should use explicit SYNTHESIS_CHUNK_SIZE');
   assert(effectiveSynthesisChunkSize(150, {}) >= 200, 'Bulk jobs should use larger synthesis segments');
   if (previousBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
+  if (previousChunkSize === undefined) delete process.env.SYNTHESIS_CHUNK_SIZE;
+  else process.env.SYNTHESIS_CHUNK_SIZE = previousChunkSize;
 });
 
 test('resolveFinalSynthesisModel keeps Sonnet for final title opinions', () => {

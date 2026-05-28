@@ -326,23 +326,18 @@ export function getPartialSynthesisConfig(overrides = {}) {
 export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
   const resolved = getSynthesisConfig(config);
 
-  // Dynamic: estimate how many docs fit in one segment based on output token budget.
-  // A full title opinion runs ~1,000 output tokens per document on average.
   const TARGET_OUTPUT_TOKENS_PER_DOC = 1000;
   const dynamicChunkSize = Math.max(1, Math.floor(resolved.maxTokens / TARGET_OUTPUT_TOKENS_PER_DOC));
 
-  // If SYNTHESIS_CHUNK_SIZE is explicitly set, treat it as a cap (never exceed it).
-  // Otherwise use the dynamic value.
-  const explicitCap = process.env.SYNTHESIS_CHUNK_SIZE
-    ? clampInt(process.env.SYNTHESIS_CHUNK_SIZE, dynamicChunkSize, 1, 250)
-    : dynamicChunkSize;
+  const explicitlySet = config.chunkSize != null || process.env.SYNTHESIS_CHUNK_SIZE;
+  const baseChunkSize = explicitlySet ? resolved.chunkSize : dynamicChunkSize;
 
   const bulkMin = clampInt(process.env.BULK_JOB_MIN_ABSTRACTS, DEFAULT_BULK_JOB_MIN_ABSTRACTS, 2, 400);
   const bulkSize = clampInt(process.env.BULK_SYNTHESIS_CHUNK_SIZE, DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE, 10, 250);
   if (abstractCount >= bulkMin) {
-    return Math.max(explicitCap, bulkSize);
+    return Math.max(baseChunkSize, bulkSize);
   }
-  return explicitCap;
+  return baseChunkSize;
 }
 
 function utf8ByteLength(value) {
