@@ -143,6 +143,10 @@ async function invokeAnthropicModel(request, options = {}) {
   }
 }
 
+// Anthropic silently caps non-streaming responses; use streaming when caller
+// asks for more than the non-streaming sweet spot so we actually get the budget.
+const ANTHROPIC_NON_STREAMING_MAX_TOKENS = 8192;
+
 export async function invokeModel(request, options = {}) {
   const model = request?.model;
   if (!model) {
@@ -154,6 +158,9 @@ export async function invokeModel(request, options = {}) {
     return await invokeGeminiGenerateContent(request, options);
   }
   if (isAnthropicModel(model)) {
+    if (Number(request.maxTokens) > ANTHROPIC_NON_STREAMING_MAX_TOKENS) {
+      return await invokeAnthropicModelStream(request, options);
+    }
     return await invokeAnthropicModel(request, options);
   }
   const error = new Error(`Unsupported model: ${model}`);

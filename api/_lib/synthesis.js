@@ -68,8 +68,8 @@ export function resolveSynthesisBatchLimit(options = {}) {
   return defaultSynthesisBatchLimit();
 }
 
-const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 6000, 256, 8192);
-const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 5000, 512, 8192);
+const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 6000, 256, 32000);
+const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 5000, 512, 32000);
 const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
 const DEFAULT_OPUS_AUDIT_MAX_TOKENS = clampInt(process.env.OPUS_AUDIT_MAX_TOKENS, 8000, 512, 8192);
 const DEFAULT_SYNTHESIS_CHUNK_SIZE = clampInt(process.env.SYNTHESIS_CHUNK_SIZE, 120, 1, 250);
@@ -325,12 +325,24 @@ export function getPartialSynthesisConfig(overrides = {}) {
 
 export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
   const resolved = getSynthesisConfig(config);
+
+  // Dynamic: estimate how many docs fit in one segment based on output token budget.
+  // A full title opinion runs ~1,000 output tokens per document on average.
+  const TARGET_OUTPUT_TOKENS_PER_DOC = 1000;
+  const dynamicChunkSize = Math.max(1, Math.floor(resolved.maxTokens / TARGET_OUTPUT_TOKENS_PER_DOC));
+
+  // If SYNTHESIS_CHUNK_SIZE is explicitly set, treat it as a cap (never exceed it).
+  // Otherwise use the dynamic value.
+  const explicitCap = process.env.SYNTHESIS_CHUNK_SIZE
+    ? clampInt(process.env.SYNTHESIS_CHUNK_SIZE, dynamicChunkSize, 1, 250)
+    : dynamicChunkSize;
+
   const bulkMin = clampInt(process.env.BULK_JOB_MIN_ABSTRACTS, DEFAULT_BULK_JOB_MIN_ABSTRACTS, 2, 400);
   const bulkSize = clampInt(process.env.BULK_SYNTHESIS_CHUNK_SIZE, DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE, 10, 250);
   if (abstractCount >= bulkMin) {
-    return Math.max(resolved.chunkSize, bulkSize);
+    return Math.max(explicitCap, bulkSize);
   }
-  return resolved.chunkSize;
+  return explicitCap;
 }
 
 function utf8ByteLength(value) {
@@ -823,6 +835,7 @@ async function callSynthesisModel({
       latencyMs: Date.now() - started,
       streamed: shouldStream,
       timeToFirstDeltaMs: response.timeToFirstDeltaMs ?? null,
+      stopReason: response.stopReason || null,
     };
   } catch (err) {
     if (previewWriter?.discard) await previewWriter.discard();
@@ -884,7 +897,7 @@ async function synthesizeWithBinarySplit({
 
 async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, systemPrompt, config, options) {
   try {
-    return await callSynthesisModel({
+    const result = await callSynthesisModel({
       abstracts,
       tract,
       contextNotes,
@@ -893,6 +906,29 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
       config,
       options,
     });
+    // Output truncated by max_tokens — replan by splitting docs in half so each
+    // half gets the full token budget. Avoids infinite validation/retry loops on
+    // jobs whose full opinion exceeds the configured maxTokens.
+    if (result.stopReason === 'max_tokens' && abstracts.length > 1) {
+      logSynthesisMetrics({
+        event: 'synthesis_max_tokens_split',
+        jobId: options.jobId || null,
+        abstractCount: abstracts.length,
+        maxTokens: config.maxTokens,
+        outputTokens: result.usage?.outputTokens ?? null,
+      });
+      return await synthesizeWithBinarySplit({
+        abstracts,
+        tract,
+        contextNotes,
+        preamble,
+        systemPrompt,
+        config,
+        options,
+        reason: 'max_tokens',
+      });
+    }
+    return result;
   } catch (err) {
     const type = classifyError(err);
     if (abstracts.length > 1 && (type === 'payload_too_large' || type === 'upstream_timeout')) {
