@@ -38,7 +38,7 @@ const DOCUMENT_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'f
 const CHUNK_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'failed']);
 const CHUNK_ABSTRACTION_STATUSES = new Set(['pending', 'processing', 'completed', 'failed', 'split_superseded', 'retry_wait']);
 const JOB_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const JOB_RATE_LIMIT_MAX_REQUESTS = 120;
+const JOB_RATE_LIMIT_MAX_REQUESTS = 600;
 const RAW_PAYLOAD_KEYS = new Set([
   'data',
   'base64',
