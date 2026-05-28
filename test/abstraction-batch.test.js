@@ -66,7 +66,7 @@ test('parseBatchAbstracts splits multi-doc model output', () => {
     { chunk: makeChunk('a') },
     { chunk: makeChunk('b') },
   ];
-  const text = 'DOCUMENT #1:\nDOC TYPE: Deed\nGRANTOR: A\n\nDOCUMENT #2:\nDOC TYPE: Lease\nGRANTOR: B\n';
+  const text = '["DOC TYPE: Deed\\nGRANTOR: A","DOC TYPE: Lease\\nGRANTOR: B"]';
   const parsed = parseBatchAbstracts(text, items, 0);
   assert(parsed.length === 2, 'Expected two parsed abstracts');
   assert(parsed[0].abstractText.includes('DOC TYPE: Deed'), 'Expected first abstract body');

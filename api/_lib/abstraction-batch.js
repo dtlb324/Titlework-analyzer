@@ -2,6 +2,7 @@
 
 import {
   ABSTRACTION_PROMPT,
+  BATCH_ABSTRACT_RESPONSE_SCHEMA,
   buildAbstractMessagesForChunks,
   enrichVisualDeliveryForModel,
   estimateAbstractPayloadBytes,
@@ -222,6 +223,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       payloadBytes,
       escalationModel: config.escalationModel,
       escalationMaxTokens: config.escalationMaxTokens,
+      responseSchema: BATCH_ABSTRACT_RESPONSE_SCHEMA,
       options,
     });
     const parsed = parseBatchAbstracts(modelResult.text, preparedItems, globalStart);

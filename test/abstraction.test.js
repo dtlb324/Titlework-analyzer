@@ -730,7 +730,7 @@ test('Phase 4: worker claims pending chunks under a lease', async () => {
     modelClient: async () => {
       modelCalls += 1;
       return {
-        text: 'DOCUMENT #1:\nClaim test A.\n\nDOCUMENT #2:\nClaim test B.',
+        text: '["Claim test A.","Claim test B."]',
         model: 'gemini-2.5-flash',
         usage: {},
       };
@@ -1535,7 +1535,7 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({
-    text: 'DOCUMENT #1:\nok X.\n\nDOCUMENT #2:\nok Y.\n\nDOCUMENT #3:\nok Z.',
+    text: '["ok X.","ok Y.","ok Z."]',
     model: 'gemini-2.5-flash',
     usage: {},
   });

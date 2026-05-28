@@ -99,6 +99,7 @@ export function buildGeminiGenerateContentBody({
   thinkingConfig = null,
   thinkingBudget,
   thinkingLevel,
+  responseSchema = null,
 }) {
   const body = {
     contents: anthropicMessagesToGeminiContents(messages),
@@ -121,6 +122,10 @@ export function buildGeminiGenerateContentBody({
   } else if (Number.isFinite(Number(thinkingBudget))) {
     // Explicit legacy call sites may still pass thinkingBudget directly.
     body.generationConfig.thinkingConfig = { thinkingBudget: Number(thinkingBudget) };
+  }
+  if (responseSchema) {
+    body.generationConfig.responseMimeType = 'application/json';
+    body.generationConfig.responseSchema = responseSchema;
   }
   return body;
 }
@@ -178,6 +183,7 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
     thinkingConfig,
     thinkingBudget: request.thinkingBudget,
     thinkingLevel: request.thinkingLevel,
+    responseSchema: request.responseSchema ?? null,
   });
   const baseUrl = String(process.env.GEMINI_API_BASE_URL || DEFAULT_GEMINI_BASE_URL).replace(/\/$/, '');
   const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;

@@ -41,6 +41,8 @@ const RAW_PERSISTENCE_KEYS = new Set([
   'sourceBytes',
 ]);
 
+export const BATCH_ABSTRACT_RESPONSE_SCHEMA = { type: 'array', items: { type: 'string' } };
+
 function clampInt(raw, fallback, min, max) {
   const value = Number(raw);
   if (!Number.isFinite(value)) return fallback;
@@ -217,12 +219,9 @@ export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
   });
   const firstDoc = globalStartIdx + 1;
   const lastDoc = globalStartIdx + items.length;
-  let textPrompt = `Abstract each of the following documents in order: ${labels.join(', ')}.
+  let textPrompt = `Abstract each of the following ${items.length} document${items.length === 1 ? '' : 's'} in order: ${labels.join(', ')}.
 
-REQUIRED OUTPUT FORMAT:
-- Begin each abstract with the exact heading "DOCUMENT #N:" on its own line, where N is the document number.
-- Emit a heading for every document from #${firstDoc} through #${lastDoc}, in order, with no skips. If a document has no abstractable content, still emit its heading followed by "No abstractable content."
-- Do not merge documents into a single section and do not omit any heading.
+Return a JSON array of exactly ${items.length} string${items.length === 1 ? '' : 's'}. Index 0 is the complete abstract for ${labels[0]}, index 1 for ${labels[1] ?? 'the next document'}, and so on. Each element must follow the output format from your instructions. If a document has no abstractable content, use the string "No abstractable content."
 
 Extract every relevant fact. Do not guess at anything illegible.`;
   if (items.some(item => item.chunk.splitFrom || (item.chunk.pageStart && item.chunk.pageEnd))) {
@@ -289,29 +288,17 @@ Extract every relevant fact. Do not guess at anything illegible.`;
 
 export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
   const trimmed = String(result || '').trim();
-  let unlabeledFallbackUsed = false;
-  return items.map((item, index) => {
-    const docNum = globalStartIdx + index + 1;
-    const nextDocNum = docNum + 1;
-    const regex = new RegExp(`DOCUMENT\\s*#${docNum}\\s*:?([\\s\\S]*?)(?=DOCUMENT\\s*#${nextDocNum}\\s*:|$)`, 'i');
-    const match = trimmed.match(regex);
-    let abstractText;
-    if (match) {
-      abstractText = match[1].trim();
-    } else if (items.length === 1) {
-      abstractText = trimmed;
-    } else if (!unlabeledFallbackUsed) {
-      abstractText = trimmed;
-      unlabeledFallbackUsed = true;
-    } else {
-      abstractText = '';
-    }
-    return {
-      chunk: item.chunk,
-      abstractText,
-      sequenceIndex: globalStartIdx + index,
-    };
-  });
+  let parsed = null;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (_) {
+    // JSON parse failure — all items get empty abstractText and fall back to singles
+  }
+  return items.map((item, index) => ({
+    chunk: item.chunk,
+    abstractText: Array.isArray(parsed) ? String(parsed[index] ?? '').trim() : '',
+    sequenceIndex: globalStartIdx + index,
+  }));
 }
 
 export function validateAbstractPersistenceInput(input) {
@@ -509,18 +496,23 @@ export async function runModelAbstraction({
   payloadBytes,
   escalationModel = ABSTRACT_ESCALATION_MODEL,
   escalationMaxTokens = ABSTRACT_ESCALATION_MAX_TOKENS,
+  responseSchema = null,
   options = {},
 }) {
   const modelClient = getModelClient(options);
+  const schemaForModel = responseSchema && isGeminiModel(model) ? responseSchema : null;
   let response = await modelClient({
     model,
     maxTokens,
     system: ABSTRACTION_PROMPT,
     messages,
     payloadBytes,
+    ...(schemaForModel ? { responseSchema: schemaForModel } : {}),
   });
   let usage = extractUsage(response.usage);
-  const escalationEnabled = options.escalationEnabled !== false
+  // Structured output mode (batch JSON) skips escalation — fallback-to-singles handles per-doc quality.
+  const escalationEnabled = !responseSchema
+    && options.escalationEnabled !== false
     && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
     && escalationModel
     && escalationModel !== model;
