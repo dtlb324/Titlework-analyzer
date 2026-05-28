@@ -509,7 +509,7 @@ export function planSynthesisSegments(abstracts, tract, contextNotes, configOver
     SYNTHESIS_PROMPT,
     configOverrides,
   );
-  if (chunkLists.length === 1 && shouldForceMultiSegmentPlanning(abstracts.length)) {
+  if (shouldForceMultiSegmentPlanning(abstracts.length)) {
     const baseConfig = getSynthesisConfig(configOverrides);
     chunkLists = buildSynthesisChunks(
       abstracts,

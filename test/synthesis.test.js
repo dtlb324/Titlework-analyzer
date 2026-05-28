@@ -1956,6 +1956,25 @@ test('planSynthesisSegments splits large single-pass jobs when multi-segment for
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulk;
 });
 
+test('planSynthesisSegments uses configured chunk size for all forced multi-segment jobs', () => {
+  const previousMulti = process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  const previousBulk = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const previousBulkSize = process.env.BULK_SYNTHESIS_CHUNK_SIZE;
+  process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '50';
+  delete process.env.BULK_SYNTHESIS_CHUNK_SIZE;
+  const abstracts = manyAbstracts(400);
+  const plan = planSynthesisSegments(abstracts, 'Tract A', 'Notes', { chunkSize: 50 });
+  assert(plan.segments.length === 8, `Expected 8 forced 50-doc segments, got ${plan.segments.length}`);
+  assert(plan.segments.every(seg => seg.documentIds.length <= 50), 'Expected every forced segment capped at 50 docs');
+  if (previousMulti === undefined) delete process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  else process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = previousMulti;
+  if (previousBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+  else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulk;
+  if (previousBulkSize === undefined) delete process.env.BULK_SYNTHESIS_CHUNK_SIZE;
+  else process.env.BULK_SYNTHESIS_CHUNK_SIZE = previousBulkSize;
+});
+
 // --- Run --------------------------------------------------------------------
 
 let passed = 0;
