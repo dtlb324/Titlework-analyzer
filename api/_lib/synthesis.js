@@ -203,6 +203,9 @@ export function logSynthesisMetrics(fields) {
 
 export const SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions.
 
+STRICT EXAMINER CONSTRAINT (do not deviate):
+You are a strict title examiner. Do NOT infer that a legal obligation has been satisfied, released, or transferred unless you can cite the exact document title, recording date, and book/page number of the release or assignment. If a chain of events is missing a link (e.g. a mortgage with no recorded satisfaction), flag it as an UNRESOLVED TITLE GAP in the Chain of Title Flags column and again in the Title Defects & Curative Requirements table. Do NOT assume a resolution exists.
+
 Synthesize the provided document abstracts into a complete title opinion analysis.
 
 CRITICAL RULES:
@@ -210,6 +213,7 @@ CRITICAL RULES:
 2. If an abstract flagged something as illegible or unclear, treat it as a curative item — do not guess.
 3. Show fractional math terse-in-cell (e.g. "1/2 × 1/4 = 1/8"). No multi-paragraph derivations.
 4. If the chain has gaps you cannot bridge, say so explicitly — do not fill gaps with assumptions.
+5. Liens, mortgages, leases, and other encumbrances remain UNRELEASED until you can cite the release/satisfaction/assignment document in the abstracts. No exceptions.
 
 OUTPUT FORMAT (strict — tables where indicated, no narrative between sections):
 
@@ -237,6 +241,8 @@ Apply Texas law for Reconciled Interest. Void root (sovereign double grant, stra
 
 export const PARTIAL_SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney synthesizing one segment of a larger chain of title.
 
+STRICT EXAMINER CONSTRAINT: Do NOT infer that a lien, mortgage, lease, or other obligation has been satisfied, released, or transferred unless an explicit release/satisfaction/assignment document is in this batch — cite its title, recording date, and book/page in the Flags column. Otherwise mark the originating instrument with Flag "UNRESOLVED TITLE GAP" and record it in DEFECTS. Do NOT assume a resolution exists.
+
 You will receive abstracts for a subset of documents from a full run. Produce a partial chain-of-title segment summary only.
 
 OUTPUT FORMAT (strict — no preamble, intro, or prose between sections):
@@ -254,6 +260,7 @@ OUTPUT FORMAT (strict — no preamble, intro, or prose between sections):
 
 Rules:
 - Only use facts from the abstracts provided.
+- Liens, mortgages, leases, and other encumbrances remain UNRELEASED until the release/satisfaction/assignment is cited from the abstracts. No exceptions.
 - Do NOT produce a final ownership determination table — a later pass merges all segments.
 - Do NOT add narrative paragraphs between table rows.
 - Flag gaps explicitly instead of inventing links.`;
@@ -282,6 +289,8 @@ Rules:
 export const FOLLOWUP_PROMPT = SYNTHESIS_PROMPT;
 
 export const OPUS_AUDIT_PROMPT = `You are a senior Texas oil and gas title attorney auditing an AI-assisted title opinion.
+
+STRICT EXAMINER CONSTRAINT: Do NOT accept any inference in the draft that a legal obligation has been satisfied, released, or transferred unless the draft cites the exact document title, recording date, and book/page of the release or assignment. If the draft bridges a missing link (e.g. a mortgage with no recorded satisfaction) without citation, downgrade the conclusion: flag the instrument as an UNRESOLVED TITLE GAP in Chain of Title and in Title Defects & Curative Requirements, and reflect the unreleased encumbrance in Final Ownership Determination's "Subject To" column.
 
 You will receive source document abstracts and a draft final title opinion. Audit the draft for missed instruments, title-chain gaps, legal-description issues, exception/reservation handling, curative requirements, and fractional math errors.
 
