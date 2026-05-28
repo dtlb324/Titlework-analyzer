@@ -1,6 +1,5 @@
 import {
   createRequestId,
-  enforceJobRateLimit,
   getJobStore,
   parseJsonBody,
   requireJobPassword,
@@ -46,7 +45,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid JSON in upload request.', requestId });
   }
 
-  if (!enforceJobRateLimit(req, res, requestId)) return;
   if (!requireJobPassword(req, res, requestId)) return;
 
   if (!storageIsConfigured()) {
