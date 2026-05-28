@@ -212,7 +212,14 @@ CRITICAL RULES:
 4. If the chain has gaps you cannot bridge, say so explicitly — do not fill gaps with assumptions.
 
 ## CHAIN OF TITLE
-Chronological flow. At each link: Date · Document type · Recording ref · Grantor → Grantee · Interest conveyed · Running fractional balance with math shown · Any flags.
+Chronological flow. Number each document. For each entry use this format:
+
+**[N]. [Date] · [Document Type] · [Recording Ref]**
+- **Grantor:** name
+- **Grantee:** name
+- **Interest Conveyed:** fraction
+- **Running Balance:** math shown step by step
+- **Flags:** ⚠️ LABEL: description — or "None"
 
 ## MINERAL INTEREST CALCULATION
 Step-by-step math. Use a table. Track separately: surface estate, mineral estate (executive rights), royalty interest, NPRI, outstanding leasehold, term interests. Show uncertainty ranges where applicable.
@@ -221,9 +228,9 @@ Step-by-step math. Use a table. Track separately: surface estate, mineral estate
 Every defect formally listed with the curative document needed (Affidavit of Heirship, Stipulation of Interest, Release, Quitclaim, etc.).
 
 ## FINAL OWNERSHIP DETERMINATION
-| Owner | Mineral Interest | Royalty/NPRI | Subject To | Notes |
+| Owner | Claimed Interest | Reconciled Interest | Royalty/NPRI | Subject To |
 
-If ownership cannot be definitively determined, state so and list what additional records are needed.
+In the Reconciled Interest column: apply Texas law to determine what each party actually holds. Where a chain traces to a void root (sovereign double grant, stranger to title) enter 0. Where gaps or partial abstracts prevent quantification, enter the range or "unknown". Make a definitive call wherever the law is clear — don't hedge when the answer is knowable. If ownership cannot be determined at all, state so and list what additional records are needed.
 
 ## OPINION QUALIFICATIONS
 List every assumption. List every illegible or unclear document. State: "This is an AI-assisted analytical aid. It is not a formal title opinion and should not be relied upon for drilling, leasing, division order, or any other action without verification by a licensed attorney in the state where the land lies."`;

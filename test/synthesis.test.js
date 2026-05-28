@@ -926,6 +926,21 @@ test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields ti
   assert(job.status === 'complete', `Expected job complete, got ${job.status}`);
 });
 
+test('SYNTHESIS_PROMPT uses numbered entry format for chain of title', () => {
+  assert(
+    SYNTHESIS_PROMPT.includes('Number each document'),
+    'SYNTHESIS_PROMPT must instruct numbered document entries',
+  );
+  assert(
+    SYNTHESIS_PROMPT.includes('**Flags:**'),
+    'SYNTHESIS_PROMPT must include Flags bullet format',
+  );
+  assert(
+    SYNTHESIS_PROMPT.includes('Reconciled Interest'),
+    'SYNTHESIS_PROMPT must include Reconciled Interest column',
+  );
+});
+
 test('Opus audit rewrites exceptional final opinions when enabled', async () => {
   const previousAudit = process.env.OPUS_AUDIT_ENABLED;
   process.env.OPUS_AUDIT_ENABLED = 'true';
