@@ -17,6 +17,7 @@
 
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
+import { fileURLToPath } from 'url';
 import { buildMergeUserMessageContent } from '../api/_lib/anthropic-request.js';
 import { getJobStore } from '../api/_lib/jobs.js';
 import { invokeModel } from '../api/_lib/model-client.js';
@@ -179,32 +180,115 @@ function escHtml(str) {
   return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function mdToHtml(md) {
-  // Escape HTML first, then convert markdown patterns to tags.
-  const escaped = String(md || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-  return escaped
-    .split(/\n{2,}/)
-    .map(block => {
-      const t = block.trim();
-      if (!t) return '';
-      if (t.startsWith('### ')) return `<h3>${t.slice(4)}</h3>`;
-      if (t.startsWith('## ')) return `<h2>${t.slice(3)}</h2>`;
-      if (t === '---') return '<hr>';
-      return `<p>${t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')}</p>`;
-    })
-    .filter(Boolean)
-    .join('\n');
+function renderInlineMarkdown(str) {
+  return escHtml(str).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
+function splitTableRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim());
+}
+
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  return cells.length >= 2 && cells.every(cell => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')));
+}
+
+function isTableStart(lines, index) {
+  return lines[index]?.trim().startsWith('|') && isTableSeparator(lines[index + 1] || '');
+}
+
+function renderTable(lines, startIndex) {
+  const headers = splitTableRow(lines[startIndex]);
+  const rows = [];
+  let index = startIndex + 2;
+
+  while (index < lines.length && lines[index].trim().startsWith('|')) {
+    rows.push(splitTableRow(lines[index]));
+    index++;
+  }
+
+  const head = headers.map(cell => `<th>${renderInlineMarkdown(cell)}</th>`).join('');
+  const body = rows
+    .map(row => `<tr>${row.map(cell => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`)
+    .join('');
+
+  return {
+    html: `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`,
+    nextIndex: index,
+  };
+}
+
+export function mdToHtml(md) {
+  const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+  const output = [];
+  let paragraph = [];
+
+  function flushParagraph() {
+    const text = paragraph.join('\n').trim();
+    paragraph = [];
+    if (text) {
+      output.push(`<p>${renderInlineMarkdown(text).replace(/\n/g, '<br>')}</p>`);
+    }
+  }
+
+  for (let i = 0; i < lines.length;) {
+    const trimmed = lines[i].trim();
+
+    if (!trimmed) {
+      flushParagraph();
+      i++;
+      continue;
+    }
+
+    if (trimmed === '---') {
+      flushParagraph();
+      output.push('<hr>');
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('### ')) {
+      flushParagraph();
+      output.push(`<h3>${renderInlineMarkdown(trimmed.slice(4))}</h3>`);
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('## ')) {
+      flushParagraph();
+      output.push(`<h2>${renderInlineMarkdown(trimmed.slice(3))}</h2>`);
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('# ')) {
+      flushParagraph();
+      output.push(`<h1>${renderInlineMarkdown(trimmed.slice(2))}</h1>`);
+      i++;
+      continue;
+    }
+
+    if (isTableStart(lines, i)) {
+      flushParagraph();
+      const table = renderTable(lines, i);
+      output.push(table.html);
+      i = table.nextIndex;
+      continue;
+    }
+
+    paragraph.push(lines[i]);
+    i++;
+  }
+
+  flushParagraph();
+  return output.join('\n');
 }
 
 function slugifyModel(id) {
   return String(id || 'model').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function buildComparisonHtml(meta, sonnetText, geminiText) {
+export function buildComparisonHtml(meta, sonnetText, geminiText) {
   const sonnetArmId = meta.armIds?.sonnet || 'sonnet';
   const geminiArmId = meta.armIds?.gemini || 'gemini';
   const sonnetArm = meta.arms?.[sonnetArmId] || {};
@@ -253,11 +337,17 @@ function buildComparisonHtml(meta, sonnetText, geminiText) {
   .col-name  { font-weight: bold; font-size: 14px; }
   .col-stats { color: #aaa; font-size: 12px; margin-top: 3px; }
   .col-body  { padding: 24px; overflow-y: auto; flex: 1; line-height: 1.75; }
+  h1 { font-size: 1.25em; margin: 0 0 0.5em; }
   h2 { font-size: 1.05em; margin: 1.5em 0 0.4em; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
   h3 { font-size: 1em; margin: 1.2em 0 0.3em; color: #444; }
   p  { margin: 0.65em 0; }
   hr { border: none; border-top: 1px solid #ddd; margin: 1.2em 0; }
   strong { font-weight: bold; }
+  .table-wrap { margin: 0.8em 0 1.2em; overflow-x: auto; border: 1px solid #d8d8d0; background: #fff; }
+  table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; line-height: 1.35; }
+  th, td { padding: 7px 9px; border: 1px solid #ddd; vertical-align: top; }
+  th { position: sticky; top: 0; background: #eee9dc; text-align: left; z-index: 1; }
+  tbody tr:nth-child(even) { background: #fafaf7; }
 </style>
 </head>
 <body>
@@ -383,7 +473,9 @@ async function main() {
   console.log(`Done. Open ${htmlPath} in a browser to compare side by side.`);
 }
 
-main().catch(err => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(err => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
