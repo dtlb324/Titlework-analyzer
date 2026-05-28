@@ -216,10 +216,11 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), options, 'payload_too_large')];
     }
 
+    const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
     const modelResult = await runModelAbstraction({
       messages,
       model: config.model,
-      maxTokens: config.maxTokens,
+      maxTokens: batchMaxTokens,
       payloadBytes,
       escalationModel: config.escalationModel,
       escalationMaxTokens: config.escalationMaxTokens,

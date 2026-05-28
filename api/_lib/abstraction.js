@@ -217,8 +217,6 @@ export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
     const docNum = globalStartIdx + index + 1;
     return `Document #${docNum} (${chunkDisplayName(item.chunk)})`;
   });
-  const firstDoc = globalStartIdx + 1;
-  const lastDoc = globalStartIdx + items.length;
   let textPrompt = `Abstract each of the following ${items.length} document${items.length === 1 ? '' : 's'} in order: ${labels.join(', ')}.
 
 Return a JSON array of exactly ${items.length} string${items.length === 1 ? '' : 's'}. Index 0 is the complete abstract for ${labels[0]}, index 1 for ${labels[1] ?? 'the next document'}, and so on. Each element must follow the output format from your instructions. If a document has no abstractable content, use the string "No abstractable content."
