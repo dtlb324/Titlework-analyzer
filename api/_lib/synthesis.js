@@ -8,7 +8,7 @@
 //
 // Required env vars:
 //   - GEMINI_API_KEY (partial segment synthesis)
-//   - ANTHROPIC_API_KEY (final title opinion, follow-ups, optional audit)
+//   - ANTHROPIC_API_KEY (final title opinion, follow-ups)
 //   Override per call with options.modelClient
 //
 // Configurable (env):
@@ -70,8 +70,6 @@ export function resolveSynthesisBatchLimit(options = {}) {
 
 const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 32000);
 const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 5000, 512, 32000);
-const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
-const DEFAULT_OPUS_AUDIT_MAX_TOKENS = clampInt(process.env.OPUS_AUDIT_MAX_TOKENS, 8000, 512, 8192);
 const DEFAULT_SYNTHESIS_CHUNK_SIZE = clampInt(process.env.SYNTHESIS_CHUNK_SIZE, 120, 1, 250);
 const DEFAULT_BULK_SYNTHESIS_CHUNK_SIZE = 200;
 const DEFAULT_BULK_JOB_MIN_ABSTRACTS = 100;
@@ -294,24 +292,6 @@ Rules:
 - Flag unresolved gaps explicitly.`;
 
 export const FOLLOWUP_PROMPT = SYNTHESIS_PROMPT;
-
-export const OPUS_AUDIT_PROMPT = `You are a senior Texas oil and gas title attorney auditing an AI-assisted title opinion.
-
-STRICT EXAMINER CONSTRAINT: Do NOT accept any inference in the draft that a legal obligation has been satisfied, released, or transferred unless the draft cites the exact document title, recording date, and book/page of the release or assignment. If the draft bridges a missing link (e.g. a mortgage with no recorded satisfaction) without citation, downgrade the conclusion: flag the instrument as an UNRESOLVED TITLE GAP in Chain of Title and in Title Defects & Curative Requirements, and reflect the unreleased encumbrance in Final Ownership Determination's "Subject To" column.
-
-You will receive source document abstracts and a draft final title opinion. Audit the draft for missed instruments, title-chain gaps, legal-description issues, exception/reservation handling, curative requirements, and fractional math errors.
-
-If the draft is materially correct, return a polished complete title opinion preserving the draft's conclusions. If the draft is wrong or incomplete, rewrite it into the corrected complete title opinion.
-
-Only use facts from the source abstracts and draft. Do NOT invent dates, parties, recording references, legal descriptions, or fractions. Preserve uncertainty and manual-verification warnings.
-
-Return only the complete final title opinion in the same section structure:
-
-## CHAIN OF TITLE
-## MINERAL INTEREST CALCULATION
-## TITLE DEFECTS & CURATIVE REQUIREMENTS
-## FINAL OWNERSHIP DETERMINATION
-## OPINION QUALIFICATIONS`;
 
 export function getSynthesisConfig(overrides = {}) {
   return {
@@ -664,126 +644,6 @@ function buildSegmentMessages(abstracts, tract, ctx, preamble, options = {}) {
     return [{ role: 'user', content }];
   }
   return [{ role: 'user', content: buildAbstractInput(abstracts, tract, ctx, preamble) }];
-}
-
-// Opus audit is opt-in only (OPUS_AUDIT_ENABLED=true). Production keeps this off.
-function opusAuditEnabled(options = {}) {
-  if (options.opusAuditEnabled === true) return true;
-  if (options.opusAuditEnabled === false) return false;
-  return process.env.OPUS_AUDIT_ENABLED === 'true';
-}
-
-function appendUniqueWarning(warnings, warning) {
-  if (!warning) return warnings;
-  if (!warnings.includes(warning)) warnings.push(warning);
-  return warnings;
-}
-
-function addTokenCounts(a, b) {
-  return (Number(a) || 0) + (Number(b) || 0);
-}
-
-function abstractRiskText(abstract) {
-  return String(abstract?.abstract || abstract?.abstractText || '');
-}
-
-export function shouldRunOpusAudit({ status, warnings = [], failedDocuments = [], abstracts = [] } = {}) {
-  const reasons = [];
-  if (status === 'partial_failed') reasons.push('partial_failed result');
-  if ((failedDocuments || []).length > 0) reasons.push('failed document exclusions');
-
-  const warningText = (warnings || []).map(w => typeof w === 'string' ? w : JSON.stringify(w)).join('\n');
-  if (/page-range segments|segment_split|repair_retry|merge_tree_applied|final_validation_failed|excluded|failed/i.test(warningText)) {
-    reasons.push('synthesis warnings');
-  }
-
-  const sourceText = (abstracts || []).map(abstractRiskText).join('\n\n');
-  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(sourceText)) reasons.push('manual verification flags');
-  if (/CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(sourceText)) reasons.push('low confidence abstracts');
-
-  return { run: reasons.length > 0, reasons };
-}
-
-function buildOpusAuditMessages({ abstracts, tract, contextNotes, finalTitleOpinion }) {
-  const sourceInput = buildAbstractInput(
-    abstracts,
-    tract,
-    contextNotes,
-    'Below are the source document abstracts used to prepare the draft title opinion.',
-  );
-  return [{
-    role: 'user',
-    content: `${sourceInput}\n\n---\n\n## DRAFT FINAL TITLE OPINION\n\n${finalTitleOpinion}\n\nAudit and rewrite the draft only as needed. Return the complete final title opinion only.`,
-  }];
-}
-
-async function runOpusFinalAudit({ payload, abstracts, tract, contextNotes, options, config }) {
-  const auditModel = options.opusAuditModel || DEFAULT_OPUS_AUDIT_MODEL;
-  const auditMaxTokens = options.opusAuditMaxTokens || DEFAULT_OPUS_AUDIT_MAX_TOKENS;
-  const messages = buildOpusAuditMessages({
-    abstracts,
-    tract,
-    contextNotes,
-    finalTitleOpinion: payload.finalTitleOpinion,
-  });
-  const payloadBytes = estimateRequestBytes(auditModel, auditMaxTokens, OPUS_AUDIT_PROMPT, messages);
-  if (payloadBytes > config.requestEnvelopeSafeBytes) {
-    const err = new Error(`Opus audit request too large (${(payloadBytes / 1024 / 1024).toFixed(1)} MB).`);
-    err.status = 413;
-    throw err;
-  }
-  const started = Date.now();
-  const response = await getModelClient(options)({
-    model: auditModel,
-    maxTokens: auditMaxTokens,
-    system: OPUS_AUDIT_PROMPT,
-    messages,
-    payloadBytes,
-    upstreamTimeoutMs: config.upstreamTimeoutMs,
-    audit: true,
-    initialModel: payload.modelUsed || config.model,
-  });
-  return {
-    text: response.text || '',
-    model: response.model || auditModel,
-    usage: extractUsage(response.usage),
-    payloadBytes,
-    latencyMs: Date.now() - started,
-  };
-}
-
-async function applyOpusAuditIfNeeded({ payload, abstracts, tract, contextNotes, options, config }) {
-  if (!payload?.finalTitleOpinion || !opusAuditEnabled(options)) return payload;
-  const decision = shouldRunOpusAudit({
-    status: payload.status,
-    warnings: payload.warnings,
-    failedDocuments: payload.failedDocuments,
-    abstracts,
-  });
-  if (!decision.run) return payload;
-
-  const warnings = [...(payload.warnings || [])];
-  try {
-    const audit = await runOpusFinalAudit({ payload, abstracts, tract, contextNotes, options, config });
-    const validation = validateFinalOpinion(audit.text);
-    if (!validation.ok) {
-      appendUniqueWarning(warnings, `Opus 4.7 audit failed: ${validation.reason}`);
-      return { ...payload, warnings };
-    }
-    appendUniqueWarning(warnings, `Opus 4.7 audit applied: ${decision.reasons.join('; ')}`);
-    return {
-      ...payload,
-      finalTitleOpinion: audit.text,
-      warnings,
-      modelUsed: audit.model,
-      inputTokens: addTokenCounts(payload.inputTokens, audit.usage.inputTokens),
-      outputTokens: addTokenCounts(payload.outputTokens, audit.usage.outputTokens),
-      synthesisDurationMs: addTokenCounts(payload.synthesisDurationMs, audit.latencyMs),
-    };
-  } catch (err) {
-    appendUniqueWarning(warnings, `Opus 4.7 audit failed: ${classifyError(err)}`);
-    return { ...payload, warnings };
-  }
 }
 
 async function callSynthesisModel({
@@ -1561,26 +1421,19 @@ export async function processSynthesisJob(jobId, options = {}) {
       if (failedDocs.length) opinionWarnings.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
       await appendResultWarnings(opinionWarnings);
       const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
-      const resultPayload = await applyOpusAuditIfNeeded({
-        payload: {
-          planId,
-          status,
-          finalTitleOpinion: validation.ok ? (onlySummary.summaryText || '') : '',
-          warnings: opinionWarnings,
-          failedDocuments: failedDocs,
-          modelUsed: onlySummary.modelUsed || config.model,
-          inputTokens: onlySummary.inputTokens || 0,
-          outputTokens: onlySummary.outputTokens || 0,
-          payloadBytes: onlySummary.payloadBytes || 0,
-          synthesisDurationMs: Date.now() - startedAt,
-          mergeWorkerId: mergeClaim.workerId,
-        },
-        abstracts,
-        tract,
-        contextNotes,
-        options,
-        config,
-      });
+      const resultPayload = {
+        planId,
+        status,
+        finalTitleOpinion: validation.ok ? (onlySummary.summaryText || '') : '',
+        warnings: opinionWarnings,
+        failedDocuments: failedDocs,
+        modelUsed: onlySummary.modelUsed || config.model,
+        inputTokens: onlySummary.inputTokens || 0,
+        outputTokens: onlySummary.outputTokens || 0,
+        payloadBytes: onlySummary.payloadBytes || 0,
+        synthesisDurationMs: Date.now() - startedAt,
+        mergeWorkerId: mergeClaim.workerId,
+      };
       result = await store.saveJobResult(jobId, resultPayload);
       mergeRanInThisBatch = Boolean(result);
     } else {
@@ -1613,26 +1466,19 @@ export async function processSynthesisJob(jobId, options = {}) {
         if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
         await appendResultWarnings(warningsAccum);
         const status = !validation.ok ? 'failed' : failedDocs.length ? 'partial_failed' : 'complete';
-        const resultPayload = await applyOpusAuditIfNeeded({
-          payload: {
-            planId,
-            status,
-            finalTitleOpinion: validation.ok ? merged.text : '',
-            warnings: warningsAccum,
-            failedDocuments: failedDocs,
-            modelUsed: merged.model,
-            inputTokens: tokensAccum.inputTokens,
-            outputTokens: tokensAccum.outputTokens,
-            payloadBytes: merged.payloadBytes,
-            synthesisDurationMs: Date.now() - startedAt,
-            mergeWorkerId: mergeClaim.workerId,
-          },
-          abstracts,
-          tract,
-          contextNotes,
-          options,
-          config,
-        });
+        const resultPayload = {
+          planId,
+          status,
+          finalTitleOpinion: validation.ok ? merged.text : '',
+          warnings: warningsAccum,
+          failedDocuments: failedDocs,
+          modelUsed: merged.model,
+          inputTokens: tokensAccum.inputTokens,
+          outputTokens: tokensAccum.outputTokens,
+          payloadBytes: merged.payloadBytes,
+          synthesisDurationMs: Date.now() - startedAt,
+          mergeWorkerId: mergeClaim.workerId,
+        };
         result = await store.saveJobResult(jobId, resultPayload);
         mergeRanInThisBatch = Boolean(result);
       } catch (err) {
@@ -1692,26 +1538,19 @@ export async function processSynthesisJob(jobId, options = {}) {
           if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
           await appendResultWarnings(warningsAccum);
           const resultStatus = validation.ok ? 'partial_failed' : 'failed';
-          const resultPayload = await applyOpusAuditIfNeeded({
-            payload: {
-              planId,
-              status: resultStatus,
-              finalTitleOpinion: validation.ok ? merged.text : '',
-              warnings: warningsAccum,
-              failedDocuments: failedDocs,
-              modelUsed: merged.model,
-              inputTokens: tokensAccum.inputTokens,
-              outputTokens: tokensAccum.outputTokens,
-              payloadBytes: merged.payloadBytes,
-              synthesisDurationMs: Date.now() - startedAt,
-              mergeWorkerId: mergeClaim.workerId,
-            },
-            abstracts,
-            tract,
-            contextNotes,
-            options,
-            config,
-          });
+          const resultPayload = {
+            planId,
+            status: resultStatus,
+            finalTitleOpinion: validation.ok ? merged.text : '',
+            warnings: warningsAccum,
+            failedDocuments: failedDocs,
+            modelUsed: merged.model,
+            inputTokens: tokensAccum.inputTokens,
+            outputTokens: tokensAccum.outputTokens,
+            payloadBytes: merged.payloadBytes,
+            synthesisDurationMs: Date.now() - startedAt,
+            mergeWorkerId: mergeClaim.workerId,
+          };
           result = await store.saveJobResult(jobId, resultPayload);
           mergeRanInThisBatch = Boolean(result);
         } catch (err) {

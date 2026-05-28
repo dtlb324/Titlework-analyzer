@@ -299,7 +299,6 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(releaseWorkflow.includes('--min-instances 0'), 'Expected worker deploy to scale to zero by default');
   assert(!releaseWorkflow.includes('--min-instances 1'), 'Expected worker deploy not to keep an always-on instance');
   assert(releaseWorkflow.includes('WORKER_DISABLED=true'), 'Expected worker service loop to be disabled by default');
-  assert(releaseWorkflow.includes('OPUS_AUDIT_ENABLED=false'), 'Expected Opus audit disabled on release deploys');
   assert(releaseWorkflow.includes('SYNTHESIS_CONCURRENCY=8'), 'Expected Phase 0 synthesis concurrency on API deploy');
   assert(releaseWorkflow.includes('SYNTHESIS_BATCH_LIMIT=8'), 'Expected Phase 1 synthesis batch limit on API deploy');
   assert(releaseWorkflow.includes('SYNTHESIS_STREAM_ENABLED=true'), 'Expected Phase 2 synthesis streaming on API deploy');
