@@ -1694,6 +1694,10 @@ function createPostgresJobStore() {
           SET synthesis_plan_id = NULL,
               synthesis_merge_worker_id = NULL,
               synthesis_merge_lease_expires_at = NULL,
+              synthesis_preview_text = NULL,
+              synthesis_preview_complete = false,
+              synthesis_preview_bytes = 0,
+              synthesis_preview_updated_at = NULL,
               updated_at = now()
           WHERE id = ${record.jobId}
         `;
