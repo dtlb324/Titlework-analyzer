@@ -1173,6 +1173,7 @@ function formatRelative(iso) {
 function renderJobHeader(job) {
   const el = document.getElementById('jobHeader');
   if (!el || !job) return;
+  if (document.getElementById('jobNameInput')) return;
   const info = statusInfo(job.status);
   const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
   const hasDownloadableResult = job.status === 'complete' || job.status === 'partial_failed';
