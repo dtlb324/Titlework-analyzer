@@ -68,7 +68,7 @@ export function resolveSynthesisBatchLimit(options = {}) {
   return defaultSynthesisBatchLimit();
 }
 
-const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 6000, 256, 32000);
+const DEFAULT_SYNTHESIS_MAX_TOKENS = clampInt(process.env.SYNTHESIS_MAX_TOKENS, 8000, 256, 32000);
 const DEFAULT_PARTIAL_MAX_TOKENS = clampInt(process.env.SYNTHESIS_PARTIAL_MAX_TOKENS, 5000, 512, 32000);
 const DEFAULT_OPUS_AUDIT_MODEL = process.env.OPUS_AUDIT_MODEL || 'claude-opus-4-7';
 const DEFAULT_OPUS_AUDIT_MAX_TOKENS = clampInt(process.env.OPUS_AUDIT_MAX_TOKENS, 8000, 512, 8192);
@@ -234,16 +234,16 @@ One row per instrument, chronological. Running Balance = math only. Flags = shor
 
 ## TITLE DEFECTS & CURATIVE REQUIREMENTS
 | # | Defect | Curative Needed | Source Doc |
-One row per distinct defect, numbered. Defect column ≤ 1 sentence. Curative column names the instrument type (Affidavit of Heirship, Stipulation of Interest, Release, Quitclaim, Correction Deed, etc.).
+ENUMERATION RULE: one row per affected instrument, numbered (D1, D2, ...). Do NOT consolidate multiple instruments under a single defect category — even when several instruments share the same defect type (e.g. overgrants), list each one separately so the reader can match it to the specific document. Defect column ≤ 1 sentence. Curative column names the instrument type (Affidavit of Heirship, Stipulation of Interest, Release, Quitclaim, Correction Deed, etc.).
 
 ## FINAL OWNERSHIP DETERMINATION
 | Owner | Reconciled Interest | Royalty/NPRI | Subject To |
 
-Reconciled Interest applies Texas law (nemo dat, void-root, time-bar, statutes of limitations). Subject To = comma-separated defect numbers (e.g. "D2, D7"). Make a definitive call where the law is clear; don't hedge when the answer is knowable.
+ENUMERATION RULE: one row per named party in the chain. Do NOT use catch-all rows like "All other parties" — every grantor and grantee that appears in CHAIN OF TITLE must appear here with their reconciled position (which may be 0). Reconciled Interest applies Texas law (nemo dat, void-root, time-bar, statutes of limitations). Subject To = comma-separated defect numbers (e.g. "D2, D7"). Make a definitive call where the law is clear; don't hedge when the answer is knowable.
 
 ## OPINION QUALIFICATIONS
-- Assumptions: one bullet per assumption, one sentence each.
-- Illegible/unclear documents: one bullet per item with Source Doc reference.
+- Assumptions: list every assumption that affected your reasoning, one bullet per assumption.
+- Illegible/unclear documents: list every illegible or unclear document individually, one bullet each, with Source Doc reference.
 - Include verbatim: "This is an AI-assisted analytical aid. It is not a formal title opinion and should not be relied upon for drilling, leasing, division order, or any other action without verification by a licensed attorney in the state where the land lies."`;
 
 export const PARTIAL_SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney synthesizing one segment of a larger chain of title.
