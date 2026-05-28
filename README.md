@@ -211,6 +211,7 @@ The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs a
 - Server-side final title synthesis and follow-ups with Claude Sonnet 4.6; partial segment passes use Gemini 2.5 Flash.
 - Durable job URLs that survive refreshes and closed tabs.
 - Retry, cancellation, partial failure, and failed-chunk recovery.
+- Monotonic progress reporting across upload, abstraction, synthesis, and job-polling views (no backward jumps from noisy poll snapshots).
 - PDF download of final results.
 
 ## Security
