@@ -1794,6 +1794,7 @@ test('tryRecoverMergePreview reuses a completed, valid preview', async () => {
   assert(recovered, 'Expected recovery from a completed valid preview');
   assert(recovered.text === opinion, 'Expected the preview text returned verbatim');
   assert(recovered.streamed === false && recovered.recovered === true, 'Expected recovered metadata flags');
+  assert(recovered.timeToFirstDeltaMs === null, 'Expected timeToFirstDeltaMs present (null) for contract parity with the merge object');
 });
 
 test('tryRecoverMergePreview returns null when the preview is incomplete', async () => {

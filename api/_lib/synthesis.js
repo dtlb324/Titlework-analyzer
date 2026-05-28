@@ -1324,6 +1324,7 @@ export async function tryRecoverMergePreview(store, jobId, config) {
     model: config.model,
     payloadBytes: Buffer.byteLength(text, 'utf8'),
     streamed: false,
+    timeToFirstDeltaMs: null,
     recovered: true,
   };
 }
