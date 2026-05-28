@@ -52,7 +52,7 @@ async function serveStatic(req, res, url) {
   try {
     fileStat = await stat(filePath);
   } catch {
-    if (!url.pathname.startsWith('/api/')) {
+    if (!url.pathname.startsWith('/api/') && url.pathname !== '/') {
       return serveStatic(req, res, new URL('/', url));
     }
     return sendJson(res, 404, { error: 'Not found.' });

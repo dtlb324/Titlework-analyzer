@@ -1286,8 +1286,9 @@ async function mergeSegmentsIntoOpinion({
       for (const slot of pairSlots) {
         if (!slot.right) next[slot.slot] = slot.left;
       }
-      for (const { slot, node } of mergedNodes) {
-        next[slot] = node;
+      for (const result of mergedNodes) {
+        if (result?.status === 'error') throw result.error;
+        next[result.slot] = result.node;
       }
       working = next;
     }
