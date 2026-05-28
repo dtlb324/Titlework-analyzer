@@ -2097,6 +2097,11 @@ function progressPercentFromJob(job) {
 function renderPolledJobStatus(job) {
   if (!job) return;
   renderJobMeta(job);
+  // When pollServerAbstraction/pollServerSynthesis are driving the bar (activeAnalysisRun is
+  // live), skip updateProgress here. progressPercentFromJob returns 0 while completedDocuments
+  // is 0 (true for the entire chunk-processing phase), which resets lastDisplayedPct and causes
+  // the bar to oscillate against the abstraction poller.
+  if (activeAnalysisRun) return;
   document.getElementById('progressSection').style.display = 'block';
   const pct = progressPercentFromJob(job);
   const label = job.currentPhase || job.status;
