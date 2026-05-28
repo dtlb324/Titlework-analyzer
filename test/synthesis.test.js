@@ -27,6 +27,7 @@ import {
   shouldForceMultiSegmentPlanning,
   shouldCompactBeforeMerge,
   COMPACTION_SYNTHESIS_PROMPT,
+  tryRecoverMergePreview,
 } from '../api/_lib/synthesis.js';
 import {
   processSynthesisBatch,
@@ -1783,6 +1784,30 @@ test('GET /api/jobs/:id/synthesis/preview returns buffered merge text', async ()
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.preview.text === 'Draft opinion preview', 'Expected preview text');
   assert(res.body.preview.bytesReceived === 21, 'Expected preview byte count');
+});
+
+test('tryRecoverMergePreview reuses a completed, valid preview', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  const opinion = goodFinalOpinion('Recovered from preview.');
+  await store.setSynthesisPreview('job_test_1', { text: opinion, complete: true });
+  const recovered = await tryRecoverMergePreview(store, 'job_test_1', getSynthesisConfig());
+  assert(recovered, 'Expected recovery from a completed valid preview');
+  assert(recovered.text === opinion, 'Expected the preview text returned verbatim');
+  assert(recovered.streamed === false && recovered.recovered === true, 'Expected recovered metadata flags');
+});
+
+test('tryRecoverMergePreview returns null when the preview is incomplete', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  await store.setSynthesisPreview('job_test_1', { text: goodFinalOpinion('partial'), complete: false });
+  const recovered = await tryRecoverMergePreview(store, 'job_test_1', getSynthesisConfig());
+  assert(recovered === null, 'Expected null for an incomplete preview');
+});
+
+test('tryRecoverMergePreview returns null when completed preview text is not a valid opinion', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  await store.setSynthesisPreview('job_test_1', { text: 'too short / garbage', complete: true });
+  const recovered = await tryRecoverMergePreview(store, 'job_test_1', getSynthesisConfig());
+  assert(recovered === null, 'Expected null when completed preview fails opinion validation');
 });
 
 test('shouldForceMultiSegmentPlanning is gated by SYNTHESIS_LARGE_JOB_MULTI_SEGMENT', () => {

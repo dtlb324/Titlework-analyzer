@@ -1308,6 +1308,26 @@ export async function planJobSynthesis(jobId, options = {}) {
   return { plan, abstracts: orderedAbstracts, job };
 }
 
+// Recover a completed-but-unsaved merge: if a prior worker streamed the full
+// final opinion into the preview row and died before saveJobResult committed,
+// reuse that text instead of re-running the expensive Sonnet merge. The preview
+// is cleared on every plan change, so a complete preview belongs to the current
+// plan. Returns a merge-shaped object, or null to fall through to a fresh merge.
+export async function tryRecoverMergePreview(store, jobId, config) {
+  if (!store?.getSynthesisPreview || !jobId) return null;
+  const preview = await store.getSynthesisPreview(jobId);
+  if (!preview?.complete) return null;
+  const text = preview.text || '';
+  if (!validateFinalOpinion(text).ok) return null;
+  return {
+    text,
+    model: config.model,
+    payloadBytes: Buffer.byteLength(text, 'utf8'),
+    streamed: false,
+    recovered: true,
+  };
+}
+
 export async function processSynthesisJob(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process synthesis.');
