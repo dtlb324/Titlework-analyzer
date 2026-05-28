@@ -215,7 +215,16 @@ export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
     const docNum = globalStartIdx + index + 1;
     return `Document #${docNum} (${chunkDisplayName(item.chunk)})`;
   });
-  let textPrompt = `Abstract each of the following documents in order: ${labels.join(', ')}. Label each section clearly as DOCUMENT #${globalStartIdx + 1}:, DOCUMENT #${globalStartIdx + 2}:, etc. Extract every relevant fact. Do not guess at anything illegible.`;
+  const firstDoc = globalStartIdx + 1;
+  const lastDoc = globalStartIdx + items.length;
+  let textPrompt = `Abstract each of the following documents in order: ${labels.join(', ')}.
+
+REQUIRED OUTPUT FORMAT:
+- Begin each abstract with the exact heading "DOCUMENT #N:" on its own line, where N is the document number.
+- Emit a heading for every document from #${firstDoc} through #${lastDoc}, in order, with no skips. If a document has no abstractable content, still emit its heading followed by "No abstractable content."
+- Do not merge documents into a single section and do not omit any heading.
+
+Extract every relevant fact. Do not guess at anything illegible.`;
   if (items.some(item => item.chunk.splitFrom || (item.chunk.pageStart && item.chunk.pageEnd))) {
     textPrompt += ' Some files are page ranges from a larger PDF. Abstract each part fully and note the source document/page range.';
   }

@@ -227,29 +227,47 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     const parsed = parseBatchAbstracts(modelResult.text, preparedItems, globalStart);
     const perChunkPayload = Math.floor(payloadBytes / preparedItems.length);
     const batchResults = [];
+    const fallbackChunks = [];
     for (let i = 0; i < preparedItems.length; i++) {
       const item = preparedItems[i];
       const parsedItem = parsed[i];
-      const saved = await persistCompletedAbstract({
-        store,
-        chunk: item.chunk,
-        workerId,
-        sequenceIndex: globalStart + i,
-        abstractText: parsedItem?.abstractText || '',
-        modelUsed: modelResult.model,
-        payloadBytes: perChunkPayload,
-        usage: {
-          inputTokens: modelResult.usage.inputTokens != null
-            ? Math.floor(modelResult.usage.inputTokens / preparedItems.length)
-            : null,
-          outputTokens: modelResult.usage.outputTokens != null
-            ? Math.floor(modelResult.usage.outputTokens / preparedItems.length)
-            : null,
-        },
-        latencyMs: Date.now() - startedAt,
-        attemptCount: Math.max(1, Number(item.chunk.abstractionAttempts) || 1),
-      });
-      batchResults.push(saved);
+      const text = String(parsedItem?.abstractText || '').trim();
+      if (!text) {
+        fallbackChunks.push(item.chunk);
+        continue;
+      }
+      try {
+        const saved = await persistCompletedAbstract({
+          store,
+          chunk: item.chunk,
+          workerId,
+          sequenceIndex: globalStart + i,
+          abstractText: text,
+          modelUsed: modelResult.model,
+          payloadBytes: perChunkPayload,
+          usage: {
+            inputTokens: modelResult.usage.inputTokens != null
+              ? Math.floor(modelResult.usage.inputTokens / preparedItems.length)
+              : null,
+            outputTokens: modelResult.usage.outputTokens != null
+              ? Math.floor(modelResult.usage.outputTokens / preparedItems.length)
+              : null,
+          },
+          latencyMs: Date.now() - startedAt,
+          attemptCount: Math.max(1, Number(item.chunk.abstractionAttempts) || 1),
+        });
+        batchResults.push(saved);
+      } catch (err) {
+        fallbackChunks.push(item.chunk);
+      }
+    }
+    if (fallbackChunks.length) {
+      const partialResults = await fallbackToSingles(
+        fallbackChunks,
+        options,
+        `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
+      );
+      batchResults.push(...partialResults);
     }
     return [...finished, ...batchResults];
   } catch (err) {
