@@ -1364,16 +1364,26 @@ function derivedProgressPercent(job) {
   return Math.round(Math.min(85, (finished / job.totalDocuments) * 85));
 }
 
+let lastJobProgressId = null;
+let lastJobProgressPct = 0;
 function renderJobProgressView(job) {
   const wrap = document.getElementById('jobProgress');
   if (!wrap || !job) return;
   if (TERMINAL_STATUSES.has(job.status)) {
     wrap.style.display = 'none';
+    lastJobProgressId = null;
+    lastJobProgressPct = 0;
     return;
   }
   wrap.style.display = '';
   const info = statusInfo(job.status);
-  const pct = derivedProgressPercent(job);
+  const rawPct = derivedProgressPercent(job);
+  if (job.id !== lastJobProgressId) {
+    lastJobProgressId = job.id;
+    lastJobProgressPct = 0;
+  }
+  const pct = Math.max(rawPct, lastJobProgressPct);
+  lastJobProgressPct = pct;
   const statusEl = document.getElementById('jobProgressStatus');
   const fillEl = document.getElementById('jobProgressFill');
   const metaEl = document.getElementById('jobProgressMeta');
