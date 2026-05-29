@@ -537,6 +537,12 @@ test('import-continuation API route is wired', () => {
   assert(jobsSource.includes('async importContinuationAbstracts(targetJobId, sourceJobId)'), 'Job store should implement continuation import');
 });
 
+test('server synthesis tells the user the tab can be closed', () => {
+  assert(script.includes('SERVER_SYNTHESIS_NOTICE'), 'Expected a server-synthesis notice constant');
+  assert(/close this tab/i.test(script), 'Expected the synthesis notice to say the tab can be closed');
+  assert(script.includes('showServerSynthesisNotice()'), 'Expected runServerSynthesis to show the server-synthesis notice');
+});
+
 let failed = 0;
 let skipped = 0;
 

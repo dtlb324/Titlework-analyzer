@@ -2562,7 +2562,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
 }
 
 async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
-  showKeepOpenNotice();
+  showServerSynthesisNotice();
   if (onProgress) onProgress(88, 'Starting server-side synthesis from saved abstracts...');
   const started = await startServerSynthesis(jobId);
   kickServerWorkflowBatch(() => processServerSynthesisBatch(jobId));
@@ -2815,6 +2815,12 @@ function showKeepOpenNotice() {
 
 function clearKeepOpenNotice() {
   document.getElementById('infoBox').innerHTML = '';
+}
+
+const SERVER_SYNTHESIS_NOTICE = 'Synthesis is running on the server. You can safely close this tab — the result is saved and will be here when you return.';
+
+function showServerSynthesisNotice() {
+  document.getElementById('infoBox').innerHTML = `<div class="info-msg">${esc(SERVER_SYNTHESIS_NOTICE)}</div>`;
 }
 
 let lastDisplayedPct = 0;
