@@ -3,7 +3,7 @@ import { request } from 'http';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createWorkerHealthServer, isWorkerLoopDisabled } from '../worker.js';
-import { runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-run-worker.js';
+import { runWorkerLoop, runWorkerOnce, runWorkerDrain } from '../api/_lib/cloud-run-worker.js';
 import { getWorkflowConfig } from '../api/_lib/queue.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -167,6 +167,43 @@ test('worker loop can be disabled for scale-to-zero browser-driven deployments',
 test('package exposes a Cloud Run worker start script', async () => {
   const pkg = await import('../package.json', { with: { type: 'json' } });
   assert(pkg.default.scripts?.['start:worker'] === 'node worker.js', 'Expected npm run start:worker to launch worker.js');
+});
+
+test('runWorkerDrain processes runnable synthesis once then stops on idle', async () => {
+  let synthCalls = 0;
+  let listCalls = 0;
+  const store = {
+    async listRunnableAbstractionJobIds() { return []; },
+    async listRunnableSynthesisJobIds() { listCalls += 1; return listCalls === 1 ? ['job_syn_1'] : []; },
+  };
+  const controller = new AbortController(); // pass a signal so no internal deadline timer is used
+  const result = await runWorkerDrain({
+    store,
+    signal: controller.signal,
+    idlePollIntervalMs: 1,
+    processSynthesis: async () => { synthCalls += 1; },
+  });
+  assert(synthCalls === 1, `Expected exactly one synthesis pass, got ${synthCalls}`);
+  assert(result.iterations >= 2, `Expected the drain to loop until an idle pass, got ${result.iterations}`);
+});
+
+test('worker /internal/drain endpoint runs a drain and returns its summary', async () => {
+  const server = createWorkerHealthServer({ drain: async () => ({ synthesisJobs: 2, errors: [], hasWork: true }) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const response = await new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path: '/internal/drain', method: 'POST' }, res => {
+      let data = '';
+      res.on('data', c => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, data }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  server.close();
+  assert(response.status === 200, `Expected 200, got ${response.status}`);
+  const parsed = JSON.parse(response.data);
+  assert(parsed.ok === true && parsed.synthesisJobs === 2, `Expected drain summary, got ${response.data}`);
 });
 
 let passed = 0;

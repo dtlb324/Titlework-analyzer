@@ -1,5 +1,5 @@
 import { createServer } from 'http';
-import { runWorkerLoop } from './api/_lib/cloud-run-worker.js';
+import { runWorkerLoop, runWorkerDrain } from './api/_lib/cloud-run-worker.js';
 import { getRuntimeInfo } from './api/_lib/runtime-info.js';
 
 function closeServer(server) {
@@ -24,7 +24,9 @@ export function isWorkerLoopDisabled(env = process.env) {
   return value === 'true' || value === '1' || value === 'yes';
 }
 
-export function createWorkerHealthServer() {
+export function createWorkerHealthServer({ drain } = {}) {
+  const runDrain = drain || (() => runWorkerDrain());
+  let draining = false;
   return createServer((req, res) => {
     if (req.url === '/healthz') {
       const body = JSON.stringify({ ok: true, service: 'title-analyzer-worker', release: getRuntimeInfo() });
@@ -33,6 +35,28 @@ export function createWorkerHealthServer() {
         'content-length': Buffer.byteLength(body),
       });
       res.end(body);
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/internal/drain') {
+      if (draining) {
+        const body = JSON.stringify({ ok: true, busy: true });
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+        res.end(body);
+        return;
+      }
+      draining = true;
+      runDrain()
+        .then(result => {
+          const body = JSON.stringify({ ok: true, ...result });
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+          res.end(body);
+        })
+        .catch(err => {
+          const body = JSON.stringify({ ok: false, error: err?.message || String(err) });
+          res.writeHead(500, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+          res.end(body);
+        })
+        .finally(() => { draining = false; });
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });

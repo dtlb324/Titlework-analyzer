@@ -100,6 +100,23 @@ export async function runWorkerOnce(options = {}) {
   };
 }
 
+export async function runWorkerDrain(options = {}) {
+  // Drain all runnable jobs once (stop on the first idle pass). When no caller
+  // signal is supplied, bound the drain with a time budget under the worker's
+  // request timeout so the HTTP response always returns.
+  if (options.signal) {
+    return runWorkerLoop({ ...options, maxIdleCycles: 1 });
+  }
+  const controller = new AbortController();
+  const budgetMs = clampPollMs(options.drainBudgetMs ?? process.env.WORKER_DRAIN_BUDGET_MS, 1_500_000, 10_000, 3_300_000);
+  const timer = setTimeout(() => controller.abort(), budgetMs);
+  try {
+    return await runWorkerLoop({ ...options, signal: controller.signal, maxIdleCycles: 1 });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function runWorkerLoop(options = {}) {
   const { idleMs, activeMs } = getWorkerPollIntervals(options);
   const maxIdleCycles = Number.isFinite(Number(options.maxIdleCycles)) ? Number(options.maxIdleCycles) : Infinity;
