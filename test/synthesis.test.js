@@ -1806,6 +1806,37 @@ test('merge recovers a completed preview after a lost save without re-running So
   if (prevCompact === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED; else process.env.SYNTHESIS_COMPACTION_ENABLED = prevCompact;
 });
 
+test('final merge uses a higher merge-specific max_tokens than the single-pass cap', async () => {
+  const prevStream = process.env.SYNTHESIS_STREAM_ENABLED;
+  const prevBulk = process.env.BULK_JOB_MIN_ABSTRACTS;
+  const prevCompact = process.env.SYNTHESIS_COMPACTION_ENABLED;
+  const prevMerge = process.env.SYNTHESIS_MERGE_MAX_TOKENS;
+  process.env.SYNTHESIS_STREAM_ENABLED = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'false';
+  delete process.env.SYNTHESIS_MERGE_MAX_TOKENS;
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(250) });
+  let finalMergeMaxTokens = null;
+  const partialMaxTokensSeen = [];
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+      partialMaxTokensSeen.push(request.maxTokens);
+      return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+    }
+    finalMergeMaxTokens = request.maxTokens; // final consolidation (SYNTHESIS_PROMPT)
+    if (request.onDelta) await request.onDelta(goodFinalOpinion(), goodFinalOpinion());
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
+  };
+  await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
+  assert(finalMergeMaxTokens === 16000, `Expected final merge max_tokens to default to 16000, got ${finalMergeMaxTokens}`);
+  assert(partialMaxTokensSeen.length > 0 && partialMaxTokensSeen.every(m => m < 16000), `Expected partial/segment calls to keep the lower cap, saw ${JSON.stringify(partialMaxTokensSeen)}`);
+
+  if (prevStream === undefined) delete process.env.SYNTHESIS_STREAM_ENABLED; else process.env.SYNTHESIS_STREAM_ENABLED = prevStream;
+  if (prevBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS; else process.env.BULK_JOB_MIN_ABSTRACTS = prevBulk;
+  if (prevCompact === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED; else process.env.SYNTHESIS_COMPACTION_ENABLED = prevCompact;
+  if (prevMerge === undefined) delete process.env.SYNTHESIS_MERGE_MAX_TOKENS; else process.env.SYNTHESIS_MERGE_MAX_TOKENS = prevMerge;
+});
+
 test('GET /api/jobs/:id/synthesis/preview returns buffered merge text', async () => {
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
   await store.setSynthesisPreview('job_test_1', {

@@ -1068,7 +1068,14 @@ async function mergeSegmentsIntoOpinion({
   tokensAccum,
 }) {
   const partial = partialConfig || getPartialSynthesisConfig(config || {});
-  const finalConfig = config || getSynthesisConfig();
+  // The merged opinion is the full document, so the final consolidation gets a
+  // higher output cap than the single-pass/segment limit; otherwise large
+  // multi-segment opinions truncate before their closing sections and fail
+  // validation. Single-pass synthesis and chunk sizing keep config.maxTokens.
+  const finalConfig = {
+    ...(config || getSynthesisConfig()),
+    maxTokens: clampInt(process.env.SYNTHESIS_MERGE_MAX_TOKENS, 16000, 1024, 32000),
+  };
   let workingSummaries = segmentSummaries;
   const mergeAbstractsPreview = workingSummaries.map(summary => ({
     filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
