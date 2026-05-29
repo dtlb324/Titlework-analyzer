@@ -13,7 +13,7 @@ The worker service already exists (`titlework-analyzer-worker`, `min-instances 0
 
 ## Goal
 
-Run all synthesis (segments + final merge) on the scale-to-zero worker, triggered by Cloud Scheduler, so long merges complete in a process with a long timeout and no browser/tab dependency — at near-zero idle cost.
+Add a scale-to-zero worker, triggered by Cloud Scheduler, that finishes synthesis (segments + final merge) for any job whose browser tab has closed — so long merges complete server-side without requiring the tab to stay open, at near-zero idle cost. The browser keeps driving while open; the worker is a **backup** driver. (Churn was already fixed by raising the API request timeout to 1800s; this work adds tab-independence.)
 
 ## Non-Goals
 
@@ -28,7 +28,7 @@ The worker becomes an **HTTP service** at `min-instances 0` with a long `--timeo
 
 - `POST /internal/drain` → runs `runWorkerLoop({ maxIdleCycles: 1, signal: <deadline> })` (drain until no runnable work or a time budget under the request timeout), returns `{ synthesisJobs, errors, hasMoreWork }`.
 
-Cloud Scheduler pings `/internal/drain` ~every minute (OIDC auth). The browser starts the job and polls `/synthesis/status`; the worker is the **sole** synthesis driver, so there is no browser-vs-worker merge race.
+Cloud Scheduler pings `/internal/drain` ~every minute (OIDC auth). The worker is a **backup** synthesis driver: the browser keeps driving while its tab is open, and the worker finishes any job whose tab has closed. The merge lease (`claimSynthesisMerge`) serializes the two — only one runs the merge at a time — so both-drivers is conflict-free, and no browser code needs to be removed.
 
 ## Components
 
@@ -41,8 +41,8 @@ Cloud Scheduler pings `/internal/drain` ~every minute (OIDC auth). The browser s
    - `runWorkerLoop` (continuous) is retained for local development behind a flag/separate command.
 
 2. **Browser flow** ([public/index.html](../../../public/index.html), `runServerSynthesis`)
-   - Remove the `kickServerWorkflowBatch(() => processServerSynthesisBatch(jobId))` call for synthesis. After `/synthesis/start`, the browser only polls `/synthesis/status`.
-   - Relax the keep-tab-open notice for the synthesis phase (synthesis now completes server-side regardless of the tab). The notice still applies to the browser-driven abstraction phase.
+   - **Driving unchanged:** the browser keeps its existing synthesis kicks. The merge lease prevents conflicts with the worker, so no browser driving code is removed.
+   - **Notice only:** relax the keep-tab notice during synthesis to tell users the result is saved server-side and the tab can be closed. The notice still applies to the browser-driven abstraction phase.
 
 ### Infrastructure (documented; not app code)
 
@@ -70,12 +70,12 @@ Cloud Scheduler pings `/internal/drain` ~every minute (OIDC auth). The browser s
 
 ## Rollout / Sequencing
 
-To avoid a window where synthesis is undriven, the Cloud Scheduler job (and worker IAM) must exist **before or together with** the deploy that removes the browser's synthesis kick. Order: provision scheduler + IAM → deploy worker HTTP server → deploy browser change.
+Because the browser keeps driving synthesis, there is no undriven window to worry about. Order: deploy the worker `/internal/drain` endpoint → provision the Cloud Scheduler job + worker IAM. The notice tweak can ship anytime. If the scheduler is ever absent or paused, behavior simply reverts to today's browser-only driving (tab must stay open) — no breakage.
 
 ## Testing
 
 - **Drain endpoint (unit):** with the in-memory store + mock model client, seed a multi-segment job at `synthesizing`, invoke the drain handler directly (no browser kick), and assert the job reaches a saved result. Extend [test/worker.test.js](../../../test/worker.test.js) / [test/cloud-run.test.js](../../../test/cloud-run.test.js).
-- **Browser change:** verify (via the existing index.html script tests, if feasible) that `runServerSynthesis` no longer kicks `/synthesis/process` and relies on polling.
+- **Browser notice:** assert (via the index.html script tests) that `runServerSynthesis` shows the relaxed server-synthesis notice (result saved server-side, tab can be closed).
 - **OIDC/IAM and the scheduler job:** verified via the deploy runbook, not unit tests.
 
 ## Risks / Open Considerations
