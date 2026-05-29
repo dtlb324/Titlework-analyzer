@@ -1987,6 +1987,11 @@ function createPostgresJobStore() {
           ON r.job_id = j.id
         WHERE j.status = 'synthesizing'
           AND r.job_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM document_chunks c
+            WHERE c.job_id = j.id
+              AND c.abstraction_status IN ('pending', 'processing', 'retry_wait')
+          )
           AND (
             s.id IS NULL
             OR s.status = 'pending'
