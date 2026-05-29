@@ -53,7 +53,10 @@ browser-driven behavior (the tab must stay open) — no breakage.
 
 - Cloud Scheduler `POST`s `/internal/drain` every minute. The worker runs one
   bounded drain (`runWorkerDrain` → `runWorkerLoop` with `maxIdleCycles: 1`),
-  processing all runnable synthesis jobs, then the instance scales back to zero.
+  processing all runnable work — synthesis plus any runnable abstraction — then
+  the instance scales back to zero. The drain is time-bounded (default 25 min,
+  under the 3600s timeout); a job that needs longer simply resumes on the next
+  tick, which the lease makes safe.
 - The browser still drives synthesis while its tab is open. The merge lease
   (`claimSynthesisMerge`) serializes the two, so only one runs the merge at a
   time — both-drivers is conflict-free.
