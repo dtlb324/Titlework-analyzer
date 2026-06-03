@@ -199,8 +199,11 @@ async function invokeOpenRouterModelStream(request, options = {}) {
       body,
       signal: timeout.signal,
     });
-    const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+      // Only drain the body as JSON on the error path. On success the body is an
+      // SSE stream that must be handed to consumeOpenRouterMessageStream untouched —
+      // calling response.json() here would consume the stream and yield empty text.
+      const data = await response.json().catch(() => ({}));
       const error = new Error(data?.error?.message || data?.error || `OpenRouter request failed (HTTP ${response.status}).`);
       error.status = response.status;
       throw error;
