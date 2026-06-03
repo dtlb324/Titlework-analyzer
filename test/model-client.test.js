@@ -134,6 +134,62 @@ test('isGeminiModel is exported for analyze validation', () => {
   assert(isGeminiModel('gemini-2.5-flash'), 'Expected gemini matcher');
 });
 
+// Regression: the OpenRouter streaming path must NOT call response.json() on a
+// successful response. A fetch body is single-consumption — draining it as JSON
+// leaves consumeOpenRouterMessageStream with an empty stream and an empty opinion.
+test('invokeModel streaming path does not consume the SSE body via json()', async () => {
+  const prevKey = process.env.OPENROUTER_API_KEY;
+  const prevProvider = process.env.MODEL_PROVIDER;
+  const prevFetch = global.fetch;
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+  delete process.env.MODEL_PROVIDER;
+
+  const sseLines = [
+    'data: {"choices":[{"delta":{"content":"Final"},"index":0}]}',
+    'data: {"choices":[{"delta":{"content":" opinion"},"index":0}]}',
+    'data: [DONE]',
+  ];
+
+  global.fetch = async () => {
+    // Model real fetch single-consumption: reading the body as JSON drains it,
+    // after which the stream reader yields nothing.
+    let bodyConsumed = false;
+    const encoder = new TextEncoder();
+    return {
+      ok: true,
+      status: 200,
+      json: async () => { bodyConsumed = true; return {}; },
+      body: {
+        getReader() {
+          let idx = 0;
+          const chunks = bodyConsumed ? [] : [sseLines.join('\n')];
+          return {
+            async read() {
+              if (idx >= chunks.length) return { done: true, value: undefined };
+              return { done: false, value: encoder.encode(chunks[idx++]) };
+            },
+            releaseLock() {},
+          };
+        },
+      },
+    };
+  };
+
+  try {
+    const result = await invokeModel({
+      model: 'anthropic/claude-sonnet-4-6', // slash-name → OpenRouter
+      maxTokens: 16000, // > NON_STREAMING_MAX_TOKENS → streaming path
+      system: 'system',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'merge' }] }],
+    });
+    assert(result.text === 'Final opinion', `Expected streamed text, got "${result.text}"`);
+  } finally {
+    global.fetch = prevFetch;
+    if (prevKey) process.env.OPENROUTER_API_KEY = prevKey; else delete process.env.OPENROUTER_API_KEY;
+    if (prevProvider) process.env.MODEL_PROVIDER = prevProvider; else delete process.env.MODEL_PROVIDER;
+  }
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {
