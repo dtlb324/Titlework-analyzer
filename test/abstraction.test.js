@@ -547,9 +547,9 @@ test('POST /api/jobs/:id/abstraction/start rejects jobs before uploads are ready
 test('resolveAbstractModel ignores removed Claude Haiku model ids', () => {
   const previous = process.env.ABSTRACT_MODEL;
   process.env.ABSTRACT_MODEL = 'claude-haiku-4-5';
-  assert(resolveAbstractModel() === 'gemini-2.5-flash', 'Expected Haiku override to fall back to Gemini Flash');
+  assert(resolveAbstractModel() === 'gemini-3.1-flash-lite', 'Expected Haiku override to fall back to Gemini Flash Lite');
   process.env.ABSTRACT_MODEL = 'claude-haiku-4-5-20251001';
-  assert(resolveAbstractModel() === 'gemini-2.5-flash', 'Expected Haiku version suffix to fall back to Gemini Flash');
+  assert(resolveAbstractModel() === 'gemini-3.1-flash-lite', 'Expected Haiku version suffix to fall back to Gemini Flash Lite');
   if (previous) process.env.ABSTRACT_MODEL = previous;
   else delete process.env.ABSTRACT_MODEL;
 });
@@ -577,8 +577,8 @@ test('browser abstraction fallback mirrors single-instrument prompt and token bu
   assert(!indexHtml.includes('INSTRUMENT 1 OF M'), 'Browser prompt should not ask for multi-instrument sub-sections');
   assert(!indexHtml.includes('multiple clearly identifiable recorded instruments'), 'Browser prompt should not ask for multi-instrument detection');
   assert(indexHtml.includes('const ABSTRACT_MAX_TOKENS = 2000'), 'Expected browser abstraction token default to match server default');
-  assert(indexHtml.includes("const ABSTRACT_MODEL = 'gemini-2.5-flash'"), 'Expected browser fallback to use Gemini Flash for abstraction');
-  assert(indexHtml.includes("const SYNTHESIS_PARTIAL_MODEL = 'gemini-2.5-flash'"), 'Expected browser partial synthesis to use Gemini Flash');
+  assert(indexHtml.includes("const ABSTRACT_MODEL = 'gemini-3.1-flash-lite'"), 'Expected browser fallback to use Gemini Flash Lite for abstraction');
+  assert(indexHtml.includes("const SYNTHESIS_PARTIAL_MODEL = 'gemini-3.1-flash-lite'"), 'Expected browser partial synthesis to use Gemini Flash Lite');
   assert(!indexHtml.includes('claude-haiku-4-5'), 'Browser abstraction must not reference Claude Haiku');
   assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6'"), 'Expected browser fallback to define Sonnet escalation model');
   assert(indexHtml.includes('callAbstractionWithEscalation'), 'Expected browser fallback to use abstraction escalation helper');
@@ -1395,10 +1395,10 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
 
   const saved = store.abstracts.get('chk_flagged');
   assert(result.status === 'completed', `Expected completed escalation, got ${result.status}`);
-  assert(models.join(',') === 'gemini-2.5-flash,claude-sonnet-4-6', `Expected Gemini Flash then Sonnet, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-3.1-flash-lite,claude-sonnet-4-6', `Expected Gemini Flash Lite then Sonnet, got ${models.join(',')}`);
   assert(saved.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet saved, got ${saved.modelUsed}`);
   assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
-  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash and Sonnet calls');
+  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash Lite and Sonnet calls');
 });
 
 test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {
@@ -1419,7 +1419,7 @@ test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', a
   });
 
   const saved = store.abstracts.get('chk_clean');
-  assert(models.join(',') === 'gemini-2.5-flash', `Expected only Gemini Flash, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-3.1-flash-lite', `Expected only Gemini Flash Lite, got ${models.join(',')}`);
   assert(saved.modelUsed === 'gemini-2.5-flash', `Expected Gemini Flash saved, got ${saved.modelUsed}`);
 });
 
