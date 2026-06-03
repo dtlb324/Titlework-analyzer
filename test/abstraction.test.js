@@ -10,6 +10,7 @@ import {
   processJobAbstraction,
   tryReuseExistingAbstract,
   validateAbstractPersistenceInput,
+  enrichVisualDeliveryForModel,
 } from '../api/_lib/abstraction.js';
 import {
   getBackgroundPromise,
@@ -445,6 +446,37 @@ const tests = [];
 function test(name, fn) {
   tests.push({ name, fn });
 }
+
+// Regression: when the request will route through OpenRouter, large visual PDFs
+// must NOT be uploaded to the Gemini Files API — that produces a file_uri source
+// openrouter-request.js rejects, hard-failing the chunk. Enrichment must leave the
+// inline 'visual' delivery untouched and make no upload call.
+test('enrichVisualDeliveryForModel skips Gemini Files upload when routing to OpenRouter', async () => {
+  const prevProvider = process.env.MODEL_PROVIDER;
+  const prevGeminiKey = process.env.GEMINI_API_KEY;
+  const prevFetch = global.fetch;
+  process.env.MODEL_PROVIDER = 'openrouter';
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  let fetchCalled = false;
+  global.fetch = async (...args) => {
+    fetchCalled = true; // any call here means an upload was attempted
+    throw new Error(`unexpected upload fetch: ${String(args[0])}`);
+  };
+
+  try {
+    const delivery = { mode: 'visual', extractedText: '' };
+    const chunk = { id: 'c1', mediaType: 'application/pdf', originalFilename: 'big.pdf' };
+    const payload = new Uint8Array(2_000_000); // ≥ 1.5 MB → would trigger upload
+    const result = await enrichVisualDeliveryForModel(delivery, chunk, payload, 'gemini-2.5-flash');
+    assert(result.mode === 'visual', `Expected delivery to stay 'visual', got '${result.mode}'`);
+    assert(result.fileUri === undefined, 'Expected no file_uri to be set');
+    assert(fetchCalled === false, 'Expected no Gemini Files upload when routing to OpenRouter');
+  } finally {
+    global.fetch = prevFetch;
+    if (prevProvider) process.env.MODEL_PROVIDER = prevProvider; else delete process.env.MODEL_PROVIDER;
+    if (prevGeminiKey) process.env.GEMINI_API_KEY = prevGeminiKey; else delete process.env.GEMINI_API_KEY;
+  }
+});
 
 test('POST /api/jobs/:id/abstraction/start enqueues quickly for the Cloud Run worker', async () => {
   const store = createMemoryPhase3Store([makeChunk()]);

@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError } from './model-client.js';
+import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
 import { shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
@@ -431,6 +431,13 @@ export async function resolveChunkDelivery(chunk, payloadBytes) {
  */
 export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model) {
   if (!delivery || delivery.mode !== 'visual' || !isGeminiModel(model)) {
+    return delivery;
+  }
+  // A Gemini file_uri is only usable by Gemini's own API. When the request will be
+  // routed through OpenRouter (slash-name or MODEL_PROVIDER=openrouter), uploading to
+  // the Gemini Files API produces a file_uri that openrouter-request.js rejects. Keep
+  // the inline base64 'visual' delivery so OpenRouter receives a source it can use.
+  if (shouldUseOpenRouter(model)) {
     return delivery;
   }
   const bytes = normalizeBytes(payloadBytes);
