@@ -216,6 +216,7 @@ The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs a
 - Retry, cancellation, partial failure, and failed-chunk recovery.
 - Monotonic progress reporting across upload, abstraction, synthesis, and job-polling views (no backward jumps from noisy poll snapshots).
 - PDF download of final results.
+- OpenRouter provider support to route model calls through the OpenRouter gateway (via `OPENROUTER_API_KEY` or `MODEL_PROVIDER=openrouter`).
 
 ## Security
 
