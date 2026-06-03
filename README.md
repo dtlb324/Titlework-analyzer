@@ -1,6 +1,6 @@
 # Mineral Ownership Builder — Title Research Tool
 
-An AI-powered web application for oil and gas landmen to analyze courthouse documents, build chain of title, and determine mineral ownership. Document abstraction uses Google Gemini 2.5 Flash; title synthesis and follow-ups use Anthropic Claude. Deployed on Google Cloud Run.
+An AI-powered web application for oil and gas landmen to analyze courthouse documents, build chain of title, and determine mineral ownership. Document abstraction uses Google Gemini 3.1 Flash Lite; title synthesis and follow-ups use Anthropic Claude. Deployed on Google Cloud Run.
 
 > **Important:** This tool is an AI-assisted research aid, not a legal opinion. Always verify output against source documents and consult a licensed attorney before any drilling, leasing, or division order action.
 
@@ -31,20 +31,20 @@ Set these on both Cloud Run services unless noted otherwise:
 
 | Name | Required | Notes |
 |------|----------|-------|
-| `GEMINI_API_KEY` | Yes | Google AI Studio API key for abstraction and partial synthesis segments (`gemini-2.5-flash`). Also accepts `GOOGLE_API_KEY`. |
+| `GEMINI_API_KEY` | Yes | Google AI Studio API key for abstraction and partial synthesis segments (`gemini-3.1-flash-lite`). Also accepts `GOOGLE_API_KEY`. |
 | `ANTHROPIC_API_KEY` | Yes (when OpenRouter is not used) | Anthropic API key for the final title opinion (Sonnet), follow-ups, and optional abstraction escalation. |
 | `OPENROUTER_API_KEY` | When OpenRouter is used | OpenRouter API key (`sk-or-...`). |
 | `MODEL_PROVIDER` | Optional | `openrouter` flips the global toggle. Unset / any other value = direct Anthropic/Gemini routing. |
 | `OPENROUTER_REFERER` | Optional | Overrides the `HTTP-Referer` OpenRouter attribution header. |
 | `OPENROUTER_TITLE` | Optional | Overrides the `X-Title` OpenRouter attribution header. |
 | `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion and merge step. Gemini/Haiku values are ignored. |
-| `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `gemini-2.5-flash` for large-job segment synthesis only (not the final opinion). Haiku/Claude values are ignored. |
+| `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `gemini-3.1-flash-lite` for large-job segment synthesis only (not the final opinion). Haiku/Claude values are ignored. |
 | `SYNTHESIS_CHUNK_SIZE` | Optional | Default `120` (max `250`). Max grouped documents per partial synthesis segment before byte envelope split. |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | Optional | Default `200` for jobs with ≥100 abstracts. |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | Optional | Default `5000` for Gemini partial segment output. |
-| `ABSTRACT_MODEL` | Optional | Default `gemini-2.5-flash`. Claude Haiku is not supported for abstraction. |
+| `ABSTRACT_MODEL` | Optional | Default `gemini-3.1-flash-lite`. Claude Haiku is not supported for abstraction. |
 | `GEMINI_THINKING_BUDGET` | Optional | **Gemini 2.5 only.** Default `0` (thinking off). Set to `-1` for dynamic thinking, or a token count (e.g. `1024`). Ignored for Gemini 3.x models. |
-| `GEMINI_THINKING_LEVEL` | Optional | **Gemini 3.x only** (e.g. `gemini-3.5-flash`). One of `minimal`, `low`, `medium`, `high`. Use `high` for hardest title/fraction work. If unset, the API default applies (`medium` on 3.5 Flash). |
+| `GEMINI_THINKING_LEVEL` | Optional | **Gemini 3.x only** (includes `gemini-3.1-flash-lite`). One of `minimal`, `low`, `medium`, `high`. Production default: `minimal` — benchmark testing showed `minimal` achieves the best OCR accuracy on scanned title instruments. |
 | `GEMINI_INCLUDE_THOUGHTS` | Optional | When `true`, Gemini may return thought summaries; they are exposed on the model response as `thoughtSummaries` and are **not** mixed into abstracts/opinions. For debugging/eval. |
 | `APP_PASSWORD` | Yes for production | Password gate for users; release verification expects it on both services. |
 | `DATABASE_URL` | Yes | Neon pooled Postgres URL, usually ending in `?sslmode=require`. |
@@ -148,7 +148,7 @@ Secrets such as `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `APP_PASSWORD`, and `DATA
 
 1. Open [Google AI Studio](https://aistudio.google.com/apikey) and create an API key for your Google account or Cloud project.
 2. In Cloud Run (both API and worker services), add `GEMINI_API_KEY` with that value.
-3. Keep `ANTHROPIC_API_KEY` configured — the **final title opinion** and follow-ups use Claude Sonnet (`claude-sonnet-4-6` by default). Abstraction and partial synthesis segments use Gemini Flash.
+3. Keep `ANTHROPIC_API_KEY` configured — the **final title opinion** and follow-ups use Claude Sonnet (`claude-sonnet-4-6` by default). Abstraction and partial synthesis segments use Gemini 3.1 Flash Lite.
 4. Optional: set `ABSTRACT_ESCALATION_MODEL=claude-sonnet-4-6` (default) for harder documents; escalation requires Anthropic even when abstraction uses Gemini.
 
 ### Release Verification
@@ -193,8 +193,8 @@ Browser
 Cloud Run worker
   -> claims ready chunk/segment rows from Neon Postgres
   -> reads source bytes from GCS
-  -> calls Gemini 2.5 Flash (abstraction + partial synthesis segments)
-  -> calls Claude Sonnet (final title opinion, follow-ups, optional escalation/audit)
+  -> calls Gemini 3.1 Flash Lite (abstraction + partial synthesis segments)
+  -> calls Claude Sonnet (final title opinion, follow-ups, optional escalation)
   -> stores abstracts, synthesis segments, and final result in Postgres
 ```
 
@@ -210,8 +210,8 @@ The durable Cloud Run worker processes uploaded chunks directly from GCS. PDFs a
 
 - Bulk upload up to 400 documents per job.
 - Direct browser-to-GCS durable uploads.
-- Server-side abstraction with Gemini 2.5 Flash.
-- Server-side final title synthesis and follow-ups with Claude Sonnet 4.6; partial segment passes use Gemini 2.5 Flash.
+- Server-side abstraction with Gemini 3.1 Flash Lite.
+- Server-side final title synthesis and follow-ups with Claude Sonnet 4.6; partial segment passes use Gemini 3.1 Flash Lite.
 - Durable job URLs that survive refreshes and closed tabs.
 - Retry, cancellation, partial failure, and failed-chunk recovery.
 - Monotonic progress reporting across upload, abstraction, synthesis, and job-polling views (no backward jumps from noisy poll snapshots).
@@ -279,11 +279,11 @@ Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthe
 
 | Stage | Model | Role |
 |-------|--------|------|
-| Abstraction | `gemini-2.5-flash` | One call per chunk (or fewer with worker batching) |
-| Partial synthesis | `gemini-2.5-flash` | Segment summaries before merge |
+| Abstraction | `gemini-3.1-flash-lite` | One call per chunk (or fewer with worker batching) |
+| Partial synthesis | `gemini-3.1-flash-lite` | Segment summaries before merge |
 | Final opinion | `claude-sonnet-4-6` | Single merge (and follow-ups) |
 
-**Paid Gemini 2.5 Flash** (indicative): ~$0.30/MTok input, ~$2.50/MTok output. **Sonnet 4.6** remains the dominant cost for the final merge on large runs. A full 300-doc run is typically on the order of **~$2–4** in model tokens on the Gemini + Sonnet stack (varies with page count, scans vs text PDFs, and output length)—well below the old Haiku-heavy estimate (~$6–7) before the Gemini migration.
+**Paid Gemini 3.1 Flash Lite** (indicative): ~$0.25/MTok input, ~$1.50/MTok output. **Sonnet 4.6** remains the dominant cost for the final merge on large runs. A full 300-doc run is typically on the order of **~$1.50–3** in model tokens on the Gemini + Sonnet stack (varies with page count, scans vs text PDFs, and output length)—cheaper and more accurate than the previous Gemini 2.5 Flash stack.
 
 ### Optimizations in this branch
 
@@ -293,6 +293,7 @@ Rough model-inference count: **~305 calls** (300 abstraction + ~4 partial synthe
 | `ABSTRACTION_BATCH_ENABLED=true` | Fewer abstraction **calls** (up to 24 small chunks per request); modest token savings |
 | `GEMINI_FILE_API_ENABLED=true` | Keeps large scanned PDFs whole via Files API instead of page-splitting for envelope limits |
 | `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts |
-| `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash) |
+| `GEMINI_THINKING_LEVEL=minimal` (production default) | Best OCR accuracy on scanned instruments; higher levels do not improve transcription and cost more |
+| `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids Sonnet re-runs on low-confidence abstracts (escalation is relatively expensive vs Gemini Flash Lite) |
 
 We do **not** use Anthropic or Gemini Batch API (24h window, no completion notification). Reliability and progress polling stay on the durable worker + Neon job model.
