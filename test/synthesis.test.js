@@ -1514,16 +1514,16 @@ test('getSynthesisConfig uses Sonnet for final merge model', () => {
 test('resolvePartialSynthesisModel uses Gemini Flash for segment work', () => {
   const previous = process.env.SYNTHESIS_PARTIAL_MODEL;
   process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-haiku-4-5';
-  assert(resolvePartialSynthesisModel() === 'gemini-2.5-flash', 'Haiku partial override must fall back to Gemini Flash');
+  assert(resolvePartialSynthesisModel() === 'gemini-3.1-flash-lite', 'Haiku partial override must fall back to Gemini Flash Lite');
   process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-sonnet-4-6';
-  assert(resolvePartialSynthesisModel() === 'gemini-2.5-flash', 'Sonnet partial override must fall back to Gemini Flash');
+  assert(resolvePartialSynthesisModel() === 'gemini-3.1-flash-lite', 'Sonnet partial override must fall back to Gemini Flash Lite');
   if (previous) process.env.SYNTHESIS_PARTIAL_MODEL = previous;
   else delete process.env.SYNTHESIS_PARTIAL_MODEL;
 });
 
 test('getPartialSynthesisConfig defaults to Gemini Flash for segment work', () => {
   const partial = getPartialSynthesisConfig();
-  assert(partial.model === 'gemini-2.5-flash', `Expected Gemini Flash partial model, got ${partial.model}`);
+  assert(partial.model === 'gemini-3.1-flash-lite', `Expected Gemini Flash Lite partial model, got ${partial.model}`);
   assert(partial.maxTokens === 5000, 'Partial synthesis should use the configured partial output cap');
 });
 
