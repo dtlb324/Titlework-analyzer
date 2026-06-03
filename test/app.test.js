@@ -57,8 +57,8 @@ test('index.html shows deployed release version under the tagline', () => {
 });
 
 test('uses Gemini Flash for abstraction and Sonnet for synthesis', () => {
-  assert(script.includes("ABSTRACT_MODEL = 'gemini-2.5-flash'"), 'Expected Gemini Flash for abstraction');
-  assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-2.5-flash'"), 'Expected Gemini Flash for partial synthesis segments');
+  assert(script.includes("ABSTRACT_MODEL = 'gemini-3.1-flash-lite'"), 'Expected Gemini Flash Lite for abstraction');
+  assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-3.1-flash-lite'"), 'Expected Gemini Flash Lite for partial synthesis segments');
   assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-4-6'"), 'Expected Sonnet for final synthesis');
   assert(!script.includes("'claude-opus-4-7'"), 'Opus 4.7 should not be hardcoded');
   assert(!script.includes('claude-haiku-4-5'), 'Haiku should not be used for abstraction or partial synthesis');
