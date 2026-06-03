@@ -32,7 +32,11 @@ Set these on both Cloud Run services unless noted otherwise:
 | Name | Required | Notes |
 |------|----------|-------|
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key for abstraction and partial synthesis segments (`gemini-2.5-flash`). Also accepts `GOOGLE_API_KEY`. |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for the final title opinion (Sonnet), follow-ups, and optional abstraction escalation. |
+| `ANTHROPIC_API_KEY` | Yes (when OpenRouter is not used) | Anthropic API key for the final title opinion (Sonnet), follow-ups, and optional abstraction escalation. |
+| `OPENROUTER_API_KEY` | When OpenRouter is used | OpenRouter API key (`sk-or-...`). |
+| `MODEL_PROVIDER` | Optional | `openrouter` flips the global toggle. Unset / any other value = direct Anthropic/Gemini routing. |
+| `OPENROUTER_REFERER` | Optional | Overrides the `HTTP-Referer` OpenRouter attribution header. |
+| `OPENROUTER_TITLE` | Optional | Overrides the `X-Title` OpenRouter attribution header. |
 | `SYNTHESIS_MODEL` | Optional | Default `claude-sonnet-4-6` for the final title opinion and merge step. Gemini/Haiku values are ignored. |
 | `SYNTHESIS_PARTIAL_MODEL` | Optional | Default `gemini-2.5-flash` for large-job segment synthesis only (not the final opinion). Haiku/Claude values are ignored. |
 | `SYNTHESIS_CHUNK_SIZE` | Optional | Default `120` (max `250`). Max grouped documents per partial synthesis segment before byte envelope split. |
