@@ -37,7 +37,7 @@ export function resolveFinalSynthesisModel() {
 }
 
 const DEFAULT_SYNTHESIS_MODEL = resolveFinalSynthesisModel();
-const DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID = 'gemini-2.5-flash';
+const DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID = 'gemini-3.1-flash-lite';
 const REMOVED_PARTIAL_SYNTHESIS_MODELS = new Set([
   'claude-haiku-4-5',
   'claude-3-5-haiku-20241022',

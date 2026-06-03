@@ -6,7 +6,7 @@ import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } fro
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
-const DEFAULT_ABSTRACT_MODEL = 'gemini-2.5-flash';
+const DEFAULT_ABSTRACT_MODEL = 'gemini-3.1-flash-lite';
 const REMOVED_ABSTRACT_MODELS = new Set(['claude-haiku-4-5', 'claude-3-5-haiku-20241022', 'claude-3-5-haiku-latest']);
 
 export function resolveAbstractModel() {
@@ -54,11 +54,11 @@ export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney 
 Respond in this exact format - no extra commentary:
 
 DOC TYPE: [type]
-DATE EXECUTED: [date or "not visible"]
-DATE RECORDED: [date or "not visible"]
-RECORDING REF: [Vol/Page or instrument number, or "not visible"]
-GRANTOR: [exact name(s) as written]
-GRANTEE: [exact name(s) as written]
+DATE EXECUTED: [date or ILLEGIBLE - VERIFY MANUALLY]
+DATE RECORDED: [date or ILLEGIBLE - VERIFY MANUALLY]
+RECORDING REF: [Vol/Page or instrument number, or ILLEGIBLE - VERIFY MANUALLY]
+GRANTOR: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY]
+GRANTEE: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY, or "not applicable" only if this instrument type has no grantee]
 LEGAL DESC: [quoted description, abbreviated if long - note survey type]
 SURFACE: [yes/no/unclear]
 MINERALS: [yes/no/unclear - fraction if stated]
@@ -72,7 +72,7 @@ ACKNOWLEDGMENT: [yes/no/unclear]
 ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities - or "none noted"]
 CONFIDENCE: [one sentence]
 
-Write ILLEGIBLE - VERIFY MANUALLY for anything you cannot read. DO NOT GUESS or fill in missing information.`;
+Write ILLEGIBLE - VERIFY MANUALLY for any text you cannot read or any field whose value is not visible on the document. Never write "not visible", "N/A", or leave a field blank as a substitute — use ILLEGIBLE - VERIFY MANUALLY. Only use "not applicable" when a field genuinely does not exist for this instrument type. DO NOT GUESS or fill in missing information.`;
 
 export function getAbstractionConfig() {
   return {
