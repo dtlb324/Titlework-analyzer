@@ -28,6 +28,7 @@ import {
   shouldCompactBeforeMerge,
   COMPACTION_SYNTHESIS_PROMPT,
   tryRecoverMergePreview,
+  totalAbstractsFromSegments,
 } from '../api/_lib/synthesis.js';
 import {
   processSynthesisBatch,
@@ -1917,6 +1918,29 @@ test('shouldCompactBeforeMerge triggers at segment threshold', () => {
   assert(shouldCompactBeforeMerge({ segmentCount: 2, mergeInputBytes: 1000 }) === false, 'Expected no compaction for small jobs');
   if (previous === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED;
   else process.env.SYNTHESIS_COMPACTION_ENABLED = previous;
+});
+
+test('totalAbstractsFromSegments counts the document span of each segment', () => {
+  // Single segment covering sequence indices 0..4 -> 5 documents.
+  assert(
+    totalAbstractsFromSegments([{ startSequenceIndex: 0, endSequenceIndex: 4 }]) === 5,
+    'Expected an inclusive span of 0..4 to count 5 documents',
+  );
+  // Two segments -> sum of their spans (5 + 3 = 8).
+  assert(
+    totalAbstractsFromSegments([
+      { startSequenceIndex: 0, endSequenceIndex: 4 },
+      { startSequenceIndex: 5, endSequenceIndex: 7 },
+    ]) === 8,
+    'Expected the count to be the sum of segment spans',
+  );
+  // No segments -> 0 (guards the partial-failure preamble against NaN/undefined).
+  assert(totalAbstractsFromSegments([]) === 0, 'Expected an empty segment list to count 0 documents');
+  // Malformed segment where end < start -> clamped to 0, not negative.
+  assert(
+    totalAbstractsFromSegments([{ startSequenceIndex: 5, endSequenceIndex: 2 }]) === 0,
+    'Expected an inverted span to clamp to 0',
+  );
 });
 
 test('merge compaction applies Gemini scaffold before final Sonnet merge', async () => {

@@ -4,6 +4,8 @@ import {
   invokeAnthropicModelStream,
   isGeminiModel,
   mapModelResponseToAnalyzeProxy,
+  shouldUseOpenRouter,
+  openRouterApiKeyError,
 } from '../api/_lib/model-client.js';
 
 function assert(condition, message) {

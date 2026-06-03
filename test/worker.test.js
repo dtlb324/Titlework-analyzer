@@ -136,6 +136,37 @@ test('synthesis runnable query skips jobs with an active final merge lease', () 
   assert(jobsSource.includes('j.synthesis_merge_lease_expires_at <= now()'), 'Expected runnable synthesis query to wait for active merge leases to expire');
 });
 
+// Regression guard: zombie 'synthesizing' jobs whose abstraction never finished
+// must not surface as runnable. Without the NOT EXISTS guard, the worker drain
+// repeatedly picks them up, planJobSynthesis throws ("Synthesis cannot start
+// until all abstraction chunks are completed or failed."), and Cloud Scheduler
+// churns on worker_synthesis_error until DEADLINE_EXCEEDED. listRunnableSynthesisJobIds
+// is Postgres-only and mocked everywhere else, so this source check is the only
+// signal that protects the guard from being edited away.
+test('synthesis runnable query excludes abstraction-incomplete jobs', () => {
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const fnStart = jobsSource.indexOf('async listRunnableSynthesisJobIds');
+  assert(fnStart >= 0, 'Expected listRunnableSynthesisJobIds');
+  const fnBody = jobsSource.slice(fnStart, fnStart + 2500);
+  assert(
+    fnBody.includes("c.abstraction_status IN ('pending', 'processing', 'retry_wait')"),
+    'Expected runnable synthesis to exclude jobs with incomplete abstraction chunks',
+  );
+  assert(
+    fnBody.includes('NOT EXISTS') && fnBody.includes('document_chunks'),
+    'Expected NOT EXISTS guard on document_chunks',
+  );
+
+  // Drift guard: the SQL runnable filter and the planJobSynthesis JS blocker
+  // check must agree on the same three "incomplete" abstraction statuses, or a
+  // job can pass one gate and fail the other (reintroducing the churn loop).
+  const synthesisSource = readFileSync(join(root, 'api/_lib/synthesis.js'), 'utf8');
+  assert(
+    synthesisSource.includes("['pending', 'processing', 'retry_wait']"),
+    'Expected planJobSynthesis blocker check to use the same pending/processing/retry_wait statuses as the SQL guard',
+  );
+});
+
 test('worker exposes an HTTP health server for Cloud Run service readiness', async () => {
   const server = createWorkerHealthServer();
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

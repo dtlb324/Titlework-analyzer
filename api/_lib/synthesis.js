@@ -342,7 +342,7 @@ function utf8ByteLength(value) {
   return Buffer.byteLength(String(value), 'utf8');
 }
 
-function totalAbstractsFromSegments(segments) {
+export function totalAbstractsFromSegments(segments) {
   let total = 0;
   for (const seg of segments) {
     total += Math.max(0, (seg.endSequenceIndex ?? -1) - (seg.startSequenceIndex ?? 0) + 1);
