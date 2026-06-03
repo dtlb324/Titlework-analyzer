@@ -213,7 +213,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         );
         return [...finished, ...leftResults, ...rightResults];
       }
-      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), options, 'payload_too_large')];
+      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs }, 'payload_too_large')];
     }
 
     const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
@@ -267,14 +267,14 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     if (fallbackChunks.length) {
       const partialResults = await fallbackToSingles(
         fallbackChunks,
-        options,
+        { ...options, workerId, leaseMs },
         `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
       );
       batchResults.push(...partialResults);
     }
     return [...finished, ...batchResults];
   } catch (err) {
-    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), options, err?.message || String(err))];
+    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs }, err?.message || String(err))];
   }
 }
 
