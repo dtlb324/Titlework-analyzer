@@ -2212,7 +2212,6 @@ function createPostgresJobStore() {
         bytesReceived: job.synthesisPreviewBytes || 0,
         updatedAt: job.synthesisPreviewUpdatedAt || null,
         modelUsed: job.synthesisPreviewModelUsed || null,
-        planId: job.synthesisPlanId || null,
       };
     },
 

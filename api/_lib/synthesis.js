@@ -1329,14 +1329,15 @@ export async function planJobSynthesis(jobId, options = {}) {
 
 // Recover a completed-but-unsaved merge: if a prior worker streamed the full
 // final opinion into the preview row and died before saveJobResult committed,
-// reuse that text instead of re-running the expensive Sonnet merge. The preview
-// is cleared on every plan change, so a complete preview belongs to the current
-// plan. Returns a merge-shaped object, or null to fall through to a fresh merge.
-export async function tryRecoverMergePreview(store, jobId, config, planId) {
+// reuse that text instead of re-running the expensive Sonnet merge. Both writers
+// of synthesis_plan_id (saveSynthesisPlan and the abstract-changed reset) clear
+// the preview text in the same atomic UPDATE, so a `complete` preview always
+// belongs to the current plan — no plan-id guard is needed here. Returns a
+// merge-shaped object, or null to fall through to a fresh merge.
+export async function tryRecoverMergePreview(store, jobId, config) {
   if (!store?.getSynthesisPreview || !jobId) return null;
   const preview = await store.getSynthesisPreview(jobId);
   if (!preview?.complete) return null;
-  if (planId && preview.planId && preview.planId !== planId) return null;
   const text = preview.text || '';
   if (!validateFinalOpinion(text).ok) return null;
   return {
@@ -1353,7 +1354,7 @@ export async function tryRecoverMergePreview(store, jobId, config, planId) {
 async function runOrRecoverMerge(mergeArgs) {
   const store = mergeArgs.options?.store;
   const jobId = mergeArgs.options?.jobId;
-  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config, mergeArgs.planId);
+  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config);
   if (recovered) {
     if (Array.isArray(mergeArgs.warningsAccum)) {
       mergeArgs.warningsAccum.push('merge_recovered: reused completed merge preview from an interrupted attempt');
@@ -1511,7 +1512,6 @@ export async function processSynthesisJob(jobId, options = {}) {
           options: { ...options, store, jobId },
           warningsAccum,
           tokensAccum,
-          planId,
         });
         const validation = validateFinalOpinion(merged.text);
         if (!validation.ok) {
@@ -1576,7 +1576,10 @@ export async function processSynthesisJob(jobId, options = {}) {
         try {
           const merged = await runOrRecoverMerge({
             segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
-            totalAbstracts: Math.max(totalAbstractsFromSegments(completedSegments), abstracts.length),
+            // Partial-failure merge: count only the documents the completed
+            // segments actually cover, so the preamble doesn't claim coverage of
+            // documents that live in failed segments.
+            totalAbstracts: totalAbstractsFromSegments(completedSegments),
             tract,
             contextNotes,
             config,
@@ -1584,7 +1587,6 @@ export async function processSynthesisJob(jobId, options = {}) {
             options: { ...options, store, jobId },
             warningsAccum,
             tokensAccum,
-            planId,
           });
           const validation = validateFinalOpinion(merged.text);
           if (!validation.ok) {
