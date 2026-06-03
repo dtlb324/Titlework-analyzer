@@ -146,7 +146,7 @@ export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeI
   return tokens >= resolveCompactionMinMergeTokens();
 }
 
-function createPreviewWriter(store, jobId) {
+function createPreviewWriter(store, jobId, model) {
   if (!store?.setSynthesisPreview || !jobId) {
     return {
       async begin() {},
@@ -166,6 +166,7 @@ function createPreviewWriter(store, jobId) {
       text: buffer,
       complete: false,
       bytesReceived: buffer.length,
+      modelUsed: model,
     });
   }
   return {
@@ -173,7 +174,7 @@ function createPreviewWriter(store, jobId) {
       buffer = '';
       lastFlushAt = 0;
       if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
-      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0 });
+      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0, modelUsed: model });
     },
     async onDelta(_delta, fullText) {
       buffer = fullText;
@@ -184,6 +185,7 @@ function createPreviewWriter(store, jobId) {
         text: buffer,
         complete: true,
         bytesReceived: buffer.length,
+        modelUsed: model,
       });
     },
     async discard() {
@@ -338,6 +340,14 @@ export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
 
 function utf8ByteLength(value) {
   return Buffer.byteLength(String(value), 'utf8');
+}
+
+function totalAbstractsFromSegments(segments) {
+  let total = 0;
+  for (const seg of segments) {
+    total += Math.max(0, (seg.endSequenceIndex ?? -1) - (seg.startSequenceIndex ?? 0) + 1);
+  }
+  return total || 0;
 }
 
 export function estimateRequestBytes(model, maxTokens, system, messages) {
@@ -669,7 +679,7 @@ async function callSynthesisModel({
     && systemPrompt === SYNTHESIS_PROMPT
     && isAnthropicModel(config.model);
   const previewWriter = shouldStream
-    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId))
+    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId, config.model))
     : null;
   if (previewWriter?.begin) await previewWriter.begin();
   const started = Date.now();
@@ -1023,6 +1033,7 @@ async function compactSegmentSummariesForMerge({
   tract,
   contextNotes,
   partialConfig,
+  finalConfig,
   options,
   tokensAccum,
 }) {
@@ -1037,7 +1048,7 @@ async function compactSegmentSummariesForMerge({
     contextNotes,
     preamble,
     systemPrompt: COMPACTION_SYNTHESIS_PROMPT,
-    config: partialConfig,
+    config: { ...partialConfig, maxTokens: Math.max(partialConfig.maxTokens, finalConfig?.maxTokens || 0) },
     options: {
       ...options,
       enableFinalStream: false,
@@ -1102,6 +1113,7 @@ async function mergeSegmentsIntoOpinion({
       tract,
       contextNotes,
       partialConfig: partial,
+      finalConfig,
       options,
       tokensAccum,
     });
@@ -1320,15 +1332,16 @@ export async function planJobSynthesis(jobId, options = {}) {
 // reuse that text instead of re-running the expensive Sonnet merge. The preview
 // is cleared on every plan change, so a complete preview belongs to the current
 // plan. Returns a merge-shaped object, or null to fall through to a fresh merge.
-export async function tryRecoverMergePreview(store, jobId, config) {
+export async function tryRecoverMergePreview(store, jobId, config, planId) {
   if (!store?.getSynthesisPreview || !jobId) return null;
   const preview = await store.getSynthesisPreview(jobId);
   if (!preview?.complete) return null;
+  if (planId && preview.planId && preview.planId !== planId) return null;
   const text = preview.text || '';
   if (!validateFinalOpinion(text).ok) return null;
   return {
     text,
-    model: config.model,
+    model: preview.modelUsed || config.model,
     payloadBytes: Buffer.byteLength(text, 'utf8'),
     streamed: false,
     timeToFirstDeltaMs: null,
@@ -1340,7 +1353,7 @@ export async function tryRecoverMergePreview(store, jobId, config) {
 async function runOrRecoverMerge(mergeArgs) {
   const store = mergeArgs.options?.store;
   const jobId = mergeArgs.options?.jobId;
-  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config);
+  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config, mergeArgs.planId);
   if (recovered) {
     if (Array.isArray(mergeArgs.warningsAccum)) {
       mergeArgs.warningsAccum.push('merge_recovered: reused completed merge preview from an interrupted attempt');
@@ -1498,6 +1511,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           options: { ...options, store, jobId },
           warningsAccum,
           tokensAccum,
+          planId,
         });
         const validation = validateFinalOpinion(merged.text);
         if (!validation.ok) {
@@ -1562,7 +1576,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         try {
           const merged = await runOrRecoverMerge({
             segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
-            totalAbstracts: abstracts.length,
+            totalAbstracts: Math.max(totalAbstractsFromSegments(completedSegments), abstracts.length),
             tract,
             contextNotes,
             config,
@@ -1570,6 +1584,7 @@ export async function processSynthesisJob(jobId, options = {}) {
             options: { ...options, store, jobId },
             warningsAccum,
             tokensAccum,
+            planId,
           });
           const validation = validateFinalOpinion(merged.text);
           if (!validation.ok) {
