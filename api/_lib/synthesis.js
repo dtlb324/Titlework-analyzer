@@ -146,7 +146,7 @@ export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeI
   return tokens >= resolveCompactionMinMergeTokens();
 }
 
-function createPreviewWriter(store, jobId) {
+function createPreviewWriter(store, jobId, model) {
   if (!store?.setSynthesisPreview || !jobId) {
     return {
       async begin() {},
@@ -166,6 +166,7 @@ function createPreviewWriter(store, jobId) {
       text: buffer,
       complete: false,
       bytesReceived: buffer.length,
+      modelUsed: model,
     });
   }
   return {
@@ -173,7 +174,7 @@ function createPreviewWriter(store, jobId) {
       buffer = '';
       lastFlushAt = 0;
       if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
-      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0 });
+      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0, modelUsed: model });
     },
     async onDelta(_delta, fullText) {
       buffer = fullText;
@@ -184,6 +185,7 @@ function createPreviewWriter(store, jobId) {
         text: buffer,
         complete: true,
         bytesReceived: buffer.length,
+        modelUsed: model,
       });
     },
     async discard() {
@@ -338,6 +340,14 @@ export function effectiveSynthesisChunkSize(abstractCount, config = {}) {
 
 function utf8ByteLength(value) {
   return Buffer.byteLength(String(value), 'utf8');
+}
+
+function totalAbstractsFromSegments(segments) {
+  let total = 0;
+  for (const seg of segments) {
+    total += Math.max(0, (seg.endSequenceIndex ?? -1) - (seg.startSequenceIndex ?? 0) + 1);
+  }
+  return total || 0;
 }
 
 export function estimateRequestBytes(model, maxTokens, system, messages) {
@@ -669,7 +679,7 @@ async function callSynthesisModel({
     && systemPrompt === SYNTHESIS_PROMPT
     && isAnthropicModel(config.model);
   const previewWriter = shouldStream
-    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId))
+    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId, config.model))
     : null;
   if (previewWriter?.begin) await previewWriter.begin();
   const started = Date.now();
@@ -1023,6 +1033,7 @@ async function compactSegmentSummariesForMerge({
   tract,
   contextNotes,
   partialConfig,
+  finalConfig,
   options,
   tokensAccum,
 }) {
@@ -1037,7 +1048,7 @@ async function compactSegmentSummariesForMerge({
     contextNotes,
     preamble,
     systemPrompt: COMPACTION_SYNTHESIS_PROMPT,
-    config: partialConfig,
+    config: { ...partialConfig, maxTokens: Math.max(partialConfig.maxTokens, finalConfig?.maxTokens || 0) },
     options: {
       ...options,
       enableFinalStream: false,
@@ -1102,6 +1113,7 @@ async function mergeSegmentsIntoOpinion({
       tract,
       contextNotes,
       partialConfig: partial,
+      finalConfig,
       options,
       tokensAccum,
     });
@@ -1317,9 +1329,11 @@ export async function planJobSynthesis(jobId, options = {}) {
 
 // Recover a completed-but-unsaved merge: if a prior worker streamed the full
 // final opinion into the preview row and died before saveJobResult committed,
-// reuse that text instead of re-running the expensive Sonnet merge. The preview
-// is cleared on every plan change, so a complete preview belongs to the current
-// plan. Returns a merge-shaped object, or null to fall through to a fresh merge.
+// reuse that text instead of re-running the expensive Sonnet merge. Both writers
+// of synthesis_plan_id (saveSynthesisPlan and the abstract-changed reset) clear
+// the preview text in the same atomic UPDATE, so a `complete` preview always
+// belongs to the current plan — no plan-id guard is needed here. Returns a
+// merge-shaped object, or null to fall through to a fresh merge.
 export async function tryRecoverMergePreview(store, jobId, config) {
   if (!store?.getSynthesisPreview || !jobId) return null;
   const preview = await store.getSynthesisPreview(jobId);
@@ -1328,7 +1342,7 @@ export async function tryRecoverMergePreview(store, jobId, config) {
   if (!validateFinalOpinion(text).ok) return null;
   return {
     text,
-    model: config.model,
+    model: preview.modelUsed || config.model,
     payloadBytes: Buffer.byteLength(text, 'utf8'),
     streamed: false,
     timeToFirstDeltaMs: null,
@@ -1562,7 +1576,10 @@ export async function processSynthesisJob(jobId, options = {}) {
         try {
           const merged = await runOrRecoverMerge({
             segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
-            totalAbstracts: abstracts.length,
+            // Partial-failure merge: count only the documents the completed
+            // segments actually cover, so the preamble doesn't claim coverage of
+            // documents that live in failed segments.
+            totalAbstracts: totalAbstractsFromSegments(completedSegments),
             tract,
             contextNotes,
             config,

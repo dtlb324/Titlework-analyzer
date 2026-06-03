@@ -543,6 +543,7 @@ function rowToJob(row) {
     synthesisPreviewUpdatedAt: row.synthesis_preview_updated_at instanceof Date
       ? row.synthesis_preview_updated_at.toISOString()
       : row.synthesis_preview_updated_at,
+    synthesisPreviewModelUsed: row.synthesis_preview_model_used || null,
   };
 }
 
@@ -925,6 +926,7 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_complete boolean NOT NULL DEFAULT false`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_bytes integer NOT NULL DEFAULT 0 CHECK (synthesis_preview_bytes >= 0)`;
         await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_updated_at timestamptz`;
+        await sql`ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS synthesis_preview_model_used text`;
         await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_chunks_split_child_unique ON document_chunks(job_id, split_parent_chunk_id, fingerprint) WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL`;
         await sql`
           CREATE TABLE IF NOT EXISTS synthesis_segments (
@@ -2177,16 +2179,18 @@ function createPostgresJobStore() {
       const bytesReceived = Number.isFinite(Number(patch.bytesReceived))
         ? Math.max(0, Math.floor(Number(patch.bytesReceived)))
         : text.length;
+      const modelUsed = typeof patch.modelUsed === 'string' ? patch.modelUsed : null;
       const rows = await sql`
         UPDATE analysis_jobs
         SET
           synthesis_preview_text = ${text},
           synthesis_preview_complete = ${complete},
           synthesis_preview_bytes = ${bytesReceived},
+          synthesis_preview_model_used = ${modelUsed ? modelUsed : null},
           synthesis_preview_updated_at = now(),
           updated_at = now()
         WHERE id = ${jobId}
-        RETURNING synthesis_preview_text, synthesis_preview_complete, synthesis_preview_bytes
+        RETURNING synthesis_preview_text, synthesis_preview_complete, synthesis_preview_bytes, synthesis_preview_model_used
       `;
       const row = rows[0];
       if (!row) return null;
@@ -2194,6 +2198,7 @@ function createPostgresJobStore() {
         text: row.synthesis_preview_text || '',
         complete: Boolean(row.synthesis_preview_complete),
         bytesReceived: row.synthesis_preview_bytes ?? 0,
+        modelUsed: row.synthesis_preview_model_used || null,
       };
     },
 
@@ -2206,6 +2211,7 @@ function createPostgresJobStore() {
         complete: Boolean(job.synthesisPreviewComplete),
         bytesReceived: job.synthesisPreviewBytes || 0,
         updatedAt: job.synthesisPreviewUpdatedAt || null,
+        modelUsed: job.synthesisPreviewModelUsed || null,
       };
     },
 
