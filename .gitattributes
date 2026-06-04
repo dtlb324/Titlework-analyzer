@@ -1,0 +1,13 @@
+# Normalize line endings so Windows checkouts don't introduce CRLF.
+# Source and config files are stored with LF in the repo and in the
+# Linux container image, regardless of the contributor's OS.
+* text=auto eol=lf
+
+# Binary assets git should never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary

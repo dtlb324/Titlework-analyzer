@@ -41,21 +41,35 @@ The flow: the browser creates a job → uploads files straight to GCS → starts
 
 ## Part 1 — Get the code
 
-You need **Node.js 22** and **git** installed.
+This project runs on both **Windows** and **macOS**. You need **Node.js 22** and **git**. Pick your OS below; after the install step, the `git` / `npm` commands are identical on both.
 
-```bash
-git clone <your-repo-url>
-cd Titlework-analyzer
-npm install
-```
+### Windows
 
-Verify the install by running the test suite:
+1. Install **Node.js 22 (LTS)** from [nodejs.org](https://nodejs.org/en/download) — run the `.msi` installer and accept the defaults.
+2. Install **Git for Windows** from [git-scm.com/download/win](https://git-scm.com/download/win).
+3. Open **PowerShell** (or Git Bash) and run:
+   ```powershell
+   git clone <your-repo-url>
+   cd Titlework-analyzer
+   npm install
+   npm test
+   ```
 
-```bash
-npm test
-```
+> Use PowerShell or Git Bash, not the legacy `cmd.exe`. All commands in this guide work in PowerShell.
 
-All tests should pass. If they do, the code is healthy and you can move on to wiring up services.
+### macOS
+
+1. Install **Node.js 22** — either the `.pkg` from [nodejs.org](https://nodejs.org/en/download), or with Homebrew: `brew install node@22`.
+2. Git ships with the Xcode Command Line Tools. If you don't have it, run `xcode-select --install` (or `brew install git`).
+3. Open **Terminal** and run:
+   ```bash
+   git clone <your-repo-url>
+   cd Titlework-analyzer
+   npm install
+   npm test
+   ```
+
+All tests should pass on either OS. If they do, the code is healthy and you can move on to wiring up services.
 
 ---
 
@@ -110,7 +124,12 @@ Claude Sonnet 4.6 writes the **final title opinion**, answers follow-up question
 
 > Skip this entire part if you only want to run the app locally. You still need a **GCS bucket** for file storage even locally, but you can defer Cloud Run hosting until you're ready.
 
-You'll use the **`gcloud`** command-line tool for most of this. Install it from the [Google Cloud SDK page](https://cloud.google.com/sdk/docs/install), then run `gcloud auth login`.
+You'll use the **`gcloud`** command-line tool for most of this. Install it for your OS, then run `gcloud auth login`:
+
+- **Windows:** download and run the [Google Cloud CLI installer](https://cloud.google.com/sdk/docs/install#windows) (`.exe`), then use the commands below in PowerShell.
+- **macOS:** install with `brew install --cask google-cloud-sdk`, or follow the [macOS instructions](https://cloud.google.com/sdk/docs/install#mac).
+
+The `gcloud` commands themselves are identical on both platforms.
 
 ### 4a. Create or select a project
 
@@ -197,9 +216,9 @@ Google's official walkthrough is the most reliable reference: **[Deploying to Cl
 
 ## Part 5 — Run it locally
 
-Once you have `DATABASE_URL`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `GCS_BUCKET`, create a `.env.local` file in the project root:
+Once you have `DATABASE_URL`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `GCS_BUCKET`, create a file named **`.env.local`** in the project root with one variable per line:
 
-```bash
+```ini
 DATABASE_URL=postgresql://USER:PASSWORD@ep-xxxx-pooler.REGION.aws.neon.tech/neondb?sslmode=require
 GEMINI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=sk-ant-your-key
@@ -207,21 +226,44 @@ GCS_BUCKET=my-titlework-bucket
 APP_PASSWORD=pick-a-password
 ```
 
-> For local GCS access you'll also need application-default credentials: run `gcloud auth application-default login` once so the Cloud Storage client can authenticate as you.
+`.env.local` is already git-ignored, so your keys never get committed. Both `KEY=value` and `export KEY='value'` lines are accepted — Node reads this file directly via the `npm run dev` scripts below, so the **same command works on Windows and Mac** (no `source` step needed).
 
-Start the web/API service:
+> For local GCS access you also need Google application-default credentials. Run this once (same on both OSes — see [Part 4](#part-4--set-up-google-cloud) for installing `gcloud`):
+> ```bash
+> gcloud auth application-default login
+> ```
 
-```bash
-npm start
+### Windows
+
+In **PowerShell**, from the project folder:
+
+```powershell
+npm run dev
 ```
 
-Then open the URL it prints (default `http://localhost:8080`). In a **second terminal**, optionally run the worker so background jobs continue:
+Open the URL it prints (default `http://localhost:8080`). To also run the background worker, open a **second** PowerShell window in the same folder:
+
+```powershell
+npm run dev:worker
+```
+
+### macOS
+
+In **Terminal**, from the project folder:
 
 ```bash
-npm run start:worker
+npm run dev
+```
+
+Open the URL it prints (default `http://localhost:8080`). To also run the background worker, open a **second** Terminal tab in the same folder:
+
+```bash
+npm run dev:worker
 ```
 
 You can now upload documents and build a title chain locally.
+
+> **`npm run dev` vs `npm start`:** `dev` loads `.env.local` for you and is what you use on your laptop. Plain `npm start` / `npm run start:worker` read configuration from the real process environment instead and are what the Cloud Run container uses in production — don't use them locally unless you've exported the variables yourself.
 
 ---
 
