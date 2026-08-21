@@ -4,6 +4,7 @@ import {
   getJobStore,
   parseJsonBody,
   requireJobPassword,
+  secureCompare,
   sendStorageNotConfigured,
   setJobSecurityHeaders,
   validateCreateChunkInput,
@@ -142,9 +143,21 @@ function publicAbstract(record) {
   };
 }
 
-function requireServerAbstractionPassword(res, requestId) {
-  if (process.env.APP_PASSWORD) return true;
-  res.status(401).json({ error: 'APP_PASSWORD is required for server-side abstraction endpoints.', requestId });
+// Defense-in-depth check for the sensitive workflow endpoints (start/process/
+// retry/followup/abstracts). Unlike requireJobPassword — which passes when
+// APP_PASSWORD is unset so local dev works on metadata routes — these endpoints
+// must NEVER be anonymous: they trigger billable model calls. This helper
+// verifies the credential itself (instead of trusting that the main handler
+// already did), and fails closed when APP_PASSWORD is not configured.
+function requireServerAbstractionPassword(req, res, requestId) {
+  const requiredPassword = process.env.APP_PASSWORD;
+  if (!requiredPassword) {
+    res.status(401).json({ error: 'APP_PASSWORD is required for server-side abstraction endpoints.', requestId });
+    return false;
+  }
+  const providedPassword = req.headers['x-app-password'];
+  if (secureCompare(providedPassword || '', requiredPassword)) return true;
+  res.status(401).json({ error: 'Invalid password.', requestId });
   return false;
 }
 
@@ -305,7 +318,7 @@ function publicStatus(snapshot) {
 
 async function handleAbstractionStart(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const setupError = serverAbstractionSetupError() || workflowSetupError();
   if (setupError) {
@@ -329,7 +342,7 @@ async function handleAbstractionStart(req, res, requestId, store, jobId) {
 
 async function handleAbstractionStatus(req, res, requestId, store, jobId) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
@@ -343,7 +356,7 @@ async function handleAbstractionStatus(req, res, requestId, store, jobId) {
 
 async function handleAbstractionProcess(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const setupError = serverAbstractionSetupError() || workflowSetupError();
   if (setupError) {
@@ -381,7 +394,7 @@ async function handleJobCancel(req, res, requestId, store, jobId) {
 
 async function handleRetryFailedChunks(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const setupError = serverAbstractionSetupError() || workflowSetupError();
   if (setupError) {
@@ -399,7 +412,7 @@ async function handleRetryFailedChunks(req, res, requestId, store, jobId) {
 
 async function handleAbstractList(req, res, requestId, store, jobId) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
@@ -479,7 +492,7 @@ function synthesisCombinedSetupError() {
 
 async function handleSynthesisStart(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const body = req.body ? parseBody(req, res, requestId) : {};
   if (req.body && !body) return;
@@ -515,7 +528,7 @@ async function handleSynthesisStart(req, res, requestId, store, jobId) {
 
 async function handleSynthesisStatus(req, res, requestId, store, jobId) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
@@ -535,7 +548,7 @@ async function handleSynthesisStatus(req, res, requestId, store, jobId) {
 
 async function handleSynthesisPreview(req, res, requestId, store, jobId) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
@@ -548,7 +561,7 @@ async function handleSynthesisPreview(req, res, requestId, store, jobId) {
 
 async function handleSynthesisProcess(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const body = req.body ? parseBody(req, res, requestId) : {};
   if (req.body && !body) return;
@@ -638,7 +651,7 @@ async function handleJobResult(req, res, requestId, store, jobId) {
 
 async function handleFollowup(req, res, requestId, store, jobId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   const body = parseBody(req, res, requestId);
   if (!body) return;
@@ -665,7 +678,7 @@ async function handleFollowup(req, res, requestId, store, jobId) {
 
 async function handleChunkRetry(req, res, requestId, store, jobId, chunkId) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.', requestId });
-  if (!requireServerAbstractionPassword(res, requestId)) return;
+  if (!requireServerAbstractionPassword(req, res, requestId)) return;
   if (!validPrefixedId(jobId, 'job_')) return res.status(400).json({ error: 'Invalid job id.', requestId });
   if (!validPrefixedId(chunkId, 'chk_')) return res.status(400).json({ error: 'Invalid chunk id.', requestId });
   const setupError = serverAbstractionSetupError();
