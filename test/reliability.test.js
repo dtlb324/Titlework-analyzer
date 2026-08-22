@@ -418,6 +418,39 @@ test('README bulk-processing constants match code', async () => {
   assert(!readme.includes('up to 2 documents per call'), 'README should not advertise stale 2-document fallback batching');
 });
 
+test('retry-failed clears the stale saved result before requeueing chunks', async () => {
+  const { retryFailedAbstractionChunks } = await import('../api/_lib/queue.js');
+  const chunks = [
+    { id: 'chk_1', jobId: 'job_1', abstractionStatus: 'failed' },
+    { id: 'chk_2', jobId: 'job_1', abstractionStatus: 'completed' },
+  ];
+  let savedResult = { planId: 'plan_old', finalTitleOpinion: 'stale opinion', status: 'partial_failed' };
+  const calls = [];
+  const store = {
+    async getJob() { return { id: 'job_1', status: 'partial_failed', totalDocuments: 2, completedDocuments: 1, failedDocuments: 1 }; },
+    async retryFailedChunks(jobId) {
+      calls.push('retryFailedChunks');
+      let reset = 0;
+      for (const chunk of chunks) {
+        if (chunk.abstractionStatus === 'failed' || chunk.abstractionStatus === 'retry_wait') {
+          chunk.abstractionStatus = 'pending';
+          reset += 1;
+        }
+      }
+      return reset;
+    },
+    async clearJobResult(jobId) { calls.push('clearJobResult'); savedResult = null; return true; },
+    async updateJob(jobId, patch) { calls.push(`updateJob:${patch.status}`); return { id: jobId, ...patch }; },
+    async getAbstractionStatus() {
+      return { total: 2, pending: 1, processing: 0, completed: 1, failed: 0, retry_wait: 0, failedChunks: [] };
+    },
+  };
+  const result = await retryFailedAbstractionChunks('job_1', { store });
+  assert(result.reset === 1, `Expected 1 chunk reset, got ${result.reset}`);
+  assert(calls.includes('clearJobResult'), `Expected clearJobResult call after requeueing chunks; calls were: ${calls.join(',')}`);
+  assert(savedResult === null, 'Expected stale saved result to be cleared');
+});
+
 let passed = 0;
 let failed = 0;
 
