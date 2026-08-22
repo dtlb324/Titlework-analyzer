@@ -539,6 +539,13 @@ export async function retryFailedAbstractionChunks(jobId, options = {}) {
     }
   }
   if (reset > 0 && store.updateJob) {
+    // The saved result (if any) was synthesized from the OLD abstracts.
+    // Requeued chunks will produce new abstracts, so the stale result must be
+    // cleared — otherwise GET /result serves an outdated opinion while the
+    // job re-runs.
+    if (store.clearJobResult) {
+      await store.clearJobResult(jobId);
+    }
     const refreshed = await store.getJob(jobId);
     if (refreshed && ['failed', 'partial_failed'].includes(refreshed.status)) {
       try {
