@@ -1422,6 +1422,34 @@ test('Synthesize with warnings does not clobber an existing partial_failed opini
   assert(after?.finalTitleOpinion.includes('Existing opinion'), 'Expected existing opinion to remain');
 });
 
+test('canceled jobs skip the final merge and save no result', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  await planJobSynthesis('job_test_1', { store });
+  // Cancel lands after the last segment completes but before the merge gate runs.
+  const realList = store.listSynthesisSegments.bind(store);
+  store.listSynthesisSegments = async (...args) => {
+    const list = await realList(...args);
+    if (list.length && list.every(segment => segment.status === 'complete')) {
+      const job = await store.getJob('job_test_1');
+      await store.updateJob('job_test_1', { ...job, status: 'canceled' });
+    }
+    return list;
+  };
+  let modelCalls = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    modelCalls += 1;
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+  };
+  const out = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 1 },
+  });
+  assert(out.mergeRan === false, `Expected no merge on a canceled job, got mergeRan=${out.mergeRan}`);
+  assert(modelCalls === 1, `Expected only the segment model call, got ${modelCalls}`);
+  assert(!(await store.getJobResult('job_test_1')), 'Expected no result saved for a canceled job');
+});
+
 test('Cancellation during synthesis stops further segment work', async () => {
   const abstracts = manyAbstracts(120);
   const store = createMemoryPhase5Store({ abstracts });

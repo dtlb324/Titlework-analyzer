@@ -1464,7 +1464,11 @@ export async function processSynthesisJob(jobId, options = {}) {
     }
     return claim;
   }
-  if (!existingResult && completedSegments.length === refreshedSegments.length && refreshedSegments.length > 0) {
+  // A cancel that lands after the last segment completes must not trigger a
+  // (billable) final merge nor persist a result for a canceled job.
+  const mergeGateJob = await store.getJob(jobId);
+  const mergeCanceled = mergeGateJob?.status === 'canceled';
+  if (!mergeCanceled && !existingResult && completedSegments.length === refreshedSegments.length && refreshedSegments.length > 0) {
     const mergeClaim = await claimFinalWriter();
     if (!mergeClaim) {
       // Another worker is already performing the final write. Report hasMore so
@@ -1557,7 +1561,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         mergeRanInThisBatch = Boolean(result);
       }
     }
-  } else if (!existingResult && failedSegments.length && !stillPending.length) {
+  } else if (!mergeCanceled && !existingResult && failedSegments.length && !stillPending.length) {
     // All work finished with at least one failed segment. Preserve any completed
     // segment work as a degraded result instead of stranding the job with no result.
     const mergeClaim = await claimFinalWriter();
