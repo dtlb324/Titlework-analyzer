@@ -399,16 +399,29 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
       await store.clearJobResult(jobId);
     }
   }
+  // Mixed abstraction leaves the job at partial_failed and waits for the
+  // landman to click "Synthesize with warnings". The worker only drains
+  // status='synthesizing' jobs, and the UI treats partial_failed as terminal
+  // (stops polling). Flip the status so both can proceed — but only when
+  // there is not already a saved opinion to keep.
+  const existingPartialResult = job.status === 'partial_failed' && typeof store.getJobResult === 'function'
+    ? await store.getJobResult(jobId)
+    : null;
+  const resumeFromPartialFailed = job.status === 'partial_failed' && !existingPartialResult;
   if (store.updateJob && !['synthesizing', 'complete', 'partial_failed', 'failed'].includes(job.status)) {
     try {
       await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Queued for server-side synthesis' });
     } catch {
       // status transition already advanced; fine.
     }
-  } else if (store.updateJob && job.status === 'failed') {
-    // allow resuming from failed
+  } else if (store.updateJob && (job.status === 'failed' || resumeFromPartialFailed)) {
     try {
-      await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Resuming synthesis after failure' });
+      await store.updateJob(jobId, {
+        status: 'synthesizing',
+        currentPhase: job.status === 'failed'
+          ? 'Resuming synthesis after failure'
+          : 'Queued for server-side synthesis with warnings',
+      });
     } catch { /* ignore */ }
   }
   const status = await store.getSynthesisStatus(jobId, { lightweight: true });

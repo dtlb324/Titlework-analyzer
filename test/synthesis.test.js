@@ -1365,6 +1365,63 @@ test('Retry synthesis clears failed result and requeues failed segments', async 
   assert(retry.result.finalTitleOpinion.includes('CHAIN OF TITLE'), 'Expected retry to replace failed result with final opinion');
 });
 
+test('Synthesize with warnings moves partial_failed jobs to synthesizing so the worker can pick them up', async () => {
+  const store = createMemoryPhase5Store({
+    jobStatus: 'partial_failed',
+    abstracts: manyAbstracts(2),
+    failedChunks: [{
+      chunkId: 'chk_failed',
+      documentId: 'doc_failed',
+      chunkOrder: 99,
+      originalFilename: 'unreadable.pdf',
+    }],
+  });
+  const before = await store.getJob('job_test_1');
+  assert(before.status === 'partial_failed', `Expected starting status partial_failed, got ${before.status}`);
+  assert(!(await store.getJobResult('job_test_1')), 'Expected no saved opinion before first synthesis');
+
+  const snapshot = await enqueueSynthesisJob('job_test_1', { store });
+  const job = await store.getJob('job_test_1');
+  assert(job.status === 'synthesizing', `Expected synthesizing after enqueue from partial_failed, got ${job.status}`);
+  assert(snapshot.job?.status === 'synthesizing', `Expected returned job synthesizing, got ${snapshot.job?.status}`);
+
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
+    text: goodFinalOpinion('Excluded one unreadable document.'),
+    model: 'claude-sonnet-4-6',
+    usage: {},
+  });
+  const result = await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 30_000,
+    config: { maxAttempts: 1 },
+  });
+  assert(result.result?.finalTitleOpinion?.includes('CHAIN OF TITLE'), 'Expected synthesis from remaining abstracts to persist an opinion');
+  assert(['complete', 'partial_failed'].includes(result.result?.status), `Expected a saved opinion status, got ${result.result?.status}`);
+});
+
+test('Synthesize with warnings does not clobber an existing partial_failed opinion', async () => {
+  const store = createMemoryPhase5Store({
+    jobStatus: 'partial_failed',
+    abstracts: manyAbstracts(1),
+    failedChunks: [{ chunkId: 'chk_failed', documentId: 'doc_failed', chunkOrder: 1, originalFilename: 'unreadable.pdf' }],
+  });
+  await store.saveJobResult('job_test_1', {
+    planId: 'plan_existing',
+    status: 'partial_failed',
+    finalTitleOpinion: goodFinalOpinion('Existing opinion'),
+    warnings: ['existing'],
+    failedDocuments: [{ id: 'doc_failed' }],
+  });
+  const before = await store.getJobResult('job_test_1');
+  assert(before?.finalTitleOpinion.includes('Existing opinion'), 'Expected fixture opinion to be saved');
+
+  await enqueueSynthesisJob('job_test_1', { store });
+  const job = await store.getJob('job_test_1');
+  const after = await store.getJobResult('job_test_1');
+  assert(job.status === 'partial_failed', `Expected existing synthesized job to stay partial_failed, got ${job.status}`);
+  assert(after?.finalTitleOpinion.includes('Existing opinion'), 'Expected existing opinion to remain');
+});
+
 test('Cancellation during synthesis stops further segment work', async () => {
   const abstracts = manyAbstracts(120);
   const store = createMemoryPhase5Store({ abstracts });
