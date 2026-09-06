@@ -1151,6 +1151,9 @@ function createPostgresJobStore() {
         END,
         status = CASE
           WHEN status = 'canceled' THEN 'canceled'
+          WHEN status = 'complete'
+            AND counts.processing + counts.pending + counts.retry_wait = 0
+            THEN 'complete'
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed > 0 AND counts.failed > 0 THEN 'partial_failed'
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed > 0 THEN 'synthesizing'
           WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.completed = 0 THEN 'failed'

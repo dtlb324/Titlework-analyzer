@@ -130,6 +130,8 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     let status = job.status;
     if (status === 'canceled') {
       // do not transition away from canceled
+    } else if (status === 'complete' && pending === 0 && processing === 0 && retry_wait === 0) {
+      // do not regress a finished job back to synthesizing
     } else if (jobChunks.length && terminal === jobChunks.length) {
       status = completed > 0 && failed > 0 ? 'partial_failed' : completed > 0 ? 'synthesizing' : 'failed';
     } else if (jobChunks.some(chunk => ['pending', 'processing', 'retry_wait'].includes(chunk.abstractionStatus))) {
@@ -1158,6 +1160,27 @@ test('Phase 4: job progress rolls up correctly across pending/processing/complet
   assert(job.status === 'partial_failed', `Expected partial_failed rollup, got ${job.status}`);
   if (previousBatch === undefined) delete process.env.ABSTRACTION_BATCH_ENABLED;
   else process.env.ABSTRACTION_BATCH_ENABLED = previousBatch;
+});
+
+test('abstraction rollup does not regress a complete job back to synthesizing', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_done', chunkOrder: 0, abstractionStatus: 'completed' }),
+  ]);
+  await store.updateJob('job_test_1', { status: 'complete', currentPhase: 'complete' });
+  await store.refreshAbstractionRollup('job_test_1');
+  const job = await store.getJob('job_test_1');
+  assert(job.status === 'complete', `Expected complete status to be preserved, got ${job.status}`);
+});
+
+test('SQL abstraction rollup preserves complete jobs that have no remaining chunk work', () => {
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const fnStart = jobsSource.indexOf('async function refreshAbstractionCounts');
+  assert(fnStart >= 0, 'Expected refreshAbstractionCounts');
+  const fnBody = jobsSource.slice(fnStart, fnStart + 4500);
+  assert(
+    fnBody.includes("WHEN status = 'complete'") && fnBody.includes("THEN 'complete'"),
+    'Expected SQL rollup to keep complete jobs complete when no chunk work remains',
+  );
 });
 
 test('Phase 4: cancel fails pending chunks so canceled jobs leave the worker queue', async () => {
