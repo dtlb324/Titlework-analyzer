@@ -62,6 +62,7 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif
 
 let cachedStore = null;
 const DEFAULT_ABSTRACTION_MAX_ATTEMPTS = 5;
+const DEFAULT_ABSTRACTION_MAX_RECLAIMS = 8;
 
 export class JobApiError extends Error {
   constructor(message, statusCode = 500) {
@@ -107,17 +108,30 @@ function abstractionMaxAttempts(options = {}) {
   return DEFAULT_ABSTRACTION_MAX_ATTEMPTS;
 }
 
+function abstractionMaxReclaims(options = {}) {
+  const raw = options.maxReclaims;
+  const value = Number(raw);
+  if (Number.isInteger(value) && value >= 1) return Math.min(value, 32);
+  return DEFAULT_ABSTRACTION_MAX_RECLAIMS;
+}
+
 export function applyAbstractionClaim(chunk, options = {}) {
   const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
   const leaseMs = Math.max(1, Number(options.leaseMs) || 90_000);
   const maxAttempts = abstractionMaxAttempts(options);
-  const nextAttempts = (Number(chunk.abstractionAttempts) || 0) + 1;
+  const maxReclaims = abstractionMaxReclaims(options);
+  const sameWorker = chunk.abstractionStatus === 'processing' && chunk.abstractionWorkerId === workerId;
+  const nextAttempts = sameWorker
+    ? (Number(chunk.abstractionAttempts) || 0)
+    : (Number(chunk.abstractionAttempts) || 0) + 1;
+  const nextReclaims = sameWorker ? (Number(chunk.abstractionReclaims) || 0) + 1 : 0;
   const nowIso = options.nowIso || new Date().toISOString();
-  if (nextAttempts > maxAttempts) {
+  if (nextAttempts > maxAttempts || nextReclaims > maxReclaims) {
     return {
       ...chunk,
       abstractionStatus: 'failed',
       abstractionAttempts: nextAttempts,
+      abstractionReclaims: nextReclaims,
       abstractionErrorType: 'max_attempts',
       abstractionErrorMessage: 'Abstraction attempt limit exceeded.',
       abstractionClaimedAt: null,
@@ -131,6 +145,7 @@ export function applyAbstractionClaim(chunk, options = {}) {
     ...chunk,
     abstractionStatus: 'processing',
     abstractionAttempts: nextAttempts,
+    abstractionReclaims: nextReclaims,
     abstractionErrorType: null,
     abstractionErrorMessage: null,
     abstractionClaimedAt: nowIso,
@@ -150,17 +165,29 @@ async function mutateJobRateLimit(ip, update) {
   });
 }
 
+function denyLimiterUnavailable(res, requestId) {
+  res.setHeader('Retry-After', '5');
+  res.status(503).json({ error: 'Rate limiter unavailable. Try again.', requestId });
+}
+
 export async function requireJobPassword(req, res, requestId) {
   const requiredPassword = process.env.APP_PASSWORD;
   if (!requiredPassword) return true;
   const ip = getClientIp(req);
   const providedPassword = req.headers['x-app-password'];
-  const outcome = await mutateJobRateLimit(ip, entry => {
-    if (entry.failedAuth >= JOB_PASSWORD_FAILURE_LIMIT) return 'locked';
-    if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
-    entry.failedAuth += 1;
-    return 'invalid';
-  });
+  let outcome;
+  try {
+    outcome = await mutateJobRateLimit(ip, entry => {
+      if (entry.failedAuth >= JOB_PASSWORD_FAILURE_LIMIT) return 'locked';
+      if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
+      entry.failedAuth += 1;
+      return 'invalid';
+    });
+  } catch {
+    await delayAuthFailure();
+    denyLimiterUnavailable(res, requestId);
+    return false;
+  }
   if (outcome === 'ok') return true;
   await delayAuthFailure();
   if (outcome === 'locked') {
@@ -173,10 +200,16 @@ export async function requireJobPassword(req, res, requestId) {
 }
 
 export async function enforceJobRateLimit(req, res, requestId) {
-  const over = await mutateJobRateLimit(getClientIp(req), entry => {
-    entry.count += 1;
-    return entry.count > JOB_RATE_LIMIT_MAX_REQUESTS;
-  });
+  let over;
+  try {
+    over = await mutateJobRateLimit(getClientIp(req), entry => {
+      entry.count += 1;
+      return entry.count > JOB_RATE_LIMIT_MAX_REQUESTS;
+    });
+  } catch {
+    denyLimiterUnavailable(res, requestId);
+    return false;
+  }
   if (!over) return true;
   res.setHeader('Retry-After', '60');
   res.status(429).json({ error: 'Job metadata rate limit exceeded. Wait 60 seconds and try again.', requestId });
@@ -663,6 +696,7 @@ function rowToChunk(row) {
     lastErrorMessage: row.last_error_message,
     abstractionStatus: row.abstraction_status || 'pending',
     abstractionAttempts: row.abstraction_attempts ?? 0,
+    abstractionReclaims: row.abstraction_reclaims ?? 0,
     abstractionErrorType: row.abstraction_error_type,
     abstractionErrorMessage: row.abstraction_error_message,
     abstractionClaimedAt: row.abstraction_claimed_at instanceof Date ? row.abstraction_claimed_at.toISOString() : row.abstraction_claimed_at,
@@ -933,6 +967,7 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS completed_at timestamptz`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_status text NOT NULL DEFAULT 'pending'`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_attempts integer NOT NULL DEFAULT 0 CHECK (abstraction_attempts >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_reclaims integer NOT NULL DEFAULT 0 CHECK (abstraction_reclaims >= 0)`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_type text`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_message text`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS payload_bytes integer CHECK (payload_bytes IS NULL OR payload_bytes >= 0)`;
@@ -1463,32 +1498,112 @@ function createPostgresJobStore() {
       const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
       const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 90000) / 1000));
       const maxAttempts = abstractionMaxAttempts(options);
+      const maxReclaims = abstractionMaxReclaims(options);
       const rows = await sql`
         UPDATE document_chunks
         SET
-          abstraction_attempts = abstraction_attempts + 1,
+          abstraction_attempts = CASE
+            WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+            ELSE abstraction_attempts + 1
+          END,
+          abstraction_reclaims = CASE
+            WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+            ELSE 0
+          END,
           abstraction_status = CASE
-            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN 'failed'
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN 'failed'
             ELSE 'processing'
           END,
           abstraction_error_type = CASE
-            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN 'max_attempts'
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN 'max_attempts'
             ELSE NULL
           END,
           abstraction_error_message = CASE
-            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN 'Abstraction attempt limit exceeded.'
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN 'Abstraction attempt limit exceeded.'
             ELSE NULL
           END,
           abstraction_claimed_at = CASE
-            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN NULL
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN NULL
             ELSE now()
           END,
           abstraction_lease_expires_at = CASE
-            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN NULL
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN NULL
             ELSE now() + make_interval(secs => ${leaseSeconds})
           END,
           abstraction_worker_id = CASE
-            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN NULL
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN NULL
             ELSE ${workerId}
           END,
           abstraction_retry_at = NULL,

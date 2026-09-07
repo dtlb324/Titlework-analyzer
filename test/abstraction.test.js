@@ -73,6 +73,7 @@ function makeChunk(overrides = {}) {
     uploadStatus: 'uploaded',
     abstractionStatus: overrides.abstractionStatus || 'pending',
     abstractionAttempts: overrides.abstractionAttempts || 0,
+    abstractionReclaims: overrides.abstractionReclaims || 0,
     abstractionErrorType: overrides.abstractionErrorType || null,
     abstractionErrorMessage: overrides.abstractionErrorMessage || null,
     abstractionRetryAt: overrides.abstractionRetryAt || null,

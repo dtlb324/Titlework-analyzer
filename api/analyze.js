@@ -173,12 +173,20 @@ export default async function handler(req, res) {
   const requiredPassword = process.env.APP_PASSWORD;
   if (requiredPassword) {
     const providedPassword = req.headers['x-app-password'];
-    const outcome = await mutateAnalyzeRateLimit(ip, entry => {
-      if (entry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) return 'locked';
-      if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
-      entry.failedAuth += 1;
-      return 'invalid';
-    });
+    let outcome;
+    try {
+      outcome = await mutateAnalyzeRateLimit(ip, entry => {
+        if (entry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) return 'locked';
+        if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
+        entry.failedAuth += 1;
+        return 'invalid';
+      });
+    } catch {
+      await delayAuthFailure();
+      res.setHeader('Retry-After', '5');
+      logRequestEvent('api_reject', { requestId, status: 503, reason: 'rate_limiter_unavailable', ip, latencyMs: Date.now() - startedAt });
+      return res.status(503).json({ error: 'Rate limiter unavailable. Try again.', requestId });
+    }
     if (outcome === 'locked') {
       await delayAuthFailure();
       res.setHeader('Retry-After', '60');
@@ -211,10 +219,17 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  const overLimit = await mutateAnalyzeRateLimit(ip, entry => {
-    entry.count += 1;
-    return entry.count > RATE_LIMIT_MAX_REQUESTS;
-  });
+  let overLimit;
+  try {
+    overLimit = await mutateAnalyzeRateLimit(ip, entry => {
+      entry.count += 1;
+      return entry.count > RATE_LIMIT_MAX_REQUESTS;
+    });
+  } catch {
+    res.setHeader('Retry-After', '5');
+    logRequestEvent('api_reject', { requestId, status: 503, reason: 'rate_limiter_unavailable', ip, latencyMs: Date.now() - startedAt });
+    return res.status(503).json({ error: 'Rate limiter unavailable. Try again.', requestId });
+  }
   if (overLimit) {
     res.setHeader('Retry-After', '60');
     logRequestEvent('api_reject', { requestId, status: 429, reason: 'rate_limit', ip, latencyMs: Date.now() - startedAt });

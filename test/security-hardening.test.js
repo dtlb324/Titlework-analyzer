@@ -241,6 +241,7 @@ test('batch fallback can re-claim chunks already leased to the same worker', asy
       uploadStatus: 'uploaded',
       abstractionStatus: 'pending',
       abstractionAttempts: 0,
+      abstractionReclaims: 0,
     });
   }
   seed('chk_1');
@@ -292,23 +293,32 @@ test('batch fallback can re-claim chunks already leased to the same worker', asy
   assert(skipped.length === 0, `Same-worker fallback must not skip leased chunks, got ${JSON.stringify(results)}`);
   assert(results.some(result => result.status === 'completed' || result.status === 'failed' || result.status === 'retry_wait'),
     `Expected fallback to process chunks, got ${JSON.stringify(results.map(r => r.status))}`);
+  assert(chunks.get('chk_1').abstractionAttempts === 1, `Batch fallback must not burn an extra attempt, got ${chunks.get('chk_1').abstractionAttempts}`);
+  assert(chunks.get('chk_1').abstractionReclaims >= 1, 'Same-worker fallback should increment the reclaim counter');
 });
 
-test('same-worker reclaim increments attempts and fails after the hard cap', () => {
+test('same-worker reclaim uses a reclaim cap and does not burn extra attempts', () => {
   let chunk = {
     id: 'chk_poison',
     abstractionStatus: 'pending',
     abstractionAttempts: 0,
+    abstractionReclaims: 0,
   };
-  for (let i = 0; i < 5; i++) {
-    chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, leaseMs: 90_000 });
-    assert(chunk.abstractionStatus === 'processing', `Attempt ${i + 1} should remain processing`);
-    assert(chunk.abstractionAttempts === i + 1, `Expected attempts ${i + 1}, got ${chunk.abstractionAttempts}`);
+  chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, maxReclaims: 3, leaseMs: 90_000 });
+  assert(chunk.abstractionStatus === 'processing', 'First claim should process');
+  assert(chunk.abstractionAttempts === 1, 'First claim increments attempts');
+  assert(chunk.abstractionReclaims === 0, 'First claim is not a reclaim');
+  for (let i = 1; i <= 3; i++) {
+    chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, maxReclaims: 3, leaseMs: 90_000 });
+    assert(chunk.abstractionAttempts === 1, `Reclaim ${i} must not increment attempts`);
+    assert(chunk.abstractionReclaims === i, `Expected reclaims ${i}, got ${chunk.abstractionReclaims}`);
+    assert(chunk.abstractionStatus === 'processing', `Reclaim ${i} should stay processing under the cap`);
   }
-  chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, leaseMs: 90_000 });
+  chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, maxReclaims: 3, leaseMs: 90_000 });
   assert(chunk.abstractionStatus === 'failed', 'Over-cap reclaim must fail the chunk');
   assert(chunk.abstractionErrorType === 'max_attempts', 'Expected max_attempts');
-  assert(chunk.abstractionAttempts === 6, 'Cap failure still records the extra attempt');
+  assert(chunk.abstractionAttempts === 1, 'Failed reclaim must not punish with an extra attempt');
+  assert(chunk.abstractionReclaims === 4, 'Cap failure records the extra reclaim');
 });
 
 test('password strikes persist across instances via shared limiter store', async () => {
@@ -347,6 +357,77 @@ test('password strikes persist across instances via shared limiter store', async
     }), locked, 'gcs_lock');
     assert(locked.statusCode === 429, `Expected shared lockout after memory reset, got ${locked.statusCode}`);
     assert(objects.size >= 1, 'Expected a persisted rate-limit object');
+  } finally {
+    delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
+    resetJobRateLimits();
+    if (previous === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = previous;
+  }
+});
+
+test('successful auth uses a short TTL cache instead of a GCS RMW each request', async () => {
+  const previous = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'correct-horse';
+  resetJobRateLimits();
+  const objects = new Map();
+  let reads = 0;
+  let writes = 0;
+  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
+    async read(key) {
+      reads += 1;
+      const row = objects.get(key);
+      return row ? { data: { ...row.data }, generation: row.generation } : { data: null, generation: 0 };
+    },
+    async write(key, data, generation) {
+      writes += 1;
+      const existing = objects.get(key);
+      const current = existing?.generation ?? 0;
+      if (generation !== current) {
+        const err = new Error('precondition');
+        err.code = 412;
+        throw err;
+      }
+      objects.set(key, { data: { ...data }, generation: current + 1 });
+    },
+  };
+  try {
+    for (let i = 0; i < 4; i++) {
+      const res = mockRes();
+      const ok = await requireJobPassword(mockReq({
+        headers: { 'x-app-password': 'correct-horse', 'x-forwarded-for': '203.0.113.92' },
+      }), res, `cache_${i}`);
+      assert(ok === true, `Expected successful auth, got ${res.statusCode}`);
+    }
+    assert(reads === 1, `Expected one shared read inside the TTL, got ${reads}`);
+    assert(writes === 0, `Successful auth must not RMW the shared store, got ${writes} writes`);
+  } finally {
+    delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
+    resetJobRateLimits();
+    if (previous === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = previous;
+  }
+});
+
+test('shared limiter fails closed when store errors are not 412', async () => {
+  const previous = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'correct-horse';
+  resetJobRateLimits();
+  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
+    async read() {
+      const err = new Error('backend exploded');
+      err.code = 500;
+      throw err;
+    },
+    async write() {
+      throw new Error('write should not run');
+    },
+  };
+  try {
+    const res = mockRes();
+    const ok = await requireJobPassword(mockReq({
+      headers: { 'x-app-password': 'correct-horse', 'x-forwarded-for': '203.0.113.93' },
+    }), res, 'gcs_down');
+    assert(ok === false && res.statusCode === 503, `Expected fail-closed 503, got ${res.statusCode}`);
   } finally {
     delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
     resetJobRateLimits();
