@@ -63,10 +63,12 @@ export async function extractPdfText(payloadBytes, options = {}) {
   try {
     const { extractText, getDocumentProxy } = await import('unpdf');
     const pdf = await getDocumentProxy(new Uint8Array(bytes));
-    const { totalPages, text } = await extractText(pdf, { mergePages: true });
+    const { totalPages, text } = await extractText(pdf, { mergePages: false });
+    const pageTexts = (Array.isArray(text) ? text : [text]).map(page => String(page || '').trim());
     return {
-      text: String(text || '').trim(),
-      totalPages: Math.max(0, Number(totalPages) || 0),
+      text: pageTexts.filter(Boolean).join('\n\n'),
+      pageTexts,
+      totalPages: Math.max(0, Number(totalPages) || pageTexts.length || 0),
     };
   } catch (err) {
     return {
@@ -80,10 +82,13 @@ export async function extractPdfText(payloadBytes, options = {}) {
 /**
  * Decide whether extracted text is dense/legible enough to skip visual PDF tokens.
  */
-export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, configOverrides = {}) {
+export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTexts }, configOverrides = {}) {
   const config = { ...getPdfTextConfig(), ...configOverrides };
+  const pagesFromExtract = Array.isArray(pageTexts)
+    ? pageTexts.map(page => String(page || '').trim())
+    : null;
   const trimmed = String(text || '').trim();
-  const pages = Math.max(1, Number(pageCount) || 1);
+  const pages = Math.max(1, pagesFromExtract?.length || Number(pageCount) || 1);
   const sizeBytes = Math.max(0, Number(fileSizeBytes) || 0);
 
   if (!trimmed.length) {
@@ -91,6 +96,19 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, confi
   }
   if (trimmed.length > config.maxExtractedChars) {
     return { suitable: false, reason: 'text_too_long' };
+  }
+
+  if (pagesFromExtract?.length) {
+    const sparsePages = pagesFromExtract.filter(page => page.length < config.minCharsPerPage).length;
+    if (sparsePages > 0) {
+      return {
+        suitable: false,
+        reason: 'blank_or_sparse_pages',
+        sparsePages,
+        pageCount: pagesFromExtract.length,
+        coverage: (pagesFromExtract.length - sparsePages) / pagesFromExtract.length,
+      };
+    }
   }
 
   const charsPerPage = trimmed.length / pages;
@@ -157,6 +175,7 @@ export async function resolvePdfTextDelivery(payloadBytes, options = {}) {
     text: extracted.text,
     pageCount: extracted.totalPages || 1,
     fileSizeBytes: bytes.byteLength,
+    pageTexts: extracted.pageTexts,
   }, config);
   if (!quality.suitable) {
     return {

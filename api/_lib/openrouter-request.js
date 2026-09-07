@@ -163,9 +163,11 @@ export function buildOpenRouterHeaders() {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${openRouterApiKey()}`,
-    'HTTP-Referer': process.env.OPENROUTER_REFERER || 'http://localhost:3000',
     'X-Title': process.env.OPENROUTER_TITLE || 'Titlework Analyzer',
   };
+  if (process.env.OPENROUTER_REFERER) {
+    headers['HTTP-Referer'] = process.env.OPENROUTER_REFERER;
+  }
   return headers;
 }
 

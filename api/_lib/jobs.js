@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { neon } from '@neondatabase/serverless';
+import { getClientIp } from './client-ip.js';
 import { buildObjectKey, isAllowedStorageUrl, validateObjectRef } from './storage.js';
 
 const ALLOWED_STATUSES = new Set([
@@ -39,6 +40,7 @@ const CHUNK_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'fail
 const CHUNK_ABSTRACTION_STATUSES = new Set(['pending', 'processing', 'completed', 'failed', 'split_superseded', 'retry_wait']);
 const JOB_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const JOB_RATE_LIMIT_MAX_REQUESTS = 1500;
+const JOB_PASSWORD_FAILURE_LIMIT = 5;
 const RAW_PAYLOAD_KEYS = new Set([
   'data',
   'base64',
@@ -70,7 +72,10 @@ export class JobApiError extends Error {
 export function setJobSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Content-Security-Policy', "default-src 'none'");
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
 }
@@ -94,41 +99,66 @@ export function secureCompare(a, b) {
   return diff === 0;
 }
 
-export function requireJobPassword(req, res, requestId) {
-  const requiredPassword = process.env.APP_PASSWORD;
-  if (!requiredPassword) return true;
-  const providedPassword = req.headers['x-app-password'];
-  if (secureCompare(providedPassword || '', requiredPassword)) return true;
-  res.status(401).json({ error: 'Invalid password.', requestId });
-  return false;
-}
-
-function getClientIp(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    || req.headers['x-real-ip']
-    || req.socket?.remoteAddress
-    || 'unknown';
-}
-
-export function enforceJobRateLimit(req, res, requestId) {
-  const ip = getClientIp(req);
+function getJobRateEntry(ip) {
   const now = Date.now();
-  const entry = jobRateLimitMap.get(ip) || { count: 0, windowStart: now };
+  const entry = jobRateLimitMap.get(ip) || { count: 0, failedAuth: 0, windowStart: now };
   if (now - entry.windowStart > JOB_RATE_LIMIT_WINDOW_MS) {
     entry.count = 0;
+    entry.failedAuth = 0;
     entry.windowStart = now;
   }
-  entry.count += 1;
   jobRateLimitMap.set(ip, entry);
   for (const [storedIp, storedEntry] of jobRateLimitMap.entries()) {
     if (now - storedEntry.windowStart > JOB_RATE_LIMIT_WINDOW_MS * 2) {
       jobRateLimitMap.delete(storedIp);
     }
   }
+  return entry;
+}
+
+export function requireJobPassword(req, res, requestId) {
+  const requiredPassword = process.env.APP_PASSWORD;
+  if (!requiredPassword) return true;
+  const entry = getJobRateEntry(getClientIp(req));
+  if (entry.failedAuth >= JOB_PASSWORD_FAILURE_LIMIT) {
+    res.setHeader('Retry-After', '60');
+    res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
+    return false;
+  }
+  const providedPassword = req.headers['x-app-password'];
+  if (secureCompare(providedPassword || '', requiredPassword)) return true;
+  entry.failedAuth += 1;
+  res.status(401).json({ error: 'Invalid password.', requestId });
+  return false;
+}
+
+export function enforceJobRateLimit(req, res, requestId) {
+  const entry = getJobRateEntry(getClientIp(req));
+  entry.count += 1;
   if (entry.count <= JOB_RATE_LIMIT_MAX_REQUESTS) return true;
   res.setHeader('Retry-After', '60');
   res.status(429).json({ error: 'Job metadata rate limit exceeded. Wait 60 seconds and try again.', requestId });
   return false;
+}
+
+export function resetJobRateLimits() {
+  jobRateLimitMap.clear();
+}
+
+export { getClientIp };
+
+export function deriveSynthesisProgress({
+  job,
+  counts,
+  hasResultRow,
+  mergeLeaseHeld,
+}) {
+  const hasResult = Boolean(hasResultRow);
+  const jobTerminal = TERMINAL_STATUSES.has(job?.status);
+  const segmentsAllFinished = (counts?.total || 0) > 0
+    && ((counts.pending || 0) + (counts.processing || 0) + (counts.retry_wait || 0)) === 0;
+  const mergeInProgress = !jobTerminal && (Boolean(mergeLeaseHeld) || (segmentsAllFinished && !hasResult));
+  return { hasResult, mergeInProgress, mergeLeaseHeld: Boolean(mergeLeaseHeld) };
 }
 
 export function hasRawPayloadFields(value) {
@@ -1394,7 +1424,10 @@ function createPostgresJobStore() {
         UPDATE document_chunks
         SET
           abstraction_status = 'processing',
-          abstraction_attempts = abstraction_attempts + 1,
+          abstraction_attempts = CASE
+            WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+            ELSE abstraction_attempts + 1
+          END,
           abstraction_error_type = NULL,
           abstraction_error_message = NULL,
           abstraction_claimed_at = now(),
@@ -1409,6 +1442,7 @@ function createPostgresJobStore() {
             abstraction_status = 'pending'
             OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
             OR (abstraction_status = 'processing' AND (abstraction_lease_expires_at IS NULL OR abstraction_lease_expires_at <= now()))
+            OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId})
           )
         RETURNING *
       `;
@@ -1492,19 +1526,12 @@ function createPostgresJobStore() {
         SET status = 'canceled',
             current_phase = 'canceled',
             error_message = ${cancelReason},
+            synthesis_merge_worker_id = NULL,
+            synthesis_merge_lease_expires_at = NULL,
             completed_at = COALESCE(completed_at, now()),
             updated_at = now()
         WHERE id = ${jobId}
         RETURNING *
-      `;
-      await sql`
-        UPDATE document_chunks
-        SET abstraction_claimed_at = NULL,
-            abstraction_lease_expires_at = NULL,
-            abstraction_worker_id = NULL,
-            updated_at = now()
-        WHERE job_id = ${jobId}
-          AND abstraction_status = 'processing'
       `;
       await sql`
         UPDATE document_chunks
@@ -1517,8 +1544,9 @@ function createPostgresJobStore() {
             abstraction_worker_id = NULL,
             updated_at = now()
         WHERE job_id = ${jobId}
-          AND abstraction_status IN ('pending', 'retry_wait')
+          AND abstraction_status IN ('pending', 'retry_wait', 'processing')
       `;
+      await this.clearSynthesisPreview(jobId);
       await refreshAbstractionCounts(jobId);
       return rowToJob(rows[0]);
     },
@@ -2246,6 +2274,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE id = ${jobId}
           AND synthesis_plan_id = ${planId}
+          AND status <> 'canceled'
           AND (
             synthesis_merge_worker_id IS NULL
             OR synthesis_merge_lease_expires_at IS NULL
@@ -2267,6 +2296,7 @@ function createPostgresJobStore() {
       await ensureSchema();
       const job = await this.getJob(jobId);
       if (!job) return null;
+      if (job.status === 'canceled') return null;
       const id = `res_${randomUUID()}`;
       const status = JOB_RESULT_STATUSES.has(payload.status) ? payload.status : 'complete';
       const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
@@ -2285,6 +2315,7 @@ function createPostgresJobStore() {
           ${payload.synthesisDurationMs ?? null}::integer, now()
         FROM analysis_jobs aj
         WHERE aj.id = ${jobId}::text
+          AND aj.status <> 'canceled'
           AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
             aj.synthesis_plan_id = ${payload.planId || null}::text
             AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
@@ -2453,16 +2484,13 @@ function createPostgresJobStore() {
         : null;
       const mergeLeaseExpiresAt = job.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
       const mergeLeaseHeld = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
-      const hasResult = result
-        ? Boolean(result.finalTitleOpinion)
-        : Boolean(resultMeta?.hasOpinion);
-      // Treat the post-segments / pre-result window as "merge in progress" so
-      // pollers don't declare the job terminal before a server worker has
-      // claimed the final merge. Without this, clients can race the claim and
-      // fall back to browser synthesis even though the server would have run it.
-      const segmentsAllFinished = counts.total > 0
-        && (counts.pending + counts.processing + counts.retry_wait) === 0;
-      const mergeInProgress = mergeLeaseHeld || (segmentsAllFinished && !hasResult);
+      const hasResultRow = Boolean(result || resultMeta);
+      const { hasResult, mergeInProgress } = deriveSynthesisProgress({
+        job,
+        counts,
+        hasResultRow,
+        mergeLeaseHeld,
+      });
       return {
         job,
         planId,
@@ -2473,6 +2501,7 @@ function createPostgresJobStore() {
         failed: counts.failed,
         retry_wait: counts.retry_wait,
         mergeInProgress,
+        mergeLeaseHeld,
         segments: includeSegments ? segments : [],
         hasResult,
         result: includeResult ? result : null,
@@ -2575,7 +2604,7 @@ function createPostgresJobStore() {
       }
       await refreshAbstractionCounts(targetJobId);
       await refreshUploadCounts(targetJobId);
-      return { imported, sourceJobId, targetJobId };
+      return { imported, sourceJobId, targetJobId, nextChunkOrder: orderOffset };
     },
 
     async finalizeUploads(jobId) {

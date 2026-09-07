@@ -66,6 +66,8 @@ test('Cloud Run server exposes health and serves the static app', async () => {
     assert(home.statusCode === 200, `Expected home 200, got ${home.statusCode}`);
     assert(home.headers['content-type'].includes('text/html'), 'Expected text/html response');
     assert(home.text.includes('Mineral Ownership Builder'), 'Expected static app HTML');
+    assert(String(home.headers['strict-transport-security'] || '').includes('max-age='), 'Expected HSTS on static UI');
+    assert(!health.json?.release?.gitSha, 'Public /healthz must not leak gitSha');
   });
 });
 

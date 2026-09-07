@@ -234,10 +234,17 @@ export async function invokeModel(request, options = {}) {
     throw error;
   }
 
+  const stream = Boolean(options.stream || request.stream);
+  const streamOptions = {
+    ...options,
+    onDelta: options.onDelta || request.onDelta,
+    onEvent: options.onEvent || request.onEvent,
+  };
+
   // OpenRouter routing: slash-name detection or global toggle
   if (shouldUseOpenRouter(model)) {
-    if (Number(request.maxTokens) > NON_STREAMING_MAX_TOKENS) {
-      return await invokeOpenRouterModelStream(request, options);
+    if (stream || Number(request.maxTokens) > NON_STREAMING_MAX_TOKENS) {
+      return await invokeOpenRouterModelStream(request, streamOptions);
     }
     return await invokeOpenRouterModel(request, options);
   }
@@ -249,8 +256,8 @@ export async function invokeModel(request, options = {}) {
 
   // Anthropic routing
   if (isAnthropicModel(model)) {
-    if (Number(request.maxTokens) > NON_STREAMING_MAX_TOKENS) {
-      return await invokeAnthropicModelStream(request, options);
+    if (stream || Number(request.maxTokens) > NON_STREAMING_MAX_TOKENS) {
+      return await invokeAnthropicModelStream(request, streamOptions);
     }
     return await invokeAnthropicModel(request, options);
   }

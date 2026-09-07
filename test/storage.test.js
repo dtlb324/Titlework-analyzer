@@ -521,6 +521,7 @@ test('durable upload endpoints reject raw base64 and document contents', async (
 test('storage upload endpoint signs GCS uploads without Vercel Blob client code', () => {
   const source = readFileSync(join(root, 'api/blob/upload.js'), 'utf8');
   assert(source.includes('createSignedUpload'), 'Upload endpoint should create signed GCS upload metadata');
+  assert(readFileSync(join(root, 'api/_lib/storage.js'), 'utf8').includes("'content-length'"), 'Signed uploads must bind Content-Length');
   assert(!source.includes('@vercel/blob'), 'Upload endpoint should not import the Vercel Blob client');
   assert(!source.includes('blob.upload-completed'), 'Upload endpoint should not depend on Vercel Blob completion callbacks');
   assert(!source.includes("'image/tiff'"), 'Storage upload content types should not include TIFF when analyze API cannot process TIFF images');

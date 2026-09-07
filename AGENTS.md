@@ -68,10 +68,8 @@ manual `gcloud run deploy`, no Build triggers on `main`.
 
 ### Production vs local
 
-- Production: `WORKER_DISABLED=true` (loop off); a scheduler pings
-  `POST /internal/drain`, and the browser-tab API kick covers the gap.
-- Local/elsewhere: run `npm run dev:worker` for background processing, or
-  keep the browser tab open so the API kick processes the job.
+- Production: `WORKER_DISABLED=true` (loop off, scale-to-zero). Release does **not** create a Cloud Scheduler job. Keep the browser tab open so API `/process` kicks drain work. Optional scheduler setup is in `docs/worker-synthesis-scheduler-runbook.md`.
+- Local/elsewhere: run `npm run dev:worker` for background processing, or keep the browser tab open so the API kick processes the job.
 
 ## Cursor Cloud specific instructions
 

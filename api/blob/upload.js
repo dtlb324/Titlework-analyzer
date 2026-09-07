@@ -1,5 +1,6 @@
 import {
   createRequestId,
+  enforceJobRateLimit,
   getJobStore,
   parseJsonBody,
   requireJobPassword,
@@ -25,9 +26,10 @@ export default async function handler(req, res) {
   if (!['GET', 'POST'].includes(req.method)) {
     return res.status(405).json({ error: 'Method not allowed.', requestId });
   }
+  if (!enforceJobRateLimit(req, res, requestId)) return;
+  if (!requireJobPassword(req, res, requestId)) return;
 
   if (req.method === 'GET') {
-    if (!requireJobPassword(req, res, requestId)) return;
     const config = getStorageConfig();
     return res.status(200).json({
       available: storageIsConfigured(),
@@ -44,8 +46,6 @@ export default async function handler(req, res) {
   } catch {
     return res.status(400).json({ error: 'Invalid JSON in upload request.', requestId });
   }
-
-  if (!requireJobPassword(req, res, requestId)) return;
 
   if (!storageIsConfigured()) {
     return res.status(503).json({
@@ -98,6 +98,6 @@ export default async function handler(req, res) {
       requestId,
       reason: err?.message || String(err),
     }));
-    return res.status(err?.statusCode || 400).json({ error: err?.message || 'Could not prepare durable upload.', requestId });
+    return res.status(err?.statusCode || 400).json({ error: 'Could not prepare durable upload.', requestId });
   }
 }

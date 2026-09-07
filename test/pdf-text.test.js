@@ -31,6 +31,17 @@ test('assessExtractedPdfText rejects empty and sparse extraction', () => {
   assert(sparse.suitable === false, 'Expected sparse rejection');
 });
 
+test('assessExtractedPdfText rejects mixed dense and blank pages', () => {
+  const dense = 'GRANTOR: Party A\nGRANTEE: Party B\nLEGAL DESC: Section 1\n'.repeat(20);
+  const quality = assessExtractedPdfText({
+    text: dense,
+    pageCount: 2,
+    fileSizeBytes: 80_000,
+    pageTexts: [dense, ''],
+  });
+  assert(quality.suitable === false && quality.reason === 'blank_or_sparse_pages', 'Expected blank-page rejection');
+});
+
 test('assessExtractedPdfText rejects likely scanned image PDFs', () => {
   const text = 'GRANTOR: JOHN DOE; GRANTEE: JANE DOE; '.repeat(40);
   const scanned = assessExtractedPdfText({ text, pageCount: 4, fileSizeBytes: 1_500_000 });

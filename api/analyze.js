@@ -2,12 +2,14 @@
 // Protections: rate limiting, input validation, secure password comparison,
 // request size limiting, XSS headers, data leakage prevention
 
+import { getClientIp } from './_lib/client-ip.js';
 import {
   invokeModel,
   isAnthropicModel,
   isGeminiModel,
   mapModelResponseToAnalyzeProxy,
   modelApiKeyError,
+  sanitizeModelClientError,
 } from './_lib/model-client.js';
 
 export const config = {
@@ -181,10 +183,25 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed.', requestId });
   }
 
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    || req.headers['x-real-ip']
-    || req.socket?.remoteAddress
-    || 'unknown';
+  const ip = getClientIp(req);
+  cleanupRateLimitMap();
+  const rateEntry = getRateLimitEntry(ip);
+
+  const requiredPassword = process.env.APP_PASSWORD;
+  if (requiredPassword) {
+    const providedPassword = req.headers['x-app-password'];
+    if (rateEntry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) {
+      res.setHeader('Retry-After', '60');
+      logRequestEvent('api_reject', { requestId, status: 429, reason: 'password_rate_limit', ip, latencyMs: Date.now() - startedAt });
+      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
+    }
+    if (!secureCompare(providedPassword || '', requiredPassword)) {
+      rateEntry.failedAuth += 1;
+      await new Promise(r => setTimeout(r, 500));
+      logRequestEvent('api_reject', { requestId, status: 401, reason: 'invalid_password', ip, latencyMs: Date.now() - startedAt });
+      return res.status(401).json({ error: 'Invalid password.', requestId });
+    }
+  }
 
   let body = req.body;
   if (typeof body === 'string') {
@@ -199,25 +216,6 @@ export default async function handler(req, res) {
   if (!validation.valid) {
     logRequestEvent('api_reject', { requestId, status: 400, reason: validation.reason, latencyMs: Date.now() - startedAt });
     return res.status(400).json({ error: validation.reason, requestId });
-  }
-
-  cleanupRateLimitMap();
-  const rateEntry = getRateLimitEntry(ip);
-
-  const requiredPassword = process.env.APP_PASSWORD;
-  if (requiredPassword) {
-    const providedPassword = req.headers['x-app-password'];
-    if (rateEntry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) {
-      res.setHeader('Retry-After', '60');
-      logRequestEvent('api_reject', { requestId, status: 429, reason: 'password_rate_limit', ip, latencyMs: Date.now() - startedAt });
-      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
-    }
-    if (!secureCompare(providedPassword || '', requiredPassword)) {
-      rateEntry.failedAuth++,
-      await new Promise(r => setTimeout(r, 500));
-      logRequestEvent('api_reject', { requestId, status: 401, reason: 'invalid_password', ip, latencyMs: Date.now() - startedAt });
-      return res.status(401).json({ error: 'Invalid password.', requestId });
-    }
   }
 
   if (validation.isPing) {
@@ -294,7 +292,7 @@ export default async function handler(req, res) {
         model: safeBody.model,
         stop_reason: null,
         usage: {},
-        error: { message: err?.message || 'Model request failed.' },
+        error: { message: sanitizeModelClientError(err) },
         requestId,
       };
     } finally {

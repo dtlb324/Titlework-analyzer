@@ -29,7 +29,7 @@ export function createWorkerHealthServer({ drain } = {}) {
   let draining = false;
   return createServer((req, res) => {
     if (req.url === '/healthz') {
-      const body = JSON.stringify({ ok: true, service: 'title-analyzer-worker', release: getRuntimeInfo() });
+      const body = JSON.stringify({ ok: true, service: 'title-analyzer-worker', release: { version: getRuntimeInfo().version } });
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'content-length': Buffer.byteLength(body),

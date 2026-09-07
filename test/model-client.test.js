@@ -190,6 +190,56 @@ test('invokeModel streaming path does not consume the SSE body via json()', asyn
   }
 });
 
+test('invokeModel streams through OpenRouter when MODEL_PROVIDER=openrouter', async () => {
+  const prevKey = process.env.OPENROUTER_API_KEY;
+  const prevAnthropic = process.env.ANTHROPIC_API_KEY;
+  const prevProvider = process.env.MODEL_PROVIDER;
+  const prevFetch = global.fetch;
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-should-not-be-used';
+  process.env.MODEL_PROVIDER = 'openrouter';
+  let requestedUrl = '';
+  global.fetch = async (url) => {
+    requestedUrl = String(url);
+    const encoder = new TextEncoder();
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      body: {
+        getReader() {
+          let done = false;
+          return {
+            async read() {
+              if (done) return { done: true, value: undefined };
+              done = true;
+              return { done: false, value: encoder.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n') };
+            },
+            releaseLock() {},
+          };
+        },
+      },
+    };
+  };
+  try {
+    const result = await invokeModel({
+      model: 'claude-sonnet-4-6',
+      maxTokens: 4000,
+      stream: true,
+      system: 'system',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'merge' }] }],
+    }, { stream: true });
+    assert(requestedUrl.includes('openrouter.ai'), `Expected OpenRouter URL, got ${requestedUrl}`);
+    assert(!requestedUrl.includes('api.anthropic.com'), 'Must not stream merge via direct Anthropic when OpenRouter is selected');
+    assert(result.text === 'ok', `Expected streamed OpenRouter text, got "${result.text}"`);
+  } finally {
+    global.fetch = prevFetch;
+    if (prevKey) process.env.OPENROUTER_API_KEY = prevKey; else delete process.env.OPENROUTER_API_KEY;
+    if (prevAnthropic) process.env.ANTHROPIC_API_KEY = prevAnthropic; else delete process.env.ANTHROPIC_API_KEY;
+    if (prevProvider) process.env.MODEL_PROVIDER = prevProvider; else delete process.env.MODEL_PROVIDER;
+  }
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

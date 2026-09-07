@@ -144,17 +144,24 @@ export async function createSignedUpload({ jobId, chunkId, originalFilename, obj
   const expiresAt = Date.now() + config.signedUrlTtlMs;
   const bucket = options.bucket || await getBucket(config);
   const file = bucket.file(key);
-  const [uploadUrl] = await file.getSignedUrl({
+  const sizeKnown = Number.isFinite(size) && size > 0;
+  const signOptions = {
     version: 'v4',
     action: 'write',
     expires: expiresAt,
     contentType,
-  });
+  };
+  if (sizeKnown) {
+    signOptions.extensionHeaders = { 'content-length': String(Math.floor(size)) };
+  }
+  const [uploadUrl] = await file.getSignedUrl(signOptions);
+  const headers = { 'content-type': contentType };
+  if (sizeKnown) headers['content-length'] = String(Math.floor(size));
   return {
     provider: 'gcs',
     method: 'PUT',
     uploadUrl,
-    headers: { 'content-type': contentType },
+    headers,
     objectKey: key,
     objectUrl: buildObjectUrl(config.bucket, key),
     blobKey: key,

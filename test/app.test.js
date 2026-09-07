@@ -517,7 +517,7 @@ test('analyzeAdditional uses durable upload and server abstraction when storage 
   assert(script.includes('async function analyzeAdditional'), 'Missing analyzeAdditional()');
   assert(script.includes('async function resolvePriorAbstractsForContinuation'), 'Missing prior abstract resolver');
   assert(script.includes('async function importContinuationAbstracts'), 'Missing continuation import helper');
-  assert(script.includes('registerJobUploads(job.id, newFiles'), 'Additional analysis should register durable uploads');
+  assert(script.includes('registerJobUploads(job.id, newFiles, { chunkOrderOffset })'), 'Additional analysis should offset new docs after imported priors');
   assert(script.includes('runServerDocumentAbstraction(job.id, newFiles'), 'Additional analysis should prefer server abstraction');
   assert(script.includes('importContinuationAbstracts(job.id, sourceJobId)'), 'Additional analysis should import prior server abstracts');
   assert(script.includes('importedContinuation'), 'Additional analysis should track continuation import success');
@@ -537,10 +537,10 @@ test('import-continuation API route is wired', () => {
   assert(jobsSource.includes('async importContinuationAbstracts(targetJobId, sourceJobId)'), 'Job store should implement continuation import');
 });
 
-test('server synthesis tells the user the tab can be closed', () => {
+test('server synthesis keeps the tab-open notice (worker loop is off in production)', () => {
   assert(script.includes('SERVER_SYNTHESIS_NOTICE'), 'Expected a server-synthesis notice constant');
-  assert(/close this tab/i.test(script), 'Expected the synthesis notice to say the tab can be closed');
-  assert(script.includes('showServerSynthesisNotice()'), 'Expected runServerSynthesis to show the server-synthesis notice');
+  assert(!/safely close this tab/i.test(script), 'Synthesis must not tell the user the tab can be closed');
+  assert(script.includes('showKeepOpenNotice()'), 'Expected runServerSynthesis to show the keep-open notice');
 });
 
 let failed = 0;
