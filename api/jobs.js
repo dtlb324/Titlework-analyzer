@@ -22,8 +22,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed.', requestId });
   }
-  if (!enforceJobRateLimit(req, res, requestId)) return;
-  if (!requireJobPassword(req, res, requestId)) return;
+  if (!(await enforceJobRateLimit(req, res, requestId))) return;
+  if (!(await requireJobPassword(req, res, requestId))) return;
 
   let body;
   try {

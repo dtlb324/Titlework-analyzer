@@ -696,8 +696,8 @@ export default async function handler(req, res) {
   res.setHeader('X-Request-Id', requestId);
 
   const parts = getPathParts(req);
-  if (!enforceJobRateLimit(req, res, requestId)) return;
-  if (!requireJobPassword(req, res, requestId)) return;
+  if (!(await enforceJobRateLimit(req, res, requestId))) return;
+  if (!(await requireJobPassword(req, res, requestId))) return;
 
   const store = getJobStore();
   if (!store) return sendStorageNotConfigured(res, requestId);

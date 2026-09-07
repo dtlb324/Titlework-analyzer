@@ -31,7 +31,7 @@ test('assessExtractedPdfText rejects empty and sparse extraction', () => {
   assert(sparse.suitable === false, 'Expected sparse rejection');
 });
 
-test('assessExtractedPdfText rejects mixed dense and blank pages', () => {
+test('assessExtractedPdfText flags mixed dense and blank pages without forcing full-doc visual', () => {
   const dense = 'GRANTOR: Party A\nGRANTEE: Party B\nLEGAL DESC: Section 1\n'.repeat(20);
   const quality = assessExtractedPdfText({
     text: dense,
@@ -39,7 +39,8 @@ test('assessExtractedPdfText rejects mixed dense and blank pages', () => {
     fileSizeBytes: 80_000,
     pageTexts: [dense, ''],
   });
-  assert(quality.suitable === false && quality.reason === 'blank_or_sparse_pages', 'Expected blank-page rejection');
+  assert(quality.suitable === false && quality.reason === 'blank_or_sparse_pages', 'Expected blank-page flag');
+  assert(quality.densePages === 1 && quality.sparsePages === 1, 'Expected mixed dense/sparse counts');
 });
 
 test('assessExtractedPdfText rejects likely scanned image PDFs', () => {
@@ -71,6 +72,35 @@ test('extractPdfText reads text from a generated pdf-lib document', async () => 
   const delivery = await resolvePdfTextDelivery(bytes);
   assert(delivery.mode === 'text', `Expected text delivery for typed PDF, got ${delivery.mode} (${delivery.reason || ''})`);
   assert(delivery.extractedText.includes('GRANTEE: JANE DOE'), 'Expected grantee in delivery text');
+});
+
+test('resolvePdfTextDelivery uses hybrid mode for mixed dense and blank pages', async () => {
+  const { extractPdfPageSubset } = await import('../api/_lib/pdf-text.js');
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const densePage = doc.addPage([612, 792]);
+  const dense = 'STATE OF TEXAS\nCOUNTY OF REEVES\nGRANTOR: JOHN DOE\nGRANTEE: JANE DOE\nLEGAL DESC: Section 1\n';
+  densePage.drawText(dense.repeat(10), { x: 72, y: 700, size: 11, font, lineHeight: 14, maxWidth: 460 });
+  doc.addPage([612, 792]);
+  const bytes = Buffer.from(await doc.save());
+  const delivery = await resolvePdfTextDelivery(bytes);
+  assert(delivery.mode === 'hybrid', `Expected hybrid delivery, got ${delivery.mode} (${delivery.reason || ''})`);
+  assert(delivery.extractedText.includes('GRANTOR: JOHN DOE'), 'Expected dense page text kept');
+  assert(Array.isArray(delivery.sparsePages) && delivery.sparsePages.includes(2), `Expected page 2 marked sparse, got ${delivery.sparsePages}`);
+  assert(Buffer.isBuffer(delivery.visualBytes) && delivery.visualBytes.length > 0, 'Expected sparse-page PDF bytes');
+  const subset = await extractPdfPageSubset(bytes, [1]);
+  assert(subset.length > 0, 'Subset extractor should copy the blank page');
+  const { buildAbstractMessagesForChunk } = await import('../api/_lib/abstraction.js');
+  const messages = buildAbstractMessagesForChunk({
+    id: 'chk_hybrid',
+    originalFilename: 'mixed.pdf',
+    mediaType: 'application/pdf',
+  }, bytes, 0, delivery);
+  const content = messages[0].content;
+  const documentBlocks = content.filter(block => block.type === 'document');
+  assert(documentBlocks.length === 1, 'Hybrid path should attach only the sparse-page PDF');
+  assert(documentBlocks[0].source.data.length < bytes.toString('base64').length, 'Sparse visual PDF must be smaller than the full document');
+  assert(content.some(block => block.type === 'text' && block.text.includes('HYBRID PDF')), 'Expected hybrid prompt labeling');
 });
 
 test('buildAbstractMessagesForChunk uses extracted text without document block', async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { neon } from '@neondatabase/serverless';
 import { getClientIp } from './client-ip.js';
+import { delayAuthFailure, mutateSharedRateLimit, resetSharedRateLimits } from './shared-rate-limit.js';
 import { buildObjectKey, isAllowedStorageUrl, validateObjectRef } from './storage.js';
 
 const ALLOWED_STATUSES = new Set([
@@ -60,7 +61,7 @@ const MAX_TITLE_OPINION_CHARS = 4_000_000;
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 let cachedStore = null;
-const jobRateLimitMap = new Map();
+const DEFAULT_ABSTRACTION_MAX_ATTEMPTS = 5;
 
 export class JobApiError extends Error {
   constructor(message, statusCode = 500) {
@@ -99,50 +100,91 @@ export function secureCompare(a, b) {
   return diff === 0;
 }
 
-function getJobRateEntry(ip) {
-  const now = Date.now();
-  const entry = jobRateLimitMap.get(ip) || { count: 0, failedAuth: 0, windowStart: now };
-  if (now - entry.windowStart > JOB_RATE_LIMIT_WINDOW_MS) {
-    entry.count = 0;
-    entry.failedAuth = 0;
-    entry.windowStart = now;
-  }
-  jobRateLimitMap.set(ip, entry);
-  for (const [storedIp, storedEntry] of jobRateLimitMap.entries()) {
-    if (now - storedEntry.windowStart > JOB_RATE_LIMIT_WINDOW_MS * 2) {
-      jobRateLimitMap.delete(storedIp);
-    }
-  }
-  return entry;
+function abstractionMaxAttempts(options = {}) {
+  const raw = options.maxAttempts ?? process.env.ABSTRACTION_MAX_ATTEMPTS;
+  const value = Number(raw);
+  if (Number.isInteger(value) && value >= 1) return Math.min(value, 12);
+  return DEFAULT_ABSTRACTION_MAX_ATTEMPTS;
 }
 
-export function requireJobPassword(req, res, requestId) {
+export function applyAbstractionClaim(chunk, options = {}) {
+  const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
+  const leaseMs = Math.max(1, Number(options.leaseMs) || 90_000);
+  const maxAttempts = abstractionMaxAttempts(options);
+  const nextAttempts = (Number(chunk.abstractionAttempts) || 0) + 1;
+  const nowIso = options.nowIso || new Date().toISOString();
+  if (nextAttempts > maxAttempts) {
+    return {
+      ...chunk,
+      abstractionStatus: 'failed',
+      abstractionAttempts: nextAttempts,
+      abstractionErrorType: 'max_attempts',
+      abstractionErrorMessage: 'Abstraction attempt limit exceeded.',
+      abstractionClaimedAt: null,
+      abstractionLeaseExpiresAt: null,
+      abstractionWorkerId: null,
+      abstractionRetryAt: null,
+      updatedAt: nowIso,
+    };
+  }
+  return {
+    ...chunk,
+    abstractionStatus: 'processing',
+    abstractionAttempts: nextAttempts,
+    abstractionErrorType: null,
+    abstractionErrorMessage: null,
+    abstractionClaimedAt: nowIso,
+    abstractionLeaseExpiresAt: new Date(Date.now() + leaseMs).toISOString(),
+    abstractionWorkerId: workerId,
+    abstractionRetryAt: null,
+    updatedAt: nowIso,
+  };
+}
+
+async function mutateJobRateLimit(ip, update) {
+  return mutateSharedRateLimit({
+    scope: 'jobs',
+    ip,
+    windowMs: JOB_RATE_LIMIT_WINDOW_MS,
+    update,
+  });
+}
+
+export async function requireJobPassword(req, res, requestId) {
   const requiredPassword = process.env.APP_PASSWORD;
   if (!requiredPassword) return true;
-  const entry = getJobRateEntry(getClientIp(req));
-  if (entry.failedAuth >= JOB_PASSWORD_FAILURE_LIMIT) {
+  const ip = getClientIp(req);
+  const providedPassword = req.headers['x-app-password'];
+  const outcome = await mutateJobRateLimit(ip, entry => {
+    if (entry.failedAuth >= JOB_PASSWORD_FAILURE_LIMIT) return 'locked';
+    if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
+    entry.failedAuth += 1;
+    return 'invalid';
+  });
+  if (outcome === 'ok') return true;
+  await delayAuthFailure();
+  if (outcome === 'locked') {
     res.setHeader('Retry-After', '60');
     res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
     return false;
   }
-  const providedPassword = req.headers['x-app-password'];
-  if (secureCompare(providedPassword || '', requiredPassword)) return true;
-  entry.failedAuth += 1;
   res.status(401).json({ error: 'Invalid password.', requestId });
   return false;
 }
 
-export function enforceJobRateLimit(req, res, requestId) {
-  const entry = getJobRateEntry(getClientIp(req));
-  entry.count += 1;
-  if (entry.count <= JOB_RATE_LIMIT_MAX_REQUESTS) return true;
+export async function enforceJobRateLimit(req, res, requestId) {
+  const over = await mutateJobRateLimit(getClientIp(req), entry => {
+    entry.count += 1;
+    return entry.count > JOB_RATE_LIMIT_MAX_REQUESTS;
+  });
+  if (!over) return true;
   res.setHeader('Retry-After', '60');
   res.status(429).json({ error: 'Job metadata rate limit exceeded. Wait 60 seconds and try again.', requestId });
   return false;
 }
 
 export function resetJobRateLimits() {
-  jobRateLimitMap.clear();
+  resetSharedRateLimits();
 }
 
 export { getClientIp };
@@ -1420,19 +1462,35 @@ function createPostgresJobStore() {
       await ensureSchema();
       const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
       const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 90000) / 1000));
+      const maxAttempts = abstractionMaxAttempts(options);
       const rows = await sql`
         UPDATE document_chunks
         SET
-          abstraction_status = 'processing',
-          abstraction_attempts = CASE
-            WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
-            ELSE abstraction_attempts + 1
+          abstraction_attempts = abstraction_attempts + 1,
+          abstraction_status = CASE
+            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN 'failed'
+            ELSE 'processing'
           END,
-          abstraction_error_type = NULL,
-          abstraction_error_message = NULL,
-          abstraction_claimed_at = now(),
-          abstraction_lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
-          abstraction_worker_id = ${workerId},
+          abstraction_error_type = CASE
+            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN 'max_attempts'
+            ELSE NULL
+          END,
+          abstraction_error_message = CASE
+            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN 'Abstraction attempt limit exceeded.'
+            ELSE NULL
+          END,
+          abstraction_claimed_at = CASE
+            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN NULL
+            ELSE now()
+          END,
+          abstraction_lease_expires_at = CASE
+            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN NULL
+            ELSE now() + make_interval(secs => ${leaseSeconds})
+          END,
+          abstraction_worker_id = CASE
+            WHEN abstraction_attempts + 1 > ${maxAttempts} THEN NULL
+            ELSE ${workerId}
+          END,
           abstraction_retry_at = NULL,
           updated_at = now()
         WHERE job_id = ${jobId}
@@ -1446,7 +1504,11 @@ function createPostgresJobStore() {
           )
         RETURNING *
       `;
-      return rowToChunk(rows[0]);
+      const chunk = rowToChunk(rows[0]);
+      if (chunk?.abstractionStatus === 'failed') {
+        await refreshAbstractionCounts(jobId);
+      }
+      return chunk;
     },
 
     async markChunkAbstractionRetryWait(jobId, chunkId, failure) {

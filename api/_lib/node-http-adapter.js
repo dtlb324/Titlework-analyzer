@@ -88,7 +88,7 @@ export async function callApiHandler(handler, req, res, url) {
   const requestId = req.headers['x-request-id'] || createRequestId();
   apiRes.setHeader('X-Request-Id', requestId);
   const preAuthReq = createApiRequest(req, url, undefined);
-  if (!requireJobPassword(preAuthReq, apiRes, requestId)) {
+  if (!(await requireJobPassword(preAuthReq, apiRes, requestId))) {
     discardRequestBody(req);
     return;
   }

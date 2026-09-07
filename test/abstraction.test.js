@@ -18,6 +18,7 @@ import {
 } from '../api/_lib/queue.js';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
+import { applyAbstractionClaim } from '../api/_lib/jobs.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -203,20 +204,7 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       const chunk = chunks.get(chunkId);
       if (!chunk || chunk.jobId !== jobId) return null;
       if (!isClaimable(chunk, Date.now(), claimOptions.workerId)) return null;
-      const leaseMs = claimOptions.leaseMs || 90_000;
-      const sameWorker = chunk.abstractionStatus === 'processing' && chunk.abstractionWorkerId === claimOptions.workerId;
-      const updated = {
-        ...chunk,
-        abstractionStatus: 'processing',
-        abstractionAttempts: sameWorker ? (chunk.abstractionAttempts || 0) : (chunk.abstractionAttempts || 0) + 1,
-        abstractionErrorType: null,
-        abstractionErrorMessage: null,
-        abstractionClaimedAt: new Date().toISOString(),
-        abstractionLeaseExpiresAt: new Date(Date.now() + leaseMs).toISOString(),
-        abstractionWorkerId: claimOptions.workerId || 'wkr_test',
-        abstractionRetryAt: null,
-        updatedAt: now,
-      };
+      const updated = applyAbstractionClaim(chunk, claimOptions);
       chunks.set(chunkId, updated);
       return updated;
     },

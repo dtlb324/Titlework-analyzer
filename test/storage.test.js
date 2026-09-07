@@ -1,4 +1,5 @@
 import jobsRouteHandler from '../api/jobs/[...path].js';
+import { requireBoundUploadSize } from '../api/_lib/storage.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -516,6 +517,27 @@ test('durable upload endpoints reject raw base64 and document contents', async (
     base64: 'JVBERi0xLjQ=',
   }, {}, { id: 'job_test_1', documentId: 'doc_test_1' }, '/api/jobs/job_test_1/documents/doc_test_1/chunks'), chunkRes);
   assert(chunkRes.statusCode === 400, `Expected chunk rejection, got ${chunkRes.statusCode}`);
+});
+
+test('signed uploads require a known sizeBytes so Content-Length is always bound', () => {
+  let missing = false;
+  try {
+    requireBoundUploadSize(0, 1024);
+  } catch (err) {
+    missing = err.statusCode === 400;
+  }
+  assert(missing, 'Zero/unknown sizeBytes must be rejected');
+  let oversize = false;
+  try {
+    requireBoundUploadSize(2048, 1024);
+  } catch (err) {
+    oversize = err.statusCode === 413;
+  }
+  assert(oversize, 'Over-max sizeBytes must be rejected');
+  assert(requireBoundUploadSize(512, 1024) === 512, 'Known size must be accepted');
+  const source = readFileSync(join(root, 'api/_lib/storage.js'), 'utf8');
+  assert(source.includes('requireBoundUploadSize(sizeBytes'), 'createSignedUpload must require sizeBytes');
+  assert(!source.includes('sizeKnown'), 'Signed PUT must not skip Content-Length when size is unknown');
 });
 
 test('storage upload endpoint signs GCS uploads without Vercel Blob client code', () => {

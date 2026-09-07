@@ -106,9 +106,9 @@ export function planAbstractionWork(chunks) {
   return { batches, singles };
 }
 
-async function claimChunkWithLease(store, chunk, workerId, leaseMs) {
+async function claimChunkWithLease(store, chunk, workerId, leaseMs, maxAttempts) {
   if (store.claimChunkForAbstraction) {
-    return await store.claimChunkForAbstraction(chunk.jobId, chunk.id, { workerId, leaseMs });
+    return await store.claimChunkForAbstraction(chunk.jobId, chunk.id, { workerId, leaseMs, maxAttempts });
   }
   if (store.markChunkAbstractionProcessing) {
     return await store.markChunkAbstractionProcessing(chunk.jobId, chunk.id);
@@ -156,15 +156,27 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   const config = getAbstractionConfig();
   const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
   const leaseMs = options.leaseMs || 90_000;
+  const maxAttempts = options.maxAttempts || config.maxAttempts;
   const globalStart = Number.isInteger(options.globalStart) ? options.globalStart : (chunks[0].chunkOrder || 0);
   const startedAt = Date.now();
   const blobLoader = getBlobLoader(options);
 
   const claimed = [];
   for (const chunk of chunks) {
-    const processing = await claimChunkWithLease(store, chunk, workerId, leaseMs);
+    const processing = await claimChunkWithLease(store, chunk, workerId, leaseMs, maxAttempts);
     if (!processing) {
       claimed.push({ status: 'skipped', chunkId: chunk.id });
+      continue;
+    }
+    if (processing.abstractionStatus === 'failed') {
+      claimed.push({
+        status: 'failed',
+        chunkId: processing.id,
+        failure: {
+          errorType: processing.abstractionErrorType || 'max_attempts',
+          errorMessage: processing.abstractionErrorMessage || 'Abstraction attempt limit exceeded.',
+        },
+      });
       continue;
     }
     const reuse = await tryReuseExistingAbstract(store, processing, workerId);
@@ -179,7 +191,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   const finished = claimed.filter(entry => entry.status !== 'claimed');
   if (!ready.length) return finished;
   if (ready.length === 1) {
-    return [...finished, await processChunkAbstraction(ready[0].chunk, { ...options, workerId, leaseMs })];
+    return [...finished, await processChunkAbstraction(ready[0].chunk, { ...options, workerId, leaseMs, maxAttempts })];
   }
 
   try {
@@ -205,15 +217,15 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         const mid = Math.ceil(ready.length / 2);
         const leftResults = await processMultiChunkAbstraction(
           ready.slice(0, mid).map(entry => entry.chunk),
-          { ...options, globalStart, workerId, leaseMs },
+          { ...options, globalStart, workerId, leaseMs, maxAttempts },
         );
         const rightResults = await processMultiChunkAbstraction(
           ready.slice(mid).map(entry => entry.chunk),
-          { ...options, globalStart: globalStart + mid, workerId, leaseMs },
+          { ...options, globalStart: globalStart + mid, workerId, leaseMs, maxAttempts },
         );
         return [...finished, ...leftResults, ...rightResults];
       }
-      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs }, 'payload_too_large')];
+      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, 'payload_too_large')];
     }
 
     const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
@@ -267,14 +279,14 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     if (fallbackChunks.length) {
       const partialResults = await fallbackToSingles(
         fallbackChunks,
-        { ...options, workerId, leaseMs },
+        { ...options, workerId, leaseMs, maxAttempts },
         `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
       );
       batchResults.push(...partialResults);
     }
     return [...finished, ...batchResults];
   } catch (err) {
-    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs }, err?.message || String(err))];
+    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err))];
   }
 }
 

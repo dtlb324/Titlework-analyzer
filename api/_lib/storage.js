@@ -77,6 +77,28 @@ export function parseStorageUrl(objectUrl, fallbackBucket = '') {
   return { bucket: fallbackBucket, objectKey: '' };
 }
 
+const RATE_LIMIT_OBJECT_PATTERN = /^ops\/rate-limits\/(jobs|analyze)\/[a-f0-9]{32,64}\.json$/;
+
+export function isAllowedRateLimitObjectKey(objectKey) {
+  return RATE_LIMIT_OBJECT_PATTERN.test(String(objectKey || ''));
+}
+
+export function requireBoundUploadSize(sizeBytes, maxUploadBytes) {
+  const size = Number(sizeBytes);
+  if (!Number.isInteger(size) || size <= 0) {
+    const error = new Error('sizeBytes is required for signed uploads.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const maxBytes = Number(maxUploadBytes);
+  if (Number.isFinite(maxBytes) && size > maxBytes) {
+    const error = new Error(`Upload is too large. Maximum object size is ${maxBytes} bytes.`);
+    error.statusCode = 413;
+    throw error;
+  }
+  return size;
+}
+
 export function validateObjectRef({ jobId, chunkId, objectKey, objectUrl }, config = getStorageConfig()) {
   const expectedPrefix = `jobs/${jobId}/chunks/${chunkId}/`;
   if (typeof objectKey !== 'string' || !objectKey.startsWith(expectedPrefix) || objectKey.includes('..')) {
@@ -122,12 +144,7 @@ export async function createSignedUpload({ jobId, chunkId, originalFilename, obj
     error.statusCode = 400;
     throw error;
   }
-  const size = Number(sizeBytes);
-  if (Number.isFinite(size) && size > config.maxUploadBytes) {
-    const error = new Error(`Upload is too large. Maximum object size is ${config.maxUploadBytes} bytes.`);
-    error.statusCode = 413;
-    throw error;
-  }
+  const size = requireBoundUploadSize(sizeBytes, config.maxUploadBytes);
   const key = objectKey || buildObjectKey(jobId, chunkId, originalFilename);
   const validation = validateObjectRef({
     jobId,
@@ -144,19 +161,18 @@ export async function createSignedUpload({ jobId, chunkId, originalFilename, obj
   const expiresAt = Date.now() + config.signedUrlTtlMs;
   const bucket = options.bucket || await getBucket(config);
   const file = bucket.file(key);
-  const sizeKnown = Number.isFinite(size) && size > 0;
   const signOptions = {
     version: 'v4',
     action: 'write',
     expires: expiresAt,
     contentType,
+    extensionHeaders: { 'content-length': String(size) },
   };
-  if (sizeKnown) {
-    signOptions.extensionHeaders = { 'content-length': String(Math.floor(size)) };
-  }
   const [uploadUrl] = await file.getSignedUrl(signOptions);
-  const headers = { 'content-type': contentType };
-  if (sizeKnown) headers['content-length'] = String(Math.floor(size));
+  const headers = {
+    'content-type': contentType,
+    'content-length': String(size),
+  };
   return {
     provider: 'gcs',
     method: 'PUT',
@@ -262,4 +278,51 @@ export async function writeObject(parentChunk, childName, bytes, options = {}) {
   await bucket.file(objectKey).save(bytes, { contentType: 'application/pdf', resumable: false });
   const objectUrl = buildObjectUrl(config.bucket, objectKey);
   return { blobKey: objectKey, blobUrl: objectUrl, objectKey, objectUrl };
+}
+
+export async function readOpsJson(objectKey, options = {}) {
+  if (!isAllowedRateLimitObjectKey(objectKey)) {
+    const error = new Error('Invalid rate-limit object key.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const config = options.config || getStorageConfig();
+  const bucket = options.bucket || await getBucket(config);
+  const file = bucket.file(objectKey);
+  try {
+    const [bytes] = await file.download();
+    const [metadata] = await file.getMetadata().catch(() => [{}]);
+    let data = null;
+    try {
+      data = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    } catch {
+      data = null;
+    }
+    return {
+      data,
+      generation: Number(metadata.generation) || 0,
+    };
+  } catch (err) {
+    if (Number(err?.code) === 404 || err?.statusCode === 404) {
+      return { data: null, generation: 0 };
+    }
+    throw err;
+  }
+}
+
+export async function writeOpsJson(objectKey, data, options = {}) {
+  if (!isAllowedRateLimitObjectKey(objectKey)) {
+    const error = new Error('Invalid rate-limit object key.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const config = options.config || getStorageConfig();
+  const bucket = options.bucket || await getBucket(config);
+  const generation = Number(options.generation) || 0;
+  await bucket.file(objectKey).save(JSON.stringify(data), {
+    resumable: false,
+    contentType: 'application/json',
+    metadata: { cacheControl: 'no-store' },
+    preconditionOpts: { ifGenerationMatch: generation },
+  });
 }

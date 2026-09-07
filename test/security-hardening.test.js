@@ -1,9 +1,11 @@
 import { getClientIp } from '../api/_lib/client-ip.js';
 import {
+  applyAbstractionClaim,
   deriveSynthesisProgress,
   requireJobPassword,
   resetJobRateLimits,
 } from '../api/_lib/jobs.js';
+import { resetSharedRateLimits } from '../api/_lib/shared-rate-limit.js';
 import jobHandler from '../api/jobs/[...path].js';
 import analyzeHandler from '../api/analyze.js';
 import { processMultiChunkAbstraction } from '../api/_lib/abstraction-batch.js';
@@ -63,16 +65,18 @@ test('rotating leftmost XFF cannot bypass job password strike limit', async () =
   try {
     for (let i = 0; i < 5; i++) {
       const res = mockRes();
-      const ok = requireJobPassword(mockReq({
+      const started = Date.now();
+      const ok = await requireJobPassword(mockReq({
         headers: {
           'x-app-password': 'wrong',
           'x-forwarded-for': `${i}.0.0.1, 198.51.100.20`,
         },
       }), res, `req_${i}`);
       assert(ok === false && res.statusCode === 401, `Expected 401 on attempt ${i + 1}, got ${res.statusCode}`);
+      assert(Date.now() - started >= 400, 'Failed pre-auth must keep the ~500ms delay');
     }
     const locked = mockRes();
-    requireJobPassword(mockReq({
+    await requireJobPassword(mockReq({
       headers: {
         'x-app-password': 'wrong',
         'x-forwarded-for': '9.9.9.9, 198.51.100.20',
@@ -81,7 +85,7 @@ test('rotating leftmost XFF cannot bypass job password strike limit', async () =
     assert(locked.statusCode === 429, `Expected 429 after five failures, got ${locked.statusCode}`);
 
     const otherHop = mockRes();
-    requireJobPassword(mockReq({
+    await requireJobPassword(mockReq({
       headers: {
         'x-app-password': 'wrong',
         'x-forwarded-for': '9.9.9.9, 198.51.100.21',
@@ -248,13 +252,7 @@ test('batch fallback can re-claim chunks already leased to the same worker', asy
       const sameWorker = chunk.abstractionStatus === 'processing' && chunk.abstractionWorkerId === options.workerId;
       const pending = chunk.abstractionStatus === 'pending';
       if (!sameWorker && !pending) return null;
-      const updated = {
-        ...chunk,
-        abstractionStatus: 'processing',
-        abstractionWorkerId: options.workerId,
-        abstractionAttempts: sameWorker ? chunk.abstractionAttempts : chunk.abstractionAttempts + 1,
-        abstractionLeaseExpiresAt: new Date(Date.now() + 90_000).toISOString(),
-      };
+      const updated = applyAbstractionClaim(chunk, options);
       chunks.set(chunkId, updated);
       return updated;
     },
@@ -294,6 +292,67 @@ test('batch fallback can re-claim chunks already leased to the same worker', asy
   assert(skipped.length === 0, `Same-worker fallback must not skip leased chunks, got ${JSON.stringify(results)}`);
   assert(results.some(result => result.status === 'completed' || result.status === 'failed' || result.status === 'retry_wait'),
     `Expected fallback to process chunks, got ${JSON.stringify(results.map(r => r.status))}`);
+});
+
+test('same-worker reclaim increments attempts and fails after the hard cap', () => {
+  let chunk = {
+    id: 'chk_poison',
+    abstractionStatus: 'pending',
+    abstractionAttempts: 0,
+  };
+  for (let i = 0; i < 5; i++) {
+    chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, leaseMs: 90_000 });
+    assert(chunk.abstractionStatus === 'processing', `Attempt ${i + 1} should remain processing`);
+    assert(chunk.abstractionAttempts === i + 1, `Expected attempts ${i + 1}, got ${chunk.abstractionAttempts}`);
+  }
+  chunk = applyAbstractionClaim(chunk, { workerId: 'wkr_1', maxAttempts: 5, leaseMs: 90_000 });
+  assert(chunk.abstractionStatus === 'failed', 'Over-cap reclaim must fail the chunk');
+  assert(chunk.abstractionErrorType === 'max_attempts', 'Expected max_attempts');
+  assert(chunk.abstractionAttempts === 6, 'Cap failure still records the extra attempt');
+});
+
+test('password strikes persist across instances via shared limiter store', async () => {
+  const previous = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'correct-horse';
+  resetJobRateLimits();
+  const objects = new Map();
+  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
+    async read(key) {
+      const row = objects.get(key);
+      return row ? { data: { ...row.data }, generation: row.generation } : { data: null, generation: 0 };
+    },
+    async write(key, data, generation) {
+      const existing = objects.get(key);
+      const current = existing?.generation ?? 0;
+      if (generation !== current) {
+        const err = new Error('precondition');
+        err.code = 412;
+        throw err;
+      }
+      objects.set(key, { data: { ...data }, generation: current + 1 });
+    },
+  };
+  try {
+    for (let i = 0; i < 5; i++) {
+      const res = mockRes();
+      await requireJobPassword(mockReq({
+        headers: { 'x-app-password': 'wrong', 'x-forwarded-for': '203.0.113.90' },
+      }), res, `gcs_${i}`);
+      assert(res.statusCode === 401, `Expected 401, got ${res.statusCode}`);
+    }
+    resetSharedRateLimits();
+    const locked = mockRes();
+    await requireJobPassword(mockReq({
+      headers: { 'x-app-password': 'wrong', 'x-forwarded-for': '203.0.113.90' },
+    }), locked, 'gcs_lock');
+    assert(locked.statusCode === 429, `Expected shared lockout after memory reset, got ${locked.statusCode}`);
+    assert(objects.size >= 1, 'Expected a persisted rate-limit object');
+  } finally {
+    delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
+    resetJobRateLimits();
+    if (previous === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = previous;
+  }
 });
 
 let passed = 0;

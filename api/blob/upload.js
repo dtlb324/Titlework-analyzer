@@ -26,8 +26,8 @@ export default async function handler(req, res) {
   if (!['GET', 'POST'].includes(req.method)) {
     return res.status(405).json({ error: 'Method not allowed.', requestId });
   }
-  if (!enforceJobRateLimit(req, res, requestId)) return;
-  if (!requireJobPassword(req, res, requestId)) return;
+  if (!(await enforceJobRateLimit(req, res, requestId))) return;
+  if (!(await requireJobPassword(req, res, requestId))) return;
 
   if (req.method === 'GET') {
     const config = getStorageConfig();
