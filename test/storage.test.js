@@ -1,4 +1,5 @@
 import jobsRouteHandler from '../api/jobs/[...path].js';
+import { requireBoundUploadSize } from '../api/_lib/storage.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -518,9 +519,31 @@ test('durable upload endpoints reject raw base64 and document contents', async (
   assert(chunkRes.statusCode === 400, `Expected chunk rejection, got ${chunkRes.statusCode}`);
 });
 
+test('signed uploads require a known sizeBytes so Content-Length is always bound', () => {
+  let missing = false;
+  try {
+    requireBoundUploadSize(0, 1024);
+  } catch (err) {
+    missing = err.statusCode === 400;
+  }
+  assert(missing, 'Zero/unknown sizeBytes must be rejected');
+  let oversize = false;
+  try {
+    requireBoundUploadSize(2048, 1024);
+  } catch (err) {
+    oversize = err.statusCode === 413;
+  }
+  assert(oversize, 'Over-max sizeBytes must be rejected');
+  assert(requireBoundUploadSize(512, 1024) === 512, 'Known size must be accepted');
+  const source = readFileSync(join(root, 'api/_lib/storage.js'), 'utf8');
+  assert(source.includes('requireBoundUploadSize(sizeBytes'), 'createSignedUpload must require sizeBytes');
+  assert(!source.includes('sizeKnown'), 'Signed PUT must not skip Content-Length when size is unknown');
+});
+
 test('storage upload endpoint signs GCS uploads without Vercel Blob client code', () => {
   const source = readFileSync(join(root, 'api/blob/upload.js'), 'utf8');
   assert(source.includes('createSignedUpload'), 'Upload endpoint should create signed GCS upload metadata');
+  assert(readFileSync(join(root, 'api/_lib/storage.js'), 'utf8').includes("'content-length'"), 'Signed uploads must bind Content-Length');
   assert(!source.includes('@vercel/blob'), 'Upload endpoint should not import the Vercel Blob client');
   assert(!source.includes('blob.upload-completed'), 'Upload endpoint should not depend on Vercel Blob completion callbacks');
   assert(!source.includes("'image/tiff'"), 'Storage upload content types should not include TIFF when analyze API cannot process TIFF images');

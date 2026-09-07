@@ -136,9 +136,6 @@ export async function verifyHealth(url, expected, fetchImpl = globalThis.fetch) 
   const release = body.release || {};
   const errors = [];
   if (expected.version && release.version !== expected.version) errors.push(`health version ${release.version} did not match ${expected.version}`);
-  if (expected.gitSha && release.gitSha !== expected.gitSha) errors.push(`health gitSha ${release.gitSha} did not match ${expected.gitSha}`);
-  if (expected.imageDigest && release.imageDigest !== expected.imageDigest) errors.push(`health imageDigest ${release.imageDigest} did not match ${expected.imageDigest}`);
-  if (expected.revision && release.revision !== expected.revision) errors.push(`health revision ${release.revision} did not match ${expected.revision}`);
   return { valid: errors.length === 0, errors, body };
 }
 

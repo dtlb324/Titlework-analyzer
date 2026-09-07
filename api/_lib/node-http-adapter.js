@@ -1,8 +1,14 @@
+import { createRequestId, requireJobPassword, setJobSecurityHeaders } from './jobs.js';
+
 const DEFAULT_MAX_BODY_BYTES = 25 * 1024 * 1024;
 
 function configuredMaxBodyBytes() {
   const raw = Number(process.env.CLOUD_RUN_MAX_BODY_BYTES || DEFAULT_MAX_BODY_BYTES);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_BODY_BYTES;
+}
+
+function discardRequestBody(req) {
+  if (typeof req.resume === 'function') req.resume();
 }
 
 export async function readNodeRequestBody(req, maxBodyBytes = configuredMaxBodyBytes()) {
@@ -77,8 +83,16 @@ export function createApiResponse(res) {
 }
 
 export async function callApiHandler(handler, req, res, url) {
+  const apiRes = createApiResponse(res);
+  setJobSecurityHeaders(apiRes);
+  const requestId = req.headers['x-request-id'] || createRequestId();
+  apiRes.setHeader('X-Request-Id', requestId);
+  const preAuthReq = createApiRequest(req, url, undefined);
+  if (!(await requireJobPassword(preAuthReq, apiRes, requestId))) {
+    discardRequestBody(req);
+    return;
+  }
   const body = await readNodeRequestBody(req);
   const apiReq = createApiRequest(req, url, body);
-  const apiRes = createApiResponse(res);
   await handler(apiReq, apiRes);
 }

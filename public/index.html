@@ -149,10 +149,6 @@
     <div class="field">
       <input type="password" id="passwordInput" placeholder="Password..." />
     </div>
-    <label class="remember-password" for="rememberPassword">
-      <input type="checkbox" id="rememberPassword" />
-      Remember password on this device
-    </label>
     <button class="btn-primary" onclick="checkPassword()">Enter</button>
     <div id="passwordError"></div>
   </div>
@@ -631,30 +627,23 @@ const APP_PASSWORD_REMEMBER_KEY = 'app_password_remember';
 
 function loadStoredPassword() {
   try {
-    if (localStorage.getItem(APP_PASSWORD_REMEMBER_KEY) === '1') {
-      const saved = localStorage.getItem(APP_PASSWORD_STORAGE_KEY);
-      if (saved) return saved;
-    }
+    localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
+    localStorage.removeItem(APP_PASSWORD_REMEMBER_KEY);
   } catch {}
   try {
-    return sessionStorage.getItem(APP_PASSWORD_STORAGE_KEY) || '';
+    sessionStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
   } catch {}
   return '';
 }
 
-function persistPassword(pw, remember) {
+function persistPassword(pw) {
   appPassword = pw;
   try {
-    if (remember) {
-      localStorage.setItem(APP_PASSWORD_STORAGE_KEY, pw);
-      localStorage.setItem(APP_PASSWORD_REMEMBER_KEY, '1');
-    } else {
-      localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
-      localStorage.removeItem(APP_PASSWORD_REMEMBER_KEY);
-    }
+    localStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
+    localStorage.removeItem(APP_PASSWORD_REMEMBER_KEY);
   } catch {}
   try {
-    sessionStorage.setItem(APP_PASSWORD_STORAGE_KEY, pw);
+    sessionStorage.removeItem(APP_PASSWORD_STORAGE_KEY);
   } catch {}
 }
 
@@ -701,12 +690,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('followupInput').addEventListener('keydown', e => { if (e.key === 'Enter') askFollowup(); });
   document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') checkPassword(); });
-  const rememberPasswordEl = document.getElementById('rememberPassword');
-  if (rememberPasswordEl) {
-    try {
-      rememberPasswordEl.checked = localStorage.getItem(APP_PASSWORD_REMEMBER_KEY) === '1';
-    } catch {}
-  }
   window.addEventListener('hashchange', () => applyRoute(parseRoute()));
   if (canLoadInitialRoute) applyRoute(parseRoute());
 });
@@ -738,8 +721,7 @@ function showMain() {
 function checkPassword() {
   const pw = document.getElementById('passwordInput').value.trim();
   if (!pw) return;
-  const remember = document.getElementById('rememberPassword')?.checked === true;
-  persistPassword(pw, remember);
+  persistPassword(pw);
   fetch('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
@@ -1651,7 +1633,7 @@ async function loadJobView(jobId) {
   }
   if (res.status === 404) {
     stopJobPoller();
-    if (headerEl) headerEl.innerHTML = '<div class="error-msg"><strong>Job not found.</strong> It may have expired or the link is wrong.</div>';
+    if (headerEl) headerEl.innerHTML = '<div class="error-msg"><strong>Job not found.</strong> The id is unknown or the link is wrong. Jobs are kept until they are canceled or deleted; they do not expire on a timer.</div>';
     return;
   }
   const data = await res.json();
@@ -1874,7 +1856,7 @@ async function maybeKickStalledJobWorkflow(state, job) {
         state.workflowSignature = signature;
       }
       shouldKick = state.workflowStallPolls >= WORKFLOW_STALL_THRESHOLD
-        && (pending > 0 || status.mergeInProgress);
+        && (pending > 0 || (status.mergeInProgress && !status.mergeLeaseHeld));
     } else {
       const payload = await fetchServerAbstractionStatus(job.id);
       const status = payload?.status || {};
@@ -2545,7 +2527,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
     const signature = `${complete}|${failed}|${processing}|${retryWait}|${status.mergeInProgress ? 1 : 0}`;
     if (signature === lastSignature) stallPolls += 1;
     else { stallPolls = 0; lastSignature = signature; }
-    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait > 0 || status.mergeInProgress)) {
+    if (stallPolls >= STALL_THRESHOLD && (status.pending + processing + retryWait > 0 || (status.mergeInProgress && !status.mergeLeaseHeld))) {
       stallPolls = 0;
       try {
         const batch = await processServerSynthesisBatch(jobId);
@@ -2562,7 +2544,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
 }
 
 async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
-  showServerSynthesisNotice();
+  showKeepOpenNotice();
   if (onProgress) onProgress(88, 'Starting server-side synthesis from saved abstracts...');
   const started = await startServerSynthesis(jobId);
   kickServerWorkflowBatch(() => processServerSynthesisBatch(jobId));
@@ -2807,7 +2789,7 @@ function showError(msg) {
 }
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 
-const KEEP_OPEN_NOTICE = 'Keep this browser tab open until the job finishes. The server processes your job while this tab stays connected.';
+const KEEP_OPEN_NOTICE = 'Keep this browser tab open until the job finishes. Production runs with the worker loop off, so the server only processes while this tab stays connected.';
 
 function showKeepOpenNotice() {
   document.getElementById('infoBox').innerHTML = `<div class="info-msg">${esc(KEEP_OPEN_NOTICE)}</div>`;
@@ -2817,10 +2799,10 @@ function clearKeepOpenNotice() {
   document.getElementById('infoBox').innerHTML = '';
 }
 
-const SERVER_SYNTHESIS_NOTICE = 'Synthesis is running on the server. You can safely close this tab — the result is saved and will be here when you return.';
+const SERVER_SYNTHESIS_NOTICE = KEEP_OPEN_NOTICE;
 
 function showServerSynthesisNotice() {
-  document.getElementById('infoBox').innerHTML = `<div class="info-msg">${esc(SERVER_SYNTHESIS_NOTICE)}</div>`;
+  showKeepOpenNotice();
 }
 
 let lastDisplayedPct = 0;
@@ -3999,7 +3981,20 @@ async function analyzeAdditional() {
   beginAnalysisRun(job.id);
   try {
   updateProgress(0, 'Checking durable file storage...', null);
-  const uploadRegistration = await registerJobUploads(job.id, newFiles, { chunkOrderOffset: 0 }).catch(err => ({
+  let importedContinuation = false;
+  let chunkOrderOffset = 0;
+  if (sourceJobId && sourceJobId !== job.id) {
+    try {
+      const imported = await importContinuationAbstracts(job.id, sourceJobId);
+      importedContinuation = (imported.imported || 0) > 0;
+      chunkOrderOffset = Number.isInteger(imported.nextChunkOrder)
+        ? imported.nextChunkOrder
+        : (imported.imported || 0);
+    } catch (importErr) {
+      showError(`Could not import prior job abstracts (${importErr.message}); combining in-browser for synthesis.`);
+    }
+  }
+  const uploadRegistration = await registerJobUploads(job.id, newFiles, { chunkOrderOffset }).catch(err => ({
     durable: false,
     warning: durableUploadWarning(err.message),
   }));
@@ -4021,7 +4016,6 @@ async function analyzeAdditional() {
   let newAbstracts = [];
   let usedServerAbstraction = false;
   let serverAbstractionFailedCount = 0;
-  let importedContinuation = false;
 
   if (uploadRegistration.durable) {
     try {
@@ -4029,14 +4023,6 @@ async function analyzeAdditional() {
       newAbstracts = groupAbstractsBySourceDocument(serverAbstraction.abstracts);
       usedServerAbstraction = true;
       serverAbstractionFailedCount = serverAbstraction.failedChunkCount;
-      if (sourceJobId && sourceJobId !== job.id) {
-        try {
-          const imported = await importContinuationAbstracts(job.id, sourceJobId);
-          importedContinuation = (imported.imported || 0) > 0;
-        } catch (importErr) {
-          showError(`Could not import prior job abstracts (${importErr.message}); combining in-browser for synthesis.`);
-        }
-      }
     } catch (serverErr) {
       if (isAnalysisCanceled(job.id)) return;
       showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);

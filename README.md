@@ -173,7 +173,7 @@ Browsers upload directly to GCS, so the bucket must allow `PUT` requests from yo
 [
   {
     "origin": ["https://YOUR-API-SERVICE-URL", "http://localhost:8080"],
-    "method": ["PUT", "GET", "HEAD"],
+    "method": ["PUT"],
     "responseHeader": ["content-type"],
     "maxAgeSeconds": 3600
   }
@@ -316,7 +316,7 @@ The workflow then: runs tests on Node 22 → builds one Docker image → pushes 
 
 After a release, confirm:
 
-- API `/api/healthz` reports the expected `release.version`, `release.gitSha`, and `release.imageDigest`.
+- API `/api/healthz` reports `release.version` (image digest and git SHA are verified from Cloud Run, not from the public health body).
 - API and worker latest-ready revisions use the **same immutable image digest**.
 - Both services have database, GCS, Gemini, Anthropic, and app-password config.
 - GCS CORS allows `PUT` uploads from the API origin with the `content-type` header.
@@ -390,7 +390,7 @@ When `MODEL_PROVIDER=openrouter` is set, model calls route through OpenRouter in
 |------|----------|-------|
 | `OPENROUTER_API_KEY` | When OpenRouter is used | OpenRouter API key (`sk-or-...`). |
 | `MODEL_PROVIDER` | Optional | `openrouter` flips the global toggle. Unset / any other value = direct routing. |
-| `OPENROUTER_REFERER` | Optional | Overrides the `HTTP-Referer` attribution header. |
+| `OPENROUTER_REFERER` | Optional | If set, sent as `HTTP-Referer`. Omitted by default (no localhost placeholder). |
 | `OPENROUTER_TITLE` | Optional | Overrides the `X-Title` attribution header. |
 
 ### Model selection & tuning
@@ -440,7 +440,7 @@ When `MODEL_PROVIDER=openrouter` is set, model calls route through OpenRouter in
 
 | Name | Notes |
 |------|-------|
-| `WORKER_DISABLED` | Worker only. Production default `true` (loop off, scale-to-zero). Set `false` for unattended background processing. |
+| `WORKER_DISABLED` | Worker only. Production default `true` (loop off, scale-to-zero). Release does not create a scheduler; keep the browser tab open, or set `false` for unattended processing. |
 | `WORKER_POLL_IDLE_MS` | Worker only. Default `2000` when running and idle. |
 | `WORKER_POLL_ACTIVE_MS` | Worker only. Default `0` (no sleep between busy passes). |
 | `WORKER_POLL_INTERVAL_MS` | Worker only. Legacy idle fallback. Default `5000`; prefer `WORKER_POLL_IDLE_MS`. |
@@ -534,13 +534,13 @@ The app does **not** use Anthropic/Gemini Batch APIs (24h window, no completion 
 
 | Protection | Detail |
 |-----------|--------|
-| Password gate | Optional `APP_PASSWORD` header/session gate. |
-| Rate limiting | Configurable `ANALYZE_RATE_LIMIT_MAX`, default 300 req/min/IP. |
-| Direct uploads | Browser uploads go to signed GCS URLs; document bytes do not pass through `/api/analyze`. |
-| Private storage | Source files live in a private GCS bucket. |
-| Durable metadata | Postgres stores metadata, refs, abstracts, results, and sanitized errors. |
+| Password gate | Optional `APP_PASSWORD` header. The browser keeps it in memory for the tab only (not cookies, `localStorage`, or `sessionStorage`). |
+| Rate limiting | Per Cloud Run instance (in-memory maps). Analyze: `ANALYZE_RATE_LIMIT_MAX` (default 300/min) plus 5 failed-password strikes/IP. Job and blob routes: 1500/min plus 5 failed-password strikes/IP, including GET. Limits use the rightmost `X-Forwarded-For` hop. |
+| Direct uploads | Browser uploads go to signed GCS URLs; document bytes do not pass through `/api/analyze`. Signed PUTs bind `Content-Length` when size is known. |
+| Private storage | Source files live in a private GCS bucket. CORS should allow `PUT` only from the app origin. |
+| Durable metadata | Postgres stores metadata, refs, abstracts, results, and sanitized errors. Jobs do not expire on a timer; a 404 means the id is unknown. |
 | No raw payload persistence | API validators reject base64/raw document fields in job metadata routes. |
-| CSP | Allows app origin plus Google Cloud Storage upload endpoints. |
+| CSP | `script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com` (inline app script plus jsPDF/pdf-lib); `style-src` includes `'unsafe-inline'`; connect-src allows the app origin and GCS upload hosts. |
 
 ## Project structure
 

@@ -79,7 +79,7 @@ test('runtime info reports release metadata from the environment with package fa
   assert(info.revision === 'titlework-analyzer-api-00042-xzy', `Expected revision, got ${info.revision}`);
 }));
 
-test('API and worker health responses include release metadata', async () => {
+test('API and worker health responses include version without deploy identity', async () => {
   await withEnv({
     RELEASE_VERSION: 'v2.3.1',
     GIT_SHA: 'def5678',
@@ -96,9 +96,11 @@ test('API and worker health responses include release metadata', async () => {
       const apiHealth = await requestServer(api, '/api/healthz');
       const workerHealth = await requestServer(worker);
       assert(apiHealth.body.release.version === 'v2.3.1', 'Expected API release version in health response');
-      assert(apiHealth.body.release.gitSha === 'def5678', 'Expected API git sha in health response');
-      assert(workerHealth.body.release.imageDigest === 'sha256:def', 'Expected worker image digest in health response');
-      assert(workerHealth.body.release.revision === 'titlework-analyzer-worker-00042-xzy', 'Expected worker revision in health response');
+      assert(apiHealth.body.release.gitSha == null, 'Public health must not leak gitSha');
+      assert(apiHealth.body.release.imageDigest == null, 'Public health must not leak imageDigest');
+      assert(workerHealth.body.release.version === 'v2.3.1', 'Expected worker version in health response');
+      assert(workerHealth.body.release.imageDigest == null, 'Worker health must not leak imageDigest');
+      assert(workerHealth.body.release.revision == null, 'Worker health must not leak revision');
     } finally {
       await Promise.all([
         new Promise(resolve => api.close(resolve)),
@@ -158,14 +160,11 @@ test('release verification helpers enforce tag version, env, and image parity', 
   ).valid === false, 'Expected mismatched service digests to fail parity validation');
 });
 
-test('release verification requires API health metadata including revision', async () => {
+test('release verification requires API health version', async () => {
   const goodHealth = {
     ok: true,
     release: {
       version: releaseTag,
-      gitSha: 'abc123',
-      imageDigest: 'sha256:abc',
-      revision: 'api-00001',
     },
   };
   const expectedRelease = goodHealth.release;
@@ -179,15 +178,15 @@ test('release verification requires API health metadata including revision', asy
   assert(missingUrl.valid === false, 'Expected health verification to fail without API URL');
 
   let requestedHealthUrl = '';
-  const badRevision = await verifyHealth('https://api.example.test', expectedRelease, async url => {
+  const badVersion = await verifyHealth('https://api.example.test', expectedRelease, async url => {
     requestedHealthUrl = String(url);
     return response({
     ...goodHealth,
-    release: { ...goodHealth.release, revision: 'api-00002' },
+    release: { version: 'v0.0.0' },
     });
   });
   assert(requestedHealthUrl === 'https://api.example.test/api/healthz', `Expected verifier to call /api/healthz, got ${requestedHealthUrl}`);
-  assert(badRevision.valid === false, 'Expected mismatched health revision to fail verification');
+  assert(badVersion.valid === false, 'Expected mismatched health version to fail verification');
 });
 
 test('verifyRelease checks Cloud Run parity, env configuration, and API health', async () => {

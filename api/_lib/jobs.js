@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { neon } from '@neondatabase/serverless';
+import { getClientIp } from './client-ip.js';
+import { delayAuthFailure, mutateSharedRateLimit, resetSharedRateLimits } from './shared-rate-limit.js';
 import { buildObjectKey, isAllowedStorageUrl, validateObjectRef } from './storage.js';
 
 const ALLOWED_STATUSES = new Set([
@@ -39,6 +41,7 @@ const CHUNK_UPLOAD_STATUSES = new Set(['pending', 'uploading', 'uploaded', 'fail
 const CHUNK_ABSTRACTION_STATUSES = new Set(['pending', 'processing', 'completed', 'failed', 'split_superseded', 'retry_wait']);
 const JOB_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const JOB_RATE_LIMIT_MAX_REQUESTS = 1500;
+const JOB_PASSWORD_FAILURE_LIMIT = 5;
 const RAW_PAYLOAD_KEYS = new Set([
   'data',
   'base64',
@@ -58,7 +61,8 @@ const MAX_TITLE_OPINION_CHARS = 4_000_000;
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 let cachedStore = null;
-const jobRateLimitMap = new Map();
+const DEFAULT_ABSTRACTION_MAX_ATTEMPTS = 5;
+const DEFAULT_ABSTRACTION_MAX_RECLAIMS = 8;
 
 export class JobApiError extends Error {
   constructor(message, statusCode = 500) {
@@ -70,7 +74,10 @@ export class JobApiError extends Error {
 export function setJobSecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Content-Security-Policy', "default-src 'none'");
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
 }
@@ -94,41 +101,139 @@ export function secureCompare(a, b) {
   return diff === 0;
 }
 
-export function requireJobPassword(req, res, requestId) {
+function abstractionMaxAttempts(options = {}) {
+  const raw = options.maxAttempts ?? process.env.ABSTRACTION_MAX_ATTEMPTS;
+  const value = Number(raw);
+  if (Number.isInteger(value) && value >= 1) return Math.min(value, 12);
+  return DEFAULT_ABSTRACTION_MAX_ATTEMPTS;
+}
+
+function abstractionMaxReclaims(options = {}) {
+  const raw = options.maxReclaims;
+  const value = Number(raw);
+  if (Number.isInteger(value) && value >= 1) return Math.min(value, 32);
+  return DEFAULT_ABSTRACTION_MAX_RECLAIMS;
+}
+
+export function applyAbstractionClaim(chunk, options = {}) {
+  const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
+  const leaseMs = Math.max(1, Number(options.leaseMs) || 90_000);
+  const maxAttempts = abstractionMaxAttempts(options);
+  const maxReclaims = abstractionMaxReclaims(options);
+  const sameWorker = chunk.abstractionStatus === 'processing' && chunk.abstractionWorkerId === workerId;
+  const nextAttempts = sameWorker
+    ? (Number(chunk.abstractionAttempts) || 0)
+    : (Number(chunk.abstractionAttempts) || 0) + 1;
+  const nextReclaims = sameWorker ? (Number(chunk.abstractionReclaims) || 0) + 1 : 0;
+  const nowIso = options.nowIso || new Date().toISOString();
+  if (nextAttempts > maxAttempts || nextReclaims > maxReclaims) {
+    return {
+      ...chunk,
+      abstractionStatus: 'failed',
+      abstractionAttempts: nextAttempts,
+      abstractionReclaims: nextReclaims,
+      abstractionErrorType: 'max_attempts',
+      abstractionErrorMessage: 'Abstraction attempt limit exceeded.',
+      abstractionClaimedAt: null,
+      abstractionLeaseExpiresAt: null,
+      abstractionWorkerId: null,
+      abstractionRetryAt: null,
+      updatedAt: nowIso,
+    };
+  }
+  return {
+    ...chunk,
+    abstractionStatus: 'processing',
+    abstractionAttempts: nextAttempts,
+    abstractionReclaims: nextReclaims,
+    abstractionErrorType: null,
+    abstractionErrorMessage: null,
+    abstractionClaimedAt: nowIso,
+    abstractionLeaseExpiresAt: new Date(Date.now() + leaseMs).toISOString(),
+    abstractionWorkerId: workerId,
+    abstractionRetryAt: null,
+    updatedAt: nowIso,
+  };
+}
+
+async function mutateJobRateLimit(ip, update) {
+  return mutateSharedRateLimit({
+    scope: 'jobs',
+    ip,
+    windowMs: JOB_RATE_LIMIT_WINDOW_MS,
+    update,
+  });
+}
+
+function denyLimiterUnavailable(res, requestId) {
+  res.setHeader('Retry-After', '5');
+  res.status(503).json({ error: 'Rate limiter unavailable. Try again.', requestId });
+}
+
+export async function requireJobPassword(req, res, requestId) {
   const requiredPassword = process.env.APP_PASSWORD;
   if (!requiredPassword) return true;
+  const ip = getClientIp(req);
   const providedPassword = req.headers['x-app-password'];
-  if (secureCompare(providedPassword || '', requiredPassword)) return true;
+  let outcome;
+  try {
+    outcome = await mutateJobRateLimit(ip, entry => {
+      if (entry.failedAuth >= JOB_PASSWORD_FAILURE_LIMIT) return 'locked';
+      if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
+      entry.failedAuth += 1;
+      return 'invalid';
+    });
+  } catch {
+    await delayAuthFailure();
+    denyLimiterUnavailable(res, requestId);
+    return false;
+  }
+  if (outcome === 'ok') return true;
+  await delayAuthFailure();
+  if (outcome === 'locked') {
+    res.setHeader('Retry-After', '60');
+    res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
+    return false;
+  }
   res.status(401).json({ error: 'Invalid password.', requestId });
   return false;
 }
 
-function getClientIp(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    || req.headers['x-real-ip']
-    || req.socket?.remoteAddress
-    || 'unknown';
-}
-
-export function enforceJobRateLimit(req, res, requestId) {
-  const ip = getClientIp(req);
-  const now = Date.now();
-  const entry = jobRateLimitMap.get(ip) || { count: 0, windowStart: now };
-  if (now - entry.windowStart > JOB_RATE_LIMIT_WINDOW_MS) {
-    entry.count = 0;
-    entry.windowStart = now;
+export async function enforceJobRateLimit(req, res, requestId) {
+  let over;
+  try {
+    over = await mutateJobRateLimit(getClientIp(req), entry => {
+      entry.count += 1;
+      return entry.count > JOB_RATE_LIMIT_MAX_REQUESTS;
+    });
+  } catch {
+    denyLimiterUnavailable(res, requestId);
+    return false;
   }
-  entry.count += 1;
-  jobRateLimitMap.set(ip, entry);
-  for (const [storedIp, storedEntry] of jobRateLimitMap.entries()) {
-    if (now - storedEntry.windowStart > JOB_RATE_LIMIT_WINDOW_MS * 2) {
-      jobRateLimitMap.delete(storedIp);
-    }
-  }
-  if (entry.count <= JOB_RATE_LIMIT_MAX_REQUESTS) return true;
+  if (!over) return true;
   res.setHeader('Retry-After', '60');
   res.status(429).json({ error: 'Job metadata rate limit exceeded. Wait 60 seconds and try again.', requestId });
   return false;
+}
+
+export function resetJobRateLimits() {
+  resetSharedRateLimits();
+}
+
+export { getClientIp };
+
+export function deriveSynthesisProgress({
+  job,
+  counts,
+  hasResultRow,
+  mergeLeaseHeld,
+}) {
+  const hasResult = Boolean(hasResultRow);
+  const jobTerminal = TERMINAL_STATUSES.has(job?.status);
+  const segmentsAllFinished = (counts?.total || 0) > 0
+    && ((counts.pending || 0) + (counts.processing || 0) + (counts.retry_wait || 0)) === 0;
+  const mergeInProgress = !jobTerminal && (Boolean(mergeLeaseHeld) || (segmentsAllFinished && !hasResult));
+  return { hasResult, mergeInProgress, mergeLeaseHeld: Boolean(mergeLeaseHeld) };
 }
 
 export function hasRawPayloadFields(value) {
@@ -591,6 +696,7 @@ function rowToChunk(row) {
     lastErrorMessage: row.last_error_message,
     abstractionStatus: row.abstraction_status || 'pending',
     abstractionAttempts: row.abstraction_attempts ?? 0,
+    abstractionReclaims: row.abstraction_reclaims ?? 0,
     abstractionErrorType: row.abstraction_error_type,
     abstractionErrorMessage: row.abstraction_error_message,
     abstractionClaimedAt: row.abstraction_claimed_at instanceof Date ? row.abstraction_claimed_at.toISOString() : row.abstraction_claimed_at,
@@ -861,6 +967,7 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS completed_at timestamptz`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_status text NOT NULL DEFAULT 'pending'`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_attempts integer NOT NULL DEFAULT 0 CHECK (abstraction_attempts >= 0)`;
+        await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_reclaims integer NOT NULL DEFAULT 0 CHECK (abstraction_reclaims >= 0)`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_type text`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS abstraction_error_message text`;
         await sql`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS payload_bytes integer CHECK (payload_bytes IS NULL OR payload_bytes >= 0)`;
@@ -1390,16 +1497,115 @@ function createPostgresJobStore() {
       await ensureSchema();
       const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
       const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 90000) / 1000));
+      const maxAttempts = abstractionMaxAttempts(options);
+      const maxReclaims = abstractionMaxReclaims(options);
       const rows = await sql`
         UPDATE document_chunks
         SET
-          abstraction_status = 'processing',
-          abstraction_attempts = abstraction_attempts + 1,
-          abstraction_error_type = NULL,
-          abstraction_error_message = NULL,
-          abstraction_claimed_at = now(),
-          abstraction_lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
-          abstraction_worker_id = ${workerId},
+          abstraction_attempts = CASE
+            WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+            ELSE abstraction_attempts + 1
+          END,
+          abstraction_reclaims = CASE
+            WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+            ELSE 0
+          END,
+          abstraction_status = CASE
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN 'failed'
+            ELSE 'processing'
+          END,
+          abstraction_error_type = CASE
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN 'max_attempts'
+            ELSE NULL
+          END,
+          abstraction_error_message = CASE
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN 'Abstraction attempt limit exceeded.'
+            ELSE NULL
+          END,
+          abstraction_claimed_at = CASE
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN NULL
+            ELSE now()
+          END,
+          abstraction_lease_expires_at = CASE
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN NULL
+            ELSE now() + make_interval(secs => ${leaseSeconds})
+          END,
+          abstraction_worker_id = CASE
+            WHEN (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_attempts
+                ELSE abstraction_attempts + 1
+              END
+            ) > ${maxAttempts}
+            OR (
+              CASE
+                WHEN abstraction_status = 'processing' AND abstraction_worker_id = ${workerId} THEN abstraction_reclaims + 1
+                ELSE 0
+              END
+            ) > ${maxReclaims}
+            THEN NULL
+            ELSE ${workerId}
+          END,
           abstraction_retry_at = NULL,
           updated_at = now()
         WHERE job_id = ${jobId}
@@ -1409,10 +1615,15 @@ function createPostgresJobStore() {
             abstraction_status = 'pending'
             OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
             OR (abstraction_status = 'processing' AND (abstraction_lease_expires_at IS NULL OR abstraction_lease_expires_at <= now()))
+            OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId})
           )
         RETURNING *
       `;
-      return rowToChunk(rows[0]);
+      const chunk = rowToChunk(rows[0]);
+      if (chunk?.abstractionStatus === 'failed') {
+        await refreshAbstractionCounts(jobId);
+      }
+      return chunk;
     },
 
     async markChunkAbstractionRetryWait(jobId, chunkId, failure) {
@@ -1492,19 +1703,12 @@ function createPostgresJobStore() {
         SET status = 'canceled',
             current_phase = 'canceled',
             error_message = ${cancelReason},
+            synthesis_merge_worker_id = NULL,
+            synthesis_merge_lease_expires_at = NULL,
             completed_at = COALESCE(completed_at, now()),
             updated_at = now()
         WHERE id = ${jobId}
         RETURNING *
-      `;
-      await sql`
-        UPDATE document_chunks
-        SET abstraction_claimed_at = NULL,
-            abstraction_lease_expires_at = NULL,
-            abstraction_worker_id = NULL,
-            updated_at = now()
-        WHERE job_id = ${jobId}
-          AND abstraction_status = 'processing'
       `;
       await sql`
         UPDATE document_chunks
@@ -1517,8 +1721,9 @@ function createPostgresJobStore() {
             abstraction_worker_id = NULL,
             updated_at = now()
         WHERE job_id = ${jobId}
-          AND abstraction_status IN ('pending', 'retry_wait')
+          AND abstraction_status IN ('pending', 'retry_wait', 'processing')
       `;
+      await this.clearSynthesisPreview(jobId);
       await refreshAbstractionCounts(jobId);
       return rowToJob(rows[0]);
     },
@@ -2246,6 +2451,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE id = ${jobId}
           AND synthesis_plan_id = ${planId}
+          AND status <> 'canceled'
           AND (
             synthesis_merge_worker_id IS NULL
             OR synthesis_merge_lease_expires_at IS NULL
@@ -2267,6 +2473,7 @@ function createPostgresJobStore() {
       await ensureSchema();
       const job = await this.getJob(jobId);
       if (!job) return null;
+      if (job.status === 'canceled') return null;
       const id = `res_${randomUUID()}`;
       const status = JOB_RESULT_STATUSES.has(payload.status) ? payload.status : 'complete';
       const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
@@ -2285,6 +2492,7 @@ function createPostgresJobStore() {
           ${payload.synthesisDurationMs ?? null}::integer, now()
         FROM analysis_jobs aj
         WHERE aj.id = ${jobId}::text
+          AND aj.status <> 'canceled'
           AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
             aj.synthesis_plan_id = ${payload.planId || null}::text
             AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
@@ -2453,16 +2661,13 @@ function createPostgresJobStore() {
         : null;
       const mergeLeaseExpiresAt = job.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
       const mergeLeaseHeld = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
-      const hasResult = result
-        ? Boolean(result.finalTitleOpinion)
-        : Boolean(resultMeta?.hasOpinion);
-      // Treat the post-segments / pre-result window as "merge in progress" so
-      // pollers don't declare the job terminal before a server worker has
-      // claimed the final merge. Without this, clients can race the claim and
-      // fall back to browser synthesis even though the server would have run it.
-      const segmentsAllFinished = counts.total > 0
-        && (counts.pending + counts.processing + counts.retry_wait) === 0;
-      const mergeInProgress = mergeLeaseHeld || (segmentsAllFinished && !hasResult);
+      const hasResultRow = Boolean(result || resultMeta);
+      const { hasResult, mergeInProgress } = deriveSynthesisProgress({
+        job,
+        counts,
+        hasResultRow,
+        mergeLeaseHeld,
+      });
       return {
         job,
         planId,
@@ -2473,6 +2678,7 @@ function createPostgresJobStore() {
         failed: counts.failed,
         retry_wait: counts.retry_wait,
         mergeInProgress,
+        mergeLeaseHeld,
         segments: includeSegments ? segments : [],
         hasResult,
         result: includeResult ? result : null,
@@ -2575,7 +2781,7 @@ function createPostgresJobStore() {
       }
       await refreshAbstractionCounts(targetJobId);
       await refreshUploadCounts(targetJobId);
-      return { imported, sourceJobId, targetJobId };
+      return { imported, sourceJobId, targetJobId, nextChunkOrder: orderOffset };
     },
 
     async finalizeUploads(jobId) {

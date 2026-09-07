@@ -2,12 +2,15 @@
 // Protections: rate limiting, input validation, secure password comparison,
 // request size limiting, XSS headers, data leakage prevention
 
+import { getClientIp } from './_lib/client-ip.js';
+import { delayAuthFailure, mutateSharedRateLimit } from './_lib/shared-rate-limit.js';
 import {
   invokeModel,
   isAnthropicModel,
   isGeminiModel,
   mapModelResponseToAnalyzeProxy,
   modelApiKeyError,
+  sanitizeModelClientError,
 } from './_lib/model-client.js';
 
 export const config = {
@@ -15,8 +18,6 @@ export const config = {
   maxDuration: 60,
 };
 
-// In-memory rate limiter
-const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // Default 200 req/min supports bulk runs (~400 docs). Override via ANALYZE_RATE_LIMIT_MAX env var.
 const RATE_LIMIT_MAX_REQUESTS = Math.min(
@@ -71,27 +72,13 @@ function createTimeoutSignal(ms) {
   return { signal: controller.signal, cleanup: () => clearTimeout(timeout) };
 }
 
-function getRateLimitEntry(ip) {
-  const now = Date.now();
-  if (!rateLimitMap.has(ip)) {
-    rateLimitMap.set(ip, { count: 0, failedAuth: 0, windowStart: now });
-  }
-  const entry = rateLimitMap.get(ip);
-  if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    entry.count = 0;
-    entry.failedAuth = 0;
-    entry.windowStart = now;
-  }
-  return entry;
-}
-
-function cleanupRateLimitMap() {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap.entries()) {
-    if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
-      rateLimitMap.delete(ip);
-    }
-  }
+function mutateAnalyzeRateLimit(ip, update) {
+  return mutateSharedRateLimit({
+    scope: 'analyze',
+    ip,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    update,
+  });
 }
 
 function secureCompare(a, b) {
@@ -181,10 +168,37 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed.', requestId });
   }
 
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    || req.headers['x-real-ip']
-    || req.socket?.remoteAddress
-    || 'unknown';
+  const ip = getClientIp(req);
+
+  const requiredPassword = process.env.APP_PASSWORD;
+  if (requiredPassword) {
+    const providedPassword = req.headers['x-app-password'];
+    let outcome;
+    try {
+      outcome = await mutateAnalyzeRateLimit(ip, entry => {
+        if (entry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) return 'locked';
+        if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
+        entry.failedAuth += 1;
+        return 'invalid';
+      });
+    } catch {
+      await delayAuthFailure();
+      res.setHeader('Retry-After', '5');
+      logRequestEvent('api_reject', { requestId, status: 503, reason: 'rate_limiter_unavailable', ip, latencyMs: Date.now() - startedAt });
+      return res.status(503).json({ error: 'Rate limiter unavailable. Try again.', requestId });
+    }
+    if (outcome === 'locked') {
+      await delayAuthFailure();
+      res.setHeader('Retry-After', '60');
+      logRequestEvent('api_reject', { requestId, status: 429, reason: 'password_rate_limit', ip, latencyMs: Date.now() - startedAt });
+      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
+    }
+    if (outcome !== 'ok') {
+      await delayAuthFailure();
+      logRequestEvent('api_reject', { requestId, status: 401, reason: 'invalid_password', ip, latencyMs: Date.now() - startedAt });
+      return res.status(401).json({ error: 'Invalid password.', requestId });
+    }
+  }
 
   let body = req.body;
   if (typeof body === 'string') {
@@ -201,31 +215,22 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: validation.reason, requestId });
   }
 
-  cleanupRateLimitMap();
-  const rateEntry = getRateLimitEntry(ip);
-
-  const requiredPassword = process.env.APP_PASSWORD;
-  if (requiredPassword) {
-    const providedPassword = req.headers['x-app-password'];
-    if (rateEntry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) {
-      res.setHeader('Retry-After', '60');
-      logRequestEvent('api_reject', { requestId, status: 429, reason: 'password_rate_limit', ip, latencyMs: Date.now() - startedAt });
-      return res.status(429).json({ error: 'Too many failed attempts. Wait 60 seconds and try again.', requestId });
-    }
-    if (!secureCompare(providedPassword || '', requiredPassword)) {
-      rateEntry.failedAuth++,
-      await new Promise(r => setTimeout(r, 500));
-      logRequestEvent('api_reject', { requestId, status: 401, reason: 'invalid_password', ip, latencyMs: Date.now() - startedAt });
-      return res.status(401).json({ error: 'Invalid password.', requestId });
-    }
-  }
-
   if (validation.isPing) {
     return res.status(200).json({ ok: true });
   }
 
-  rateEntry.count++;
-  if (rateEntry.count > RATE_LIMIT_MAX_REQUESTS) {
+  let overLimit;
+  try {
+    overLimit = await mutateAnalyzeRateLimit(ip, entry => {
+      entry.count += 1;
+      return entry.count > RATE_LIMIT_MAX_REQUESTS;
+    });
+  } catch {
+    res.setHeader('Retry-After', '5');
+    logRequestEvent('api_reject', { requestId, status: 503, reason: 'rate_limiter_unavailable', ip, latencyMs: Date.now() - startedAt });
+    return res.status(503).json({ error: 'Rate limiter unavailable. Try again.', requestId });
+  }
+  if (overLimit) {
     res.setHeader('Retry-After', '60');
     logRequestEvent('api_reject', { requestId, status: 429, reason: 'rate_limit', ip, latencyMs: Date.now() - startedAt });
     return res.status(429).json({ error: 'Rate limit exceeded. Wait 60 seconds and try again.', requestId });
@@ -294,7 +299,7 @@ export default async function handler(req, res) {
         model: safeBody.model,
         stop_reason: null,
         usage: {},
-        error: { message: err?.message || 'Model request failed.' },
+        error: { message: sanitizeModelClientError(err) },
         requestId,
       };
     } finally {

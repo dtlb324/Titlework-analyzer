@@ -458,6 +458,7 @@ function publicSynthesisStatusBody(snapshot) {
     planId: status.planId ?? raw?.planId ?? null,
     hasResult: status.hasResult ?? raw?.hasResult ?? false,
     mergeInProgress: status.mergeInProgress ?? raw?.mergeInProgress ?? false,
+    mergeLeaseHeld: status.mergeLeaseHeld ?? raw?.mergeLeaseHeld ?? false,
     segments: (raw?.segments || []).map(publicSynthesisSegment),
     warnings: raw?.result?.warnings || [],
     failedDocuments: raw?.result?.failedDocuments || [],
@@ -695,9 +696,8 @@ export default async function handler(req, res) {
   res.setHeader('X-Request-Id', requestId);
 
   const parts = getPathParts(req);
-  const isWrite = req.method !== 'GET';
-  if (isWrite && !enforceJobRateLimit(req, res, requestId)) return;
-  if (!requireJobPassword(req, res, requestId)) return;
+  if (!(await enforceJobRateLimit(req, res, requestId))) return;
+  if (!(await requireJobPassword(req, res, requestId))) return;
 
   const store = getJobStore();
   if (!store) return sendStorageNotConfigured(res, requestId);

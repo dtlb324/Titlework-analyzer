@@ -22,7 +22,7 @@
 //   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
-import { isGeminiModel, invokeModel, invokeAnthropicModelStream, isAnthropicModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
+import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
 import { buildMergeUserMessageContent } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
@@ -582,17 +582,12 @@ async function defaultModelClient(request) {
   const timeoutMs = request.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS;
   const timeout = createTimeoutSignal(timeoutMs);
   try {
-    if (request.stream && isAnthropicModel(request.model)) {
-      return await invokeAnthropicModelStream(request, {
-        timeoutMs,
-        createTimeoutSignal: () => timeout,
-        onDelta: request.onDelta,
-        onEvent: request.onEvent,
-      });
-    }
     return await invokeModel(request, {
       timeoutMs,
       createTimeoutSignal: () => timeout,
+      stream: request.stream,
+      onDelta: request.onDelta,
+      onEvent: request.onEvent,
     });
   } finally {
     timeout.cleanup();

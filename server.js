@@ -14,6 +14,24 @@ import { getRuntimeInfo } from './api/_lib/runtime-info.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, 'public');
 
+function publicHealth(serviceName) {
+  const info = getRuntimeInfo();
+  return {
+    ok: true,
+    service: serviceName,
+    release: { version: info.version },
+  };
+}
+
+function staticSecurityHeaders() {
+  return {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  };
+}
+
 const MIME_TYPES = new Map([
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
@@ -61,6 +79,7 @@ async function serveStatic(req, res, url) {
   res.writeHead(200, {
     'content-type': MIME_TYPES.get(extname(filePath).toLowerCase()) || 'application/octet-stream',
     'content-length': fileStat.size,
+    ...staticSecurityHeaders(),
   });
   createReadStream(filePath).pipe(res);
 }
@@ -70,7 +89,7 @@ export function createServer() {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     try {
       if (url.pathname === '/healthz' || url.pathname === '/api/healthz') {
-        return sendJson(res, 200, { ok: true, service: 'title-analyzer', release: getRuntimeInfo() });
+        return sendJson(res, 200, publicHealth('title-analyzer'));
       }
       if (url.pathname === '/api/analyze') return await callApiHandler(analyzeHandler, req, res, url);
       if (url.pathname === '/api/jobs') return await callApiHandler(jobsHandler, req, res, url);

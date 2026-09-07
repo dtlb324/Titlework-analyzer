@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import jobsRouteHandler from '../api/jobs/[...path].js';
+import { deriveSynthesisProgress } from '../api/_lib/jobs.js';
 import {
   buildFollowupMessages,
   buildSynthesisChunks,
@@ -151,8 +152,17 @@ function createMemoryPhase5Store(initialState = {}) {
     async cancelJob(jobId, reason) {
       const job = jobs.get(jobId);
       if (!job) return null;
-      const next = { ...job, status: 'canceled', currentPhase: 'canceled', errorMessage: reason || 'canceled', updatedAt: now() };
+      const next = {
+        ...job,
+        status: 'canceled',
+        currentPhase: 'canceled',
+        errorMessage: reason || 'canceled',
+        synthesisMergeWorkerId: null,
+        synthesisMergeLeaseExpiresAt: null,
+        updatedAt: now(),
+      };
       jobs.set(jobId, next);
+      synthesisPreviews.delete(jobId);
       return next;
     },
     async listDocumentAbstracts(jobId) {
@@ -409,6 +419,8 @@ function createMemoryPhase5Store(initialState = {}) {
       return reset;
     },
     async saveJobResult(jobId, payload) {
+      const job = jobs.get(jobId);
+      if (!job || job.status === 'canceled') return null;
       const id = `res_${jobId}`;
       const row = {
         id,
@@ -469,6 +481,8 @@ function createMemoryPhase5Store(initialState = {}) {
     async claimSynthesisMerge(jobId, planId, options = {}) {
       mergeClaimCalls += 1;
       lastMergeLeaseMs = options.leaseMs || 120_000;
+      const job = jobs.get(jobId);
+      if (!job || job.status === 'canceled') return null;
       if (initialState.mergeClaimResult === false) return null;
       return {
         jobId,
@@ -516,10 +530,19 @@ function createMemoryPhase5Store(initialState = {}) {
         ? await this.summarizeSynthesisSegments(jobId, planId)
         : { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0 };
       const list = includeSegments && planId ? await this.listSynthesisSegments(jobId, planId) : [];
+      const job = await this.getJob(jobId);
       const result = includeResult ? await this.getJobResult(jobId) : null;
       const resultMeta = lightweight && !includeResult ? await this.getJobResultMeta(jobId) : null;
+      const mergeLeaseExpiresAt = job?.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
+      const mergeLeaseHeld = Boolean(job?.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
+      const { hasResult, mergeInProgress } = deriveSynthesisProgress({
+        job,
+        counts,
+        hasResultRow: Boolean(result || resultMeta),
+        mergeLeaseHeld,
+      });
       return {
-        job: await this.getJob(jobId),
+        job,
         planId,
         total: counts.total,
         pending: counts.pending,
@@ -527,11 +550,10 @@ function createMemoryPhase5Store(initialState = {}) {
         complete: counts.complete,
         failed: counts.failed,
         retry_wait: counts.retry_wait,
-        mergeInProgress: false,
+        mergeInProgress,
+        mergeLeaseHeld,
         segments: list,
-        hasResult: result
-          ? Boolean(result.finalTitleOpinion)
-          : Boolean(resultMeta?.hasOpinion),
+        hasResult,
         result,
         resultMeta,
       };

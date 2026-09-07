@@ -63,10 +63,12 @@ export async function extractPdfText(payloadBytes, options = {}) {
   try {
     const { extractText, getDocumentProxy } = await import('unpdf');
     const pdf = await getDocumentProxy(new Uint8Array(bytes));
-    const { totalPages, text } = await extractText(pdf, { mergePages: true });
+    const { totalPages, text } = await extractText(pdf, { mergePages: false });
+    const pageTexts = (Array.isArray(text) ? text : [text]).map(page => String(page || '').trim());
     return {
-      text: String(text || '').trim(),
-      totalPages: Math.max(0, Number(totalPages) || 0),
+      text: pageTexts.filter(Boolean).join('\n\n'),
+      pageTexts,
+      totalPages: Math.max(0, Number(totalPages) || pageTexts.length || 0),
     };
   } catch (err) {
     return {
@@ -80,10 +82,13 @@ export async function extractPdfText(payloadBytes, options = {}) {
 /**
  * Decide whether extracted text is dense/legible enough to skip visual PDF tokens.
  */
-export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, configOverrides = {}) {
+export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTexts }, configOverrides = {}) {
   const config = { ...getPdfTextConfig(), ...configOverrides };
+  const pagesFromExtract = Array.isArray(pageTexts)
+    ? pageTexts.map(page => String(page || '').trim())
+    : null;
   const trimmed = String(text || '').trim();
-  const pages = Math.max(1, Number(pageCount) || 1);
+  const pages = Math.max(1, pagesFromExtract?.length || Number(pageCount) || 1);
   const sizeBytes = Math.max(0, Number(fileSizeBytes) || 0);
 
   if (!trimmed.length) {
@@ -91,6 +96,27 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, confi
   }
   if (trimmed.length > config.maxExtractedChars) {
     return { suitable: false, reason: 'text_too_long' };
+  }
+
+  const densePageIndexes = [];
+  const sparsePageIndexes = [];
+  if (pagesFromExtract?.length) {
+    pagesFromExtract.forEach((page, index) => {
+      if (page.length >= config.minCharsPerPage) densePageIndexes.push(index);
+      else sparsePageIndexes.push(index);
+    });
+    if (sparsePageIndexes.length > 0) {
+      return {
+        suitable: false,
+        reason: 'blank_or_sparse_pages',
+        sparsePages: sparsePageIndexes.length,
+        densePages: densePageIndexes.length,
+        sparsePageIndexes,
+        densePageIndexes,
+        pageCount: pagesFromExtract.length,
+        coverage: densePageIndexes.length / pagesFromExtract.length,
+      };
+    }
   }
 
   const charsPerPage = trimmed.length / pages;
@@ -119,7 +145,35 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes }, confi
     printableRatio,
     bytesPerChar,
     totalChars: trimmed.length,
+    densePageIndexes: densePageIndexes.length ? densePageIndexes : null,
+    sparsePageIndexes: sparsePageIndexes.length ? sparsePageIndexes : null,
   };
+}
+
+export async function extractPdfPageSubset(payloadBytes, pageIndexesZeroBased) {
+  const indexes = [...new Set((pageIndexesZeroBased || []).map(index => Number(index)).filter(index => Number.isInteger(index) && index >= 0))];
+  if (!indexes.length) {
+    throw new Error('No PDF pages requested.');
+  }
+  const { PDFDocument } = await import('pdf-lib');
+  const source = await PDFDocument.load(normalizeBytes(payloadBytes), { ignoreEncryption: true });
+  const pageCount = source.getPageCount();
+  const valid = indexes.filter(index => index < pageCount);
+  if (!valid.length) {
+    throw new Error('Requested PDF pages are out of range.');
+  }
+  const child = await PDFDocument.create();
+  const pages = await child.copyPages(source, valid);
+  for (const page of pages) child.addPage(page);
+  return Buffer.from(await child.save());
+}
+
+function labeledExtractedPages(pageTexts, densePageIndexes, pageStart) {
+  const start = Math.max(1, Number(pageStart) || 1);
+  return densePageIndexes.map(index => {
+    const pageNo = start + index;
+    return `----- PAGE ${pageNo} (extracted text) -----\n${pageTexts[index]}`;
+  }).join('\n\n');
 }
 
 /**
@@ -157,19 +211,49 @@ export async function resolvePdfTextDelivery(payloadBytes, options = {}) {
     text: extracted.text,
     pageCount: extracted.totalPages || 1,
     fileSizeBytes: bytes.byteLength,
+    pageTexts: extracted.pageTexts,
   }, config);
-  if (!quality.suitable) {
+  if (quality.suitable) {
     return {
-      mode: 'visual',
-      reason: quality.reason,
-      quality,
+      mode: 'text',
+      extractedText: extracted.text,
       totalPages: extracted.totalPages,
+      quality,
     };
   }
+
+  const densePageIndexes = quality.densePageIndexes || [];
+  const sparsePageIndexes = quality.sparsePageIndexes || [];
+  if (quality.reason === 'blank_or_sparse_pages' && densePageIndexes.length && sparsePageIndexes.length) {
+    try {
+      const visualBytes = await extractPdfPageSubset(bytes, sparsePageIndexes);
+      const pageStart = Math.max(1, Number(options.pageStart) || 1);
+      const sparsePages = sparsePageIndexes.map(index => pageStart + index);
+      return {
+        mode: 'hybrid',
+        reason: 'blank_or_sparse_pages',
+        extractedText: labeledExtractedPages(extracted.pageTexts, densePageIndexes, pageStart),
+        visualBytes,
+        sparsePages,
+        densePages: densePageIndexes.map(index => pageStart + index),
+        totalPages: extracted.totalPages,
+        quality,
+      };
+    } catch (err) {
+      return {
+        mode: 'visual',
+        reason: 'hybrid_subset_failed',
+        error: err?.message || String(err),
+        quality,
+        totalPages: extracted.totalPages,
+      };
+    }
+  }
+
   return {
-    mode: 'text',
-    extractedText: extracted.text,
-    totalPages: extracted.totalPages,
+    mode: 'visual',
+    reason: quality.reason,
     quality,
+    totalPages: extracted.totalPages,
   };
 }

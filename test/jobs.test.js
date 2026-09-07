@@ -534,9 +534,9 @@ test('frontend guards authenticated initial job route until password succeeds', 
   `);
 });
 
-test('frontend can remember access password on this device', async () => {
-  const session = new Map();
-  const local = new Map();
+test('frontend keeps the access password in memory only', async () => {
+  const session = new Map([['app_password', 'stale-session']]);
+  const local = new Map([['app_password', 'stale-local'], ['app_password_remember', '1']]);
   const storageApi = (map) => ({
     getItem(key) { return map.has(key) ? map.get(key) : null; },
     setItem(key, value) { map.set(key, String(value)); },
@@ -547,23 +547,17 @@ test('frontend can remember access password on this device', async () => {
     assert(typeof persistPassword === 'function', 'Expected persistPassword helper');
     assert(typeof clearStoredPassword === 'function', 'Expected clearStoredPassword helper');
 
-    persistPassword('saved-secret', true);
+    assert(loadStoredPassword() === '', 'Expected no password loaded from web storage');
+    assert(localStorage.getItem('app_password') === null, 'Expected stale localStorage password cleared');
+    assert(sessionStorage.getItem('app_password') === null, 'Expected stale sessionStorage password cleared');
+
+    persistPassword('saved-secret');
     assert(appPassword === 'saved-secret', 'Expected in-memory password after persist');
-    assert(localStorage.getItem('app_password') === 'saved-secret', 'Expected remembered password in localStorage');
-    assert(localStorage.getItem('app_password_remember') === '1', 'Expected remember flag in localStorage');
-    assert(sessionStorage.getItem('app_password') === 'saved-secret', 'Expected session copy after remember');
-
-    appPassword = '';
-    assert(loadStoredPassword() === 'saved-secret', 'Expected remembered password on reload');
-
-    persistPassword('session-only', false);
-    assert(localStorage.getItem('app_password') === null, 'Expected local password cleared when not remembering');
-    assert(localStorage.getItem('app_password_remember') === null, 'Expected remember flag cleared');
-    assert(sessionStorage.getItem('app_password') === 'session-only', 'Expected session password without remember');
+    assert(localStorage.getItem('app_password') === null, 'Must not persist password in localStorage');
+    assert(sessionStorage.getItem('app_password') === null, 'Must not persist password in sessionStorage');
 
     clearStoredPassword();
     assert(appPassword === '', 'Expected in-memory password cleared');
-    assert(loadStoredPassword() === '', 'Expected no password after clear');
   `}\n})()`, {
     console: { log() {}, error() {}, warn() {}, debug() {} },
     assert,
@@ -593,8 +587,7 @@ test('frontend can remember access password on this device', async () => {
     fetch: async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => '{}' }),
   });
 
-  assert(indexHtml.includes('id="rememberPassword"'), 'Expected remember-password checkbox in password gate');
-  assert(indexHtml.includes('Remember password on this device'), 'Expected remember-password label');
+  assert(!indexHtml.includes('id="rememberPassword"'), 'Remember-password checkbox must be removed');
 });
 
 test('Bug fix: synthesis progress caps completedDocuments at files.length after splits', async () => {

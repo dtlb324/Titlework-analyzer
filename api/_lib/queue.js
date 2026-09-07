@@ -373,6 +373,7 @@ function publicSynthesisStatus(status) {
     planId: status.planId || null,
     hasResult: Boolean(status.hasResult),
     mergeInProgress: Boolean(status.mergeInProgress),
+    mergeLeaseHeld: Boolean(status.mergeLeaseHeld),
   };
 }
 

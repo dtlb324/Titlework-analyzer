@@ -249,7 +249,7 @@ test('invokeOpenRouterModel calls fetch with correct URL and headers', async () 
 
   assert(capturedUrl.includes('openrouter.ai/api/v1/chat/completions'), `Wrong URL: ${capturedUrl}`);
   assert(capturedHeaders['Authorization'] === 'Bearer sk-or-test-key', 'Wrong auth header');
-  assert(capturedHeaders['HTTP-Referer'] !== undefined, 'Missing HTTP-Referer');
+  assert(capturedHeaders['HTTP-Referer'] === undefined, 'HTTP-Referer must be omitted unless OPENROUTER_REFERER is set');
   assert(capturedHeaders['X-Title'] !== undefined, 'Missing X-Title');
   assert(capturedBody.model === 'anthropic/claude-sonnet-4-6', 'Wrong model in body');
   assert(result.text === 'response text', 'Wrong response text');

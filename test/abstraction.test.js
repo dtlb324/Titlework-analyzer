@@ -18,6 +18,7 @@ import {
 } from '../api/_lib/queue.js';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
+import { applyAbstractionClaim } from '../api/_lib/jobs.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -72,6 +73,7 @@ function makeChunk(overrides = {}) {
     uploadStatus: 'uploaded',
     abstractionStatus: overrides.abstractionStatus || 'pending',
     abstractionAttempts: overrides.abstractionAttempts || 0,
+    abstractionReclaims: overrides.abstractionReclaims || 0,
     abstractionErrorType: overrides.abstractionErrorType || null,
     abstractionErrorMessage: overrides.abstractionErrorMessage || null,
     abstractionRetryAt: overrides.abstractionRetryAt || null,
@@ -151,7 +153,7 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     return { updated, counts: { completed, failed, pending, processing, retry_wait } };
   }
 
-  function isClaimable(chunk, asOfMs) {
+  function isClaimable(chunk, asOfMs, workerId = null) {
     if (chunk.uploadStatus !== 'uploaded') return false;
     const status = chunk.abstractionStatus || 'pending';
     if (status === 'pending') return true;
@@ -160,6 +162,7 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       return !retryAt || retryAt <= asOfMs;
     }
     if (status === 'processing') {
+      if (workerId && chunk.abstractionWorkerId === workerId) return true;
       const expires = chunk.abstractionLeaseExpiresAt ? Date.parse(chunk.abstractionLeaseExpiresAt) : 0;
       return !expires || expires <= asOfMs;
     }
@@ -201,20 +204,8 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     async claimChunkForAbstraction(jobId, chunkId, claimOptions = {}) {
       const chunk = chunks.get(chunkId);
       if (!chunk || chunk.jobId !== jobId) return null;
-      if (!isClaimable(chunk, Date.now())) return null;
-      const leaseMs = claimOptions.leaseMs || 90_000;
-      const updated = {
-        ...chunk,
-        abstractionStatus: 'processing',
-        abstractionAttempts: (chunk.abstractionAttempts || 0) + 1,
-        abstractionErrorType: null,
-        abstractionErrorMessage: null,
-        abstractionClaimedAt: new Date().toISOString(),
-        abstractionLeaseExpiresAt: new Date(Date.now() + leaseMs).toISOString(),
-        abstractionWorkerId: claimOptions.workerId || 'wkr_test',
-        abstractionRetryAt: null,
-        updatedAt: now,
-      };
+      if (!isClaimable(chunk, Date.now(), claimOptions.workerId)) return null;
+      const updated = applyAbstractionClaim(chunk, claimOptions);
       chunks.set(chunkId, updated);
       return updated;
     },
@@ -371,15 +362,7 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       };
       jobs.set(jobId, updated);
       for (const chunk of orderedChunks(jobId)) {
-        if (chunk.abstractionStatus === 'processing') {
-          chunks.set(chunk.id, {
-            ...chunk,
-            abstractionClaimedAt: null,
-            abstractionLeaseExpiresAt: null,
-            abstractionWorkerId: null,
-            updatedAt: now,
-          });
-        } else if (['pending', 'retry_wait'].includes(chunk.abstractionStatus)) {
+        if (['pending', 'retry_wait', 'processing'].includes(chunk.abstractionStatus)) {
           chunks.set(chunk.id, {
             ...chunk,
             abstractionStatus: 'failed',
@@ -1187,6 +1170,7 @@ test('Phase 4: cancel fails pending chunks so canceled jobs leave the worker que
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_one', chunkOrder: 0, abstractionStatus: 'pending' }),
     makeChunk({ id: 'chk_two', chunkOrder: 1, abstractionStatus: 'retry_wait', abstractionRetryAt: new Date(Date.now() + 60_000).toISOString() }),
+    makeChunk({ id: 'chk_three', chunkOrder: 2, abstractionStatus: 'processing', abstractionWorkerId: 'wkr_live' }),
   ]);
   await store.cancelJob('job_test_1', 'test cancel');
   const chunks = await store.listChunks('job_test_1');

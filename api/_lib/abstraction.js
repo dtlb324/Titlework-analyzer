@@ -159,27 +159,10 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
   if (isCsvChunk(chunk)) {
     const csvText = bytes.toString('utf8');
     textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
-  } else if (isPdfChunk(chunk) && delivery?.mode === 'text' && delivery.extractedText) {
-    textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES and write ILLEGIBLE - VERIFY MANUALLY where needed.`;
-  } else if (isPdfChunk(chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
-    content.push({
-      type: 'document',
-      source: {
-        type: 'file_uri',
-        media_type: delivery.mimeType || 'application/pdf',
-        uri: delivery.fileUri,
-        geminiFileName: delivery.geminiFileName || null,
-      },
-    });
   } else if (isPdfChunk(chunk)) {
-    content.push({
-      type: 'document',
-      source: {
-        type: 'base64',
-        media_type: 'application/pdf',
-        data: bytes.toString('base64'),
-      },
-    });
+    const pdf = pdfDeliveryParts(chunk, bytes, delivery, docNum, name);
+    textPrompt += pdf.promptSuffix;
+    if (pdf.documentBlock) content.push(pdf.documentBlock);
   } else if (isImageChunk(chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
     content.push({
       type: 'image',
@@ -205,6 +188,51 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
 
   content.push({ type: 'text', text: textPrompt });
   return [{ role: 'user', content }];
+}
+
+function visualPdfDocumentBlock(delivery, bytes) {
+  if (delivery?.fileUri) {
+    return {
+      type: 'document',
+      source: {
+        type: 'file_uri',
+        media_type: delivery.mimeType || 'application/pdf',
+        uri: delivery.fileUri,
+        geminiFileName: delivery.geminiFileName || null,
+      },
+    };
+  }
+  const visual = delivery?.visualBytes ? normalizeBytes(delivery.visualBytes) : bytes;
+  return {
+    type: 'document',
+    source: {
+      type: 'base64',
+      media_type: 'application/pdf',
+      data: visual.toString('base64'),
+    },
+  };
+}
+
+function pdfDeliveryParts(_chunk, bytes, delivery, docNum, name) {
+  if (delivery?.mode === 'text' && delivery.extractedText) {
+    return {
+      promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES and write ILLEGIBLE - VERIFY MANUALLY where needed.`,
+      documentBlock: null,
+    };
+  }
+  if (delivery?.mode === 'hybrid' && delivery.extractedText) {
+    const sparse = Array.isArray(delivery.sparsePages) && delivery.sparsePages.length
+      ? delivery.sparsePages.join(', ')
+      : 'sparse/blank pages';
+    return {
+      promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - HYBRID PDF:\nText-extracted pages:\n${delivery.extractedText}\n\nSparse or blank pages (${sparse}) are attached as a visual PDF in that original page order. Abstract those pages from the attached PDF. Stay coverage-complete across extracted text and attached pages.`,
+      documentBlock: visualPdfDocumentBlock(delivery, bytes),
+    };
+  }
+  if (delivery?.mode === 'gemini_file' && delivery.fileUri) {
+    return { promptSuffix: '', documentBlock: visualPdfDocumentBlock(delivery, bytes) };
+  }
+  return { promptSuffix: '', documentBlock: visualPdfDocumentBlock(delivery, bytes) };
 }
 
 /**
@@ -235,27 +263,10 @@ Extract every relevant fact. Do not guess at anything illegible.`;
     if (isCsvChunk(item.chunk)) {
       const csvText = bytes.toString('utf8');
       textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
-    } else if (isPdfChunk(item.chunk) && delivery?.mode === 'text' && delivery.extractedText) {
-      textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES.`;
-    } else if (isPdfChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
-      content.push({
-        type: 'document',
-        source: {
-          type: 'file_uri',
-          media_type: delivery.mimeType || 'application/pdf',
-          uri: delivery.fileUri,
-          geminiFileName: delivery.geminiFileName || null,
-        },
-      });
     } else if (isPdfChunk(item.chunk)) {
-      content.push({
-        type: 'document',
-        source: {
-          type: 'base64',
-          media_type: 'application/pdf',
-          data: bytes.toString('base64'),
-        },
-      });
+      const pdf = pdfDeliveryParts(item.chunk, bytes, delivery, docNum, name);
+      textPrompt += pdf.promptSuffix;
+      if (pdf.documentBlock) content.push(pdf.documentBlock);
     } else if (isImageChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
       content.push({
         type: 'image',
@@ -421,7 +432,10 @@ function getModelClient(options) {
 
 export async function resolveChunkDelivery(chunk, payloadBytes) {
   if (isPdfChunk(chunk)) {
-    return await resolvePdfTextDelivery(payloadBytes);
+    return await resolvePdfTextDelivery(payloadBytes, {
+      pageStart: chunk.pageStart,
+      pageEnd: chunk.pageEnd,
+    });
   }
   return { mode: 'visual' };
 }
@@ -430,17 +444,17 @@ export async function resolveChunkDelivery(chunk, payloadBytes) {
  * Upload large visual PDFs/images to Gemini Files API so generateContent stays under JSON envelope limits.
  */
 export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model) {
-  if (!delivery || delivery.mode !== 'visual' || !isGeminiModel(model)) {
+  if (!delivery || !isGeminiModel(model)) {
     return delivery;
   }
-  // A Gemini file_uri is only usable by Gemini's own API. When the request will be
-  // routed through OpenRouter (slash-name or MODEL_PROVIDER=openrouter), uploading to
-  // the Gemini Files API produces a file_uri that openrouter-request.js rejects. Keep
-  // the inline base64 'visual' delivery so OpenRouter receives a source it can use.
+  const needsVisualUpload = delivery.mode === 'visual' || delivery.mode === 'hybrid';
+  if (!needsVisualUpload) return delivery;
   if (shouldUseOpenRouter(model)) {
     return delivery;
   }
-  const bytes = normalizeBytes(payloadBytes);
+  const bytes = delivery.mode === 'hybrid' && delivery.visualBytes
+    ? normalizeBytes(delivery.visualBytes)
+    : normalizeBytes(payloadBytes);
   if (!shouldUseGeminiFileApi(bytes.byteLength)) {
     return delivery;
   }
@@ -450,6 +464,15 @@ export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes
   const mimeType = isPdfChunk(chunk) ? 'application/pdf' : (chunk.mediaType || 'image/jpeg');
   try {
     const uploaded = await uploadGeminiFile(bytes, mimeType, chunkDisplayName(chunk));
+    if (delivery.mode === 'hybrid') {
+      return {
+        ...delivery,
+        fileUri: uploaded.uri,
+        geminiFileName: uploaded.name,
+        mimeType: uploaded.mimeType,
+        sizeBytes: bytes.byteLength,
+      };
+    }
     return {
       mode: 'gemini_file',
       fileUri: uploaded.uri,
@@ -474,6 +497,12 @@ export function estimateAbstractPayloadBytes(chunk, payloadBytes = null, deliver
       REQUEST_ENVELOPE_SAFE_BYTES,
       Buffer.byteLength(String(delivery.extractedText || ''), 'utf8') + 4_000,
     );
+  }
+  if (delivery?.mode === 'hybrid') {
+    const textBytes = Buffer.byteLength(String(delivery.extractedText || ''), 'utf8') + 4_000;
+    if (delivery.fileUri) return textBytes + 6_000;
+    const visual = delivery.visualBytes?.byteLength || 0;
+    return textBytes + Math.ceil(visual * 1.37);
   }
   if (delivery?.mode === 'gemini_file') {
     return 6_000;
@@ -732,11 +761,12 @@ function extractRetryAfter(err) {
   return Number.isFinite(value) ? value : 0;
 }
 
-async function claimChunkWithLease(store, chunk, workerId, leaseMs) {
+async function claimChunkWithLease(store, chunk, workerId, leaseMs, maxAttempts) {
   if (store.claimChunkForAbstraction) {
     return await store.claimChunkForAbstraction(chunk.jobId, chunk.id, {
       workerId,
       leaseMs,
+      maxAttempts,
     });
   }
   if (store.markChunkAbstractionProcessing) {
@@ -778,9 +808,19 @@ export async function processChunkAbstraction(chunk, options = {}) {
   const workerId = options.workerId || `wkr_${Math.random().toString(36).slice(2, 10)}`;
   const sequenceIndex = Number.isInteger(options.sequenceIndex) ? options.sequenceIndex : chunk.chunkOrder || 0;
   const startedAt = Date.now();
-  const claimedChunk = await claimChunkWithLease(store, chunk, workerId, leaseMs);
+  const claimedChunk = await claimChunkWithLease(store, chunk, workerId, leaseMs, maxAttempts);
   if (!claimedChunk) {
     return { status: 'skipped', chunkId: chunk.id };
+  }
+  if (claimedChunk.abstractionStatus === 'failed') {
+    return {
+      status: 'failed',
+      chunkId: claimedChunk.id,
+      failure: {
+        errorType: claimedChunk.abstractionErrorType || 'max_attempts',
+        errorMessage: claimedChunk.abstractionErrorMessage || 'Abstraction attempt limit exceeded.',
+      },
+    };
   }
   const processingChunk = claimedChunk;
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
