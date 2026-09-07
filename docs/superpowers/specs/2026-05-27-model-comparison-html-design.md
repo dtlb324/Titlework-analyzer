@@ -5,7 +5,7 @@
 
 ## Goal
 
-Extend `scripts/compare-final-opinion.mjs` to emit a `comparison.html` file alongside the existing markdown outputs. Opening the file in any browser shows both final title opinions side by side with latency and token stats, making it easy to judge which model — Claude Sonnet 4.6 or Gemini 3.5 Flash — produces a better result for a given job.
+Extend `scripts/compare-final-opinion.mjs` to emit a `comparison.html` file alongside the existing markdown outputs. Opening the file in any browser shows both final title opinions side by side with latency and token stats, making it easy to judge which model — Claude Sonnet 5 or Gemini 3.5 Flash — produces a better result for a given job.
 
 ## Scope
 
@@ -50,7 +50,7 @@ opinionTexts[arm.id] = result.text;
 ┌─────────────────────────────────────────────────────┐
 │  Job: job_abc123 · Tract: NE/4 Sec 5 · 12 abstracts │
 ├──────────────────────────┬──────────────────────────┤
-│  Claude Sonnet 4.6       │  Gemini 3.5 Flash        │
+│  Claude Sonnet 5       │  Gemini 3.5 Flash        │
 │  4.2s · 1,840 tok out    │  6.1s · 2,103 tok out    │
 ├──────────────────────────┼──────────────────────────┤
 │                          │                          │

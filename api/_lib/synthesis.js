@@ -12,8 +12,8 @@
 //   Override per call with options.modelClient
 //
 // Configurable (env):
-//   - SYNTHESIS_MODEL (default: claude-sonnet-4-6 for final title opinion; Gemini/Haiku ignored)
-//   - SYNTHESIS_MAX_TOKENS (default: 6000)
+//   - SYNTHESIS_MODEL (default: claude-sonnet-5 for final title opinion; Gemini/Haiku ignored)
+//   - SYNTHESIS_MAX_TOKENS (default: 8000)
 //   - SYNTHESIS_CHUNK_SIZE (default: 50)
 //   - REQUEST_ENVELOPE_SAFE_BYTES (default: 3_900_000)
 //   - REQUEST_OVERHEAD_BYTES (default: 350_000)
@@ -26,7 +26,7 @@ import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, saniti
 import { buildMergeUserMessageContent } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
-const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-5';
 
 export function resolveFinalSynthesisModel() {
   const configured = String(process.env.SYNTHESIS_MODEL || DEFAULT_FINAL_SYNTHESIS_MODEL).trim();

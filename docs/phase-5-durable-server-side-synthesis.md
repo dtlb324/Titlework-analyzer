@@ -160,9 +160,9 @@ flowchart TD
 | Step | `synthesis.currentStep` | Model | System prompt | Output artifact |
 |------|-------------------------|-------|---------------|-----------------|
 | Plan | — | — | — | `synthesis.plan.segments[]` |
-| Segment *i* | `segment` | Sonnet 4.6 | `PARTIAL_SYNTHESIS_PROMPT` | `segmentSummaries[i]` checkpoint |
-| Final merge | `merge` | Sonnet 4.6 | `SYNTHESIS_PROMPT` | `finalTitleOpinion` |
-| Tree merge (fallback) | `merge_tree` | Sonnet 4.6 | `PARTIAL` then `SYNTHESIS` | intermediate + final |
+| Segment *i* | `segment` | Sonnet 5 | `PARTIAL_SYNTHESIS_PROMPT` | `segmentSummaries[i]` checkpoint |
+| Final merge | `merge` | Sonnet 5 | `SYNTHESIS_PROMPT` | `finalTitleOpinion` |
+| Tree merge (fallback) | `merge_tree` | Sonnet 5 | `PARTIAL` then `SYNTHESIS` | intermediate + final |
 
 **Single-pass:** If planner yields one chunk, call full `SYNTHESIS_PROMPT` once (no partial table in output).
 
@@ -298,7 +298,7 @@ interface SynthesisResult {
   failedDocuments: FailedDocumentRef[];
 
   generatedAt: string;           // ISO — merge completion time
-  model: string;                 // synthesis/merge model (e.g. claude-sonnet-4-6)
+  model: string;                 // synthesis/merge model (e.g. claude-sonnet-5)
 
   tokenUsage: TokenUsage;        // rolled up
   costEstimateUsd?: number;      // from list prices × tokens

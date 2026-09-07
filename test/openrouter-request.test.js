@@ -20,14 +20,14 @@ function test(name, fn) {
 test('shouldUseOpenRouter returns false by default for simple claude models', () => {
   const prev = process.env.MODEL_PROVIDER;
   delete process.env.MODEL_PROVIDER;
-  assert(shouldUseOpenRouter('claude-sonnet-4-6') === false);
+  assert(shouldUseOpenRouter('claude-sonnet-5') === false);
   process.env.MODEL_PROVIDER = prev;
 });
 
 test('shouldUseOpenRouter returns true for slash-names', () => {
   const prev = process.env.MODEL_PROVIDER;
   delete process.env.MODEL_PROVIDER;
-  assert(shouldUseOpenRouter('anthropic/claude-sonnet-4-6') === true);
+  assert(shouldUseOpenRouter('anthropic/claude-sonnet-5') === true);
   assert(shouldUseOpenRouter('openai/gpt-4o') === true);
   assert(shouldUseOpenRouter('google/gemini-2.5-flash') === true);
   process.env.MODEL_PROVIDER = prev;
@@ -36,7 +36,7 @@ test('shouldUseOpenRouter returns true for slash-names', () => {
 test('shouldUseOpenRouter returns true when MODEL_PROVIDER=openrouter', () => {
   const prev = process.env.MODEL_PROVIDER;
   process.env.MODEL_PROVIDER = 'openrouter';
-  assert(shouldUseOpenRouter('claude-sonnet-4-6') === true);
+  assert(shouldUseOpenRouter('claude-sonnet-5') === true);
   assert(shouldUseOpenRouter('gemini-2.5-flash') === true);
   process.env.MODEL_PROVIDER = prev;
 });
@@ -44,7 +44,7 @@ test('shouldUseOpenRouter returns true when MODEL_PROVIDER=openrouter', () => {
 test('shouldUseOpenRouter ignores MODEL_PROVIDER other than openrouter', () => {
   const prev = process.env.MODEL_PROVIDER;
   process.env.MODEL_PROVIDER = 'anthropic';
-  assert(shouldUseOpenRouter('claude-sonnet-4-6') === false);
+  assert(shouldUseOpenRouter('claude-sonnet-5') === false);
   process.env.MODEL_PROVIDER = prev;
 });
 
@@ -69,8 +69,8 @@ test('openRouterApiKeyError returns null when key is set', () => {
 // ── buildOpenRouterRequestBody ───────────────────────────────────────
 
 test('buildOpenRouterRequestBody maps model with auto name-mapping', () => {
-  const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-4-6', maxTokens: 100, messages: [] });
-  assert(req.model === 'anthropic/claude-sonnet-4-6', `Expected anthropic prefix, got ${req.model}`);
+  const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-5', maxTokens: 100, messages: [] });
+  assert(req.model === 'anthropic/claude-sonnet-5', `Expected anthropic prefix, got ${req.model}`);
 });
 
 test('buildOpenRouterRequestBody maps gemini model automatically', () => {
@@ -85,7 +85,7 @@ test('buildOpenRouterRequestBody passes slash-names through unchanged', () => {
 
 test('buildOpenRouterRequestBody places system as leading message', () => {
   const req = buildOpenRouterRequestBody({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     system: 'you are helpful',
     messages: [{ role: 'user', content: 'hello' }],
@@ -96,7 +96,7 @@ test('buildOpenRouterRequestBody places system as leading message', () => {
 
 test('buildOpenRouterRequestBody handles array system', () => {
   const req = buildOpenRouterRequestBody({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     system: [{ text: 'part1' }, { text: 'part2' }],
     messages: [],
@@ -106,7 +106,7 @@ test('buildOpenRouterRequestBody handles array system', () => {
 
 test('buildOpenRouterRequestBody translates text blocks', () => {
   const req = buildOpenRouterRequestBody({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
   });
@@ -116,7 +116,7 @@ test('buildOpenRouterRequestBody translates text blocks', () => {
 
 test('buildOpenRouterRequestBody translates image blocks (base64)', () => {
   const req = buildOpenRouterRequestBody({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     messages: [{
       role: 'user',
@@ -130,7 +130,7 @@ test('buildOpenRouterRequestBody translates image blocks (base64)', () => {
 
 test('buildOpenRouterRequestBody translates document blocks (base64 PDF)', () => {
   const req = buildOpenRouterRequestBody({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     messages: [{
       role: 'user',
@@ -147,7 +147,7 @@ test('buildOpenRouterRequestBody throws on file_uri source', () => {
   let threw = false;
   try {
     buildOpenRouterRequestBody({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       maxTokens: 100,
       messages: [{
         role: 'user',
@@ -164,7 +164,7 @@ test('buildOpenRouterRequestBody throws on file_uri source', () => {
 
 test('buildOpenRouterRequestBody preserves cache_control for anthropic/* targets', () => {
   const req = buildOpenRouterRequestBody({
-    model: 'anthropic/claude-sonnet-4-6',
+    model: 'anthropic/claude-sonnet-5',
     maxTokens: 100,
     messages: [{
       role: 'user',
@@ -187,28 +187,41 @@ test('buildOpenRouterRequestBody strips cache_control for non-anthropic targets'
 });
 
 test('buildOpenRouterRequestBody maps max_tokens', () => {
-  const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-4-6', maxTokens: 4096, messages: [] });
+  const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-5', maxTokens: 4096, messages: [] });
   assert(req.max_tokens === 4096);
+});
+
+test('buildOpenRouterRequestBody omits thinking and sampling fields', () => {
+  const req = buildOpenRouterRequestBody({
+    model: 'claude-sonnet-5',
+    maxTokens: 8000,
+    system: 'sys',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(!('thinking' in req), 'Sonnet 5 rejects manual thinking budgets');
+  assert(!('temperature' in req), 'Sonnet 5 rejects non-default temperature');
+  assert(!('top_p' in req), 'Sonnet 5 rejects non-default top_p');
+  assert(!('top_k' in req), 'Sonnet 5 rejects non-default top_k');
 });
 
 // ── normalizeOpenRouterResponse ──────────────────────────────────────
 
 test('normalizeOpenRouterResponse extracts text and usage', () => {
   const data = {
-    model: 'anthropic/claude-sonnet-4-6',
+    model: 'anthropic/claude-sonnet-5',
     choices: [{ message: { content: 'hello world', role: 'assistant' }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 10, completion_tokens: 5 },
   };
-  const result = normalizeOpenRouterResponse(data, 'claude-sonnet-4-6');
+  const result = normalizeOpenRouterResponse(data, 'claude-sonnet-5');
   assert(result.text === 'hello world');
-  assert(result.model === 'anthropic/claude-sonnet-4-6');
+  assert(result.model === 'anthropic/claude-sonnet-5');
   assert(result.usage.input_tokens === 10);
   assert(result.usage.output_tokens === 5);
   assert(result.stopReason === 'stop');
 });
 
 test('normalizeOpenRouterResponse handles null input gracefully', () => {
-  const result = normalizeOpenRouterResponse({}, 'claude-sonnet-4-6');
+  const result = normalizeOpenRouterResponse({}, 'claude-sonnet-5');
   assert(result.text === '');
   assert(result.usage.input_tokens === null);
   assert(result.usage.output_tokens === null);
@@ -233,12 +246,12 @@ test('invokeOpenRouterModel calls fetch with correct URL and headers', async () 
       json: async () => ({
         choices: [{ message: { content: 'response text' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 5, completion_tokens: 3 },
-        model: 'anthropic/claude-sonnet-4-6',
+        model: 'anthropic/claude-sonnet-5',
       }),
     };
   };
   const result = await invokeOpenRouterModel({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     system: 'system',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
@@ -251,7 +264,7 @@ test('invokeOpenRouterModel calls fetch with correct URL and headers', async () 
   assert(capturedHeaders['Authorization'] === 'Bearer sk-or-test-key', 'Wrong auth header');
   assert(capturedHeaders['HTTP-Referer'] === undefined, 'HTTP-Referer must be omitted unless OPENROUTER_REFERER is set');
   assert(capturedHeaders['X-Title'] !== undefined, 'Missing X-Title');
-  assert(capturedBody.model === 'anthropic/claude-sonnet-4-6', 'Wrong model in body');
+  assert(capturedBody.model === 'anthropic/claude-sonnet-5', 'Wrong model in body');
   assert(result.text === 'response text', 'Wrong response text');
   assert(result.usage.input_tokens === 5, 'Wrong usage input');
   assert(result.usage.output_tokens === 3, 'Wrong usage output');
@@ -262,7 +275,7 @@ test('invokeOpenRouterModel throws key error when API key is missing', async () 
   delete process.env.OPENROUTER_API_KEY;
   try {
     await invokeOpenRouterModel({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       maxTokens: 100,
       messages: [],
     });

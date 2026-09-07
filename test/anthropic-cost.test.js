@@ -18,6 +18,20 @@ test('buildSystemParam enables ephemeral cache for long prompts by default', () 
   assert(system[0].cache_control?.type === 'ephemeral', 'Expected ephemeral cache_control');
 });
 
+test('buildMessagesRequestBody omits thinking and sampling fields', () => {
+  const body = buildMessagesRequestBody({
+    model: 'claude-sonnet-5',
+    maxTokens: 8000,
+    system: 'sys',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(!('thinking' in body), 'Sonnet 5 rejects manual thinking budgets');
+  assert(!('temperature' in body), 'Sonnet 5 rejects non-default temperature');
+  assert(!('top_p' in body), 'Sonnet 5 rejects non-default top_p');
+  assert(!('top_k' in body), 'Sonnet 5 rejects non-default top_k');
+  assert(Object.keys(body).sort().join(',') === 'max_tokens,messages,model,system', `Unexpected request keys: ${Object.keys(body).join(',')}`);
+});
+
 test('buildMessagesRequestBody passes through cached system blocks', () => {
   process.env.ANTHROPIC_PROMPT_CACHE = 'true';
   const body = buildMessagesRequestBody({

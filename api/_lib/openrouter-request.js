@@ -13,7 +13,7 @@ export function openRouterApiKeyError() {
 
 /**
  * Determine whether a model name should be routed through OpenRouter.
- * 1. Slash-name detection (e.g. anthropic/claude-sonnet-4-6) → always OpenRouter.
+ * 1. Slash-name detection (e.g. anthropic/claude-sonnet-5) → always OpenRouter.
  * 2. Global toggle MODEL_PROVIDER=openrouter → route everything through OpenRouter.
  * 3. Otherwise → false (existing Anthropic/Gemini routing applies).
  */

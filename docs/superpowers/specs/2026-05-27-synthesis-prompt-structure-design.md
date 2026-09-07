@@ -9,7 +9,7 @@ Improve the clarity of Sonnet's title opinion output for all production jobs by 
 
 ## Background
 
-A side-by-side comparison of Claude Sonnet 4.6 vs Gemini 3.5 Flash on the same job abstracts revealed that Gemini's output was easier to read:
+A side-by-side comparison of Claude Sonnet 5 vs Gemini 3.5 Flash on the same job abstracts revealed that Gemini's output was easier to read:
 - Numbered entries per document made the chain of title scannable
 - Inline flags per document (with ⚠️ labels) made issues easy to spot
 - A "Reconciled Interest" column in the final ownership table made definitive legal conclusions clear (e.g., void chains = 0)

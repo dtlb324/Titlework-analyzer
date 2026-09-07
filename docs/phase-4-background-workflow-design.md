@@ -293,7 +293,7 @@ Port constants from `public/index.html` / `api/analyze.js`:
 | **Rate limits** | Inngest global throttle + server `ANALYZE_RATE_LIMIT_MAX`; on 429, `retry_wait` with `Retry-After` if present |
 | **Retries** | Max 8 transient per chunk; splits do not count as full attempts on parent |
 | **Model whitelist** | Keep `allowedModels` in `api/analyze.js` |
-| **Models** | `ABSTRACT_MODEL = claude-haiku-4-5`, `SYNTHESIS_MODEL = claude-sonnet-4-6` |
+| **Models** | `ABSTRACT_MODEL = claude-haiku-4-5`, `SYNTHESIS_MODEL = claude-sonnet-5` |
 | **Fallback** | Env `ABSTRACT_MODEL_FALLBACK`, `SYNTHESIS_MODEL_FALLBACK` (e.g. sonnet-4-5) — use only after 2 consecutive 5xx/timeout on same chunk; log `model_fallback_used` |
 | **max_tokens** | Abstract 2000, synthesis 8000 (unchanged) |
 

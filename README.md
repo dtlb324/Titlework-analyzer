@@ -114,7 +114,7 @@ Gemini 3.1 Flash Lite reads every uploaded document and produces a structured ab
 3. Open **API Keys → Create Key**, name it, and copy the value (starts with `sk-ant-...`).
 4. This is your **`ANTHROPIC_API_KEY`**.
 
-Claude Sonnet 4.6 writes the **final title opinion**, answers follow-up questions, and can optionally re-read low-confidence documents ("escalation").
+Claude Sonnet 5 writes the **final title opinion**, answers follow-up questions, and can optionally re-read low-confidence documents ("escalation").
 
 > Keep **both** keys configured. Gemini does the bulk reading; Claude does the final reasoning. Neither one replaces the other in the default setup.
 
@@ -397,10 +397,10 @@ When `MODEL_PROVIDER=openrouter` is set, model calls route through OpenRouter in
 
 | Name | Notes |
 |------|-------|
-| `SYNTHESIS_MODEL` | Default `claude-sonnet-4-6` for the final opinion and merge. Gemini/Haiku values are ignored. |
+| `SYNTHESIS_MODEL` | Default `claude-sonnet-5` for the final opinion and merge. Gemini/Haiku values are ignored. |
 | `SYNTHESIS_PARTIAL_MODEL` | Default `gemini-3.1-flash-lite` for large-job segment synthesis only. Haiku/Claude values are ignored. |
 | `ABSTRACT_MODEL` | Default `gemini-3.1-flash-lite`. Claude Haiku is not supported for abstraction. |
-| `ABSTRACT_ESCALATION_MODEL` | Default `claude-sonnet-4-6`. Used for re-reads of low-confidence abstracts (requires Anthropic). |
+| `ABSTRACT_ESCALATION_MODEL` | Default `claude-sonnet-5`. Used for re-reads of low-confidence abstracts (requires Anthropic). |
 | `GEMINI_THINKING_BUDGET` | **Gemini 2.5 only.** Default `0` (off). `-1` = dynamic, or a token count. Ignored on Gemini 3.x. |
 | `GEMINI_THINKING_LEVEL` | **Gemini 3.x only.** `minimal`/`low`/`medium`/`high`. Production default `minimal` (best OCR accuracy on scans). |
 | `GEMINI_INCLUDE_THOUGHTS` | When `true`, Gemini may return thought summaries (exposed as `thoughtSummaries`, never mixed into abstracts). Debug only. |
@@ -412,7 +412,7 @@ When `MODEL_PROVIDER=openrouter` is set, model calls route through OpenRouter in
 | `SYNTHESIS_CHUNK_SIZE` | Default `120` (max `250`). Max grouped docs per partial synthesis segment. |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | Default `200` for jobs with ≥100 abstracts. |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | Default `5000` for Gemini partial segment output. |
-| `SYNTHESIS_MAX_TOKENS` | Default `6000`. |
+| `SYNTHESIS_MAX_TOKENS` | Default `8000`. |
 | `SYNTHESIS_BATCH_LIMIT` | Default `4` (max `16`). Segments claimed per `/synthesis/process` batch. Production sets `8`. |
 | `SYNTHESIS_STREAM_ENABLED` | Default off. Streams the final Sonnet merge to `GET /api/jobs/:id/synthesis/preview`; opinion saved after stream completes. |
 | `SYNTHESIS_COMPACTION_ENABLED` | Default on. Compacts ≥6 segments (or large merge input) via Gemini before the final Sonnet merge. |
@@ -500,7 +500,7 @@ Roughly **~305 model calls**: 300 abstraction + ~4 partial synthesis segments + 
 |-------|--------|------|
 | Abstraction | `gemini-3.1-flash-lite` | One call per chunk (fewer with worker batching) |
 | Partial synthesis | `gemini-3.1-flash-lite` | Segment summaries before merge |
-| Final opinion | `claude-sonnet-4-6` | Single merge + follow-ups |
+| Final opinion | `claude-sonnet-5` | Single merge + follow-ups |
 
 A full 300-doc run is typically on the order of **~$1.50–3** in model tokens on the Gemini + Sonnet stack, dominated by the final Sonnet merge. App `/api/*` polling and GCS uploads are separate from token cost.
 
@@ -511,7 +511,7 @@ A full 300-doc run is typically on the order of **~$1.50–3** in model tokens o
 | `ABSTRACTION_PDF_TEXT_FIRST=true` (default) | Biggest savings on text-native PDFs: sends extracted text instead of visual blocks. |
 | `ABSTRACTION_BATCH_ENABLED=true` | Fewer abstraction **calls** (up to 24 small chunks per request). |
 | `GEMINI_FILE_API_ENABLED=true` | Keeps large scanned PDFs whole instead of page-splitting for envelope limits. |
-| `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=6000` | Caps output spend without changing prompts. |
+| `ABSTRACT_MAX_TOKENS=2000`, `SYNTHESIS_MAX_TOKENS=8000` | Caps output spend without changing prompts. |
 | `GEMINI_THINKING_LEVEL=minimal` (production default) | Best OCR accuracy on scans; higher levels cost more without improving transcription. |
 | `ABSTRACTION_ESCALATION_ENABLED=false` | Avoids relatively expensive Sonnet re-runs on low-confidence abstracts. |
 
@@ -524,7 +524,7 @@ The app does **not** use Anthropic/Gemini Batch APIs (24h window, no completion 
 - Bulk upload up to 400 documents per job.
 - Direct browser-to-GCS durable uploads (bytes never pass through the API).
 - Server-side abstraction with Gemini 3.1 Flash Lite. The worker batches small chunks, and the browser-only fallback can group up to 24 small documents per call while still page-splitting oversized single PDFs.
-- Final title synthesis and follow-ups with Claude Sonnet 4.6.
+- Final title synthesis and follow-ups with Claude Sonnet 5.
 - Durable job URLs that survive refreshes and closed tabs.
 - Retry, cancellation, partial-failure, and failed-chunk recovery.
 - PDF download of final results.

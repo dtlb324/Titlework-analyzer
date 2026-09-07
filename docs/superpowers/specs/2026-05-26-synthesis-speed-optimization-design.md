@@ -39,7 +39,7 @@ This spec consolidates the highest-impact recommendations from three independent
 ```text
 Abstraction (Gemini Flash, parallel)
   → Partial synthesis segments (Gemini Flash, up to SYNTHESIS_CONCURRENCY=4)
-  → Final merge (Claude Sonnet 4.6, one blocking call, max 6000 output tokens)
+  → Final merge (Claude Sonnet 5, one blocking call, max 6000 output tokens)
   → saveJobResult → UI poll sees result
   (Opus audit exists in code but is disabled in production — not on the hot path)
 ```

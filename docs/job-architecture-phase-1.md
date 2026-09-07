@@ -102,7 +102,7 @@ jobs:recent                    → capped list for GET /api/jobs (optional)
   "documentCount": 42,
   "abstractCount": 40,
   "failedDocumentCount": 2,
-  "synthesisModel": "claude-sonnet-4-6",
+  "synthesisModel": "claude-sonnet-5",
   "abstractModel": "claude-haiku-4-5",
   "opinionAvailable": false,
   "opinionStorageKey": null,

@@ -116,7 +116,7 @@ function buildComparisonHtml(meta, sonnetText, geminiText) {
 <div class="columns">
   <div class="col">
     <div class="col-header">
-      <div class="col-name">Claude Sonnet 4.6</div>
+      <div class="col-name">Claude Sonnet 5</div>
       <div class="col-stats">${escHtml(fmtStats(sonnetArm))}</div>
     </div>
     <div class="col-body">${mdToHtml(sonnetText)}</div>
@@ -288,7 +288,7 @@ open eval/compare/$(ls -t eval/compare | head -1)/comparison.html
 - [ ] Top bar shows the correct job ID
 - [ ] Top bar shows the tract (if the job has one)
 - [ ] Top bar shows mode (`single-pass` or `merge`) and abstract count
-- [ ] Left column header reads "Claude Sonnet 4.6" with latency and token count
+- [ ] Left column header reads "Claude Sonnet 5" with latency and token count
 - [ ] Right column header reads "Gemini 3.5 Flash" with latency and token count
 - [ ] Both columns contain the actual title opinion text (not empty, not raw markdown symbols)
 - [ ] `##` headings render as `<h2>` (larger text), `###` as `<h3>` (smaller)

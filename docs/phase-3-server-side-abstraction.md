@@ -247,7 +247,7 @@ Port behavior from `abstractBatch`, `abstractSinglePdfOnTimeout`, and `api/analy
 
 **Optional later:** Provider interface with fallback order `haiku → flash` on 529/overload only — not Phase 3 MVP.
 
-**Synthesis unchanged:** Sonnet 4.6 stays client-side (or Phase 4); Phase 3 only moves **abstraction**.
+**Synthesis unchanged:** Sonnet 5 stays client-side (or Phase 4); Phase 3 only moves **abstraction**.
 
 ---
 
