@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Compare final title opinions: Claude Sonnet 4.6 vs Gemini 2.5 Pro on the same abstracts.
+ * Compare final title opinions: Claude Sonnet 5 vs Gemini 2.5 Pro on the same abstracts.
  *
  * Does NOT write to job_results — outputs markdown files for blind review.
  *
@@ -11,7 +11,7 @@
  * Optional:
  *   --out-dir eval/compare/my-run
  *   --gemini-model gemini-2.5-pro
- *   --sonnet-model claude-sonnet-4-6
+ *   --sonnet-model claude-sonnet-5
  *   --gemini-thinking-level high   (or env GEMINI_THINKING_LEVEL)
  */
 
@@ -31,7 +31,7 @@ import {
 } from '../api/_lib/synthesis.js';
 
 function parseArgs(argv) {
-  const args = { jobId: null, outDir: null, geminiModel: 'gemini-2.5-pro', sonnetModel: 'claude-sonnet-4-6', geminiThinkingLevel: null };
+  const args = { jobId: null, outDir: null, geminiModel: 'gemini-2.5-pro', sonnetModel: 'claude-sonnet-5', geminiThinkingLevel: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--job-id') args.jobId = argv[++i];
@@ -53,7 +53,7 @@ Options:
   --job-id <id>                 Completed or abstracted job (abstracts required)
   --out-dir <path>              Output directory (default: eval/compare/<jobId>-<ts>)
   --gemini-model <id>           Default: gemini-2.5-pro
-  --sonnet-model <id>           Default: claude-sonnet-4-6
+  --sonnet-model <id>           Default: claude-sonnet-5
   --gemini-thinking-level <lvl> minimal|low|medium|high (or GEMINI_THINKING_LEVEL)
 `);
 }
@@ -293,7 +293,7 @@ export function buildComparisonHtml(meta, sonnetText, geminiText) {
   const geminiArmId = meta.armIds?.gemini || 'gemini';
   const sonnetArm = meta.arms?.[sonnetArmId] || {};
   const geminiArm = meta.arms?.[geminiArmId] || {};
-  const sonnetLabel = meta.armLabels?.sonnet || 'Claude Sonnet 4.6';
+  const sonnetLabel = meta.armLabels?.sonnet || 'Claude Sonnet 5';
   const geminiLabel = meta.armLabels?.gemini || 'Gemini';
 
   function fmtStats(arm) {

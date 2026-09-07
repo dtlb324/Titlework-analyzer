@@ -59,7 +59,7 @@ test('index.html shows deployed release version under the tagline', () => {
 test('uses Gemini Flash for abstraction and Sonnet for synthesis', () => {
   assert(script.includes("ABSTRACT_MODEL = 'gemini-3.1-flash-lite'"), 'Expected Gemini Flash Lite for abstraction');
   assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-3.1-flash-lite'"), 'Expected Gemini Flash Lite for partial synthesis segments');
-  assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-4-6'"), 'Expected Sonnet for final synthesis');
+  assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-5'"), 'Expected Sonnet for final synthesis');
   assert(!script.includes("'claude-opus-4-7'"), 'Opus 4.7 should not be hardcoded');
   assert(!script.includes('claude-haiku-4-5'), 'Haiku should not be used for abstraction or partial synthesis');
 });
@@ -148,7 +148,7 @@ test('API rejects unknown model', async () => {
   assert(String(res.body?.error).includes('model'), 'Should reject unknown model');
 });
 
-test('API accepts gemini-2.5-flash and claude-sonnet-4-6', async () => {
+test('API accepts gemini-2.5-flash and claude-sonnet-5', async () => {
   const prevAnthropic = process.env.ANTHROPIC_API_KEY;
   const prevGemini = process.env.GEMINI_API_KEY;
   const prevFetch = global.fetch;
@@ -172,7 +172,7 @@ test('API accepts gemini-2.5-flash and claude-sonnet-4-6', async () => {
       json: async () => ({ content: [{ type: 'text', text: 'ok' }], model: 'test-model', stop_reason: 'end_turn', usage: {} }),
     };
   };
-  for (const model of ['gemini-2.5-flash', 'claude-sonnet-4-6']) {
+  for (const model of ['gemini-2.5-flash', 'claude-sonnet-5']) {
     const req = mockReq({ model, messages: [{ role: 'user', content: 'hello' }] });
     const res = mockRes();
     await handler(req, res);

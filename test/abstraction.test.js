@@ -565,7 +565,7 @@ test('browser abstraction fallback mirrors single-instrument prompt and token bu
   assert(indexHtml.includes("const ABSTRACT_MODEL = 'gemini-3.1-flash-lite'"), 'Expected browser fallback to use Gemini Flash Lite for abstraction');
   assert(indexHtml.includes("const SYNTHESIS_PARTIAL_MODEL = 'gemini-3.1-flash-lite'"), 'Expected browser partial synthesis to use Gemini Flash Lite');
   assert(!indexHtml.includes('claude-haiku-4-5'), 'Browser abstraction must not reference Claude Haiku');
-  assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-4-6'"), 'Expected browser fallback to define Sonnet escalation model');
+  assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-5'"), 'Expected browser fallback to define Sonnet escalation model');
   assert(indexHtml.includes('callAbstractionWithEscalation'), 'Expected browser fallback to use abstraction escalation helper');
 });
 
@@ -1385,10 +1385,10 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
     blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
     modelClient: async request => {
       models.push(request.model);
-      if (request.model === 'claude-sonnet-4-6') {
+      if (request.model === 'claude-sonnet-5') {
         return {
           text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nCONFIDENCE: Sonnet verified the illegible text and low-confidence fields.',
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           usage: { input_tokens: 20, output_tokens: 30 },
         };
       }
@@ -1402,8 +1402,8 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
 
   const saved = store.abstracts.get('chk_flagged');
   assert(result.status === 'completed', `Expected completed escalation, got ${result.status}`);
-  assert(models.join(',') === 'gemini-3.1-flash-lite,claude-sonnet-4-6', `Expected Gemini Flash Lite then Sonnet, got ${models.join(',')}`);
-  assert(saved.modelUsed === 'claude-sonnet-4-6', `Expected Sonnet saved, got ${saved.modelUsed}`);
+  assert(models.join(',') === 'gemini-3.1-flash-lite,claude-sonnet-5', `Expected Gemini Flash Lite then Sonnet, got ${models.join(',')}`);
+  assert(saved.modelUsed === 'claude-sonnet-5', `Expected Sonnet saved, got ${saved.modelUsed}`);
   assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
   assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash Lite and Sonnet calls');
 });

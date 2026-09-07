@@ -587,7 +587,7 @@ Future policies:
 Initial server-side implementation can keep the current model choices:
 
 - Abstraction: Claude Haiku 4.5.
-- Synthesis/follow-ups: Claude Sonnet 4.6.
+- Synthesis/follow-ups: Claude Sonnet 5.
 
 Future cost optimization:
 

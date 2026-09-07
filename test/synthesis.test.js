@@ -841,7 +841,7 @@ test('processSynthesisSegment resolves grouped abstracts by document ID', async 
   let promptContent = '';
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     promptContent = request.messages[0].content;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
 
   const result = await processSynthesisSegment('job_test_1', segment, [{
@@ -879,7 +879,7 @@ test('processSynthesisSegment resolves legacy chunk IDs against grouped chunkIds
   let promptContent = '';
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     promptContent = request.messages[0].content;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
 
   const result = await processSynthesisSegment('job_test_1', segment, [{
@@ -917,7 +917,7 @@ test('processSynthesisSegment deduplicates legacy chunk IDs from one grouped doc
   let promptContent = '';
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     promptContent = request.messages[0].content;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
 
   const result = await processSynthesisSegment('job_test_1', segment, [{
@@ -944,7 +944,7 @@ test('Single-pass synthesis: ≤50 ok abstracts → one synthesis call yields ti
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     calls += 1;
     assert(request.system === SYNTHESIS_PROMPT, 'Single-pass should use SYNTHESIS_PROMPT');
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 1000, output_tokens: 800 } };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 800 } };
   };
   const result = await processSynthesisJob('job_test_1', { store });
   assert(calls === 1, `Expected one model call, got ${calls}`);
@@ -992,7 +992,7 @@ test('Synthesis segment stale worker cannot overwrite a reclaimed segment', asyn
         completedAt: new Date().toISOString(),
       });
     }
-    return { text: goodFinalOpinion('stale worker result'), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion('stale worker result'), model: 'claude-sonnet-5', usage: {} };
   };
 
   const result = await processSynthesisSegment('job_test_1', segment, abstracts, {
@@ -1011,7 +1011,7 @@ test('Invalid single-pass model output fails instead of persisting a complete re
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: 'too short',
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: {},
   });
 
@@ -1040,11 +1040,11 @@ test('Multi-segment: 250 abstracts → segments + merge with checkpoints written
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       segmentCalls += 1;
-      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-4-6', usage: { input_tokens: 500, output_tokens: 400 } };
+      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-5', usage: { input_tokens: 500, output_tokens: 400 } };
     }
     if (request.system === SYNTHESIS_PROMPT) {
       mergeCalls += 1;
-      return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 800, output_tokens: 1200 } };
+      return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 800, output_tokens: 1200 } };
     }
     throw new Error('unexpected system prompt');
   };
@@ -1066,9 +1066,9 @@ test('Final merge claim lease exceeds upstream model timeout by default', async 
   const store = createMemoryPhase5Store({ abstracts });
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
-      return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+      return { text: goodSegmentSummary(0), model: 'claude-sonnet-5', usage: {} };
     }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
 
   await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
@@ -1087,10 +1087,10 @@ test('Final merge honors single-writer claim and skips merge when claim is unava
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       segmentCalls += 1;
-      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-4-6', usage: {} };
+      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-5', usage: {} };
     }
     mergeCalls += 1;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
 
   const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
@@ -1110,7 +1110,7 @@ test('Final merge error persists failed result instead of leaving no-result term
   const store = createMemoryPhase5Store({ abstracts });
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
-      return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+      return { text: goodSegmentSummary(0), model: 'claude-sonnet-5', usage: {} };
     }
     const err = new Error('merge provider failure');
     err.status = 500;
@@ -1143,7 +1143,7 @@ test('Partial job: failed abstract omitted; warnings list excluded documents', a
   const store = createMemoryPhase5Store({ abstracts, failedChunks });
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: { input_tokens: 1, output_tokens: 1 },
   });
   const result = await processSynthesisJob('job_test_1', { store });
@@ -1182,7 +1182,7 @@ test('Split-degraded documents produce final result warnings even when all chunk
   const store = createMemoryPhase5Store({ abstracts });
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: { input_tokens: 1, output_tokens: 1 },
   });
 
@@ -1214,10 +1214,10 @@ test('Segment timeout triggers binary split retry', async () => {
         err.status = 504;
         throw err;
       }
-      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
+      return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
     }
     mergeCalls += 1;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
   };
   const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
   assert(timeoutTriggered, 'Expected a 504 to be issued');
@@ -1245,16 +1245,16 @@ test('Merge too large triggers tree merge of segment summaries', async () => {
         treeMergeCalls += 1;
         return {
           text: 'consolidated segment summary ' + treeMergeCalls + '\nChain summary preserved across segments.' + 'x'.repeat(220),
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           usage: { input_tokens: 1, output_tokens: 1 },
         };
       }
       // Original segment: return a huge summary so the merge step blows past budget
       const big = 'a'.repeat(5_000_000);
-      return { text: 'CHAIN big section ' + big, model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
+      return { text: 'CHAIN big section ' + big, model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
     }
     mergeCalls += 1;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
   };
   const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
   assert(treeMergeCalls > 0, `Expected tree-merge to run, got ${treeMergeCalls}`);
@@ -1280,9 +1280,9 @@ test('Resume: completed segments are not re-run on a second process pass', async
         err.status = 500;
         throw err;
       }
-      return { text: goodSegmentSummary(totalCalls), model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
+      return { text: goodSegmentSummary(totalCalls), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
     }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 1, output_tokens: 1 } };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
   };
   // First pass: complete 1 segment, then "crash" causes others to fail.
   await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { maxAttempts: 1 } }).catch(() => {});
@@ -1335,13 +1335,13 @@ test('Mixed synthesis segment failures persist partial_failed result instead of 
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       partialCalls += 1;
       if (partialCalls === 1) {
-        return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+        return { text: goodSegmentSummary(0), model: 'claude-sonnet-5', usage: {} };
       }
       const err = new Error('bad segment');
       err.status = 400;
       throw err;
     }
-    return { text: goodFinalOpinion('One synthesis segment failed.'), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion('One synthesis segment failed.'), model: 'claude-sonnet-5', usage: {} };
   };
 
   const result = await processSynthesisJob('job_test_1', {
@@ -1373,7 +1373,7 @@ test('Retry synthesis clears failed result and requeues failed segments', async 
 
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: {},
   });
   await enqueueSynthesisJob('job_test_1', { store });
@@ -1409,7 +1409,7 @@ test('Synthesize with warnings moves partial_failed jobs to synthesizing so the 
 
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion('Excluded one unreadable document.'),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: {},
   });
   const result = await processSynthesisJob('job_test_1', {
@@ -1460,7 +1460,7 @@ test('canceled jobs skip the final merge and save no result', async () => {
   let modelCalls = 0;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
     modelCalls += 1;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
   const out = await processSynthesisJob('job_test_1', {
     store,
@@ -1480,7 +1480,7 @@ test('Cancellation during synthesis stops further segment work', async () => {
   let calls = 0;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
     calls += 1;
-    return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodSegmentSummary(0), model: 'claude-sonnet-5', usage: {} };
   };
   // enqueueSynthesisJob should throw because of canceled state.
   let threw = false;
@@ -1502,7 +1502,7 @@ test('GET /api/jobs/:id/result returns stored title opinion via route handler', 
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: { input_tokens: 100, output_tokens: 200 },
   });
   await processSynthesisJob('job_test_1', { store });
@@ -1524,10 +1524,10 @@ test('Follow-up uses stored title opinion only — no raw analysis-input payload
     callCount += 1;
     if (callCount === 1) {
       // synthesis call
-      return { text: goodFinalOpinion('Reservation noted in deed #3.'), model: 'claude-sonnet-4-6', usage: {} };
+      return { text: goodFinalOpinion('Reservation noted in deed #3.'), model: 'claude-sonnet-5', usage: {} };
     }
     observedMessages = request.messages;
-    return { text: 'Direct answer using only title opinion.', model: 'claude-sonnet-4-6', usage: {} };
+    return { text: 'Direct answer using only title opinion.', model: 'claude-sonnet-5', usage: {} };
   };
   await processSynthesisJob('job_test_1', { store });
 
@@ -1604,25 +1604,25 @@ test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
 test('resolveFinalSynthesisModel keeps Sonnet for final title opinions', () => {
   const previous = process.env.SYNTHESIS_MODEL;
   process.env.SYNTHESIS_MODEL = 'gemini-2.5-pro';
-  assert(resolveFinalSynthesisModel() === 'claude-sonnet-4-6', 'Gemini SYNTHESIS_MODEL must not be used for final opinions');
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5', 'Gemini SYNTHESIS_MODEL must not be used for final opinions');
   process.env.SYNTHESIS_MODEL = 'claude-haiku-4-5';
-  assert(resolveFinalSynthesisModel() === 'claude-sonnet-4-6', 'Haiku SYNTHESIS_MODEL must not be used for final opinions');
-  process.env.SYNTHESIS_MODEL = 'claude-sonnet-4-6';
-  assert(resolveFinalSynthesisModel() === 'claude-sonnet-4-6', 'Sonnet should be honored');
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5', 'Haiku SYNTHESIS_MODEL must not be used for final opinions');
+  process.env.SYNTHESIS_MODEL = 'claude-sonnet-5';
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5', 'Sonnet should be honored');
   if (previous) process.env.SYNTHESIS_MODEL = previous;
   else delete process.env.SYNTHESIS_MODEL;
 });
 
 test('getSynthesisConfig uses Sonnet for final merge model', () => {
   const config = getSynthesisConfig();
-  assert(config.model === 'claude-sonnet-4-6', `Expected Sonnet final model, got ${config.model}`);
+  assert(config.model === 'claude-sonnet-5', `Expected Sonnet final model, got ${config.model}`);
 });
 
 test('resolvePartialSynthesisModel uses Gemini Flash for segment work', () => {
   const previous = process.env.SYNTHESIS_PARTIAL_MODEL;
   process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-haiku-4-5';
   assert(resolvePartialSynthesisModel() === 'gemini-3.1-flash-lite', 'Haiku partial override must fall back to Gemini Flash Lite');
-  process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-sonnet-4-6';
+  process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-sonnet-5';
   assert(resolvePartialSynthesisModel() === 'gemini-3.1-flash-lite', 'Sonnet partial override must fall back to Gemini Flash Lite');
   if (previous) process.env.SYNTHESIS_PARTIAL_MODEL = previous;
   else delete process.env.SYNTHESIS_PARTIAL_MODEL;
@@ -1640,7 +1640,7 @@ test('Synthesis status lightweight poll omits full title opinion payload', async
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: {},
   });
   await processSynthesisJob('job_test_1', { store });
@@ -1660,9 +1660,9 @@ test('Synthesis status reports segment progress and warnings', async () => {
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
-      return { text: goodSegmentSummary(0), model: 'claude-sonnet-4-6', usage: {} };
+      return { text: goodSegmentSummary(0), model: 'claude-sonnet-5', usage: {} };
     }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
   await processSynthesisJob('job_test_1', { store });
   const res = mockRes();
@@ -1678,7 +1678,7 @@ test('Synthesis /start enqueues quickly for the Cloud Run worker', async () => {
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: {},
   });
   const startedAt = Date.now();
@@ -1702,7 +1702,7 @@ test('Cancellation during /synthesis/process returns 409 and runs no work', asyn
   let calls = 0;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
     calls += 1;
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
   const res = mockRes();
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/synthesis/process'), res);
@@ -1751,7 +1751,7 @@ test('Synthesis /process drains next batch and reports result for the route', as
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => ({
     text: goodFinalOpinion(),
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     usage: { input_tokens: 100, output_tokens: 200 },
   });
   const res = mockRes();
@@ -1804,7 +1804,7 @@ test('processSynthesisBatch claims up to configured batchLimit ready segments pe
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
     }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
   await processSynthesisBatch('job_test_1', { store, budgetMs: 5_000, batchLimit: 8 });
   assert(maxReadyLimit === 8, `Expected batch limit 8, saw ${maxReadyLimit}`);
@@ -1850,12 +1850,12 @@ test('final merge writes streaming preview during Sonnet merge when enabled', as
       }
       return {
         text: goodFinalOpinion(),
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         usage: { input_tokens: 10, output_tokens: 20 },
         timeToFirstDeltaMs: 12,
       };
     }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
   const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
   assert(streamCalled, 'Expected streaming final merge call');
@@ -1884,7 +1884,7 @@ test('merge recovers a completed preview after a lost save without re-running So
     }
     mergeCalls += 1; // final Sonnet merge
     if (request.onDelta) await request.onDelta(opinion, opinion);
-    return { text: opinion, model: 'claude-sonnet-4-6', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
+    return { text: opinion, model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
   };
 
   // First pass: simulate the worker dying after the preview is marked complete
@@ -1933,7 +1933,7 @@ test('final merge uses a higher merge-specific max_tokens than the single-pass c
     }
     finalMergeMaxTokens = request.maxTokens; // final consolidation (SYNTHESIS_PROMPT)
     if (request.onDelta) await request.onDelta(goodFinalOpinion(), goodFinalOpinion());
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
   };
   await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
   assert(finalMergeMaxTokens === 16000, `Expected final merge max_tokens to default to 16000, got ${finalMergeMaxTokens}`);
@@ -2068,7 +2068,7 @@ test('merge compaction applies Gemini scaffold before final Sonnet merge', async
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
     }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-4-6', usage: {} };
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
   };
   const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 120_000, batchLimit: 8 });
   assert(compactionCalls >= 1, `Expected compaction call, saw ${compactionCalls}`);

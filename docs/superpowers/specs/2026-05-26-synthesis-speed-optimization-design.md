@@ -39,7 +39,7 @@ This spec consolidates the highest-impact recommendations from three independent
 ```text
 Abstraction (Gemini Flash, parallel)
   → Partial synthesis segments (Gemini Flash, up to SYNTHESIS_CONCURRENCY=4)
-  → Final merge (Claude Sonnet 4.6, one blocking call, max 6000 output tokens)
+  → Final merge (Claude Sonnet 5, one blocking call, max 8000 output tokens)
   → saveJobResult → UI poll sees result
   (Opus audit exists in code but is disabled in production — not on the hot path)
 ```
@@ -439,7 +439,7 @@ Later (optional):    Enable background worker when unattended jobs are needed
 | `WORKER_DISABLED` | `true` (keep) | — | Worker deferred; browser + API kicks drive work |
 | `SYNTHESIS_CONCURRENCY` | 4 | 0 | Partial segments only; max 16 |
 | `SYNTHESIS_BATCH_LIMIT` | *new* 4→8 | 1 | Segments claimed per batch |
-| `SYNTHESIS_MAX_TOKENS` | 6000 | 0, 3 | Final opinion cap |
+| `SYNTHESIS_MAX_TOKENS` | 8000 | 0, 3 | Final opinion cap |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | 5000 | 0, 3 | Partial summary cap |
 | `SYNTHESIS_CHUNK_SIZE` | 120 | 0 | Docs per segment |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | 200 | 0 | Bulk jobs ≥100 abstracts |

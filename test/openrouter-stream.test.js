@@ -79,12 +79,12 @@ test('consumeOpenRouterMessageStream extracts usage', async () => {
 
 test('consumeOpenRouterMessageStream extracts model name', async () => {
   const sseLines = [
-    'data: {"model":"anthropic/claude-sonnet-4-6","choices":[{"delta":{"content":"hi"}}]}',
+    'data: {"model":"anthropic/claude-sonnet-5","choices":[{"delta":{"content":"hi"}}]}',
     'data: [DONE]',
   ];
   const body = makeSSEBody(sseLines);
   const result = await consumeOpenRouterMessageStream(body);
-  assert(result.model === 'anthropic/claude-sonnet-4-6', `Expected model, got ${result.model}`);
+  assert(result.model === 'anthropic/claude-sonnet-5', `Expected model, got ${result.model}`);
 });
 
 test('consumeOpenRouterMessageStream calls onDelta callbacks', async () => {

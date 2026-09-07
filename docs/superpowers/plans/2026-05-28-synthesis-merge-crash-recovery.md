@@ -148,7 +148,7 @@ test('merge recovers a completed preview after a lost save without re-running So
     }
     mergeCalls += 1; // final Sonnet merge
     if (request.onDelta) await request.onDelta(opinion, opinion);
-    return { text: opinion, model: 'claude-sonnet-4-6', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
+    return { text: opinion, model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
   };
 
   // First pass: simulate the worker dying after the preview is marked complete

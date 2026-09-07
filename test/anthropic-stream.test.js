@@ -30,7 +30,7 @@ function test(name, fn) {
 
 test('consumeAnthropicMessageStream accumulates text deltas', async () => {
   const events = [
-    'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-sonnet-4-6"}}',
+    'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-sonnet-5"}}',
     'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}',
     'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}',
     'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
@@ -42,7 +42,7 @@ test('consumeAnthropicMessageStream accumulates text deltas', async () => {
     },
   });
   assert(result.text === 'Hello world', `Expected merged text, got ${result.text}`);
-  assert(result.model === 'claude-sonnet-4-6', 'Expected model from message_start');
+  assert(result.model === 'claude-sonnet-5', 'Expected model from message_start');
   assert(deltas.length === 2, 'Expected two delta callbacks');
   assert(result.firstDeltaAt != null, 'Expected first delta timestamp');
 });

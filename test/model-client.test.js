@@ -102,7 +102,7 @@ test('invokeAnthropicModelStream requests stream=true and forwards deltas', asyn
   };
   const deltas = [];
   const result = await invokeAnthropicModelStream({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     maxTokens: 100,
     system: 'system prompt',
     messages: [{ role: 'user', content: 'hello' }],
@@ -177,7 +177,7 @@ test('invokeModel streaming path does not consume the SSE body via json()', asyn
 
   try {
     const result = await invokeModel({
-      model: 'anthropic/claude-sonnet-4-6', // slash-name → OpenRouter
+      model: 'anthropic/claude-sonnet-5', // slash-name → OpenRouter
       maxTokens: 16000, // > NON_STREAMING_MAX_TOKENS → streaming path
       system: 'system',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'merge' }] }],
@@ -223,7 +223,7 @@ test('invokeModel streams through OpenRouter when MODEL_PROVIDER=openrouter', as
   };
   try {
     const result = await invokeModel({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       maxTokens: 4000,
       stream: true,
       system: 'system',
