@@ -1,17 +1,31 @@
 #!/usr/bin/env node
 /**
- * Dev harness: compare OCR/abstraction models on scanned title documents.
+ * Dev harness: compare OCR/abstraction models on the same scanned title documents.
+ *
+ * Runs the production abstraction prompt against every file in a folder, once per
+ * model, then writes raw outputs + a markdown accuracy/cost report.
  *
  * If ground_truth.json exists alongside the images, computes per-model
  * transcription accuracy (GRANTOR, GRANTEE, DATE EXECUTED, DATE RECORDED,
  * RECORDING REF) and fabrication rate (degraded fields correctly flagged vs
  * invented). Without ground truth, falls back to the cross-model fabrication
- * signal from the previous run.
+ * signal.
  *
- * Usage:
+ * Usage (default A/B: 3.1 Flash Lite vs 3.8 Flash):
  *   node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs
  *
- * source .env.local && node scripts/compare-ocr-models.mjs scripts/sample-docs
+ *   node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs \
+ *     --models gemini-3.1-flash-lite,gemini-3.8-flash
+ *
+ *   # Override thinking level per model (id:level). 3.8 Flash rejects `minimal`.
+ *   node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs \
+ *     --models gemini-3.1-flash-lite:minimal,gemini-3.8-flash:low
+ *
+ *   # Smoke-test first N docs
+ *   node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs --limit 5
+ *
+ * Generate synthetic sample docs (optional):
+ *   python3 scripts/generate_test_titles.py
  */
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync, existsSync } from 'fs';
 import { join, extname, dirname } from 'path';
@@ -25,24 +39,36 @@ import {
 import { invokeModel } from '../api/_lib/model-client.js';
 
 // ---------------------------------------------------------------------------
-// Models — edit IDs here. Confirmed against Gemini API June 2026.
-// 2.5 uses thinkingBudget; gen-3+ uses thinkingLevel. minimal beats higher
-// effort for OCR transcription on socOCRbench.
+// Model catalog — edit defaults / IDs here.
+// Confirmed against Gemini API. Gemini 2.5 uses thinkingBudget; gen-3+ uses
+// thinkingLevel. 3.8 Flash does not support `minimal` (use `low` for OCR).
 // ---------------------------------------------------------------------------
-const MODELS = [
-  { id: 'gemini-2.5-flash',      thinking: { thinkingBudget: 0 } },
-  { id: 'gemini-3.1-flash-lite', thinking: { thinkingLevel: 'minimal' } },
-  { id: 'gemini-3-flash-preview', thinking: { thinkingLevel: 'minimal' } },
-  { id: 'gemini-3.5-flash',      thinking: { thinkingLevel: 'minimal' } },
-];
-
-// USD per 1M tokens, standard tier. Verified Jun 2026. Batch API ≈ 50%.
-const PRICING = {
-  'gemini-2.5-flash':      { in: 0.30, out: 2.50 },
-  'gemini-3.1-flash-lite': { in: 0.25, out: 1.50 },
-  'gemini-3-flash-preview':{ in: 0.50, out: 3.00 },
-  'gemini-3.5-flash':      { in: 1.50, out: 9.00 },
+const MODEL_CATALOG = {
+  'gemini-2.5-flash': {
+    thinking: { thinkingBudget: 0 },
+    pricing: { in: 0.30, out: 2.50 },
+  },
+  'gemini-3.1-flash-lite': {
+    thinking: { thinkingLevel: 'minimal' },
+    pricing: { in: 0.25, out: 1.50 },
+  },
+  'gemini-3-flash-preview': {
+    thinking: { thinkingLevel: 'minimal' },
+    pricing: { in: 0.50, out: 3.00 },
+  },
+  'gemini-3.5-flash': {
+    thinking: { thinkingLevel: 'minimal' },
+    pricing: { in: 1.50, out: 9.00 },
+  },
+  // Intro pricing through 2026-12-31; standard after is $1.50 / $7.50.
+  'gemini-3.8-flash': {
+    thinking: { thinkingLevel: 'low' },
+    pricing: { in: 0.75, out: 3.75 },
+  },
 };
+
+/** Default A/B pair for OCR accuracy: current production lite vs 3.8 Flash. */
+const DEFAULT_MODEL_IDS = ['gemini-3.1-flash-lite', 'gemini-3.8-flash'];
 
 // Fields the accuracy checker scores against ground_truth.json.
 // Keys match the ground_truth.json field names (uppercase_with_underscores).
@@ -62,14 +88,114 @@ const FABRICATION_FIELDS = [
 const MAX_TOKENS    = 2000;
 const MAX_RAW_BYTES = 14_000_000;
 const SUPPORTED_EXT = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp']);
+const THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
 
 const __dirname    = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR  = join(__dirname, 'ocr-comparison-results');
 
 // ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+export function parseArgs(argv = process.argv.slice(2)) {
+  const args = {
+    folder: null,
+    models: null,
+    limit: null,
+    help: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--help' || a === '-h') args.help = true;
+    else if (a === '--models') args.models = argv[++i];
+    else if (a === '--limit') args.limit = Number(argv[++i]);
+    else if (a.startsWith('-')) {
+      throw new Error(`Unknown option: ${a}`);
+    } else if (!args.folder) {
+      args.folder = a;
+    } else {
+      throw new Error(`Unexpected argument: ${a}`);
+    }
+  }
+  return args;
+}
+
+export function usage() {
+  return `Compare OCR/abstraction models on the same PDFs/images.
+
+Usage:
+  node --env-file=.env.local scripts/compare-ocr-models.mjs <folder> [options]
+
+Required env: GEMINI_API_KEY (or GOOGLE_API_KEY)
+
+Options:
+  --models <list>   Comma-separated model ids, optional :thinkingLevel
+                    Default: ${DEFAULT_MODEL_IDS.join(',')}
+                    Catalog: ${Object.keys(MODEL_CATALOG).join(', ')}
+  --limit <n>       Only process the first N files (sorted)
+  -h, --help        Show this help
+
+Examples:
+  node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs
+  node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs \\
+    --models gemini-3.1-flash-lite,gemini-3.8-flash --limit 5
+  node --env-file=.env.local scripts/compare-ocr-models.mjs /path/to/scans \\
+    --models gemini-3.1-flash-lite:minimal,gemini-3.8-flash:low
+`;
+}
+
+/**
+ * Resolve --models into [{ id, thinking, pricing }].
+ * Spec forms: "id" or "id:level" (level = minimal|low|medium|high).
+ * Unknown ids are allowed (pricing falls back to zeros; thinking defaults to
+ * catalog entry or { thinkingLevel: 'low' } for gemini-3*).
+ */
+export function resolveModels(spec, catalog = MODEL_CATALOG) {
+  const raw = String(spec || '').trim();
+  const ids = raw
+    ? raw.split(',').map(s => s.trim()).filter(Boolean)
+    : [...DEFAULT_MODEL_IDS];
+  if (!ids.length) throw new Error('No models specified.');
+
+  return ids.map(token => {
+    const colon = token.indexOf(':');
+    const id = colon >= 0 ? token.slice(0, colon).trim() : token;
+    const levelOverride = colon >= 0 ? token.slice(colon + 1).trim().toLowerCase() : null;
+    if (!id) throw new Error(`Invalid model token: ${token}`);
+    if (levelOverride && !THINKING_LEVELS.has(levelOverride)) {
+      throw new Error(`Invalid thinking level "${levelOverride}" for ${id}. Use: ${[...THINKING_LEVELS].join('|')}`);
+    }
+
+    const entry = catalog[id] || {};
+    let thinking = entry.thinking ? { ...entry.thinking } : null;
+    if (levelOverride) {
+      thinking = { thinkingLevel: levelOverride };
+    } else if (!thinking) {
+      if (/^gemini-2\.5/i.test(id)) thinking = { thinkingBudget: 0 };
+      else if (/^gemini-3/i.test(id)) {
+        // 3.8+ rejects minimal; default unknown 3.x to low for OCR harness safety.
+        thinking = { thinkingLevel: /flash-lite/i.test(id) ? 'minimal' : 'low' };
+      } else {
+        thinking = {};
+      }
+    }
+
+    // Guard: 3.8 Flash rejects minimal even if a caller passes it.
+    if (/^gemini-3\.8/i.test(id) && thinking?.thinkingLevel === 'minimal') {
+      thinking = { thinkingLevel: 'low' };
+    }
+
+    return {
+      id,
+      thinking,
+      pricing: entry.pricing || { in: 0, out: 0 },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Normalisation for accuracy comparison
 // ---------------------------------------------------------------------------
-function normDate(s) {
+export function normDate(s) {
   // Collapse ordinals and abbreviations so "April 7th, 1923" == "April 7, 1923"
   return s
     .toLowerCase()
@@ -84,7 +210,7 @@ function normDate(s) {
     .replace(/\s+/g, ' ').trim();
 }
 
-function normName(s) {
+export function normName(s) {
   return s
     .toLowerCase()
     .replace(/[.,;:'"]/g, '')
@@ -92,14 +218,14 @@ function normName(s) {
     .replace(/\s+/g, ' ').trim();
 }
 
-function normRef(s) {
+export function normRef(s) {
   return s
     .toLowerCase()
     .replace(/\bvolume\b/g, 'vol').replace(/\bpage\b/g, 'page').replace(/\bpg\b/g, 'page')
     .replace(/[.,;:'"]/g, '').replace(/\s+/g, ' ').trim();
 }
 
-function normalise(fieldKey, value) {
+export function normalise(fieldKey, value) {
   if (!value) return '';
   const s = String(value).trim();
   if (fieldKey.includes('DATE')) return normDate(s);
@@ -107,19 +233,23 @@ function normalise(fieldKey, value) {
   return normName(s);
 }
 
+export function isAbstained(value) {
+  if (!value) return true;
+  return /illegible|not visible|verify manually|unclear|^n\/a$|^none$|not applicable/i.test(String(value).trim());
+}
+
 // CORRECT = normalised exact match
 // PARTIAL = one contains the other (handles "and wife" trailing clauses)
 // WRONG   = non-empty mismatch
 // MISSED  = model returned empty/n/a when GT has a value
-function scoreField(modelRaw, gtValue, isDegraded) {
+export function scoreField(modelRaw, gtValue, isDegraded, gtKey = '') {
   if (isDegraded) {
     return isAbstained(modelRaw) ? 'correct_illegible' : 'fabricated';
   }
   if (gtValue === undefined || gtValue === null) return 'no_gt';
   if (!modelRaw || isAbstained(modelRaw)) return 'missed';
-  const gtKey = ''; // normalise uses the gt field key; we pass empty for generic norm
-  const mn = normalise('', modelRaw);
-  const gn = normalise('', gtValue);
+  const mn = normalise(gtKey, modelRaw);
+  const gn = normalise(gtKey, gtValue);
   if (mn === gn) return 'correct';
   if (mn.includes(gn) || gn.includes(mn)) return 'partial';
   return 'wrong';
@@ -143,18 +273,13 @@ function mediaTypeForExt(ext) {
 
 function safeName(s) { return String(s).replace(/[^a-z0-9._-]+/gi, '_'); }
 
-function parseFields(text) {
+export function parseFields(text) {
   const fields = {};
   for (const line of String(text || '').split('\n')) {
     const m = line.match(/^([A-Z][A-Z /-]*[A-Z]):\s*(.*)$/);
     if (m) fields[m[1].trim()] = m[2].trim();
   }
   return fields;
-}
-
-function isAbstained(value) {
-  if (!value) return true;
-  return /illegible|not visible|verify manually|unclear|^n\/a$|^none$|not applicable/i.test(String(value).trim());
 }
 
 function countIllegible(text) {
@@ -183,15 +308,38 @@ async function runOne(model, messages) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  const folder = process.argv[2];
+  let args;
+  try {
+    args = parseArgs();
+  } catch (err) {
+    console.error(err.message);
+    console.error(usage());
+    process.exit(1);
+  }
+
+  if (args.help) {
+    console.log(usage());
+    process.exit(0);
+  }
+
+  const folder = args.folder;
   if (!folder) {
-    console.error('Usage: node scripts/compare-ocr-models.mjs <folder>');
+    console.error(usage());
     process.exit(1);
   }
   if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
-    console.error('GEMINI_API_KEY not set. Run: source .env.local && node ...');
+    console.error('GEMINI_API_KEY not set. Run: node --env-file=.env.local scripts/compare-ocr-models.mjs ...');
     process.exit(1);
   }
+
+  let models;
+  try {
+    models = resolveModels(args.models);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  const pricingById = Object.fromEntries(models.map(m => [m.id, m.pricing]));
 
   // Load ground truth if present
   const gtPath = join(folder, 'ground_truth.json');
@@ -205,16 +353,26 @@ async function main() {
     console.log('No ground_truth.json found — using cross-model fabrication signal only.');
   }
 
-  const entries = readdirSync(folder)
+  let entries = readdirSync(folder)
     .filter(f => SUPPORTED_EXT.has(extname(f).toLowerCase()))
     .sort();
+  if (Number.isFinite(args.limit) && args.limit > 0) {
+    entries = entries.slice(0, args.limit);
+  }
   if (!entries.length) {
     console.error(`No supported files found in ${folder}`);
     process.exit(1);
   }
 
   mkdirSync(RESULTS_DIR, { recursive: true });
-  console.log(`\nModels: ${MODELS.map(m => m.id).join(', ')}`);
+  console.log(`\nModels: ${models.map(m => {
+    const t = m.thinking?.thinkingLevel
+      ? `thinkingLevel=${m.thinking.thinkingLevel}`
+      : m.thinking?.thinkingBudget != null
+        ? `thinkingBudget=${m.thinking.thinkingBudget}`
+        : 'thinking=default';
+    return `${m.id} (${t})`;
+  }).join(', ')}`);
   console.log(`Documents: ${entries.length}\n`);
 
   const docResults = [];
@@ -251,7 +409,7 @@ async function main() {
     console.log(`- ${file}${modeNote}`);
 
     const perModel = {};
-    for (const model of MODELS) {
+    for (const model of models) {
       try {
         const out = await runOne(model, messages);
         const fields = parseFields(out.text);
@@ -264,7 +422,7 @@ async function main() {
                           (gt.degraded_stamp && (gtKey === 'DATE_RECORDED' || gtKey === 'RECORDING_REF'));
             const modelVal = fields[parsed] ?? '';
             const gtVal = gt.fields?.[gtKey];
-            scores[gtKey] = scoreField(modelVal, gtVal, isDeg);
+            scores[gtKey] = scoreField(modelVal, gtVal, isDeg, gtKey);
           }
         }
 
@@ -295,7 +453,7 @@ async function main() {
     docResults.push({ name: file, mode, gt, perModel });
   }
 
-  writeFileSync(join(RESULTS_DIR, 'report.md'), buildReport(docResults, groundTruth));
+  writeFileSync(join(RESULTS_DIR, 'report.md'), buildReport(docResults, groundTruth, models, pricingById));
   console.log(`\nReport: ${join(RESULTS_DIR, 'report.md')}`);
   console.log(`Raw outputs: ${RESULTS_DIR}/<doc>.<model>.txt`);
   if (groundTruth) {
@@ -307,12 +465,19 @@ async function main() {
 // ---------------------------------------------------------------------------
 // Report builder
 // ---------------------------------------------------------------------------
-function buildReport(docResults, groundTruth) {
-  const modelIds = MODELS.map(m => m.id);
+export function buildReport(docResults, groundTruth, models, pricingById = {}) {
+  const modelIds = models.map(m => m.id);
   const hasGT = !!groundTruth;
   const lines = [];
   lines.push('# OCR/abstraction model comparison\n');
-  lines.push(`Models: ${modelIds.map(m => `\`${m}\``).join(', ')}\n`);
+  lines.push(`Models: ${models.map(m => {
+    const t = m.thinking?.thinkingLevel
+      ? `thinkingLevel=${m.thinking.thinkingLevel}`
+      : m.thinking?.thinkingBudget != null
+        ? `thinkingBudget=${m.thinking.thinkingBudget}`
+        : 'default';
+    return `\`${m.id}\` (${t})`;
+  }).join(', ')}\n`);
 
   // ── per-model tallies ──────────────────────────────────────────────────────
   const tally = Object.fromEntries(modelIds.map(id => [id, {
@@ -383,13 +548,13 @@ function buildReport(docResults, groundTruth) {
   for (const id of modelIds) {
     const t = tally[id];
     const avg = t.docs ? Math.round(t.latencySum / t.docs) : 0;
-    const p = PRICING[id] || { in: 0, out: 0 };
+    const p = pricingById[id] || MODEL_CATALOG[id]?.pricing || { in: 0, out: 0 };
     const costRun = (t.inTok / 1e6) * p.in + (t.outTok / 1e6) * p.out;
     const per1k   = t.docs ? (costRun / t.docs) * 1000 : 0;
     lines.push(`| \`${id}\` | ${t.docs} | ${avg}ms | ${t.inTok} | ${t.outTok} | $${costRun.toFixed(4)} | **$${per1k.toFixed(2)}** | ${t.errors} |`);
   }
   lines.push('');
-  lines.push('> **Est. $/1k docs** = per-doc token average × 1,000. Standard tier pricing. Batch API ≈ half.\n');
+  lines.push('> **Est. $/1k docs** = per-doc token average × 1,000. Standard/intro tier pricing. Batch API ≈ half.\n');
 
   // ── accuracy table (only when GT present) ─────────────────────────────────
   if (hasGT) {
@@ -492,4 +657,6 @@ function buildReport(docResults, groundTruth) {
   return lines.join('\n');
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}

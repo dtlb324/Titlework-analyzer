@@ -517,6 +517,22 @@ A full 300-doc run is typically on the order of **~$1.50–3** in model tokens o
 
 The app does **not** use Anthropic/Gemini Batch APIs (24h window, no completion notification). Reliability and progress polling stay on the durable worker + Neon job model.
 
+### OCR model A/B (dev harness)
+
+To score transcription accuracy of two Gemini models on the **same** PDFs/images (production abstraction prompt), run:
+
+```bash
+# Default: gemini-3.1-flash-lite (thinkingLevel=minimal) vs gemini-3.8-flash (thinkingLevel=low)
+npm run compare:ocr -- scripts/sample-docs
+
+# Explicit models / cheaper smoke run
+npm run compare:ocr -- scripts/sample-docs --models gemini-3.1-flash-lite,gemini-3.8-flash --limit 5
+```
+
+Put scans (or PNGs) in a folder. Optional `ground_truth.json` enables field-level accuracy scoring; without it the report still flags cross-model fabrication disagreements. Outputs land in gitignored `scripts/ocr-comparison-results/`. Note: Gemini 3.8 Flash rejects `minimal` thinking — the harness uses `low` for that model.
+
+Optional synthetic corpus: `python3 scripts/generate_test_titles.py` (writes gitignored `scripts/sample-docs/`).
+
 ---
 
 ## Features
