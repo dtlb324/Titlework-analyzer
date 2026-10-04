@@ -156,7 +156,7 @@ Set `DATABASE_URL`, `GCS_BUCKET`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `AP
 
 ### Cut a release
 
-The tag must be lowercase and must match the `version` in `package.json`.
+Push a lowercase `vX.Y.Z` tag that matches the `version` in `package.json`.
 
 ```bash
 VERSION="v$(node -p "require('./package.json').version")"
@@ -164,7 +164,7 @@ git tag "$VERSION"
 git push origin "$VERSION"
 ```
 
-The workflow runs the tests on Node 22, builds one Docker image, and pushes it to Artifact Registry. It then resolves the image digest, deploys the worker, deploys the API from the same digest, verifies both services with `scripts/verify-release.mjs`, and creates the GitHub Release.
+The workflow runs the tests on Node 22, builds one Docker image, and pushes it to Artifact Registry. It then resolves the image digest, deploys the worker, deploys the API from the same immutable image digest, verifies both services with `scripts/verify-release.mjs`, and creates the GitHub Release.
 
 Do not leave Cloud Build or Cloud Run source-deploy triggers on `main`. They can race the tag workflow and overwrite the verified image.
 
@@ -177,7 +177,7 @@ After a release, check these points.
 
 ### Roll back
 
-Redeploy a previously verified image digest to both services, then confirm both report the same digest. Database changes only move forward.
+Rollback API and worker together. Redeploy a previously verified image digest to both services, then confirm both report the same digest. Database changes only move forward.
 
 ```bash
 gcloud run deploy WORKER_SERVICE \
@@ -212,7 +212,7 @@ Model calls then go through [OpenRouter](https://openrouter.ai) instead of Anthr
 | `GCS_BUCKET` | Private bucket for uploaded chunks and split PDFs. |
 | `GEMINI_API_KEY` | Gemini key. `GOOGLE_API_KEY` is also read. |
 | `ANTHROPIC_API_KEY` | Required unless you use OpenRouter. |
-| `APP_PASSWORD` | Password gate for users. Release verification expects it on both services. |
+| `APP_PASSWORD` | Yes for production. Password gate for users. Release verification expects it on both services. |
 
 ### OpenRouter
 
@@ -271,7 +271,7 @@ Model calls then go through [OpenRouter](https://openrouter.ai) instead of Anthr
 
 | Name | Default | Notes |
 |---|---|---|
-| `WORKER_DISABLED` | off | Worker only. `true` turns the loop off so the service scales to zero. The release workflow sets it to `true`. |
+| `WORKER_DISABLED` | off | Worker only. `true` turns the loop off so the worker can scale-to-zero. The release workflow sets it to `true`. |
 | `WORKER_POLL_IDLE_MS` | `2000` | Worker only. Wait between polls when idle. |
 | `WORKER_POLL_ACTIVE_MS` | `0` | Worker only. Wait between busy passes. |
 | `WORKER_POLL_INTERVAL_MS` | `5000` | Worker only. Legacy fallback for the idle wait. |
@@ -316,7 +316,7 @@ Model calls then go through [OpenRouter](https://openrouter.ai) instead of Anthr
 
 `DATABASE_URL or POSTGRES_URL is required`: set `DATABASE_URL` to your Neon pooled connection string.
 
-Uploads fail with CORS errors: allow `PUT` from the API origin with the `content-type` header in the bucket CORS policy.
+Uploads fail with CORS errors. Check the GCS CORS policy. It must allow `PUT` from the API origin with the `content-type` header.
 
 Jobs stay queued or abstracting: confirm the worker is deployed, has the five required variables, and can reach Neon. If `WORKER_DISABLED=true`, keep the browser tab open so the API processes the job. Set `WORKER_DISABLED=false` for unattended runs.
 
