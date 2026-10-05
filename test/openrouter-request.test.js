@@ -73,6 +73,11 @@ test('buildOpenRouterRequestBody maps model with auto name-mapping', () => {
   assert(req.model === 'anthropic/claude-sonnet-5', `Expected anthropic prefix, got ${req.model}`);
 });
 
+test('buildOpenRouterRequestBody maps Sonnet 5.5 to the dotted OpenRouter slug', () => {
+  const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-5-5', maxTokens: 100, messages: [] });
+  assert(req.model === 'anthropic/claude-sonnet-5.5', `Expected dotted OpenRouter slug, got ${req.model}`);
+});
+
 test('buildOpenRouterRequestBody maps gemini model automatically', () => {
   const req = buildOpenRouterRequestBody({ model: 'gemini-2.5-flash', maxTokens: 100, messages: [] });
   assert(req.model === 'google/gemini-2.5-flash', `Expected google/ prefix, got ${req.model}`);

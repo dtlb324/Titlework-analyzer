@@ -1604,18 +1604,18 @@ test('effectiveSynthesisChunkSize enlarges segments for bulk jobs', () => {
 test('resolveFinalSynthesisModel keeps Sonnet for final title opinions', () => {
   const previous = process.env.SYNTHESIS_MODEL;
   process.env.SYNTHESIS_MODEL = 'gemini-2.5-pro';
-  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5', 'Gemini SYNTHESIS_MODEL must not be used for final opinions');
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5-5', 'Gemini SYNTHESIS_MODEL must not be used for final opinions');
   process.env.SYNTHESIS_MODEL = 'claude-haiku-4-5';
-  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5', 'Haiku SYNTHESIS_MODEL must not be used for final opinions');
-  process.env.SYNTHESIS_MODEL = 'claude-sonnet-5';
-  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5', 'Sonnet should be honored');
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5-5', 'Haiku SYNTHESIS_MODEL must not be used for final opinions');
+  process.env.SYNTHESIS_MODEL = 'claude-sonnet-5-5';
+  assert(resolveFinalSynthesisModel() === 'claude-sonnet-5-5', 'Sonnet 5.5 should be honored');
   if (previous) process.env.SYNTHESIS_MODEL = previous;
   else delete process.env.SYNTHESIS_MODEL;
 });
 
 test('getSynthesisConfig uses Sonnet for final merge model', () => {
   const config = getSynthesisConfig();
-  assert(config.model === 'claude-sonnet-5', `Expected Sonnet final model, got ${config.model}`);
+  assert(config.model === 'claude-sonnet-5-5', `Expected Sonnet 5.5 final model, got ${config.model}`);
 });
 
 test('resolvePartialSynthesisModel uses Gemini Flash for segment work', () => {

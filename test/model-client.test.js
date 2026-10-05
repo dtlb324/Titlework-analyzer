@@ -7,6 +7,7 @@ import {
   shouldUseOpenRouter,
   openRouterApiKeyError,
 } from '../api/_lib/model-client.js';
+import { buildOpenRouterRequestBody } from '../api/_lib/openrouter-request.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -17,6 +18,11 @@ const tests = [];
 function test(name, fn) {
   tests.push({ name, fn });
 }
+
+test('OpenRouter maps claude-sonnet-5-5 to anthropic/claude-sonnet-5.5', () => {
+  const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-5-5', maxTokens: 100, messages: [] });
+  assert(req.model === 'anthropic/claude-sonnet-5.5', `Expected dotted OpenRouter slug, got ${req.model}`);
+});
 
 test('abstractionApiKeyError requires Gemini key for gemini models', () => {
   const prevGemini = process.env.GEMINI_API_KEY;

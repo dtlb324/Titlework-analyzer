@@ -21,13 +21,13 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   `ADD COLUMN IF NOT EXISTS`). No migration files. GCS signed URLs live in
   `api/_lib/storage.js`; the browser uploads straight to the bucket.
 - AI: `gemini-3.1-flash-lite` abstracts each chunk (`api/_lib/abstraction.js`)
-  and writes partial synthesis on large jobs. `claude-sonnet-5` writes the
+  and writes partial synthesis on large jobs. `claude-sonnet-5-5` writes the
   final opinion, answers follow-ups, and re-reads low-confidence abstracts
   (`api/_lib/synthesis.js`, `ABSTRACT_ESCALATION_MODEL`).
   `MODEL_PROVIDER=openrouter` sends calls through OpenRouter
   (`shouldUseOpenRouter` in `api/_lib/openrouter-request.js`, used by
   `api/_lib/model-client.js`). A model id that already contains `/` takes
-  that route too.
+  that route too. `claude-sonnet-5-5` maps to OpenRouter `anthropic/claude-sonnet-5.5`.
 - Frontend is one file: `public/index.html` (~4.4k lines).
 
 ### Commands
@@ -71,7 +71,7 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   is a Map mock, not that SQL.
 - Claude request bodies are `model`, `max_tokens`, `system`, and `messages`
   (`buildMessagesRequestBody` in `api/_lib/anthropic-request.js`). Sonnet 5
-  rejects `thinking`, `temperature`, `top_p`, and `top_k`.
+  and Sonnet 5.5 reject `thinking`, `temperature`, `top_p`, and `top_k`.
 
 ### Safety
 
