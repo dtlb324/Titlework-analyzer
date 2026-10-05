@@ -28,13 +28,15 @@ export function shouldUseOpenRouter(model) {
 
 /**
  * Auto-map internal model names to OpenRouter slash-names when MODEL_PROVIDER=openrouter.
- * - claude-* → anthropic/claude-*
+ * - claude-sonnet-5-5 → anthropic/claude-sonnet-5.5 (OpenRouter slug uses a dot)
+ * - other claude-* → anthropic/claude-*
  * - gemini-* → google/gemini-*
  * - already contains '/' → pass through unchanged
  */
 function mapModelName(model) {
   const modelName = String(model || '').trim();
   if (modelName.includes('/')) return modelName;
+  if (modelName === 'claude-sonnet-5-5') return 'anthropic/claude-sonnet-5.5';
   if (/^claude-/i.test(modelName)) return `anthropic/${modelName}`;
   if (/^gemini-/i.test(modelName)) return `google/${modelName}`;
   return modelName;

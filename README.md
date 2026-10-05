@@ -1,6 +1,6 @@
 # Titlework Analyzer
 
-Titlework Analyzer is a web app that helps oil and gas landmen read courthouse documents, build a chain of title, and draft a mineral ownership opinion. Gemini 3.1 Flash Lite abstracts each document, and Claude Sonnet 5 writes the final opinion and answers follow-up questions. The app runs on Google Cloud Run with Neon Postgres and Google Cloud Storage.
+Titlework Analyzer is a web app that helps oil and gas landmen read courthouse documents, build a chain of title, and draft a mineral ownership opinion. Gemini 3.1 Flash Lite abstracts each document, and Claude Sonnet 5.5 writes the final opinion and answers follow-up questions. The app runs on Google Cloud Run with Neon Postgres and Google Cloud Storage.
 
 The output is a research aid, not a legal opinion. Check it against the source documents, and consult a licensed attorney before any drilling, leasing, or division order action.
 
@@ -60,7 +60,7 @@ Cloud Run starts many short-lived instances, and the pooled string keeps the num
 ### Model API keys
 
 1. Create a Gemini key at [Google AI Studio](https://aistudio.google.com/apikey). It is your `GEMINI_API_KEY`. Gemini reads every document and writes a structured abstract. It also does partial synthesis on large jobs.
-2. Create an Anthropic key in the [Anthropic console](https://console.anthropic.com), after you add billing. It is your `ANTHROPIC_API_KEY`. Claude Sonnet writes the final opinion, answers follow-ups, and can re-read low-confidence documents.
+2. Create an Anthropic key in the [Anthropic console](https://console.anthropic.com), after you add billing. It is your `ANTHROPIC_API_KEY`. Claude Sonnet 5.5 writes the final opinion, answers follow-ups, and can re-read low-confidence documents.
 
 You need both keys unless you use OpenRouter (see below).
 
@@ -230,10 +230,10 @@ Model calls then go through [OpenRouter](https://openrouter.ai) instead of Anthr
 
 | Name | Default | Notes |
 |---|---|---|
-| `SYNTHESIS_MODEL` | `claude-sonnet-5` | Final opinion and merge. Gemini and Haiku values are ignored. |
+| `SYNTHESIS_MODEL` | `claude-sonnet-5-5` | Final opinion and merge. Gemini and Haiku values are ignored. OpenRouter maps this to `anthropic/claude-sonnet-5.5`. |
 | `SYNTHESIS_PARTIAL_MODEL` | `gemini-3.1-flash-lite` | Segment synthesis on large jobs. Haiku and Claude values are ignored. |
 | `ABSTRACT_MODEL` | `gemini-3.1-flash-lite` | Claude Haiku is not supported here. |
-| `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5` | Re-reads low-confidence abstracts. Needs Anthropic. |
+| `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5-5` | Re-reads low-confidence abstracts. Needs Anthropic. OpenRouter maps this to `anthropic/claude-sonnet-5.5`. |
 | `GEMINI_THINKING_LEVEL` | unset | Gemini 3.x only. Accepts `minimal`, `low`, `medium`, or `high`. When unset, the API default applies. |
 | `GEMINI_THINKING_BUDGET` | `0` | Gemini 2.5 only. `-1` is dynamic, or give a token count. |
 | `GEMINI_INCLUDE_THOUGHTS` | off | When `true`, Gemini returns thought summaries as `thoughtSummaries`. For debugging. |
@@ -347,7 +347,7 @@ The app does not use the Anthropic or Gemini batch APIs. Progress runs through t
 - Upload up to 400 documents per job.
 - Upload directly from the browser to GCS.
 - Abstract documents server-side with Gemini 3.1 Flash Lite. The worker batches small chunks. The browser fallback groups up to 24 small documents per call and still splits oversized single PDFs.
-- Write the final opinion and answer follow-ups with Claude Sonnet 5.
+- Write the final opinion and answer follow-ups with Claude Sonnet 5.5.
 - Reopen a job by URL after a refresh or a closed tab.
 - Retry, cancel, and recover failed chunks.
 - Download the final result as a PDF.
