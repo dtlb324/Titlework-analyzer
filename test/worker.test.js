@@ -219,22 +219,35 @@ test('runWorkerDrain processes runnable synthesis once then stops on idle', asyn
 });
 
 test('worker /internal/drain endpoint runs a drain and returns its summary', async () => {
+  const previousToken = process.env.INTERNAL_DRAIN_TOKEN;
+  process.env.INTERNAL_DRAIN_TOKEN = 'drain-test-token';
   const server = createWorkerHealthServer({ drain: async () => ({ synthesisJobs: 2, errors: [], hasWork: true }) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
-  const response = await new Promise((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path: '/internal/drain', method: 'POST' }, res => {
-      let data = '';
-      res.on('data', c => { data += c; });
-      res.on('end', () => resolve({ status: res.statusCode, data }));
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1',
+        port,
+        path: '/internal/drain',
+        method: 'POST',
+        headers: { 'x-internal-drain-token': 'drain-test-token' },
+      }, res => {
+        let data = '';
+        res.on('data', c => { data += c; });
+        res.on('end', () => resolve({ status: res.statusCode, data }));
+      });
+      req.on('error', reject);
+      req.end();
     });
-    req.on('error', reject);
-    req.end();
-  });
-  server.close();
-  assert(response.status === 200, `Expected 200, got ${response.status}`);
-  const parsed = JSON.parse(response.data);
-  assert(parsed.ok === true && parsed.synthesisJobs === 2, `Expected drain summary, got ${response.data}`);
+    assert(response.status === 200, `Expected 200, got ${response.status}`);
+    const parsed = JSON.parse(response.data);
+    assert(parsed.ok === true && parsed.synthesisJobs === 2, `Expected drain summary, got ${response.data}`);
+  } finally {
+    if (previousToken === undefined) delete process.env.INTERNAL_DRAIN_TOKEN;
+    else process.env.INTERNAL_DRAIN_TOKEN = previousToken;
+    await new Promise(resolve => server.close(resolve));
+  }
 });
 
 let passed = 0;

@@ -7,7 +7,11 @@ Full setup (Neon, API keys, GCS, Cloud Run) lives in `README.md` — follow it;
 this file is a pointer, not a copy.
 
 - Services: `server.js` (API + static `public/index.html`) and `worker.js`
-  (queue loop; health server exposes `POST /internal/drain`).
+  (queue loop; health server exposes `POST /internal/drain`). Drain requires
+  `INTERNAL_DRAIN_TOKEN` via `X-Internal-Drain-Token` (`secureCompare`).
+  Production (`NODE_ENV=production` or Cloud Run `K_SERVICE`) fails closed
+  when the token is unset. The production caller is Cloud Scheduler; it must
+  send the header (see `docs/worker-synthesis-scheduler-runbook.md`).
 - Data: Neon Postgres (`api/_lib/jobs.js` — validation + store + inline
   `CREATE TABLE IF NOT EXISTS` migrations, no manual migrations) and GCS
   signed URLs (`api/_lib/storage.js`; browser uploads direct-to-bucket).
@@ -51,7 +55,12 @@ this file is a pointer, not a copy.
 - `requireServerAbstractionPassword` (`api/jobs/[...path].js`) verifies
   `x-app-password` via `secureCompare` and fails closed when `APP_PASSWORD`
   is unset.
-- Never commit secrets or local state: `.env*`, `.tmp-gcloud/`,
+- `POST /internal/drain` (`worker.js`) verifies `x-internal-drain-token`
+  against `INTERNAL_DRAIN_TOKEN` via `secureCompare`. Production fails closed
+  when that token is unset. Set it on the worker before a release that
+  includes the check, and send the same value from Cloud Scheduler.
+- Never commit secrets or local state: `.env*` (except placeholder
+  `.env.example`), `.tmp-gcloud/`,
   `scripts/ocr-comparison-results/`, and `scripts/sample-docs/` are ignored.
 - The final merge and escalation re-reads are billable Sonnet calls — don't
   add retry/fallback paths that re-fire them silently.
@@ -68,7 +77,7 @@ manual `gcloud run deploy`, no Build triggers on `main`.
 
 ### Production vs local
 
-- Production: `WORKER_DISABLED=true` (loop off, scale-to-zero). Release does **not** create a Cloud Scheduler job. Keep the browser tab open so API `/process` kicks drain work. Optional scheduler setup is in `docs/worker-synthesis-scheduler-runbook.md`.
+- Production: `WORKER_DISABLED=true` (loop off, scale-to-zero). Release does **not** create a Cloud Scheduler job. Keep the browser tab open so API `/process` kicks drain work. Optional scheduler setup is in `docs/worker-synthesis-scheduler-runbook.md`. The worker service needs `INTERNAL_DRAIN_TOKEN` before that scheduler can call `POST /internal/drain`.
 - Local/elsewhere: run `npm run dev:worker` for background processing, or keep the browser tab open so the API kick processes the job.
 
 ## Cursor Cloud specific instructions

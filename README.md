@@ -23,6 +23,8 @@ GEMINI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=your-anthropic-key
 GCS_BUCKET=your-bucket-name
 APP_PASSWORD=pick-a-password
+# Worker only. Required in production for POST /internal/drain.
+INTERNAL_DRAIN_TOKEN=pick-a-long-random-token
 ```
 
 Sign in to Google Cloud once so the app can reach the bucket, then start the server.
@@ -213,6 +215,7 @@ Model calls then go through [OpenRouter](https://openrouter.ai) instead of Anthr
 | `GEMINI_API_KEY` | Gemini key. `GOOGLE_API_KEY` is also read. |
 | `ANTHROPIC_API_KEY` | Required unless you use OpenRouter. |
 | `APP_PASSWORD` | Yes for production. Password gate for users. Release verification expects it on both services. |
+| `INTERNAL_DRAIN_TOKEN` | Yes for production, worker only. Shared secret for `POST /internal/drain`. Callers send it as `X-Internal-Drain-Token`. Compared in constant time. The production image fails closed with 401 when this is unset. Cloud Scheduler must send the same value; see `docs/worker-synthesis-scheduler-runbook.md`. |
 
 ### OpenRouter
 
@@ -272,6 +275,7 @@ Model calls then go through [OpenRouter](https://openrouter.ai) instead of Anthr
 | Name | Default | Notes |
 |---|---|---|
 | `WORKER_DISABLED` | off | Worker only. `true` turns the loop off so the worker can scale-to-zero. The release workflow sets it to `true`. |
+| `INTERNAL_DRAIN_TOKEN` | unset | Worker only. When set, `POST /internal/drain` requires header `X-Internal-Drain-Token`. Production (`NODE_ENV=production`, which the image sets, or Cloud Run `K_SERVICE`) rejects the request when this is unset. Outside production an unset token leaves the route open for local use. |
 | `WORKER_POLL_IDLE_MS` | `2000` | Worker only. Wait between polls when idle. |
 | `WORKER_POLL_ACTIVE_MS` | `0` | Worker only. Wait between busy passes. |
 | `WORKER_POLL_INTERVAL_MS` | `5000` | Worker only. Legacy fallback for the idle wait. |
@@ -353,6 +357,7 @@ The app does not use the Anthropic or Gemini batch APIs. Progress runs through t
 Report vulnerabilities as described in `SECURITY.md`.
 
 - Password gate. When `APP_PASSWORD` is set, the browser sends it as a header and keeps it in memory for the tab. It does not store it in cookies, `localStorage`, or `sessionStorage`.
+- Worker drain. `POST /internal/drain` checks `X-Internal-Drain-Token` against `INTERNAL_DRAIN_TOKEN` with the same constant-time compare as the password gate. Cloud Run IAM still requires the scheduler's OIDC token. The in-app check is a second gate, and it fails closed in production when the secret is missing. `/healthz` stays unauthenticated.
 - Rate limits. `/api/analyze` allows `ANALYZE_RATE_LIMIT_MAX` requests per minute per IP. Job and blob routes allow 1500 per minute per IP, including GET. Both lock an IP after 5 failed passwords. The client IP is the rightmost `X-Forwarded-For` hop. When GCS is configured, limiter state lives in the bucket, so instances share it. Otherwise it stays in memory.
 - Uploads. Browsers upload to signed GCS URLs. Signed PUT requests bind `Content-Length` when the size is known.
 - Storage. Source files stay in a private bucket. Allow `PUT` only from your app origin.
