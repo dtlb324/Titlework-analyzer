@@ -11,6 +11,11 @@ in `README.md` — follow it; this file is a pointer, not a copy.
 - Services: `server.js` (API + static `public/index.html`, default port 8080)
   and `worker.js` (queue loop). The worker health server stays up when the
   loop is off and exposes `GET /healthz` and `POST /internal/drain`.
+  Drain requires `INTERNAL_DRAIN_TOKEN` via `X-Internal-Drain-Token`
+  (`secureCompare`). Production (`NODE_ENV=production` or Cloud Run
+  `K_SERVICE`) fails closed when the token is unset. The production caller
+  is Cloud Scheduler; it must send the header (see
+  `docs/worker-synthesis-scheduler-runbook.md`).
 - Data: Neon Postgres. `api/_lib/jobs.js` validates, stores, and migrates
   inline in `ensureSchema` (`CREATE TABLE IF NOT EXISTS` and
   `ADD COLUMN IF NOT EXISTS`). No migration files. GCS signed URLs live in
@@ -82,10 +87,15 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   `APP_PASSWORD` is unset.
 - The rate-limit IP is the rightmost `X-Forwarded-For` hop (`getClientIp`
   in `api/_lib/client-ip.js`), the hop Cloud Run appends.
-- `POST /internal/drain` has no in-app password check. The worker is
-  deployed `--no-allow-unauthenticated`; Cloud Run IAM is the gate.
-- Ignored local state: `.env*`, `.tmp-gcloud/`,
-  `scripts/ocr-comparison-results/`, and `scripts/sample-docs/`.
+- `POST /internal/drain` (`worker.js`) verifies `x-internal-drain-token`
+  against `INTERNAL_DRAIN_TOKEN` via `secureCompare`. Production fails closed
+  when that token is unset. Set it on the worker before a release that
+  includes the check, and send the same value from Cloud Scheduler.
+  `/healthz` stays unauthenticated. The worker is still deployed
+  `--no-allow-unauthenticated`; Cloud Run IAM is the outer gate.
+- Ignored local state: `.env*` (except placeholder `.env.example`),
+  `.tmp-gcloud/`, `scripts/ocr-comparison-results/`, and
+  `scripts/sample-docs/`.
 - The final merge and escalation re-reads are billable Sonnet calls. Do not
   add a retry or fallback that fires them again on its own.
 
@@ -112,7 +122,8 @@ read them.
   The release workflow does not create a Cloud Scheduler job. An open
   browser tab drives work: `/abstraction/process` and `/synthesis/process`
   kick a bounded batch (`WORKFLOW_KICK_ON_START`). Optional scheduler setup
-  is `docs/worker-synthesis-scheduler-runbook.md`.
+  is `docs/worker-synthesis-scheduler-runbook.md`. The worker service needs
+  `INTERNAL_DRAIN_TOKEN` before that scheduler can call `POST /internal/drain`.
 - Elsewhere, run `npm run dev:worker`, or leave the tab open so the same
   API kick processes the job.
 

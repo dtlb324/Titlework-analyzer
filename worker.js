@@ -1,6 +1,49 @@
 import { createServer } from 'http';
 import { runWorkerLoop, runWorkerDrain } from './api/_lib/cloud-run-worker.js';
+import { secureCompare } from './api/_lib/jobs.js';
 import { getRuntimeInfo } from './api/_lib/runtime-info.js';
+
+// Cloud Scheduler is the production caller. It already presents an OIDC bearer
+// token to Cloud Run IAM; this header is the in-app secret, sent alongside it.
+export const INTERNAL_DRAIN_HEADER = 'x-internal-drain-token';
+
+export function isProductionRuntime(env = process.env) {
+  if (String(env.NODE_ENV || '').trim().toLowerCase() === 'production') return true;
+  return String(env.K_SERVICE || '').trim() !== '';
+}
+
+function configuredDrainToken(env) {
+  const raw = env.INTERNAL_DRAIN_TOKEN;
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+}
+
+// Fails closed in production (Dockerfile sets NODE_ENV=production; Cloud Run
+// also sets K_SERVICE) when INTERNAL_DRAIN_TOKEN is missing. Outside production
+// an unset token stays open so local drain POSTs keep working; a configured
+// token is required in every environment.
+export function authorizeInternalDrain(req, env = process.env) {
+  const secret = configuredDrainToken(env);
+  if (!secret) {
+    if (isProductionRuntime(env)) {
+      return { ok: false, status: 401, error: 'INTERNAL_DRAIN_TOKEN is required.' };
+    }
+    return { ok: true };
+  }
+  const header = req?.headers?.[INTERNAL_DRAIN_HEADER];
+  const provided = typeof header === 'string' ? header.trim() : '';
+  if (secureCompare(provided, secret)) return { ok: true };
+  return { ok: false, status: 401, error: 'Unauthorized.' };
+}
+
+function writeJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
 
 function closeServer(server) {
   return new Promise(resolve => {
@@ -38,23 +81,22 @@ export function createWorkerHealthServer({ drain } = {}) {
       return;
     }
     if (req.method === 'POST' && req.url === '/internal/drain') {
+      const auth = authorizeInternalDrain(req);
+      if (!auth.ok) {
+        writeJson(res, auth.status, { ok: false, error: auth.error });
+        return;
+      }
       if (draining) {
-        const body = JSON.stringify({ ok: true, busy: true });
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
-        res.end(body);
+        writeJson(res, 200, { ok: true, busy: true });
         return;
       }
       draining = true;
       runDrain()
         .then(result => {
-          const body = JSON.stringify({ ok: true, ...result });
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
-          res.end(body);
+          writeJson(res, 200, { ok: true, ...result });
         })
         .catch(err => {
-          const body = JSON.stringify({ ok: false, error: err?.message || String(err) });
-          res.writeHead(500, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
-          res.end(body);
+          writeJson(res, 500, { ok: false, error: err?.message || String(err) });
         })
         .finally(() => { draining = false; });
       return;

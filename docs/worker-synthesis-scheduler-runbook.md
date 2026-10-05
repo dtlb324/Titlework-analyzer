@@ -25,7 +25,20 @@ gcloud run services add-iam-policy-binding "$WORKER" \
   --project "$PROJECT" --region "$REGION" \
   --member "serviceAccount:${SA}" --role roles/run.invoker
 
-# 3. Cloud Scheduler job: POST /internal/drain every minute with an OIDC token.
+# 3. Shared secret the worker checks in the app. Cloud Run IAM still requires
+#    the scheduler OIDC token; this header is a second gate. Use the same value
+#    for INTERNAL_DRAIN_TOKEN on the worker. Production returns 401 when the
+#    variable is missing. Set the variable and the scheduler header before
+#    deploying a release that enforces the check (the previous worker ignores both).
+DRAIN_TOKEN='replace-with-a-long-random-token'
+
+gcloud run services update "$WORKER" \
+  --project "$PROJECT" --region "$REGION" \
+  --update-env-vars "INTERNAL_DRAIN_TOKEN=${DRAIN_TOKEN}"
+
+# 4. Cloud Scheduler job: POST /internal/drain every minute with an OIDC token
+#    plus the in-app secret. Do not put the secret in Authorization — that
+#    header is the OIDC bearer token Cloud Run IAM checks.
 #    --location must be a Cloud Scheduler region (`gcloud scheduler locations list`);
 #    us-south1 is not one, so us-central1 is used (region is functionally irrelevant —
 #    the job just makes an HTTPS call to the worker URL).
@@ -35,9 +48,18 @@ gcloud scheduler jobs create http synthesis-drain \
   --project "$PROJECT" --location "$SCHED_LOCATION" \
   --schedule "* * * * *" --attempt-deadline 1800s \
   --uri "${WORKER_URL}/internal/drain" --http-method POST \
+  --headers "X-Internal-Drain-Token=${DRAIN_TOKEN}" \
   --oidc-service-account-email "$SA" \
   --oidc-token-audience "$WORKER_URL"
 ```
+
+## Auth order for an existing scheduler
+
+Set `INTERNAL_DRAIN_TOKEN` on the worker and add `X-Internal-Drain-Token` on
+the scheduler job before the release that checks the header. The running
+worker ignores the extra env var and header, so doing this first keeps the
+current job working. Deploying the check first makes `/internal/drain` return
+401 until both are in place. Browser-driven synthesis is unaffected.
 
 ## Rollout order
 
@@ -45,8 +67,8 @@ gcloud scheduler jobs create http synthesis-drain \
    **and** the runnable-query hardening (exclude abstraction-incomplete jobs from
    `listRunnableSynthesisJobIds`). Without the hardening, the drain churns on
    abandoned jobs whose abstraction never finished.
-2. Run steps 0–3 above. If the job already exists, update it instead of creating:
-   `gcloud scheduler jobs update http synthesis-drain --project "$PROJECT" --location "$SCHED_LOCATION" --attempt-deadline 1800s`
+2. Run steps 0–4 above. If the job already exists, update it instead of creating:
+   `gcloud scheduler jobs update http synthesis-drain --project "$PROJECT" --location "$SCHED_LOCATION" --attempt-deadline 1800s --update-headers "X-Internal-Drain-Token=${DRAIN_TOKEN}"`
 3. If the job was paused during setup, resume it:
    `gcloud scheduler jobs resume synthesis-drain --project "$PROJECT" --location "$SCHED_LOCATION"`
 
@@ -68,7 +90,9 @@ browser-driven behavior (the tab must stay open) — no breakage.
 
 ## How it works
 
-- Cloud Scheduler `POST`s `/internal/drain` every minute. The worker runs one
+- Cloud Scheduler `POST`s `/internal/drain` every minute with an OIDC identity
+  token (Cloud Run IAM) and `X-Internal-Drain-Token` (in-app
+  `INTERNAL_DRAIN_TOKEN`, constant-time compare). The worker runs one
   bounded drain (`runWorkerDrain` → `runWorkerLoop` with `maxIdleCycles: 1`),
   processing all runnable work — synthesis plus any runnable abstraction — then
   the instance scales back to zero. The drain is time-bounded (default 25 min,
