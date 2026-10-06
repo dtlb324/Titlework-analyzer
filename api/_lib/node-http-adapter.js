@@ -1,4 +1,4 @@
-import { createRequestId, requireJobPassword, setJobSecurityHeaders } from './jobs.js';
+import { publicRequestId, requireJobPassword, setJobSecurityHeaders } from './jobs.js';
 
 const DEFAULT_MAX_BODY_BYTES = 25 * 1024 * 1024;
 
@@ -85,7 +85,7 @@ export function createApiResponse(res) {
 export async function callApiHandler(handler, req, res, url) {
   const apiRes = createApiResponse(res);
   setJobSecurityHeaders(apiRes);
-  const requestId = req.headers['x-request-id'] || createRequestId();
+  const requestId = publicRequestId(req.headers['x-request-id']);
   apiRes.setHeader('X-Request-Id', requestId);
   const preAuthReq = createApiRequest(req, url, undefined);
   if (!(await requireJobPassword(preAuthReq, apiRes, requestId))) {

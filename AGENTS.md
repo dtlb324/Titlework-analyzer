@@ -80,7 +80,9 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   `docs/phase-2-durable-storage.md` still describes session-scoped rows and
   Vercel Blob. The code is the contract.
 - `requireJobPassword` (`api/_lib/jobs.js`) allows the request when
-  `APP_PASSWORD` is unset. `requireServerAbstractionPassword`
+  `APP_PASSWORD` is unset outside production. Production
+  (`NODE_ENV=production` or Cloud Run `K_SERVICE`) returns 401 until
+  `APP_PASSWORD` is set. `requireServerAbstractionPassword`
   (`api/jobs/[...path].js`) is the extra gate on abstraction and synthesis
   start/status/process/preview, retry, follow-up, and the abstract list. It
   checks `x-app-password` with `secureCompare` and returns 401 when

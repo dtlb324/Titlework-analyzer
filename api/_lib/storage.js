@@ -41,40 +41,99 @@ export function buildObjectUrl(bucket, objectKey) {
   return `gs://${bucket}/${objectKey}`;
 }
 
+const GCS_VIRTUAL_HOST_SUFFIX = '.storage.googleapis.com';
+
+function decodeStoragePath(pathname) {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+}
+
+function pathHasDotSegment(pathname) {
+  const decoded = decodeStoragePath(pathname);
+  if (decoded == null) return true;
+  return decoded.split('/').some(segment => segment === '..' || segment === '.');
+}
+
+export function gcsVirtualHostedBucket(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!host.endsWith(GCS_VIRTUAL_HOST_SUFFIX)) return '';
+  const bucket = host.slice(0, -GCS_VIRTUAL_HOST_SUFFIX.length);
+  if (!/^[a-z0-9][a-z0-9._-]{1,220}$/.test(bucket) || bucket.includes('..')) return '';
+  return bucket;
+}
+
+function storageUrlParts(value) {
+  const parsed = new URL(value);
+  if (parsed.username || parsed.password) return null;
+  if (parsed.port && parsed.port !== '443') return null;
+  const decodedPath = decodeStoragePath(parsed.pathname);
+  if (decodedPath == null || pathHasDotSegment(parsed.pathname)) return null;
+  if (parsed.protocol === 'gs:') {
+    if (!parsed.hostname || !decodedPath.startsWith('/jobs/')) return null;
+    return { bucket: parsed.hostname, objectKey: decodedPath.replace(/^\/+/, '') };
+  }
+  if (parsed.protocol !== 'https:') return null;
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'storage.googleapis.com') {
+    const [, bucket, ...parts] = decodedPath.split('/');
+    if (!bucket || parts[0] !== 'jobs' || bucket.includes('..')) return null;
+    return { bucket, objectKey: parts.join('/') };
+  }
+  const bucket = gcsVirtualHostedBucket(host);
+  if (!bucket || !decodedPath.startsWith('/jobs/')) return null;
+  return { bucket, objectKey: decodedPath.replace(/^\/+/, '') };
+}
+
 export function isAllowedStorageUrl(value) {
   try {
-    const parsed = new URL(value);
-    if (parsed.protocol === 'gs:') {
-      return Boolean(parsed.hostname) && parsed.pathname.startsWith('/jobs/');
-    }
-    const host = parsed.hostname.toLowerCase();
-    if (parsed.protocol !== 'https:') return false;
-    if (host === 'storage.googleapis.com') {
-      const [, bucket, firstSegment] = parsed.pathname.split('/');
-      return Boolean(bucket) && firstSegment === 'jobs';
-    }
-    if (host.endsWith('.storage.googleapis.com')) {
-      return parsed.pathname.startsWith('/jobs/');
-    }
-    return false;
+    return Boolean(storageUrlParts(value));
   } catch {
     return false;
   }
 }
 
 export function parseStorageUrl(objectUrl, fallbackBucket = '') {
-  const parsed = new URL(objectUrl);
-  if (parsed.protocol === 'gs:') {
-    return { bucket: parsed.hostname, objectKey: parsed.pathname.replace(/^\/+/, '') };
+  try {
+    return storageUrlParts(objectUrl) || { bucket: fallbackBucket, objectKey: '' };
+  } catch {
+    return { bucket: fallbackBucket, objectKey: '' };
   }
-  if (parsed.hostname.toLowerCase() === 'storage.googleapis.com') {
-    const [, bucket, ...parts] = parsed.pathname.split('/');
-    return { bucket, objectKey: parts.join('/') };
+}
+
+function isSafeObjectKey(objectKey) {
+  if (typeof objectKey !== 'string' || !objectKey || objectKey.length > 2048) return false;
+  if (objectKey.startsWith('/') || objectKey.includes('\\') || objectKey.includes('\0')) return false;
+  return objectKey.split('/').every(segment => segment && segment !== '.' && segment !== '..');
+}
+
+export function resolveReadableObject(chunk, config = getStorageConfig()) {
+  const objectUrl = chunk?.objectUrl || chunk?.blobUrl;
+  if (typeof objectUrl !== 'string' || !isAllowedStorageUrl(objectUrl)) {
+    const error = new Error('Chunk storage URL must be a Google Cloud Storage object URL.');
+    error.statusCode = 400;
+    throw error;
   }
-  if (parsed.hostname.toLowerCase().endsWith('.storage.googleapis.com')) {
-    return { bucket: parsed.hostname.split('.')[0], objectKey: parsed.pathname.replace(/^\/+/, '') };
+  const ref = parseStorageUrl(objectUrl, config.bucket);
+  const objectKey = chunk?.objectKey || chunk?.blobKey || ref.objectKey;
+  if (!isSafeObjectKey(objectKey) || !chunk?.jobId || !objectKey.startsWith(`jobs/${chunk.jobId}/`)) {
+    const error = new Error('Chunk storage key must stay inside the job prefix.');
+    error.statusCode = 400;
+    throw error;
   }
-  return { bucket: fallbackBucket, objectKey: '' };
+  if (ref.objectKey !== objectKey) {
+    const error = new Error('Chunk storage URL does not match the object key.');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (config.bucket && ref.bucket !== config.bucket) {
+    const error = new Error('Chunk storage URL must point to the configured GCS bucket.');
+    error.statusCode = 400;
+    throw error;
+  }
+  return { bucket: ref.bucket || config.bucket, objectKey };
 }
 
 const RATE_LIMIT_OBJECT_PATTERN = /^ops\/rate-limits\/(jobs|analyze)\/[a-f0-9]{32,64}\.json$/;
@@ -229,16 +288,10 @@ export async function readObject(chunk, options = {}) {
     error.statusCode = 500;
     throw error;
   }
-  const objectUrl = chunk.objectUrl || chunk.blobUrl;
-  if (!isAllowedStorageUrl(objectUrl)) {
-    const error = new Error('Chunk storage URL must be a Google Cloud Storage object URL.');
-    error.statusCode = 400;
-    throw error;
-  }
   const config = options.config || getStorageConfig();
-  const ref = parseStorageUrl(objectUrl, config.bucket);
-  const bucket = options.bucket || await getBucket({ ...config, bucket: ref.bucket || config.bucket });
-  const file = bucket.file(chunk.objectKey || chunk.blobKey || ref.objectKey);
+  const location = resolveReadableObject(chunk, config);
+  const bucket = options.bucket || await getBucket({ ...config, bucket: location.bucket });
+  const file = bucket.file(location.objectKey);
   const [bytes] = await file.download();
   const [metadata] = await file.getMetadata().catch(() => [{}]);
   return {

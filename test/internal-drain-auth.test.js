@@ -162,6 +162,28 @@ test('worker health stays unauthenticated when drain auth is required', async ()
   });
 });
 
+test('POST /internal/drain does not return internal error text', async () => {
+  const previous = snapshotEnv();
+  delete process.env.NODE_ENV;
+  delete process.env.K_SERVICE;
+  process.env.INTERNAL_DRAIN_TOKEN = 'local-token';
+  const server = createWorkerHealthServer({
+    drain: async () => {
+      throw new Error('database password=super-secret');
+    },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const res = await postDrain(server.address().port, { 'x-internal-drain-token': 'local-token' });
+    assert(res.status === 500, `Expected 500, got ${res.status}`);
+    assert(res.body?.error === 'Drain failed.', `Expected generic error, got ${JSON.stringify(res.body)}`);
+    assert(!JSON.stringify(res.body).includes('super-secret'), 'Internal error text must not be returned');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    restoreEnv(previous);
+  }
+});
+
 let passed = 0;
 let failed = 0;
 

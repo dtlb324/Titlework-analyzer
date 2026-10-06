@@ -679,6 +679,23 @@ test('inferSynthesisDriver detects browser and server results', () => {
   assert(inferSynthesisDriver(null) === null, 'Expected null for missing result');
 });
 
+test('job rename escapes HTML in the name field', async () => {
+  await runClientScript(`
+    renderJobNameEditor({ id: 'job_client_1', createdAt: Date.now(), updatedAt: Date.now(), status: 'complete' }, '"><img src=x onerror=alert(1)>');
+    const html = document.getElementById('jobTitleBlock').innerHTML;
+    assert(html.includes('value="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"'), 'job name must stay inside the value attribute');
+    assert(!html.includes('<img'), 'job name must not inject a tag');
+  `);
+});
+
+test('successful password entry clears the password field', async () => {
+  await runClientScript(`
+    document.getElementById('passwordInput').value = 'secret-password';
+    await checkPassword();
+    assert(document.getElementById('passwordInput').value === '', 'password field should be cleared after a successful check');
+  `);
+});
+
 let passed = 0;
 let failed = 0;
 

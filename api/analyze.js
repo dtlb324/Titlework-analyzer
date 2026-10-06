@@ -3,6 +3,8 @@
 // request size limiting, XSS headers, data leakage prevention
 
 import { getClientIp } from './_lib/client-ip.js';
+import { publicRequestId, secureCompare } from './_lib/jobs.js';
+import { isProductionRuntime } from './_lib/runtime-info.js';
 import { delayAuthFailure, mutateSharedRateLimit } from './_lib/shared-rate-limit.js';
 import {
   invokeModel,
@@ -41,10 +43,6 @@ function getAnalyzeConfig() {
   };
 }
 
-function createRequestId() {
-  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
 function logRequestEvent(event, fields = {}) {
   console.log(JSON.stringify({
     event,
@@ -81,16 +79,6 @@ function mutateAnalyzeRateLimit(ip, update) {
   });
 }
 
-function secureCompare(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const maxLen = Math.max(a.length, b.length);
-  let diff = a.length !== b.length ? 1 : 0;
-  for (let i = 0; i < maxLen; i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return diff === 0;
-}
-
 function validateRequestBody(body) {
   if (body && body.ping === true) return { valid: true, isPing: true };
   if (!body || !Array.isArray(body.messages)) {
@@ -106,7 +94,10 @@ function validateRequestBody(body) {
     'gemini-2.5-pro',
     'gemini-2.0-flash',
   ];
-  if (/^claude-haiku/i.test(body.model || '')) {
+  if (typeof body.model !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(body.model)) {
+    return { valid: false, reason: 'Invalid or disallowed model.' };
+  }
+  if (/^claude-haiku/i.test(body.model)) {
     return { valid: false, reason: 'Invalid or disallowed model.' };
   }
   if (!body.model || (!allowedModels.includes(body.model) && !isGeminiModel(body.model) && !isAnthropicModel(body.model))) {
@@ -160,7 +151,7 @@ function setSecurityHeaders(res) {
 
 export default async function handler(req, res) {
   setSecurityHeaders(res);
-  const requestId = req.headers['x-request-id'] || createRequestId();
+  const requestId = publicRequestId(req.headers['x-request-id']);
   const startedAt = Date.now();
   res.setHeader('X-Request-Id', requestId);
 
@@ -172,6 +163,10 @@ export default async function handler(req, res) {
   const ip = getClientIp(req);
 
   const requiredPassword = process.env.APP_PASSWORD;
+  if (!requiredPassword && isProductionRuntime()) {
+    logRequestEvent('api_reject', { requestId, status: 401, reason: 'password_not_configured', latencyMs: Date.now() - startedAt });
+    return res.status(401).json({ error: 'APP_PASSWORD is required.', requestId });
+  }
   if (requiredPassword) {
     const providedPassword = req.headers['x-app-password'];
     let outcome;

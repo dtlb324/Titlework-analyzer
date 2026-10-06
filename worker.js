@@ -1,16 +1,13 @@
 import { createServer } from 'http';
 import { runWorkerLoop, runWorkerDrain } from './api/_lib/cloud-run-worker.js';
 import { secureCompare } from './api/_lib/jobs.js';
-import { getRuntimeInfo } from './api/_lib/runtime-info.js';
+import { getRuntimeInfo, isProductionRuntime } from './api/_lib/runtime-info.js';
+
+export { isProductionRuntime };
 
 // Cloud Scheduler is the production caller. It already presents an OIDC bearer
 // token to Cloud Run IAM; this header is the in-app secret, sent alongside it.
 export const INTERNAL_DRAIN_HEADER = 'x-internal-drain-token';
-
-export function isProductionRuntime(env = process.env) {
-  if (String(env.NODE_ENV || '').trim().toLowerCase() === 'production') return true;
-  return String(env.K_SERVICE || '').trim() !== '';
-}
 
 function configuredDrainToken(env) {
   const raw = env.INTERNAL_DRAIN_TOKEN;
@@ -96,7 +93,11 @@ export function createWorkerHealthServer({ drain } = {}) {
           writeJson(res, 200, { ok: true, ...result });
         })
         .catch(err => {
-          writeJson(res, 500, { ok: false, error: err?.message || String(err) });
+          console.error(JSON.stringify({
+            event: 'worker_drain_error',
+            reason: err?.message || String(err),
+          }));
+          writeJson(res, 500, { ok: false, error: 'Drain failed.' });
         })
         .finally(() => { draining = false; });
       return;

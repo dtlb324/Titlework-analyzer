@@ -1,5 +1,5 @@
 import {
-  createRequestId,
+  publicRequestId,
   enforceJobRateLimit,
   getJobStore,
   parseJsonBody,
@@ -251,7 +251,16 @@ async function handleChunkPatch(req, res, requestId, store, jobId, chunkId) {
   }
   const body = parseBody(req, res, requestId);
   if (!body) return;
-  const validation = validatePatchChunkInput(body, { jobId, chunkId });
+  const existing = typeof store.getChunk === 'function'
+    ? await store.getChunk(jobId, chunkId)
+    : (await store.listChunks(jobId)).find(item => item.id === chunkId);
+  if (!existing) return res.status(404).json({ error: 'Chunk not found.', requestId });
+  const validation = validatePatchChunkInput(body, {
+    jobId,
+    chunkId,
+    existingBlobKey: existing.blobKey,
+    existingBlobUrl: existing.blobUrl,
+  });
   if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
 
   const chunk = await store.updateChunk(jobId, chunkId, validation.patch);
@@ -692,7 +701,7 @@ async function handleChunkRetry(req, res, requestId, store, jobId, chunkId) {
 
 export default async function handler(req, res) {
   setJobSecurityHeaders(res);
-  const requestId = req.headers['x-request-id'] || createRequestId();
+  const requestId = publicRequestId(req.headers['x-request-id']);
   res.setHeader('X-Request-Id', requestId);
 
   const parts = getPathParts(req);
