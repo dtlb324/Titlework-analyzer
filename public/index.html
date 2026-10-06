@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'">
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -125,8 +125,8 @@
   .recent-jobs-row:hover { background:#f5e7c4; }
   .recent-jobs-empty { color:#8a6f4a; font-style:italic; padding:.6rem 0; }
 </style>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha384-weMABwrltA6jWR8DDe9Jp5blk+tZQh7ugpCsF3JwSA53WZM9/14PjS5LAJNHNjAI" crossorigin="anonymous"></script>
 </head>
 <body>
 
@@ -722,7 +722,7 @@ function checkPassword() {
   const pw = document.getElementById('passwordInput').value.trim();
   if (!pw) return;
   persistPassword(pw);
-  fetch('/api/analyze', {
+  return fetch('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
     body: JSON.stringify({ ping: true }),
@@ -731,6 +731,7 @@ function checkPassword() {
       document.getElementById('passwordError').innerHTML = '<div class="error-msg">Incorrect password.</div>';
       clearStoredPassword();
     } else {
+      document.getElementById('passwordInput').value = '';
       document.getElementById('passwordGate').style.display = 'none';
       showMain();
       applyRoute(parseRoute());
@@ -2772,7 +2773,14 @@ function removeFile(i) {
   document.getElementById('analyzeBtn').disabled = files.length === 0;
 }
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 function showError(msg) {
   // Split on first colon to get a title vs detail
   const colonIdx = msg.indexOf(':');

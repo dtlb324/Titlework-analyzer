@@ -1,7 +1,7 @@
 import { createReadStream } from 'fs';
 import { readFile, stat } from 'fs/promises';
 import { createServer as createHttpServer } from 'http';
-import { extname, join, normalize } from 'path';
+import { extname, isAbsolute, join, normalize, relative, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { callApiHandler } from './api/_lib/node-http-adapter.js';
@@ -56,11 +56,19 @@ function sendJson(res, statusCode, body, headers = {}) {
   res.end(payload);
 }
 
-function safePublicPath(pathname) {
-  const decoded = decodeURIComponent(pathname);
-  const relative = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
-  const resolved = normalize(join(PUBLIC_DIR, relative));
-  return resolved.startsWith(PUBLIC_DIR) ? resolved : null;
+export function safePublicPath(pathname, publicDir = PUBLIC_DIR) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes('\0')) return null;
+  const relativePath = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
+  const resolved = normalize(join(publicDir, relativePath));
+  const fromRoot = relative(publicDir, resolved);
+  if (!fromRoot || isAbsolute(fromRoot) || fromRoot === '..' || fromRoot.startsWith(`..${sep}`)) return null;
+  return resolved;
 }
 
 async function serveStatic(req, res, url) {

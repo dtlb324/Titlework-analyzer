@@ -1,6 +1,7 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, timingSafeEqual } from 'crypto';
 import { neon } from '@neondatabase/serverless';
 import { getClientIp } from './client-ip.js';
+import { isProductionRuntime } from './runtime-info.js';
 import { delayAuthFailure, mutateSharedRateLimit, resetSharedRateLimits } from './shared-rate-limit.js';
 import { buildObjectKey, isAllowedStorageUrl, validateObjectRef } from './storage.js';
 
@@ -82,8 +83,16 @@ export function setJobSecurityHeaders(res) {
   res.setHeader('Pragma', 'no-cache');
 }
 
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,80}$/;
+
 export function createRequestId() {
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function publicRequestId(headerValue) {
+  const value = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (typeof value === 'string' && REQUEST_ID_PATTERN.test(value)) return value;
+  return createRequestId();
 }
 
 export function parseJsonBody(body) {
@@ -93,12 +102,13 @@ export function parseJsonBody(body) {
 
 export function secureCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const maxLen = Math.max(a.length, b.length);
-  let diff = a.length !== b.length ? 1 : 0;
-  for (let i = 0; i < maxLen; i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) {
+    timingSafeEqual(left, left);
+    return false;
   }
-  return diff === 0;
+  return timingSafeEqual(left, right);
 }
 
 function abstractionMaxAttempts(options = {}) {
@@ -172,7 +182,13 @@ function denyLimiterUnavailable(res, requestId) {
 
 export async function requireJobPassword(req, res, requestId) {
   const requiredPassword = process.env.APP_PASSWORD;
-  if (!requiredPassword) return true;
+  if (!requiredPassword) {
+    if (isProductionRuntime()) {
+      res.status(401).json({ error: 'APP_PASSWORD is required.', requestId });
+      return false;
+    }
+    return true;
+  }
   const ip = getClientIp(req);
   const providedPassword = req.headers['x-app-password'];
   let outcome;
@@ -583,16 +599,26 @@ export function validatePatchChunkInput(input, context = {}) {
     if (!isSafeMetadataString(input.blobUrl, MAX_BLOB_REF_LENGTH) || !isAllowedBlobUrl(input.blobUrl)) {
       return { valid: false, reason: 'Invalid blobUrl.' };
     }
-    if (context.jobId && context.chunkId && input.blobKey) {
+    patch.blobUrl = input.blobUrl;
+  }
+  if (patch.blobKey !== undefined || patch.blobUrl !== undefined) {
+    const objectKey = patch.blobKey !== undefined ? patch.blobKey : context.existingBlobKey;
+    const objectUrl = patch.blobUrl !== undefined ? patch.blobUrl : context.existingBlobUrl;
+    if (patch.blobUrl !== undefined || objectUrl) {
+      if (typeof objectKey !== 'string' || typeof objectUrl !== 'string' || !objectKey || !objectUrl) {
+        return { valid: false, reason: 'blobKey and blobUrl must both refer to the same object.' };
+      }
+      if (context.jobId && context.chunkId && !objectKey.startsWith(buildChunkBlobPrefix(context.jobId, context.chunkId))) {
+        return { valid: false, reason: 'blobKey must match the job and chunk upload prefix.' };
+      }
       const storageRef = validateObjectRef({
         jobId: context.jobId,
         chunkId: context.chunkId,
-        objectKey: input.blobKey,
-        objectUrl: input.blobUrl,
+        objectKey,
+        objectUrl,
       });
       if (!storageRef.valid) return { valid: false, reason: storageRef.reason };
     }
-    patch.blobUrl = input.blobUrl;
   }
   const checksumSha256 = normalizeChecksum(input.checksumSha256 ?? input.checksum);
   if (checksumSha256 === false) {

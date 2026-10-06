@@ -569,6 +569,78 @@ test('synthesis persistence casts nullable values for Neon parameter typing', ()
   assert(source.includes('${payload.mergeWorkerId ?? null}::text'), 'job result persistence should cast nullable mergeWorkerId for Neon');
 });
 
+test('PATCH chunk blobUrl cannot retarget another bucket or object', async () => {
+  const previousBucket = process.env.GCS_BUCKET;
+  process.env.GCS_BUCKET = 'titlework-test';
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  try {
+    await store.createDocument('job_test_1', {
+      originalFilename: 'Deed.pdf',
+      mediaType: 'application/pdf',
+      sizeBytes: 123456,
+      fingerprint: 'deed-fingerprint',
+      checksumSha256: 'a'.repeat(64),
+    });
+    await store.createChunk('job_test_1', 'doc_test_1', {
+      chunkOrder: 0,
+      originalFilename: 'Deed.pdf',
+      mediaType: 'application/pdf',
+      sizeBytes: 123456,
+      fingerprint: 'deed-chunk-fingerprint',
+      checksumSha256: 'b'.repeat(64),
+    });
+    const otherBucket = mockRes();
+    await jobsRouteHandler(mockReq('PATCH', {
+      blobUrl: 'gs://other-bucket/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+    }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), otherBucket);
+    assert(otherBucket.statusCode === 400, `Expected cross-bucket blobUrl rejection, got ${otherBucket.statusCode}`);
+
+    const otherKey = mockRes();
+    await jobsRouteHandler(mockReq('PATCH', {
+      blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/other.pdf',
+    }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), otherKey);
+    assert(otherKey.statusCode === 400, `Expected object key mismatch rejection, got ${otherKey.statusCode}`);
+  } finally {
+    delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
+    if (previousBucket === undefined) delete process.env.GCS_BUCKET;
+    else process.env.GCS_BUCKET = previousBucket;
+  }
+});
+
+test('readable storage refs stay on the configured bucket and reject dot segments', async () => {
+  const storage = await import('../api/_lib/storage.js');
+  const previousBucket = process.env.GCS_BUCKET;
+  process.env.GCS_BUCKET = 'titlework-test';
+  try {
+    assert(storage.isAllowedStorageUrl('gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf'), 'Expected gs object URL');
+    assert(!storage.isAllowedStorageUrl('gs://titlework-test/jobs/../secret.pdf'), 'Expected dot-segment object URL rejection');
+    assert(!storage.isAllowedStorageUrl('https://storage.googleapis.com.evil.example/jobs/job_test_1/deed.pdf'), 'Expected lookalike host rejection');
+    assert(storage.gcsVirtualHostedBucket('titlework-test.storage.googleapis.com') === 'titlework-test', 'Expected full virtual-host bucket name');
+    let rejected = false;
+    try {
+      storage.resolveReadableObject({
+        jobId: 'job_test_1',
+        blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+        blobUrl: 'gs://other-bucket/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+      });
+    } catch (err) {
+      rejected = err.statusCode === 400;
+    }
+    assert(rejected, 'Expected cross-bucket read rejection');
+    const resolved = storage.resolveReadableObject({
+      jobId: 'job_test_1',
+      blobKey: 'jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+      blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/deed.pdf',
+    });
+    assert(resolved.bucket === 'titlework-test', 'Expected configured bucket');
+    assert(resolved.objectKey === 'jobs/job_test_1/chunks/chk_test_1/deed.pdf', 'Expected matching object key');
+  } finally {
+    if (previousBucket === undefined) delete process.env.GCS_BUCKET;
+    else process.env.GCS_BUCKET = previousBucket;
+  }
+});
+
 let passed = 0;
 let failed = 0;
 

@@ -1,5 +1,5 @@
 import {
-  createRequestId,
+  publicRequestId,
   enforceJobRateLimit,
   getJobStore,
   parseJsonBody,
@@ -20,7 +20,7 @@ export const config = {
 
 export default async function handler(req, res) {
   setJobSecurityHeaders(res);
-  const requestId = req.headers['x-request-id'] || createRequestId();
+  const requestId = publicRequestId(req.headers['x-request-id']);
   res.setHeader('X-Request-Id', requestId);
 
   if (!['GET', 'POST'].includes(req.method)) {

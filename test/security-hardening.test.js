@@ -9,8 +9,11 @@ import { resetSharedRateLimits } from '../api/_lib/shared-rate-limit.js';
 import jobHandler from '../api/jobs/[...path].js';
 import analyzeHandler from '../api/analyze.js';
 import { processMultiChunkAbstraction } from '../api/_lib/abstraction-batch.js';
-import { createServer } from '../server.js';
+import { createServer, safePublicPath } from '../server.js';
 import { request } from 'http';
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -431,6 +434,131 @@ test('shared limiter fails closed when store errors are not 412', async () => {
   } finally {
     delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
     resetJobRateLimits();
+    if (previous === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = previous;
+  }
+});
+
+test('static files cannot escape the public directory by prefix', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'public-audit-'));
+  const publicDir = join(root, 'public');
+  await mkdir(publicDir);
+  await writeFile(join(publicDir, 'index.html'), 'ok');
+  await writeFile(join(root, 'public-secret.txt'), 'SENTINEL');
+  try {
+    assert(safePublicPath('/index.html', publicDir) === join(publicDir, 'index.html'), 'index.html should resolve inside public');
+    assert(safePublicPath('/..%2fpublic-secret.txt', publicDir) === null, 'encoded slash traversal must not resolve');
+    assert(safePublicPath('/%2e%2e/public-secret.txt', publicDir) === null, 'encoded dot traversal must not resolve');
+    assert(safePublicPath('/../public-secret.txt', publicDir) === null, 'dot-dot traversal must not resolve');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+
+  const sibling = join(process.cwd(), 'public-audit-secret.txt');
+  await writeFile(sibling, 'SENTINEL-PUBLIC-PREFIX');
+  const server = createServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const leaked = await new Promise((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1',
+        port: server.address().port,
+        path: '/..%2fpublic-audit-secret.txt',
+      }, res => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => { text += chunk; });
+        res.on('end', () => resolve({ statusCode: res.statusCode, text }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert(leaked.statusCode === 403, `Expected 403 for public-prefix traversal, got ${leaked.statusCode}`);
+    assert(!leaked.text.includes('SENTINEL-PUBLIC-PREFIX'), 'Traversal must not return the sibling file');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(sibling, { force: true });
+  }
+});
+
+test('production API calls fail closed when APP_PASSWORD is unset', async () => {
+  const previousNode = process.env.NODE_ENV;
+  const previousService = process.env.K_SERVICE;
+  const previousPassword = process.env.APP_PASSWORD;
+  delete process.env.APP_PASSWORD;
+  delete process.env.K_SERVICE;
+  process.env.NODE_ENV = 'production';
+  const server = createServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const req = request({
+        method: 'POST',
+        path: '/api/analyze',
+        host: '127.0.0.1',
+        port: server.address().port,
+        headers: { 'content-type': 'application/json' },
+      }, res => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => { text += chunk; });
+        res.on('end', () => resolve({ statusCode: res.statusCode, text }));
+      });
+      req.on('error', reject);
+      req.end('{"ping":true}');
+    });
+    assert(result.statusCode === 401, `Expected production 401, got ${result.statusCode}`);
+    assert(result.text.includes('APP_PASSWORD is required'), `Expected password configuration error, got ${result.text}`);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    if (previousNode === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNode;
+    if (previousService === undefined) delete process.env.K_SERVICE;
+    else process.env.K_SERVICE = previousService;
+    if (previousPassword === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = previousPassword;
+  }
+});
+
+test('analyze proxy rejects slash model ids', async () => {
+  const previous = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'correct-horse';
+  try {
+    const res = mockRes();
+    await analyzeHandler(mockReq({
+      method: 'POST',
+      url: '/api/analyze',
+      headers: { 'x-app-password': 'correct-horse', 'x-forwarded-for': '203.0.113.41' },
+      body: {
+        model: 'claude-sonnet-5/openai/gpt-4',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    }), res);
+    assert(res.statusCode === 400, `Expected slash model 400, got ${res.statusCode}`);
+  } finally {
+    if (previous === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = previous;
+  }
+});
+
+test('reflected request ids must match a safe token', async () => {
+  const previous = process.env.APP_PASSWORD;
+  process.env.APP_PASSWORD = 'correct-horse';
+  try {
+    const res = mockRes();
+    await analyzeHandler(mockReq({
+      method: 'POST',
+      url: '/api/analyze',
+      headers: {
+        'x-app-password': 'wrong',
+        'x-forwarded-for': '203.0.113.42',
+        'x-request-id': 'bad id\r\nX-Injected: 1',
+      },
+      body: { ping: true },
+    }), res);
+    assert(res.statusCode === 401, `Expected 401, got ${res.statusCode}`);
+    assert(/^req_[A-Za-z0-9._:-]+$/.test(res.headers['X-Request-Id']), `Expected generated request id, got ${res.headers['X-Request-Id']}`);
+  } finally {
     if (previous === undefined) delete process.env.APP_PASSWORD;
     else process.env.APP_PASSWORD = previous;
   }

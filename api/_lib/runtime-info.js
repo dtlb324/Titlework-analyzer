@@ -22,6 +22,11 @@ function normalize(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+export function isProductionRuntime(env = process.env) {
+  if (String(env.NODE_ENV || '').trim().toLowerCase() === 'production') return true;
+  return String(env.K_SERVICE || '').trim() !== '';
+}
+
 export function getRuntimeInfo(env = process.env) {
   const packageVersion = getPackageVersion();
   return {
