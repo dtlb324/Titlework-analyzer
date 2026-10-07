@@ -34,7 +34,7 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
     assert.deepEqual(config.models.map(model => model.id), ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'claude-haiku-5-5']);
     assert.equal(config.models[1].thinkingLevel, 'low');
     assert.equal(config.models[2].label, 'Claude Haiku 5.5');
-    assert.equal(config.models[2].maxTokens, config.models[0].maxTokens);
+    assert.deepEqual(config.models.map(model => model.maxTokens), [8000, 8000, 8000], 'lab limit is shared and larger than production\'s 2,000');
     assert.equal(config.maxPages, 10);
     assert.equal(config.maxBytes, 12_000_000);
   });
@@ -309,4 +309,14 @@ test('Haiku cost uses the long-prompt tier and cache rates, and never fabricates
   assert.equal(costs[0].costRates.input, 0.5);
   assert.equal(costs[1].costUsd, (1000 * 0.1 + 2000 * 0.125 + 3000 * 0.01 + 100 * 0.5) / 1_000_000);
   assert.equal(costs[2].costUsd, null);
+});
+
+test('OCR_COMPARE_MAX_TOKENS overrides the shared limit and invalid values fall back to the default', () => {
+  const run = value => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `import { createOcrCompareHandler } from './api/ocr-compare.js'; const res={setHeader(){},status(code){this.code=code;return this;},json(body){console.log(JSON.stringify(body.models.map(m=>m.maxTokens)));}}; await createOcrCompareHandler()({method:'GET',headers:{'x-app-password':'ocr-test-password'},socket:{}},res);`], { encoding: 'utf8', env: { ...process.env, OCR_COMPARE_MAX_TOKENS: value } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  assert.deepEqual(run('4096'), [4096, 4096, 4096]);
+  for (const bad of ['100', '9000', 'abc', '']) assert.deepEqual(run(bad), [8000, 8000, 8000], `value ${bad}`);
 });
