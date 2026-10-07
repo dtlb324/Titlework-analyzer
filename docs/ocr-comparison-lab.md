@@ -16,6 +16,7 @@ In your git-ignored `.env.local`, configure:
 - `ANTHROPIC_API_KEY` — for Claude Haiku 5.5. If it is missing, only the Haiku
   column reports an error; the Gemini results are still returned
 - Optional `ABSTRACT_MODEL` — baseline model override, restricted to Gemini 3-series
+- Optional `OCR_COMPARE_MAX_TOKENS` — shared output-token limit (default 8000)
 
 The isolated lab rejects other baseline models (including Gemini 2.5) with
 HTTP 503 for both metadata and comparisons, before starting either provider.
@@ -51,8 +52,11 @@ server instance at a time; this is not a cross-instance quota.
 - Every PDF is rendered into PNG pages in the browser at scale 2 before upload.
   Neither model receives the original PDF or its hidden/searchable text layer.
 - All three models receive the exact same rendered images, in the same order,
-  with the shared `ABSTRACTION_PROMPT` and the same output-token limit from
-  `getAbstractionConfig()` (normally 2,000).
+  with the shared `ABSTRACTION_PROMPT` and the same output-token limit. The lab
+  limit is 8,000 by default (set `OCR_COMPARE_MAX_TOKENS`, 512–8192, to change
+  it) rather than production's roughly 2,000: a multi-page upload can contain
+  several instruments, and Haiku 5.5's thinking tokens count against the same
+  limit. Output cut off by the limit is flagged in the UI as truncated.
 - The baseline uses the configured production Gemini thinking level, or the
   provider default if none is set. 3.8 Flash explicitly uses `low` because it
   does not support `minimal`. Haiku 5.5 always runs with adaptive thinking; the

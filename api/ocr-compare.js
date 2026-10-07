@@ -4,6 +4,13 @@ import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingCo
 import { invokeAnthropicModel, isAnthropicModel, sanitizeModelClientError } from './_lib/model-client.js';
 
 const MAX_PAGES = 10;
+// Lab-only output limit shared by all models. Production abstraction uses ~2,000
+// tokens per chunk, but a 10-page upload can hold several instruments, and Haiku
+// 5.5's thinking tokens count against the same limit. 8192 is the largest value
+// the non-streaming Anthropic call allows (NON_STREAMING_MAX_TOKENS).
+const DEFAULT_LAB_MAX_TOKENS = 8000;
+const MIN_LAB_MAX_TOKENS = 512;
+const MAX_LAB_MAX_TOKENS = 8192;
 const MAX_BYTES = 12_000_000;
 const MAX_BASE64_CHARS = Math.ceil(MAX_BYTES / 3) * 4;
 const PRICING_SOURCE = 'https://ai.google.dev/gemini-api/docs/pricing';
@@ -11,18 +18,24 @@ const ANTHROPIC_PRICING_SOURCE = 'https://platform.claude.com/docs/en/about-clau
 const HAIKU_ID = 'claude-haiku-5-5';
 const HAIKU_LONG_PROMPT_TOKENS = 100_000;
 
+function labMaxTokens() {
+  const raw = Number(process.env.OCR_COMPARE_MAX_TOKENS);
+  return Number.isInteger(raw) && raw >= MIN_LAB_MAX_TOKENS && raw <= MAX_LAB_MAX_TOKENS ? raw : DEFAULT_LAB_MAX_TOKENS;
+}
+
 function models() {
   const config = getAbstractionConfig();
+  const maxTokens = labMaxTokens();
   if (!/^gemini-3[.-][a-z0-9.-]+$/i.test(config.model)) {
     const error = new Error('OCR comparison requires a Gemini 3-series ABSTRACT_MODEL.');
     error.statusCode = 503;
     throw error;
   }
   return [
-    { id: config.model, label: 'Current Gemini', thinkingLevel: resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default', maxTokens: config.maxTokens },
-    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'low', maxTokens: config.maxTokens },
+    { id: config.model, label: 'Current Gemini', thinkingLevel: resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default', maxTokens },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'low', maxTokens },
     // Haiku 5.5 thinks adaptively; `effort: low` is its closest analogue to 3.8's `low`.
-    { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort low', effort: 'low', maxTokens: config.maxTokens },
+    { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort low', effort: 'low', maxTokens },
   ];
 }
 
