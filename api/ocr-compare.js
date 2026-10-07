@@ -1,12 +1,15 @@
 import { ABSTRACTION_PROMPT, buildAbstractMessagesForChunk, getAbstractionConfig } from './_lib/abstraction.js';
 import { requireJobPassword, setJobSecurityHeaders } from './_lib/jobs.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingConfig } from './_lib/gemini-request.js';
-import { sanitizeModelClientError } from './_lib/model-client.js';
+import { invokeAnthropicModel, isAnthropicModel, sanitizeModelClientError } from './_lib/model-client.js';
 
 const MAX_PAGES = 10;
 const MAX_BYTES = 12_000_000;
 const MAX_BASE64_CHARS = Math.ceil(MAX_BYTES / 3) * 4;
 const PRICING_SOURCE = 'https://ai.google.dev/gemini-api/docs/pricing';
+const ANTHROPIC_PRICING_SOURCE = 'https://platform.claude.com/docs/en/about-claude/pricing';
+const HAIKU_ID = 'claude-haiku-5-5';
+const HAIKU_LONG_PROMPT_TOKENS = 100_000;
 
 function models() {
   const config = getAbstractionConfig();
@@ -18,7 +21,17 @@ function models() {
   return [
     { id: config.model, label: 'Current Gemini', thinkingLevel: resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default', maxTokens: config.maxTokens },
     { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'low', maxTokens: config.maxTokens },
+    // Haiku 5.5 thinks adaptively; `effort: low` is its closest analogue to 3.8's `low`.
+    { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort low', effort: 'low', maxTokens: config.maxTokens },
   ];
+}
+
+// Gemini and Claude are both called directly (never through OpenRouter),
+// regardless of the production MODEL_PROVIDER.
+function invokeLabModel(call, options) {
+  return isAnthropicModel(call.model)
+    ? invokeAnthropicModel(call, { ...options, direct: true })
+    : invokeGeminiGenerateContent(call, options);
 }
 
 function validateUpload(body) {
@@ -56,7 +69,24 @@ function fieldsFromText(text) {
   return fields;
 }
 
+function estimateHaikuCost(usage) {
+  const num = value => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null);
+  const input = num(usage?.input_tokens);
+  const output = num(usage?.output_tokens);
+  const cacheWrite = usage?.cache_creation_input_tokens == null ? 0 : num(usage.cache_creation_input_tokens);
+  const cacheRead = usage?.cache_read_input_tokens == null ? 0 : num(usage.cache_read_input_tokens);
+  if ([input, output, cacheWrite, cacheRead].some(value => value === null)) return { costUsd: null };
+  // Anthropic prices the whole request by total prompt length; output_tokens already include thinking.
+  const long = input + cacheWrite + cacheRead > HAIKU_LONG_PROMPT_TOKENS;
+  const rates = long ? { input: 0.5, output: 2.5, cacheWrite: 0.625, cacheRead: 0.05 } : { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheRead: 0.01 };
+  return {
+    costUsd: (input * rates.input + cacheWrite * rates.cacheWrite + cacheRead * rates.cacheRead + output * rates.output) / 1_000_000,
+    costRates: { input: rates.input, output: rates.output, source: ANTHROPIC_PRICING_SOURCE },
+  };
+}
+
 function estimateCost(id, usage) {
+  if (id === HAIKU_ID) return estimateHaikuCost(usage);
   const rates = id === 'gemini-3.1-flash-lite'
     ? { input: 0.25, output: 1.5 }
     : id === 'gemini-3.8-flash'
@@ -64,12 +94,14 @@ function estimateCost(id, usage) {
       : null;
   const input = usage?.input_tokens;
   const output = usage?.output_tokens;
-  const thinking = usage?.thinking_tokens;
+  // Gemini omits thoughtsTokenCount when the model did not think, so absent means zero.
+  // Missing input/output counts still produce no estimate.
+  const thinking = usage?.thinking_tokens ?? 0;
   if (!rates || ![input, output, thinking].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) return { costUsd: null, costRates: rates && { ...rates, source: PRICING_SOURCE } };
   return { costUsd: (input * rates.input + (output + thinking) * rates.output) / 1_000_000, costRates: { ...rates, source: PRICING_SOURCE } };
 }
 
-export function createOcrCompareHandler({ modelClient = invokeGeminiGenerateContent } = {}) {
+export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
   let active = false;
   return async function handler(req, res) {
     setJobSecurityHeaders(res);
@@ -84,7 +116,7 @@ export function createOcrCompareHandler({ modelClient = invokeGeminiGenerateCont
     let upload;
     try { upload = validateUpload(req.body); }
     catch (error) { return res.status(400).json({ error: error.message }); }
-    if (modelClient === invokeGeminiGenerateContent && geminiApiKeyError()) return res.status(503).json({ error: geminiApiKeyError() });
+    if (modelClient === invokeLabModel && geminiApiKeyError()) return res.status(503).json({ error: geminiApiKeyError() });
     if (active) {
       res.setHeader('Retry-After', '5');
       return res.status(429).json({ error: 'A comparison is already running on this server instance. Wait before starting another.' });
@@ -100,7 +132,7 @@ export function createOcrCompareHandler({ modelClient = invokeGeminiGenerateCont
       const results = await Promise.all(pair.map(async model => {
         const started = Date.now();
         try {
-          const result = await modelClient({ model: model.id, maxTokens: model.maxTokens, system: ABSTRACTION_PROMPT, messages, ...(model.thinkingLevel === 'default' ? {} : { thinkingLevel: model.thinkingLevel }) }, { timeoutMs: 240_000, createTimeoutSignal: ms => ({ signal: AbortSignal.timeout(ms), cleanup() {} }) });
+          const result = await modelClient({ model: model.id, maxTokens: model.maxTokens, system: ABSTRACTION_PROMPT, messages, ...(model.effort ? { effort: model.effort } : model.thinkingLevel === 'default' ? {} : { thinkingLevel: model.thinkingLevel }) }, { timeoutMs: 240_000, createTimeoutSignal: ms => ({ signal: AbortSignal.timeout(ms), cleanup() {} }) });
           const text = String(result.text || '');
           const usage = result.usage || {};
           return { ...model, text, fields: fieldsFromText(text), usage, latencyMs: Date.now() - started, stopReason: result.stopReason || null, modelVersion: result.model || model.id, ...estimateCost(model.id, usage) };

@@ -9,12 +9,12 @@
   <script type="module" src="/ocr-compare.js"></script>
 </head>
 <body>
-  <header><a href="/">← Mineral Ownership Builder</a><h1>OCR model comparison</h1><p>One document. The same page images. Two independent model outputs.</p></header>
+  <header><a href="/">← Mineral Ownership Builder</a><h1>OCR model comparison</h1><p>One document. The same page images. Three independent model outputs.</p></header>
   <main>
     <section class="panel" aria-labelledby="setup-title">
       <h2 id="setup-title">Compare a document</h2>
-      <p>PDFs are rendered locally into page images; hidden text layers are not sent. Images are decoded and validated locally. This isolated test does not create jobs or save documents to application storage. Model requests are billable.</p>
-      <p>Both models use the same max output token limit, shown with their effective server settings. Production escalation and batching are excluded; this is an isolated OCR comparison, not the production title-analysis workflow.</p>
+      <p>PDFs are rendered locally into page images; hidden text layers are not sent. Images are decoded and validated locally. This isolated test does not create jobs or save documents to application storage. Model requests are billable, and page images are sent to both Google and Anthropic.</p>
+      <p>All three models use the same max output token limit, shown with their effective server settings. Production escalation and batching are excluded; this is an isolated OCR comparison, not the production title-analysis workflow.</p>
       <form id="compare-form">
         <div class="controls">
           <div><label for="password">Application password</label><input id="password" type="password" autocomplete="off" required><small>Not saved in browser storage. Provider API keys stay on the server.</small></div>
@@ -29,11 +29,12 @@
       <section class="panel preview-panel" aria-labelledby="preview-title"><h2 id="preview-title">Original page images</h2><div id="previews"><p class="muted">Your document preview will appear here.</p></div></section>
       <section class="panel" aria-labelledby="baseline-title"><h2 id="baseline-title">Baseline output</h2><div id="baseline"><p class="muted">Waiting for comparison.</p></div></section>
       <section class="panel" aria-labelledby="candidate-title"><h2 id="candidate-title">Candidate output</h2><div id="candidate"><p class="muted">Waiting for comparison.</p></div></section>
+      <section class="panel" aria-labelledby="challenger-title"><h2 id="challenger-title">Challenger output</h2><div id="challenger"><p class="muted">Waiting for comparison.</p></div></section>
     </div>
     <section class="panel" aria-labelledby="differences-title">
       <div class="section-heading"><h2 id="differences-title">Field differences</h2><button id="download" type="button" disabled>Download JSON report</button></div>
       <p>Differences are not accuracy scores. Review both outputs against the original document; neither is ground truth.</p>
-      <div class="table-scroll"><table><thead><tr><th scope="col">Field</th><th scope="col">Baseline</th><th scope="col">Candidate</th><th scope="col">Comparison</th></tr></thead><tbody id="differences"></tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th scope="col">Field</th><th scope="col">Baseline</th><th scope="col">Candidate</th><th scope="col">Challenger</th><th scope="col">Comparison</th></tr></thead><tbody id="differences"></tbody></table></div>
     </section>
   </main>
 </body>

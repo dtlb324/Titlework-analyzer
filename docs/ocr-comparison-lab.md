@@ -2,7 +2,7 @@
 
 An opt-in browser page at `/ocr-compare.html` compares the configured current
 Gemini abstraction model (default `gemini-3.1-flash-lite`) with
-`gemini-3.8-flash`. It does not change the production abstraction model,
+`gemini-3.8-flash` and Anthropic's `claude-haiku-5-5`. It does not change the production abstraction model,
 create durable jobs, save abstracts, or run title-opinion synthesis.
 
 ## Enable locally
@@ -12,7 +12,9 @@ In your git-ignored `.env.local`, configure:
 
 - `OCR_COMPARE_ENABLED=true`
 - `APP_PASSWORD` — your application's access password (required even locally)
-- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — a key with access to both models
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — a key with access to both Gemini models
+- `ANTHROPIC_API_KEY` — for Claude Haiku 5.5. If it is missing, only the Haiku
+  column reports an error; the Gemini results are still returned
 - Optional `ABSTRACT_MODEL` — baseline model override, restricted to Gemini 3-series
 
 The isolated lab rejects other baseline models (including Gemini 2.5) with
@@ -33,9 +35,9 @@ inside a hosted Hermes container is not publicly reachable on its own port.
 ## Compare
 
 1. Enter the app password, then select one PDF, PNG, JPEG, or WebP.
-2. Review the rendered source-page previews and the two model settings.
-3. Click **Compare OCR** once. This starts one request per model in parallel.
-4. Review both outputs and the field differences. Download the JSON report if
+2. Review the rendered source-page previews and the three model settings.
+3. Click **Compare OCR** once. This starts one request per model (three) in parallel.
+4. Review all three outputs and the field differences. Download the JSON report if
    you want to retain the results.
 
 Limits: 10 pages and 12,000,000 bytes of rendered image data per comparison.
@@ -48,17 +50,21 @@ server instance at a time; this is not a cross-instance quota.
 
 - Every PDF is rendered into PNG pages in the browser at scale 2 before upload.
   Neither model receives the original PDF or its hidden/searchable text layer.
-- Both models receive the exact same rendered images, in the same order,
+- All three models receive the exact same rendered images, in the same order,
   with the shared `ABSTRACTION_PROMPT` and the same output-token limit from
   `getAbstractionConfig()` (normally 2,000).
 - The baseline uses the configured production Gemini thinking level, or the
   provider default if none is set. 3.8 Flash explicitly uses `low` because it
-  does not support `minimal`. These settings are shown, not treated as equal.
+  does not support `minimal`. Haiku 5.5 always runs with adaptive thinking; the
+  lab sets `output_config.effort` to `low`, its closest analogue. Sampling
+  parameters are not sent (Haiku 5.5 rejects non-default values). Its
+  `output_tokens` already include any thinking tokens, so the thinking count
+  shows as unavailable. These settings are shown, not treated as equal.
 - This compares visual **title-field extraction**, not a verbatim full-page
   transcription or the complete production workflow (text-first delivery,
   batching, fallback, and escalation are intentionally excluded).
-- The lab calls the **direct Gemini API**, even if `MODEL_PROVIDER=openrouter`
-  is set for production. Provider routing can therefore differ from production.
+- The lab calls the **direct Gemini API** and the **direct Anthropic API**, even
+  if `MODEL_PROVIDER=openrouter` is set for production. Provider routing can therefore differ from production.
 - Field differences are review cues, **not accuracy scores**. Use manually
   verified answers to decide which output is correct; agreement is not proof.
 - A failure in either model does not hide the other model's successful output.
@@ -66,25 +72,34 @@ server instance at a time; this is not a cross-instance quota.
 
 ## Usage, cost, and privacy
 
-Each comparison makes two billable model calls when using a paid API tier.
+Each comparison makes three billable model calls when using a paid API tier.
 Timing is server-side model-call wall time, not browser rendering/upload time.
 Token usage includes input, output, and thinking tokens when reported.
 
-Cost is an **estimate** using standard paid direct Gemini rates in USD per
-million tokens, including thinking in output cost:
+Cost is an **estimate** using standard paid direct API rates in USD per
+million tokens, including thinking in output cost. A Gemini response that omits
+its thinking-token count is treated as zero thinking tokens; a response missing
+input or output counts gets no estimate:
 
 | Model | Input | Output + thinking |
 | --- | ---: | ---: |
 | `gemini-3.1-flash-lite` | $0.25 | $1.50 |
 | `gemini-3.8-flash`, through 2026-12-31 UTC | $0.75 | $3.75 |
 | `gemini-3.8-flash`, from 2027-01-01 UTC | $1.50 | $7.50 |
+| `claude-haiku-5-5`, prompts up to 100K tokens | $0.10 | $0.50 |
+| `claude-haiku-5-5`, prompts over 100K tokens | $0.50 | $2.50 |
 
-Source: https://ai.google.dev/gemini-api/docs/pricing . Rates were checked on
-2026-10-07. Estimates do not represent actual invoices, free-tier eligibility,
-caching discounts, or other service tiers. An unknown model's pricing or
+Sources: https://ai.google.dev/gemini-api/docs/pricing and
+https://platform.claude.com/docs/en/about-claude/pricing . Rates were checked on
+2026-10-07. Haiku's prompt-length tier uses input plus cache tokens; cache
+writes ($0.125 / $0.625) and reads ($0.01 / $0.05) are priced when reported.
+Estimates do not represent actual invoices, free-tier eligibility,
+batch discounts, or other service tiers. Claude image inputs are tokenized
+differently from Gemini's, so input-token counts are not comparable across
+providers. An unknown model's pricing or
 missing token counts produces no estimate rather than a made-up zero.
 
-Document images are sent to Google for inference. The lab does not persist
+Document images are sent to Google and to Anthropic for inference. The lab does not persist
 source images or outputs to the job database or document bucket; downloaded
 reports remain on your device. Existing application authentication may use
 its shared rate-limiter store for auth bookkeeping, but no lab document or
