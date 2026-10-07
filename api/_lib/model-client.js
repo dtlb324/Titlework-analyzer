@@ -119,8 +119,12 @@ export async function invokeAnthropicModelStream(request, options = {}) {
   }
 }
 
-async function invokeAnthropicModel(request, options = {}) {
-  const keyError = modelApiKeyError(request.model);
+// `options.direct` skips OpenRouter key routing: the OCR lab always calls
+// api.anthropic.com, so only ANTHROPIC_API_KEY is relevant there.
+export async function invokeAnthropicModel(request, options = {}) {
+  const keyError = options.direct
+    ? (anthropicApiKey() ? null : 'ANTHROPIC_API_KEY is required for Claude models.')
+    : modelApiKeyError(request.model);
   if (keyError) {
     const error = new Error(keyError);
     error.statusCode = 503;
@@ -131,6 +135,7 @@ async function invokeAnthropicModel(request, options = {}) {
     maxTokens: request.maxTokens,
     system: request.system,
     messages: request.messages,
+    effort: request.effort,
   }));
   const timeoutMs = Number(options.timeoutMs) || 240_000;
   const timeout = options.createTimeoutSignal

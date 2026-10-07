@@ -72,6 +72,8 @@ in `README.md` — follow it; this file is a pointer, not a copy.
 - Claude request bodies are `model`, `max_tokens`, `system`, and `messages`
   (`buildMessagesRequestBody` in `api/_lib/anthropic-request.js`). Sonnet 5
   and Sonnet 5.5 reject `thinking`, `temperature`, `top_p`, and `top_k`.
+  Only the OCR lab adds an optional `output_config.effort` (Haiku 5.5 runs at
+  `low`); production calls never set it.
 
 ### Safety
 

@@ -15,7 +15,7 @@ small { display: block; margin-top: .4rem; }
 button { border: 1px solid #7a4118; border-radius: 4px; background: #7a4118; color: white; font: bold .95rem Georgia, serif; padding: .7rem 1rem; cursor: pointer; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 :focus-visible { outline: 3px solid #b8631e; outline-offset: 3px; }
-.comparison { display: grid; grid-template-columns: minmax(220px, .9fr) minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.comparison { display: grid; grid-template-columns: minmax(200px, .8fr) repeat(3, minmax(0, 1fr)); gap: 1rem; align-items: start; }
 .comparison .panel { max-height: 78vh; overflow-y: auto; }
 figure { margin: 0 0 1rem; }
 figure img { display: block; width: 100%; height: auto; border: 1px solid #d9c9a8; }
@@ -29,5 +29,6 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .9rem/1.55 ui-monosp
 table { border-collapse: collapse; width: 100%; font-size: .9rem; }
 th, td { text-align: left; vertical-align: top; padding: .6rem; border-bottom: 1px solid #d9c9a8; min-width: 120px; white-space: pre-wrap; overflow-wrap: anywhere; }
 tr.different { background: #fff1d6; }
+@media (max-width: 1200px) { .comparison { grid-template-columns: repeat(3, minmax(0, 1fr)); } .comparison .preview-panel { grid-column: 1 / -1; } .preview-panel img { max-width: 650px; margin: auto; } }
 @media (max-width: 900px) { .comparison { grid-template-columns: 1fr; } .comparison .panel { max-height: none; } .preview-panel img { max-width: 650px; margin: auto; } }
 @media (max-width: 600px) { .controls { grid-template-columns: 1fr; } main { padding: .7rem; } .panel { padding: .85rem; } }

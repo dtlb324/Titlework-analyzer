@@ -1,4 +1,5 @@
 const LIMITS = { maxPages: 10, maxBytes: 12000000, renderScale: 2 };
+const MODEL_COUNT = 3;
 
 async function encodePage(blob, width, height) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -58,7 +59,7 @@ export function createCompareUI(deps = {}) {
   const prepare = deps.prepareDocument || (file => prepareDocument(file));
   const urls = deps.URL || URL;
   const delay = deps.setTimeout || setTimeout;
-  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'differences', 'download'].map(id => [id, doc.getElementById(id)]));
+  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download'].map(id => [id, doc.getElementById(id)]));
   let file, pages = [], report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
   const updateControls = () => {
@@ -77,6 +78,7 @@ export function createCompareUI(deps = {}) {
     el.download.disabled = true;
     el.baseline.replaceChildren(node('p', 'Waiting for comparison.', 'muted'));
     el.candidate.replaceChildren(node('p', 'Waiting for comparison.', 'muted'));
+    el.challenger.replaceChildren(node('p', 'Waiting for comparison.', 'muted'));
     el.differences.replaceChildren();
     el.settings.textContent = '';
   };
@@ -158,28 +160,29 @@ export function createCompareUI(deps = {}) {
       if (!metadataResponse.ok) throw await httpError(metadataResponse);
       const metadata = await metadataResponse.json();
       if (current !== generation) return;
-      if (!Array.isArray(metadata.models) || metadata.models.length !== 2 || metadata.renderScale !== LIMITS.renderScale || !Number.isInteger(metadata.maxPages) || metadata.maxPages < 1 || !Number.isInteger(metadata.maxBytes) || metadata.maxBytes < 1 || metadata.models[0].maxTokens !== metadata.models[1].maxTokens) throw new Error('Unsupported server comparison configuration.');
+      if (!Array.isArray(metadata.models) || metadata.models.length !== MODEL_COUNT || metadata.renderScale !== LIMITS.renderScale || !Number.isInteger(metadata.maxPages) || metadata.maxPages < 1 || !Number.isInteger(metadata.maxBytes) || metadata.maxBytes < 1 || metadata.models.some(model => model.maxTokens !== metadata.models[0].maxTokens)) throw new Error('Unsupported server comparison configuration.');
       if (selectedPages.length > Math.min(LIMITS.maxPages, metadata.maxPages)) throw new Error('Document exceeds the server page limit.');
       const byteCount = selectedPages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
       if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error('Document exceeds the server image byte limit.');
       el.settings.textContent = metadata.models.map(modelSettings).join('\n');
-      el.status.textContent = 'Comparing the same page images with both models. No automatic retries.';
+      el.status.textContent = 'Comparing the same page images with all three models. No automatic retries.';
       const response = await request('/api/ocr-compare', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: selectedFile.name, pages: selectedPages.map(({ mediaType, data }) => ({ mediaType, data })) }) });
       if (!response.ok) throw await httpError(response);
       const result = await response.json();
       if (current !== generation) return;
-      displayModel(el.baseline, result.models[0]);
-      displayModel(el.candidate, result.models[1]);
-      const [left, right] = result.models.map(model => model.fields || {});
+      if (!Array.isArray(result.models) || result.models.length !== MODEL_COUNT) throw new Error('Unexpected number of model results.');
+      [el.baseline, el.candidate, el.challenger].forEach((target, index) => displayModel(target, result.models[index]));
+      const fieldSets = result.models.map(model => model.fields || {});
       const failed = result.models.some(model => model.error);
-      const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
+      const keys = [...new Set(fieldSets.flatMap(fields => Object.keys(fields)))].sort();
       for (const key of keys) {
         const row = node('tr');
-        const same = JSON.stringify(stableValue(left[key])) === JSON.stringify(stableValue(right[key]));
+        const serialized = fieldSets.map(fields => JSON.stringify(stableValue(fields[key])));
+        const same = serialized.every(value => value === serialized[0]);
         if (!same && !failed) row.className = 'different';
         const heading = node('th', key);
         heading.setAttribute('scope', 'row');
-        row.append(heading, node('td', result.models[0].error ? 'Unavailable (model failed)' : valueText(left[key])), node('td', result.models[1].error ? 'Unavailable (model failed)' : valueText(right[key])), node('td', failed ? 'Unavailable' : same ? 'Same' : 'Different'));
+        row.append(heading, ...result.models.map((model, index) => node('td', model.error ? 'Unavailable (model failed)' : valueText(fieldSets[index][key]))), node('td', failed ? 'Unavailable' : same ? 'Same' : 'Different'));
         el.differences.append(row);
       }
       report = {

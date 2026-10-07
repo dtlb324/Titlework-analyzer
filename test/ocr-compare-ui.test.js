@@ -14,12 +14,13 @@ class Element {
 }
 const allText = el => [el.textContent, ...el.children.map(allText)].join(' ');
 function harness(overrides = {}) {
-  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'differences', 'download'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download'].map(id => [id, new Element()]));
   const calls = [], blobs = [], revoked = [];
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const models = [
     { id: 'gemini-3.1-flash-lite', label: 'Baseline', thinkingLevel: 'default', maxTokens: 8000, text: '<script>unsafe</script>', fields: { grantor: '<img src=x onerror=bad()>', onlyBaseline: 0 }, usage: { input_tokens: 10, output_tokens: 20, thinking_tokens: 3 }, latencyMs: 120, stopReason: 'MAX_TOKENS', modelVersion: 'v1', costUsd: .001, costRates: { input: .25, output: 1.5, source: 'fixture' } },
-    { id: 'gemini-3.8-flash', label: 'Candidate', thinkingLevel: 'minimal', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } }
+    { id: 'gemini-3.8-flash', label: 'Candidate', thinkingLevel: 'minimal', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } },
+    { id: 'claude-haiku-5-5', label: 'Challenger', thinkingLevel: 'adaptive, effort low', maxTokens: 8000, text: 'GRANTOR: Third', fields: { grantor: 'Third', onlyCandidate: false }, usage: { input_tokens: 12, output_tokens: 5 }, latencyMs: 90, stopReason: 'end_turn', modelVersion: 'v3', costUsd: .0003, costRates: { input: .1, output: .5, source: 'fixture' } }
   ];
   const result = { filename: 'deed.png', pageCount: 1, inputMode: 'rendered_images', models };
   const deps = {
@@ -148,6 +149,7 @@ test('one model error is preserved independently without treating failed fields 
   await h.elements['compare-form'].fire('submit');
   assert.match(allText(h.elements.baseline), /unsafe/);
   assert.match(allText(h.elements.candidate), /Provider failed/);
+  assert.match(allText(h.elements.challenger), /Third/, 'a failure in one model does not hide the third column');
   assert.match(allText(h.elements.candidate), /cost: unavailable/);
   assert.match(h.elements.status.textContent, /1 model failed/);
   assert.match(allText(h.elements.differences), /Unavailable/);
@@ -176,10 +178,11 @@ test('field comparison ignores object key order while preserving array order and
   const h = harness();
   h.models[0].fields = { object: { a: 1, b: 2 }, array: [1, 2], absent: null };
   h.models[1].fields = { object: { b: 2, a: 1 }, array: [2, 1] };
+  h.models[2].fields = { object: { a: 1, b: 2 }, array: [1, 2], absent: null };
   ui.createCompareUI(h.deps);
   await selected(h);
   await h.elements['compare-form'].fire('submit');
-  const rows = Object.fromEntries(h.elements.differences.children.map(row => [row.children[0].textContent, row.children[3].textContent]));
+  const rows = Object.fromEntries(h.elements.differences.children.map(row => [row.children[0].textContent, row.children[4].textContent]));
   assert.equal(rows.object, 'Same');
   assert.equal(rows.array, 'Different');
   assert.equal(rows.absent, 'Different');
@@ -212,11 +215,16 @@ test('one upload compares server-selected models, renders safe union differences
   assert.match(allText(h.elements.baseline), /truncated/i);
   assert.match(allText(h.elements.candidate), /empty/i);
   assert.equal(h.elements.differences.children.length, 3);
+  assert.match(allText(h.elements.challenger), /Third/);
+  assert.match(allText(h.elements.challenger), /adaptive, effort low/);
+  assert.match(allText(h.elements.settings), /claude-haiku-5-5/);
+  assert.equal(h.elements.differences.children[0].children.length, 5, 'field + three models + comparison');
   assert.match(allText(h.elements.differences), /<img src=x onerror=bad\(\)>/);
   assert.equal(h.elements.download.disabled, false);
   await h.elements.download.fire('click');
   const report = JSON.parse(await h.blobs.at(-1).text());
   assert.equal(report.models[0].text, '<script>unsafe</script>');
+  assert.equal(report.models.length, 3);
   assert.ok(!JSON.stringify(report).includes('private-password'));
   assert.ok(!JSON.stringify(report).includes('YWJj'));
   assert.ok(h.revoked.includes('blob:2'));

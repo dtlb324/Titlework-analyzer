@@ -53,11 +53,12 @@ export function buildMergeUserMessageContent({ preamble, tract, contextNotes, se
   ];
 }
 
-export function buildMessagesRequestBody({ model, maxTokens, system, messages }) {
+export function buildMessagesRequestBody({ model, maxTokens, system, messages, effort }) {
   return {
     model,
     max_tokens: maxTokens,
     system: buildSystemParam(system),
     messages,
+    ...(effort ? { output_config: { effort } } : {}),
   };
 }
