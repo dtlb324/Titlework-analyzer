@@ -10,9 +10,21 @@ import jobsHandler from './api/jobs.js';
 import jobPathHandler from './api/jobs/[...path].js';
 import blobUploadHandler from './api/blob/upload.js';
 import { getRuntimeInfo } from './api/_lib/runtime-info.js';
+import { createOcrCompareHandler } from './api/ocr-compare.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, 'public');
+const PDFJS_FILES = new Map(['pdf.mjs', 'pdf.worker.mjs'].map(name => [`/vendor/pdfjs/${name}`, join(__dirname, 'node_modules', 'pdfjs-dist', 'build', name)]));
+// Scanned PDFs may need JBIG2/JPEG2000 decoders. Expose only known renderer
+// assets, never a general node_modules directory or user-controlled file path.
+const PDFJS_ASSETS = {
+  wasm: ['jbig2.wasm', 'jbig2_nowasm_fallback.js', 'openjpeg.wasm', 'openjpeg_nowasm_fallback.js', 'qcms_bg.wasm'],
+  iccs: ['CGATS001Compat-v2-micro.icc'],
+  standard_fonts: ['FoxitDingbats.pfb', 'FoxitFixed.pfb', 'FoxitFixedBold.pfb', 'FoxitFixedBoldItalic.pfb', 'FoxitFixedItalic.pfb', 'FoxitSerif.pfb', 'FoxitSerifBold.pfb', 'FoxitSerifBoldItalic.pfb', 'FoxitSerifItalic.pfb', 'FoxitSymbol.pfb', 'LiberationSans-Regular.ttf', 'LiberationSans-Bold.ttf', 'LiberationSans-BoldItalic.ttf', 'LiberationSans-Italic.ttf'],
+};
+for (const [directory, names] of Object.entries(PDFJS_ASSETS)) {
+  for (const name of names) PDFJS_FILES.set(`/vendor/pdfjs/${directory}/${name}`, join(__dirname, 'node_modules', 'pdfjs-dist', directory, name));
+}
 
 function publicHealth(serviceName) {
   const info = getRuntimeInfo();
@@ -92,7 +104,8 @@ async function serveStatic(req, res, url) {
   createReadStream(filePath).pipe(res);
 }
 
-export function createServer() {
+export function createServer({ ocrCompareModelClient } = {}) {
+  const ocrCompareHandler = createOcrCompareHandler({ modelClient: ocrCompareModelClient });
   return createHttpServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     try {
@@ -100,10 +113,19 @@ export function createServer() {
         return sendJson(res, 200, publicHealth('title-analyzer'));
       }
       if (url.pathname === '/api/analyze') return await callApiHandler(analyzeHandler, req, res, url);
+      if (url.pathname === '/api/ocr-compare') return await callApiHandler(ocrCompareHandler, req, res, url);
       if (url.pathname === '/api/jobs') return await callApiHandler(jobsHandler, req, res, url);
       if (url.pathname.startsWith('/api/jobs/')) return await callApiHandler(jobPathHandler, req, res, url);
       if (url.pathname === '/api/blob/upload') return await callApiHandler(blobUploadHandler, req, res, url);
       if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'Method not allowed.' });
+      if (url.pathname.startsWith('/vendor/pdfjs/')) {
+        const filePath = PDFJS_FILES.get(url.pathname);
+        if (!filePath) return sendJson(res, 404, { error: 'Not found.' });
+        const contentType = /\.(mjs|js)$/.test(filePath) ? 'text/javascript; charset=utf-8' : filePath.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream';
+        res.writeHead(200, { 'content-type': contentType, ...staticSecurityHeaders() });
+        if (req.method === 'HEAD') return res.end();
+        return createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
+      }
       return await serveStatic(req, res, url);
     } catch (err) {
       console.error(JSON.stringify({
