@@ -320,3 +320,16 @@ test('OCR_COMPARE_MAX_TOKENS overrides the shared limit and invalid values fall 
   assert.deepEqual(run('4096'), [4096, 4096, 4096]);
   for (const bad of ['100', '9000', 'abc', '']) assert.deepEqual(run(bad), [8000, 8000, 8000], `value ${bad}`);
 });
+
+test('Haiku thinking tokens are shown from output_tokens_details without being billed twice', async () => {
+  await withServer(async base => {
+    const report = await (await request(base, { method: 'POST', body: JSON.stringify(document) })).json();
+    const haiku = report.models[2];
+    assert.equal(haiku.usage.thinking_tokens, 1700);
+    assert.equal(haiku.usage.output_tokens, 2853);
+    assert.equal(haiku.costUsd, (25199 * 0.1 + 728 * 0.125 + 2853 * 0.5) / 1_000_000, 'thinking is already inside output_tokens');
+    assert.equal(report.models[0].usage.thinking_tokens, undefined, 'Gemini usage is untouched');
+  }, { ocrCompareModelClient: async call => ({ text: 'GRANTOR: X', usage: call.model.startsWith('claude-')
+    ? { input_tokens: 25199, cache_creation_input_tokens: 728, cache_read_input_tokens: 0, output_tokens: 2853, output_tokens_details: { thinking_tokens: 1700 } }
+    : { input_tokens: 10, output_tokens: 5 } }) });
+});
