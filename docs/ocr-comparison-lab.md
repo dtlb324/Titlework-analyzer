@@ -62,8 +62,8 @@ server instance at a time; this is not a cross-instance quota.
   does not support `minimal`. Haiku 5.5 always runs with adaptive thinking; the
   lab sets `output_config.effort` to `low`, its closest analogue. Sampling
   parameters are not sent (Haiku 5.5 rejects non-default values). Its
-  `output_tokens` already include any thinking tokens, so the thinking count
-  shows as unavailable. These settings are shown, not treated as equal.
+  `output_tokens` already include any thinking tokens; the thinking count shown
+  is the portion Anthropic reports in `output_tokens_details`, not an extra charge. These settings are shown, not treated as equal.
 - This compares visual **title-field extraction**, not a verbatim full-page
   transcription or the complete production workflow (text-first delivery,
   batching, fallback, and escalation are intentionally excluded).

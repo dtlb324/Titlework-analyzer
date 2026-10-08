@@ -82,6 +82,14 @@ function fieldsFromText(text) {
   return fields;
 }
 
+// Anthropic reports thinking inside output_tokens and breaks it out separately in
+// output_tokens_details. Surface it as thinking_tokens for display only; the cost
+// estimate must not add it again.
+function withThinkingTokens(usage) {
+  const thinking = usage?.output_tokens_details?.thinking_tokens;
+  return typeof thinking === 'number' && Number.isFinite(thinking) && thinking >= 0 && usage.thinking_tokens == null ? { ...usage, thinking_tokens: thinking } : usage;
+}
+
 function estimateHaikuCost(usage) {
   const num = value => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null);
   const input = num(usage?.input_tokens);
@@ -147,7 +155,7 @@ export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
         try {
           const result = await modelClient({ model: model.id, maxTokens: model.maxTokens, system: ABSTRACTION_PROMPT, messages, ...(model.effort ? { effort: model.effort } : model.thinkingLevel === 'default' ? {} : { thinkingLevel: model.thinkingLevel }) }, { timeoutMs: 240_000, createTimeoutSignal: ms => ({ signal: AbortSignal.timeout(ms), cleanup() {} }) });
           const text = String(result.text || '');
-          const usage = result.usage || {};
+          const usage = withThinkingTokens(result.usage || {});
           return { ...model, text, fields: fieldsFromText(text), usage, latencyMs: Date.now() - started, stopReason: result.stopReason || null, modelVersion: result.model || model.id, ...estimateCost(model.id, usage) };
         } catch (error) {
           return { ...model, error: sanitizeModelClientError(error), latencyMs: Date.now() - started };
