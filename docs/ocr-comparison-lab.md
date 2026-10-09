@@ -35,17 +35,27 @@ inside a hosted Hermes container is not publicly reachable on its own port.
 
 ## Compare
 
-1. Enter the app password, then select one PDF, PNG, JPEG, or WebP.
-2. Review the rendered source-page previews and the three model settings.
-3. Click **Compare OCR** once. This starts one request per model (three) in parallel.
-4. Review all three outputs and the field differences. Download the JSON report if
-   you want to retain the results.
+1. Enter the app password, then select up to 10 PDF, PNG, JPEG, or WebP files at once.
+2. Review the file list and the rendered source-page previews, and read the stated number of billable calls (three per file).
+3. Click **Compare OCR** once. Files are compared one at a time in the order selected; within a file, the three models run in parallel.
+4. Select **View** on a file in the list to review its three outputs and field differences. Download the JSON report if you want to retain the results; it contains a `files` array with one entry per finished file.
 
-Limits: 10 pages and 12,000,000 bytes of rendered image data per comparison.
-Use one recorded instrument per file. If rendering exceeds the limit, prepare
-a smaller page range as a separate file. There is no automatic retry, PDF
-splitting, Claude escalation, or synthesis. Only one comparison can run per
-server instance at a time; this is not a cross-instance quota.
+Limits: 10 files per selection, and 10 pages and 12,000,000 bytes of rendered
+image data per file. The page limit applies to each file separately, not to the
+whole selection. Use one recorded instrument per file; the models abstract only
+the first instrument they find in a file.
+
+A file that cannot be rendered or validated is listed as unusable and skipped.
+If a request fails (wrong password, lab disabled, provider not configured, or
+another comparison already running on the server), the remaining files are not
+run and nothing is retried. Results for files that already finished stay
+available. A single model failing inside a finished comparison does not stop the
+batch.
+
+If rendering exceeds a file's limit, prepare a smaller page range as a separate
+file. There is no automatic retry, PDF splitting, Claude escalation, or
+synthesis. Only one comparison can run per server instance at a time (the batch
+runs files sequentially for this reason); this is not a cross-instance quota.
 
 ## What the comparison measures
 

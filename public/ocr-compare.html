@@ -9,7 +9,7 @@
   <script type="module" src="/ocr-compare.js"></script>
 </head>
 <body>
-  <header><a href="/">← Mineral Ownership Builder</a><h1>OCR model comparison</h1><p>One document. The same page images. Three independent model outputs.</p></header>
+  <header><a href="/">← Mineral Ownership Builder</a><h1>OCR model comparison</h1><p>Up to ten documents. The same page images for every model. Three independent model outputs per document.</p></header>
   <main>
     <section class="panel" aria-labelledby="setup-title">
       <h2 id="setup-title">Compare a document</h2>
@@ -18,12 +18,17 @@
       <form id="compare-form">
         <div class="controls">
           <div><label for="password">Application password</label><input id="password" type="password" autocomplete="off" required><small>Not saved in browser storage. Provider API keys stay on the server.</small></div>
-          <div><label for="document">Document (one PDF, PNG, JPEG or WebP)</label><input id="document" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" required><small>Up to 10 pages and 12 MB of decoded image bytes after rendering.</small></div>
+          <div><label for="document">Documents (up to 10 PDF, PNG, JPEG or WebP files)</label><input id="document" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" required><small>Each file is compared on its own: up to 10 pages and 12 MB of decoded image bytes after rendering per file. Each file makes three billable model calls.</small></div>
         </div>
         <button id="compare" type="submit">Compare OCR</button>
       </form>
-      <p id="status" role="status" aria-live="polite">Choose a document and enter the application password. Effective models and settings are loaded from the server when you compare.</p>
+      <p id="status" role="status" aria-live="polite">Choose one or more documents and enter the application password. Effective models and settings are loaded from the server when you compare.</p>
       <p id="settings" class="muted"></p>
+    </section>
+    <section class="panel" aria-labelledby="batch-title">
+      <h2 id="batch-title">Files</h2>
+      <p class="muted">Files are compared one at a time, in the order selected. Select View to review a file's outputs and differences. A request-level failure stops the remaining files; nothing is retried automatically.</p>
+      <div class="table-scroll"><table><thead><tr><th scope="col">File</th><th scope="col">Pages</th><th scope="col">Status</th><th scope="col">Model failures</th><th scope="col">Estimated cost</th><th scope="col">Review</th></tr></thead><tbody id="batch"></tbody></table></div>
     </section>
     <div class="comparison">
       <section class="panel preview-panel" aria-labelledby="preview-title"><h2 id="preview-title">Original page images</h2><div id="previews"><p class="muted">Your document preview will appear here.</p></div></section>

@@ -1,5 +1,6 @@
 const LIMITS = { maxPages: 10, maxBytes: 12000000, renderScale: 2 };
 const MODEL_COUNT = 3;
+const MAX_FILES = 10;
 
 async function encodePage(blob, width, height) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -59,8 +60,10 @@ export function createCompareUI(deps = {}) {
   const prepare = deps.prepareDocument || (file => prepareDocument(file));
   const urls = deps.URL || URL;
   const delay = deps.setTimeout || setTimeout;
-  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download'].map(id => [id, doc.getElementById(id)]));
-  let file, pages = [], report, previewUrls = [];
+  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch'].map(id => [id, doc.getElementById(id)]));
+  // One entry per selected file: { file, pages, status, message, result }.
+  // status: preparing | ready | error | running | done | failed | skipped
+  let entries = [], selected = 0, report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
   const updateControls = () => {
     el.compare.disabled = busy || preparing;
@@ -73,15 +76,7 @@ export function createCompareUI(deps = {}) {
     if (className) item.className = className;
     return item;
   };
-  const clearResults = () => {
-    report = undefined;
-    el.download.disabled = true;
-    el.baseline.replaceChildren(node('p', 'Waiting for comparison.', 'muted'));
-    el.candidate.replaceChildren(node('p', 'Waiting for comparison.', 'muted'));
-    el.challenger.replaceChildren(node('p', 'Waiting for comparison.', 'muted'));
-    el.differences.replaceChildren();
-    el.settings.textContent = '';
-  };
+  const waiting = () => node('p', 'Waiting for comparison.', 'muted');
   const modelSettings = model => `${model.label}: ${model.id} · thinking ${model.thinkingLevel} · max output ${model.maxTokens} tokens`;
   const displayModel = (target, model) => {
     target.replaceChildren(node('h3', model.label), node('p', modelSettings(model), 'metrics'));
@@ -108,49 +103,147 @@ export function createCompareUI(deps = {}) {
     try { detail = (await response.json()).error; } catch {}
     return new Error(`HTTP ${response.status}${typeof detail === 'string' ? ': ' + detail : ''}`);
   };
-  el.document.addEventListener('change', async () => {
-    const current = ++generation;
-    clearResults();
+  const totalCost = result => {
+    const costs = result.models.map(model => model.costUsd);
+    return costs.every(cost => typeof cost === 'number') ? costs.reduce((sum, cost) => sum + cost, 0) : null;
+  };
+  const statusText = entry => ({
+    preparing: 'Preparing…', ready: 'Ready', running: 'Running…', done: 'Done', skipped: 'Not run',
+    error: `Cannot compare: ${entry.message}`, failed: `Failed: ${entry.message}`,
+  })[entry.status];
+
+  const renderBatch = () => {
+    el.batch.replaceChildren();
+    entries.forEach((entry, index) => {
+      const row = node('tr');
+      if (index === selected) row.className = 'selected';
+      const name = node('th', entry.file.name);
+      name.setAttribute('scope', 'row');
+      const failures = entry.result ? entry.result.models.filter(model => model.error).length : null;
+      const cost = entry.result ? totalCost(entry.result) : null;
+      const view = node('button', 'View');
+      view.setAttribute('type', 'button');
+      view.disabled = busy && !entry.result;
+      view.addEventListener('click', () => showFile(index));
+      row.append(name, node('td', entry.pages ? String(entry.pages.length) : '—'), node('td', statusText(entry)), node('td', failures === null ? '—' : String(failures)), node('td', cost === null ? (entry.result ? 'unavailable' : '—') : '$' + cost.toFixed(6)), node('td'));
+      row.children[5].append(view);
+      el.batch.append(row);
+    });
+  };
+  const clearPreviews = () => {
     previewUrls.forEach(url => urls.revokeObjectURL(url));
     previewUrls = [];
     el.previews.replaceChildren();
-    pages = [];
+  };
+  const renderPreviews = () => {
+    clearPreviews();
+    (entries[selected]?.pages || []).forEach((page, index) => {
+      const figure = node('figure');
+      const image = node('img');
+      const url = urls.createObjectURL(page.blob);
+      previewUrls.push(url);
+      image.src = url;
+      image.alt = `Original document page ${index + 1}`;
+      figure.append(image, node('figcaption', `Page ${index + 1} · ${page.width} × ${page.height} pixels`));
+      el.previews.append(figure);
+    });
+  };
+  const renderResult = () => {
+    const result = entries[selected]?.result;
+    el.differences.replaceChildren();
+    if (!result) {
+      for (const target of [el.baseline, el.candidate, el.challenger]) target.replaceChildren(waiting());
+      return;
+    }
+    [el.baseline, el.candidate, el.challenger].forEach((target, index) => displayModel(target, result.models[index]));
+    const fieldSets = result.models.map(model => model.fields || {});
+    const failed = result.models.some(model => model.error);
+    const keys = [...new Set(fieldSets.flatMap(fields => Object.keys(fields)))].sort();
+    for (const key of keys) {
+      const row = node('tr');
+      const serialized = fieldSets.map(fields => JSON.stringify(stableValue(fields[key])));
+      const same = serialized.every(value => value === serialized[0]);
+      if (!same && !failed) row.className = 'different';
+      const heading = node('th', key);
+      heading.setAttribute('scope', 'row');
+      row.append(heading, ...result.models.map((model, index) => node('td', model.error ? 'Unavailable (model failed)' : valueText(fieldSets[index][key]))), node('td', failed ? 'Unavailable' : same ? 'Same' : 'Different'));
+      el.differences.append(row);
+    }
+  };
+  function showFile(index) {
+    if (!entries[index]) return;
+    selected = index;
+    renderBatch();
+    renderPreviews();
+    renderResult();
+  }
+  const clearResults = () => {
+    report = undefined;
+    el.download.disabled = true;
+    el.settings.textContent = '';
+    entries.forEach(entry => { delete entry.result; if (entry.status !== 'error' && entry.status !== 'preparing') { entry.status = 'ready'; delete entry.message; } });
+    renderBatch();
+    renderResult();
+  };
+
+  el.document.addEventListener('change', async () => {
+    const current = ++generation;
+    report = undefined;
+    el.download.disabled = true;
+    el.settings.textContent = '';
+    clearPreviews();
+    entries = [];
+    selected = 0;
+    renderBatch();
+    renderResult();
     preparing = false;
     updateControls();
-    file = el.document.files[0];
-    if (!file) { el.status.textContent = 'Choose a document.'; return; }
-    const selectedFile = file;
+    const files = Array.from(el.document.files || []);
+    if (!files.length) { el.status.textContent = 'Choose a document.'; return; }
+    if (files.length > MAX_FILES) { el.status.textContent = `Choose at most ${MAX_FILES} files (you selected ${files.length}).`; return; }
+    entries = files.map(file => ({ file, status: 'preparing' }));
+    renderBatch();
     preparing = true;
     updateControls();
-    el.status.textContent = 'Preparing page images…';
     try {
-      const prepared = await prepare(selectedFile);
-      if (current !== generation) return;
-      pages = prepared;
-      pages.forEach((page, index) => {
-        const figure = node('figure');
-        const image = node('img');
-        const url = urls.createObjectURL(page.blob);
-        previewUrls.push(url);
-        image.src = url;
-        image.alt = `Original document page ${index + 1}`;
-        figure.append(image, node('figcaption', `Page ${index + 1} · ${page.width} × ${page.height} pixels`));
-        el.previews.append(figure);
-      });
-      el.status.textContent = `${file.name}: ${pages.length} page image(s) ready. Compare to load effective server models.`;
-    } catch (error) {
-      if (current === generation) el.status.textContent = `Document preparation failed: ${error.message}`;
+      for (let index = 0; index < entries.length; index++) {
+        el.status.textContent = files.length === 1 ? 'Preparing page images…' : `Preparing page images… file ${index + 1} of ${files.length}`;
+        const entry = entries[index];
+        try {
+          const pages = await prepare(entry.file);
+          if (current !== generation) return;
+          entry.pages = pages;
+          entry.status = 'ready';
+        } catch (error) {
+          if (current !== generation) return;
+          entry.status = 'error';
+          entry.message = error.message;
+        }
+        if (index === 0) renderPreviews();
+        renderBatch();
+      }
+      const ready = entries.filter(entry => entry.status === 'ready');
+      const unusable = entries.length - ready.length;
+      if (entries.length === 1) {
+        el.status.textContent = unusable ? `Document preparation failed: ${entries[0].message}` : `${entries[0].file.name}: ${ready[0].pages.length} page image(s) ready. Compare to load effective server models.`;
+      } else if (!ready.length) {
+        el.status.textContent = 'None of the selected files could be prepared. See the file list for details.';
+      } else {
+        const pageTotal = ready.reduce((sum, entry) => sum + entry.pages.length, 0);
+        el.status.textContent = `${ready.length} of ${entries.length} files ready (${pageTotal} page images)${unusable ? `; ${unusable} cannot be compared` : ''}. Each file is compared separately and makes 3 billable model calls (${ready.length * 3} in total). Compare to load effective server models.`;
+      }
     } finally {
       if (current === generation) { preparing = false; updateControls(); }
     }
   });
+
   el['compare-form'].addEventListener('submit', async event => {
     event.preventDefault();
     if (busy || preparing) return;
-    if (!file || !pages.length || !el.password.value) { el.status.textContent = 'Choose a valid document and enter the application password.'; return; }
+    if (!entries.some(entry => entry.status === 'ready') || !el.password.value) { el.status.textContent = 'Choose a valid document and enter the application password.'; return; }
     clearResults();
     const current = generation;
-    const selectedFile = file, selectedPages = pages;
+    const runnable = entries.filter(entry => entry.status === 'ready');
     busy = true;
     updateControls();
     el.status.textContent = 'Loading server model settings…';
@@ -161,40 +254,64 @@ export function createCompareUI(deps = {}) {
       const metadata = await metadataResponse.json();
       if (current !== generation) return;
       if (!Array.isArray(metadata.models) || metadata.models.length !== MODEL_COUNT || metadata.renderScale !== LIMITS.renderScale || !Number.isInteger(metadata.maxPages) || metadata.maxPages < 1 || !Number.isInteger(metadata.maxBytes) || metadata.maxBytes < 1 || metadata.models.some(model => model.maxTokens !== metadata.models[0].maxTokens)) throw new Error('Unsupported server comparison configuration.');
-      if (selectedPages.length > Math.min(LIMITS.maxPages, metadata.maxPages)) throw new Error('Document exceeds the server page limit.');
-      const byteCount = selectedPages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
-      if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error('Document exceeds the server image byte limit.');
-      el.settings.textContent = metadata.models.map(modelSettings).join('\n');
-      el.status.textContent = 'Comparing the same page images with all three models. No automatic retries.';
-      const response = await request('/api/ocr-compare', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: selectedFile.name, pages: selectedPages.map(({ mediaType, data }) => ({ mediaType, data })) }) });
-      if (!response.ok) throw await httpError(response);
-      const result = await response.json();
-      if (current !== generation) return;
-      if (!Array.isArray(result.models) || result.models.length !== MODEL_COUNT) throw new Error('Unexpected number of model results.');
-      [el.baseline, el.candidate, el.challenger].forEach((target, index) => displayModel(target, result.models[index]));
-      const fieldSets = result.models.map(model => model.fields || {});
-      const failed = result.models.some(model => model.error);
-      const keys = [...new Set(fieldSets.flatMap(fields => Object.keys(fields)))].sort();
-      for (const key of keys) {
-        const row = node('tr');
-        const serialized = fieldSets.map(fields => JSON.stringify(stableValue(fields[key])));
-        const same = serialized.every(value => value === serialized[0]);
-        if (!same && !failed) row.className = 'different';
-        const heading = node('th', key);
-        heading.setAttribute('scope', 'row');
-        row.append(heading, ...result.models.map((model, index) => node('td', model.error ? 'Unavailable (model failed)' : valueText(fieldSets[index][key]))), node('td', failed ? 'Unavailable' : same ? 'Same' : 'Different'));
-        el.differences.append(row);
+      for (const entry of runnable) {
+        if (entry.pages.length > Math.min(LIMITS.maxPages, metadata.maxPages)) throw new Error(`${entry.file.name}: document exceeds the server page limit.`);
+        const byteCount = entry.pages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
+        if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error(`${entry.file.name}: document exceeds the server image byte limit.`);
       }
-      report = {
+      el.settings.textContent = metadata.models.map(modelSettings).join('\n');
+      let halted = null;
+      for (const entry of runnable) {
+        if (halted) { entry.status = 'skipped'; continue; }
+        entry.status = 'running';
+        const position = entries.indexOf(entry);
+        const changed = position !== selected;
+        selected = position;
+        renderBatch();
+        if (changed) renderPreviews();
+        renderResult();
+        el.status.textContent = runnable.length === 1
+          ? 'Comparing the same page images with all three models. No automatic retries.'
+          : `Comparing ${entry.file.name} (${runnable.indexOf(entry) + 1} of ${runnable.length}) with all three models. No automatic retries.`;
+        try {
+          const response = await request('/api/ocr-compare', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: entry.file.name, pages: entry.pages.map(({ mediaType, data }) => ({ mediaType, data })) }) });
+          if (!response.ok) throw await httpError(response);
+          const result = await response.json();
+          if (current !== generation) return;
+          if (!Array.isArray(result.models) || result.models.length !== MODEL_COUNT) throw new Error('Unexpected number of model results.');
+          entry.result = result;
+          entry.status = 'done';
+        } catch (error) {
+          if (current !== generation) return;
+          entry.status = 'failed';
+          entry.message = error.message;
+          halted = entry;
+        }
+        renderBatch();
+        renderResult();
+      }
+      if (current !== generation) return;
+      const done = entries.filter(entry => entry.status === 'done');
+      report = { files: done.map(({ result }) => ({
         filename: result.filename, pageCount: result.pageCount, inputMode: result.inputMode,
         models: result.models.map(model => Object.fromEntries(['id', 'label', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]])))
-      };
-      el.download.disabled = false;
-      const failedCount = result.models.filter(model => model.error).length;
-      el.status.textContent = failedCount ? `${failedCount} model${failedCount === 1 ? '' : 's'} failed. Independent results are shown; no automatic retry was made.` : 'Comparison complete. Review differences against the original page images.';
+      })) };
+      el.download.disabled = !done.length;
+      renderBatch();
+      if (halted) {
+        const skipped = entries.filter(entry => entry.status === 'skipped').length;
+        el.status.textContent = `Comparison failed: ${halted.message}. No automatic retry was made. ${done.length} of ${runnable.length} file${runnable.length === 1 ? '' : 's'} completed${skipped ? `; ${skipped} not run` : ''}.`;
+        return;
+      }
+      const failedCount = done.reduce((sum, { result }) => sum + result.models.filter(model => model.error).length, 0);
+      const costs = done.map(({ result }) => totalCost(result));
+      const costNote = done.length > 1 && costs.every(cost => cost !== null) ? ` Estimated total cost $${costs.reduce((sum, cost) => sum + cost, 0).toFixed(6)}.` : '';
+      el.status.textContent = failedCount
+        ? `${failedCount} model${failedCount === 1 ? '' : 's'} failed. Independent results are shown; no automatic retry was made.${costNote}`
+        : done.length > 1 ? `Comparison complete for ${done.length} files. Select a file to review its differences against the original page images.${costNote}` : 'Comparison complete. Review differences against the original page images.';
     } catch (error) {
       if (current === generation) el.status.textContent = `Comparison failed: ${error.message}. No automatic retry was made.`;
-    } finally { busy = false; updateControls(); }
+    } finally { busy = false; updateControls(); if (current === generation) renderBatch(); }
   });
   el.download.addEventListener('click', () => {
     if (!report) return;
