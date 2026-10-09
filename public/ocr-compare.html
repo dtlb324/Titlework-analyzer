@@ -30,6 +30,11 @@
       <p class="muted">Files are compared one at a time, in the order selected. Select View to review a file's outputs and differences. A request-level failure stops the remaining files; nothing is retried automatically.</p>
       <div class="table-scroll"><table><thead><tr><th scope="col">File</th><th scope="col">Pages</th><th scope="col">Status</th><th scope="col">Model failures</th><th scope="col">Estimated cost</th><th scope="col">Review</th></tr></thead><tbody id="batch"></tbody></table></div>
     </section>
+    <section class="panel" aria-labelledby="accuracy-title">
+      <h2 id="accuracy-title">Document accuracy</h2>
+      <p id="accuracy-note" class="muted">Accuracy is the share of transcribed fields found in the document's own text. Scans without embedded text have no score. Field differences below are still not accuracy.</p>
+      <div class="table-scroll"><table><thead><tr><th scope="col">Rank</th><th scope="col">Model</th><th scope="col">Accuracy</th></tr></thead><tbody id="accuracy-rank"></tbody></table></div>
+    </section>
     <div class="comparison">
       <section class="panel preview-panel" aria-labelledby="preview-title"><h2 id="preview-title">Original page images</h2><div id="previews"><p class="muted">Your document preview will appear here.</p></div></section>
       <section class="panel" aria-labelledby="baseline-title"><h2 id="baseline-title">Baseline output</h2><div id="baseline"><p class="muted">Waiting for comparison.</p></div></section>

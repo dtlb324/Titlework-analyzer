@@ -59,6 +59,8 @@ runs files sequentially for this reason); this is not a cross-instance quota.
 
 ## What the comparison measures
 
+Accuracy is scored in the browser against the document's embedded text. Images and text-free scans have no score. The text is not uploaded.
+
 - Every PDF is rendered into PNG pages in the browser at scale 2 before upload.
   Neither model receives the original PDF or its hidden/searchable text layer.
 - All three models receive the exact same rendered images, in the same order,
@@ -79,8 +81,9 @@ runs files sequentially for this reason); this is not a cross-instance quota.
   batching, fallback, and escalation are intentionally excluded).
 - The lab calls the **direct Gemini API** and the **direct Anthropic API**, even
   if `MODEL_PROVIDER=openrouter` is set for production. Provider routing can therefore differ from production.
-- Field differences are review cues, **not accuracy scores**. Use manually
-  verified answers to decide which output is correct; agreement is not proof.
+- Field differences are review cues, **not accuracy scores**. Agreement is not
+  proof. When a PDF has embedded text, the page scores transcribed fields against
+  that text. A scan with no text layer still needs a manual check.
 - A failure in either model does not hide the other model's successful output.
   Empty or token-limited outputs need review rather than a guessed success.
 

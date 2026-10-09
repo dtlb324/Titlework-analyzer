@@ -1,3 +1,5 @@
+import { assessAccuracy, scoreModel } from './ocr-accuracy.js';
+
 const LIMITS = { maxPages: 10, maxBytes: 12000000, renderScale: 2 };
 const MODEL_COUNT = 3;
 const MAX_FILES = 10;
@@ -53,6 +55,25 @@ export async function prepareDocument(file, deps = {}) {
   } finally { await task.destroy(); }
 }
 
+export async function readDocumentText(file, deps = {}) {
+  if (file?.type !== 'application/pdf') return '';
+  const pdfjs = await (deps.loadPdfjs || (() => import('/vendor/pdfjs/pdf.mjs')))();
+  pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.mjs';
+  const task = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false, wasmUrl: '/vendor/pdfjs/wasm/', standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', iccUrl: '/vendor/pdfjs/iccs/' });
+  try {
+    const pdf = await task.promise;
+    const pages = [];
+    for (let index = 1; index <= pdf.numPages; index++) {
+      const page = await pdf.getPage(index);
+      try {
+        const content = await page.getTextContent();
+        pages.push((content.items || []).map(item => item?.str ?? '').join(' '));
+      } finally { page.cleanup(); }
+    }
+    return pages.join('\n').trim();
+  } finally { await task.destroy(); }
+}
+
 
 export function createCompareUI(deps = {}) {
   const doc = deps.document || document;
@@ -60,7 +81,7 @@ export function createCompareUI(deps = {}) {
   const prepare = deps.prepareDocument || (file => prepareDocument(file));
   const urls = deps.URL || URL;
   const delay = deps.setTimeout || setTimeout;
-  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch'].map(id => [id, doc.getElementById(id)]));
+  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
   // One entry per selected file: { file, pages, status, message, result }.
   // status: preparing | ready | error | running | done | failed | skipped
   let entries = [], selected = 0, report, previewUrls = [];
@@ -78,12 +99,19 @@ export function createCompareUI(deps = {}) {
   };
   const waiting = () => node('p', 'Waiting for comparison.', 'muted');
   const modelSettings = model => `${model.label}: ${model.id} · thinking ${model.thinkingLevel} · max output ${model.maxTokens} tokens`;
-  const displayModel = (target, model) => {
+  const accuracyText = accuracy => {
+    if (accuracy.status === 'scored') return `Document accuracy: ${accuracy.percent}% (${accuracy.matched} of ${accuracy.scored} fields found in the document).`;
+    if (accuracy.reason === 'no-document-text') return 'Document accuracy: no embedded text in this document.';
+    if (accuracy.reason === 'model-failed') return 'Document accuracy: not scored (model failed).';
+    return 'Document accuracy: no transcribed fields to score.';
+  };
+  const displayModel = (target, model, documentText) => {
     target.replaceChildren(node('h3', model.label), node('p', modelSettings(model), 'metrics'));
     target.append(node('p', `Version ${model.modelVersion ?? 'not reported'} · stop ${model.stopReason ?? 'not reported'}`, 'metrics'));
     const usage = model.usage || {};
     target.append(node('p', `${model.latencyMs ?? '—'} ms · input ${usage.input_tokens ?? '—'} · output ${usage.output_tokens ?? '—'} · thinking ${usage.thinking_tokens ?? '—'} tokens`, 'metrics'));
     target.append(node('p', `Estimated cost: ${typeof model.costUsd === 'number' ? '$' + model.costUsd.toFixed(6) : 'unavailable'}`, 'metrics'));
+    target.append(node('p', accuracyText(scoreModel(documentText, model)), 'metrics'));
     if (model.costRates) target.append(node('p', `Rates / million tokens: input $${model.costRates.input}, output $${model.costRates.output} (${model.costRates.source})`, 'metrics'));
     if (model.error) target.append(node('p', model.error, 'error'));
     if (/MAX_TOKENS|LENGTH/i.test(model.stopReason || '')) target.append(node('p', 'Warning: output may be truncated by the token limit.', 'warning'));
@@ -129,6 +157,22 @@ export function createCompareUI(deps = {}) {
       row.children[5].append(view);
       el.batch.append(row);
     });
+    renderAccuracy();
+  };
+  const renderAccuracy = () => {
+    const { ranking } = assessAccuracy(entries.map(entry => ({ filename: entry.file.name, documentText: entry.documentText, models: entry.result?.models })));
+    el['accuracy-rank'].replaceChildren();
+    if (!ranking.rows.length) {
+      el['accuracy-note'].textContent = 'Accuracy is the share of transcribed fields found in the document\'s own text. Scans without embedded text have no score. Field differences below are still not accuracy.';
+      return;
+    }
+    const count = ranking.documentCount;
+    el['accuracy-note'].textContent = `Ranked on ${count} document${count === 1 ? '' : 's'}. The percent is transcribed fields found in the document text.`;
+    for (const row of ranking.rows) {
+      const tr = node('tr');
+      tr.append(node('td', String(row.rank)), node('td', row.label), node('td', `${row.percent}% (${row.matched} of ${row.scored} fields)`));
+      el['accuracy-rank'].append(tr);
+    }
   };
   const clearPreviews = () => {
     previewUrls.forEach(url => urls.revokeObjectURL(url));
@@ -155,7 +199,7 @@ export function createCompareUI(deps = {}) {
       for (const target of [el.baseline, el.candidate, el.challenger]) target.replaceChildren(waiting());
       return;
     }
-    [el.baseline, el.candidate, el.challenger].forEach((target, index) => displayModel(target, result.models[index]));
+    [el.baseline, el.candidate, el.challenger].forEach((target, index) => displayModel(target, result.models[index], entries[selected]?.documentText));
     const fieldSets = result.models.map(model => model.fields || {});
     const failed = result.models.some(model => model.error);
     const keys = [...new Set(fieldSets.flatMap(fields => Object.keys(fields)))].sort();
@@ -212,7 +256,12 @@ export function createCompareUI(deps = {}) {
         try {
           const pages = await prepare(entry.file);
           if (current !== generation) return;
+          let documentText = '';
+          try { documentText = await readDocumentText(entry.file, deps); }
+          catch { documentText = ''; }
+          if (current !== generation) return;
           entry.pages = pages;
+          entry.documentText = documentText;
           entry.status = 'ready';
         } catch (error) {
           if (current !== generation) return;
@@ -292,9 +341,15 @@ export function createCompareUI(deps = {}) {
       }
       if (current !== generation) return;
       const done = entries.filter(entry => entry.status === 'done');
-      report = { files: done.map(({ result }) => ({
-        filename: result.filename, pageCount: result.pageCount, inputMode: result.inputMode,
-        models: result.models.map(model => Object.fromEntries(['id', 'label', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]])))
+      const modelRecord = (model, documentText) => {
+        const record = Object.fromEntries(['id', 'label', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
+        const accuracy = scoreModel(documentText, model);
+        if (accuracy.status === 'scored') record.accuracy = { matched: accuracy.matched, scored: accuracy.scored, percent: accuracy.percent };
+        return record;
+      };
+      report = { files: done.map(entry => ({
+        filename: entry.result.filename, pageCount: entry.result.pageCount, inputMode: entry.result.inputMode,
+        models: entry.result.models.map(model => modelRecord(model, entry.documentText)),
       })) };
       el.download.disabled = !done.length;
       renderBatch();
