@@ -20,7 +20,7 @@ function harness(overrides = {}) {
   const models = [
     { id: 'gemini-3.1-flash-lite', label: 'Baseline', thinkingLevel: 'default', maxTokens: 8000, text: '<script>unsafe</script>', fields: { grantor: '<img src=x onerror=bad()>', onlyBaseline: 0 }, usage: { input_tokens: 10, output_tokens: 20, thinking_tokens: 3 }, latencyMs: 120, stopReason: 'MAX_TOKENS', modelVersion: 'v1', costUsd: .001, costRates: { input: .25, output: 1.5, source: 'fixture' } },
     { id: 'gemini-3.8-flash', label: 'Candidate', thinkingLevel: 'minimal', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } },
-    { id: 'claude-haiku-5-5', label: 'Challenger', thinkingLevel: 'adaptive, effort low', maxTokens: 8000, text: 'GRANTOR: Third', fields: { grantor: 'Third', onlyCandidate: false }, usage: { input_tokens: 12, output_tokens: 5 }, latencyMs: 90, stopReason: 'end_turn', modelVersion: 'v3', costUsd: .0003, costRates: { input: .1, output: .5, source: 'fixture' } }
+    { id: 'claude-haiku-5-5', label: 'Challenger', thinkingLevel: 'adaptive, effort medium', maxTokens: 8000, text: 'GRANTOR: Third', fields: { grantor: 'Third', onlyCandidate: false }, usage: { input_tokens: 12, output_tokens: 5 }, latencyMs: 90, stopReason: 'end_turn', modelVersion: 'v3', costUsd: .0003, costRates: { input: .1, output: .5, source: 'fixture' } }
   ];
   const result = { filename: 'deed.png', pageCount: 1, inputMode: 'rendered_images', models };
   const deps = {
@@ -216,7 +216,7 @@ test('one upload compares server-selected models, renders safe union differences
   assert.match(allText(h.elements.candidate), /empty/i);
   assert.equal(h.elements.differences.children.length, 3);
   assert.match(allText(h.elements.challenger), /Third/);
-  assert.match(allText(h.elements.challenger), /adaptive, effort low/);
+  assert.match(allText(h.elements.challenger), /adaptive, effort medium/);
   assert.match(allText(h.elements.settings), /claude-haiku-5-5/);
   assert.equal(h.elements.differences.children[0].children.length, 5, 'field + three models + comparison');
   assert.match(allText(h.elements.differences), /<img src=x onerror=bad\(\)>/);
