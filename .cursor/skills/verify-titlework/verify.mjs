@@ -4,7 +4,7 @@
 // only the processes this run recorded.
 
 import { spawn, execFileSync } from 'node:child_process';
-import { closeSync, openSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readlinkSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import net from 'node:net';
 import { dirname, resolve } from 'node:path';
@@ -103,13 +103,45 @@ function alive(pid) {
 }
 
 function listenerPids(port) {
-  let out = '';
-  try {
-    out = execFileSync('ss', ['-ltnp', `sport = :${port}`], { encoding: 'utf8' });
-  } catch (err) {
-    return { ok: false, error: err?.message || String(err), pids: [] };
+  const hex = Number(port).toString(16).toUpperCase().padStart(4, '0');
+  const inodes = new Set();
+  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let text = '';
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const line of text.split('\n').slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 10) continue;
+      const portHex = (parts[1].split(':').pop() || '').toUpperCase();
+      if (parts[3] === '0A' && portHex === hex) inodes.add(parts[9]);
+    }
   }
-  const pids = [...out.matchAll(/pid=(\d+)/g)].map(match => Number(match[1]));
+  if (!inodes.size) return { ok: true, pids: [] };
+  const pids = [];
+  for (const entry of readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue;
+    let fds = [];
+    try {
+      fds = readdirSync(`/proc/${entry}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const target = readlinkSync(`/proc/${entry}/fd/${fd}`);
+        const match = /^socket:\[(\d+)\]$/.exec(target);
+        if (match && inodes.has(match[1])) {
+          pids.push(Number(entry));
+          break;
+        }
+      } catch {
+        // The fd can disappear while we read it.
+      }
+    }
+  }
   return { ok: true, pids: [...new Set(pids)] };
 }
 
