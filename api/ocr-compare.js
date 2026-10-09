@@ -34,8 +34,8 @@ function models() {
   return [
     { id: config.model, label: 'Current Gemini', thinkingLevel: resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default', maxTokens },
     { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'low', maxTokens },
-    // Haiku 5.5 thinks adaptively; `effort: low` is its closest analogue to 3.8's `low`.
-    { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort low', effort: 'low', maxTokens },
+    // Haiku 5.5 thinks adaptively. Medium effort is the lab setting under test for accuracy.
+    { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort medium', effort: 'medium', maxTokens },
   ];
 }
 

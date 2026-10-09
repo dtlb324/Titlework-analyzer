@@ -72,8 +72,8 @@ Accuracy is scored in the browser against the document's embedded text. Images a
 - The baseline uses the configured production Gemini thinking level, or the
   provider default if none is set. 3.8 Flash explicitly uses `low` because it
   does not support `minimal`. Haiku 5.5 always runs with adaptive thinking; the
-  lab sets `output_config.effort` to `low`, its closest analogue. Sampling
-  parameters are not sent (Haiku 5.5 rejects non-default values). Its
+  lab sets `output_config.effort` to `medium`. Sampling parameters are not sent
+  (Haiku 5.5 rejects non-default values). Its
   `output_tokens` already include any thinking tokens; the thinking count shown
   is the portion Anthropic reports in `output_tokens_details`, not an extra charge. These settings are shown, not treated as equal.
 - This compares visual **title-field extraction**, not a verbatim full-page

@@ -34,6 +34,8 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
     assert.deepEqual(config.models.map(model => model.id), ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'claude-haiku-5-5']);
     assert.equal(config.models[1].thinkingLevel, 'low');
     assert.equal(config.models[2].label, 'Claude Haiku 5.5');
+    assert.equal(config.models[2].effort, 'medium');
+    assert.equal(config.models[2].thinkingLevel, 'adaptive, effort medium');
     assert.deepEqual(config.models.map(model => model.maxTokens), [8000, 8000, 8000], 'lab limit is shared and larger than production\'s 2,000');
     assert.equal(config.maxPages, 10);
     assert.equal(config.maxBytes, 12_000_000);
@@ -73,7 +75,7 @@ test('one upload starts all models concurrently with identical visual input and 
       assert.deepEqual(calls[0].messages, calls[1].messages);
       assert.deepEqual(calls[0].messages, calls[2].messages);
       assert.equal(calls[0].system, calls[2].system);
-      assert.equal(calls[2].effort, 'low');
+      assert.equal(calls[2].effort, 'medium');
       assert.equal(calls[2].thinkingLevel, undefined, 'Claude uses effort, not a Gemini thinking level');
       assert.equal(calls[0].system, calls[1].system);
       assert.match(calls[0].system, /expert oil and gas title attorney/);
@@ -220,7 +222,7 @@ test('the lab uses direct Gemini and direct Anthropic even when production provi
       const [claude] = anthropicCalls;
       assert.equal(claude.headers['x-api-key'], 'sk-ant-synthetic-test-key');
       assert.equal(claude.body.model, 'claude-haiku-5-5');
-      assert.deepEqual(claude.body.output_config, { effort: 'low' });
+      assert.deepEqual(claude.body.output_config, { effort: 'medium' });
       assert.equal(claude.body.max_tokens, report.models[2].maxTokens);
       assert.ok(!('thinking' in claude.body) && !('temperature' in claude.body), 'Haiku 5.5 rejects sampling overrides');
       assert.equal(claude.body.messages[0].content[0].type, 'image');
