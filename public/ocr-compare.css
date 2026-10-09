@@ -29,6 +29,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .9rem/1.55 ui-monosp
 table { border-collapse: collapse; width: 100%; font-size: .9rem; }
 th, td { text-align: left; vertical-align: top; padding: .6rem; border-bottom: 1px solid #d9c9a8; min-width: 120px; white-space: pre-wrap; overflow-wrap: anywhere; }
 tr.different { background: #fff1d6; }
+tr.selected { background: #f3e9d2; }
+td button { padding: .3rem .7rem; font-size: .85rem; }
 @media (max-width: 1200px) { .comparison { grid-template-columns: repeat(3, minmax(0, 1fr)); } .comparison .preview-panel { grid-column: 1 / -1; } .preview-panel img { max-width: 650px; margin: auto; } }
 @media (max-width: 900px) { .comparison { grid-template-columns: 1fr; } .comparison .panel { max-height: none; } .preview-panel img { max-width: 650px; margin: auto; } }
 @media (max-width: 600px) { .controls { grid-template-columns: 1fr; } main { padding: .7rem; } .panel { padding: .85rem; } }

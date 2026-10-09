@@ -14,7 +14,7 @@ class Element {
 }
 const allText = el => [el.textContent, ...el.children.map(allText)].join(' ');
 function harness(overrides = {}) {
-  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch'].map(id => [id, new Element()]));
   const calls = [], blobs = [], revoked = [];
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const models = [
@@ -223,8 +223,9 @@ test('one upload compares server-selected models, renders safe union differences
   assert.equal(h.elements.download.disabled, false);
   await h.elements.download.fire('click');
   const report = JSON.parse(await h.blobs.at(-1).text());
-  assert.equal(report.models[0].text, '<script>unsafe</script>');
-  assert.equal(report.models.length, 3);
+  assert.equal(report.files.length, 1);
+  assert.equal(report.files[0].models[0].text, '<script>unsafe</script>');
+  assert.equal(report.files[0].models.length, 3);
   assert.ok(!JSON.stringify(report).includes('private-password'));
   assert.ok(!JSON.stringify(report).includes('YWJj'));
   assert.ok(h.revoked.includes('blob:2'));
@@ -242,6 +243,8 @@ test('isolated page has labelled controls, live status, local assets and respons
   const html = read('public/ocr-compare.html');
   assert.match(html, /<title>OCR model comparison/);
   for (const id of ['password', 'document']) assert.match(html, new RegExp(`for="${id}"`));
+  assert.match(html, /<input id="document" type="file" multiple /, 'the document picker accepts several files');
+  assert.match(html, /id="batch"/);
   assert.match(html, /type="password"/);
   assert.match(html, /aria-live="polite"/);
   assert.match(html, /href="\/"/);
@@ -254,4 +257,96 @@ test('isolated page has labelled controls, live status, local assets and respons
   assert.match(html, /img-src 'self' blob:/);
   assert.match(html, /object-src 'none'/);
   assert.match(read('public/ocr-compare.css'), /@media/);
+});
+
+const named = name => ({ name, type: 'image/png', size: 3 });
+async function selectMany(h, files) {
+  h.elements.password.value = 'private-password';
+  h.elements.document.files = files;
+  await h.elements.document.fire('change');
+}
+function multiHarness(overrides = {}) {
+  const h = harness(overrides);
+  // Each POST echoes its filename and tags every model's text so results can be told apart.
+  h.deps.fetch = async (url, options) => {
+    h.calls.push({ url, ...options });
+    if (options.method !== 'POST') return { ok: true, json: async () => ({ models: h.models, maxPages: 10, maxBytes: 12000000, renderScale: 2 }) };
+    const { filename } = JSON.parse(options.body);
+    if (h.failOn === filename) return { ok: false, status: 429, json: async () => ({ error: 'A comparison is already running' }) };
+    return { ok: true, json: async () => ({ ...h.result, filename, models: h.models.map(model => ({ ...model, text: `${filename}:${model.id}`, stopReason: 'STOP' })) }) };
+  };
+  return h;
+}
+
+test('several files are compared one at a time in selection order, each with its own result', async () => {
+  const h = multiHarness();
+  let running = 0, maxRunning = 0;
+  const inner = h.deps.fetch;
+  h.deps.fetch = async (url, options) => { if (options.method === 'POST') { running++; maxRunning = Math.max(maxRunning, running); await new Promise(resolve => setImmediate(resolve)); running--; } return inner(url, options); };
+  ui.createCompareUI(h.deps);
+  await selectMany(h, [named('a.png'), named('b.png'), named('c.png')]);
+  assert.match(h.elements.status.textContent, /3 of 3 files ready/);
+  assert.match(h.elements.status.textContent, /9 in total/, 'billable calls are stated before running');
+  assert.equal(h.elements.batch.children.length, 3);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(h.calls.map(call => call.method), ['GET', 'POST', 'POST', 'POST'], 'metadata once, then one POST per file');
+  assert.deepEqual(h.calls.slice(1).map(call => JSON.parse(call.body).filename), ['a.png', 'b.png', 'c.png']);
+  assert.equal(maxRunning, 1, 'files are never compared in parallel');
+  assert.match(h.elements.status.textContent, /Comparison complete for 3 files/);
+  assert.match(allText(h.elements.batch), /a\.png/);
+  assert.equal(h.elements.batch.children.filter(row => /Done/.test(allText(row))).length, 3);
+  assert.match(allText(h.elements.baseline), /c\.png:gemini-3\.1-flash-lite/, 'the last file is shown after the run');
+  // Selecting View on the first row swaps the previews and outputs without a new request.
+  const callsBefore = h.calls.length;
+  const view = h.elements.batch.children[0].children[5].children[0];
+  await view.fire('click');
+  assert.match(allText(h.elements.baseline), /a\.png:gemini-3\.1-flash-lite/);
+  assert.equal(h.calls.length, callsBefore);
+  await h.elements.download.fire('click');
+  const report = JSON.parse(await h.blobs.at(-1).text());
+  assert.deepEqual(report.files.map(file => file.filename), ['a.png', 'b.png', 'c.png']);
+  assert.ok(!JSON.stringify(report).includes('private-password'));
+});
+
+test('more than ten files are rejected before any preparation or request', async () => {
+  const h = multiHarness();
+  let prepared = 0;
+  h.deps.prepareDocument = async () => { prepared++; return []; };
+  ui.createCompareUI(h.deps);
+  await selectMany(h, Array.from({ length: 11 }, (_, index) => named(`f${index}.png`)));
+  assert.match(h.elements.status.textContent, /at most 10 files/);
+  assert.equal(prepared, 0);
+  await h.elements['compare-form'].fire('submit');
+  assert.equal(h.calls.length, 0);
+  await selectMany(h, Array.from({ length: 10 }, (_, index) => named(`f${index}.png`)));
+  assert.match(h.elements.status.textContent, /10 of 10 files ready/);
+});
+
+test('a file that cannot be prepared is listed but skipped while the others still run', async () => {
+  const h = multiHarness();
+  h.deps.prepareDocument = async file => { if (file.name === 'bad.png') throw new Error('PDF rendering failed'); return [{ mediaType: 'image/png', data: 'YWJj', blob: new Blob(['abc']), width: 1, height: 1 }]; };
+  ui.createCompareUI(h.deps);
+  await selectMany(h, [named('a.png'), named('bad.png'), named('c.png')]);
+  assert.match(h.elements.status.textContent, /2 of 3 files ready.*1 cannot be compared/);
+  assert.match(allText(h.elements.batch), /Cannot compare: PDF rendering failed/);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(h.calls.filter(call => call.method === 'POST').map(call => JSON.parse(call.body).filename), ['a.png', 'c.png']);
+});
+
+test('a request-level failure stops the remaining files, keeps finished results and never retries', async () => {
+  const h = multiHarness();
+  h.failOn = 'b.png';
+  ui.createCompareUI(h.deps);
+  await selectMany(h, [named('a.png'), named('b.png'), named('c.png')]);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(h.calls.filter(call => call.method === 'POST').map(call => JSON.parse(call.body).filename), ['a.png', 'b.png'], 'c.png is not sent and b.png is not retried');
+  assert.match(h.elements.status.textContent, /No automatic retry was made\. 1 of 3 files completed; 1 not run/);
+  const statuses = h.elements.batch.children.map(row => allText(row.children[2]));
+  assert.match(statuses[0], /Done/);
+  assert.match(statuses[1], /Failed/);
+  assert.match(statuses[2], /Not run/);
+  assert.equal(h.elements.download.disabled, false, 'finished results can still be downloaded');
+  await h.elements.download.fire('click');
+  assert.deepEqual(JSON.parse(await h.blobs.at(-1).text()).files.map(file => file.filename), ['a.png']);
+  assert.equal(h.elements.compare.disabled, false);
 });
