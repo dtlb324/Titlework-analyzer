@@ -14,7 +14,7 @@ class Element {
 }
 const allText = el => [el.textContent, ...el.children.map(allText)].join(' ');
 function harness(overrides = {}) {
-  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
   const calls = [], blobs = [], revoked = [];
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const models = [
@@ -349,4 +349,113 @@ test('a request-level failure stops the remaining files, keeps finished results 
   await h.elements.download.fire('click');
   assert.deepEqual(JSON.parse(await h.blobs.at(-1).text()).files.map(file => file.filename), ['a.png']);
   assert.equal(h.elements.compare.disabled, false);
+});
+
+function pdfHarness() {
+  const h = harness();
+  const seen = { textReads: 0, destroyed: 0, cleaned: 0, options: null };
+  const pdfjs = {
+    GlobalWorkerOptions: {},
+    getDocument: options => {
+      seen.options = options;
+      return {
+        promise: Promise.resolve({
+          numPages: 1,
+          getPage: async () => ({
+            getTextContent: async () => { seen.textReads += 1; return { items: [{ str: 'Ada' }, { str: 'Owner' }] }; },
+            cleanup() { seen.cleaned += 1; },
+          }),
+        }),
+        destroy: async () => { seen.destroyed += 1; },
+      };
+    },
+  };
+  h.deps.loadPdfjs = async () => pdfjs;
+  return { h, seen, pdfjs };
+}
+const pdfFile = () => new File(['%PDF-1.7 sample'], 'deed.pdf', { type: 'application/pdf' });
+
+test('a PDF preparation records document text and does not upload it', async () => {
+  const { h, seen, pdfjs } = pdfHarness();
+  h.models[0].fields = { ...h.models[0].fields, GRANTOR: 'Ada Owner' };
+  ui.createCompareUI(h.deps);
+  await selected(h, pdfFile());
+  assert.equal(seen.textReads, 1);
+  assert.equal(seen.cleaned, 1);
+  assert.equal(seen.destroyed, 1);
+  assert.equal(seen.options.isEvalSupported, false);
+  assert.equal(seen.options.wasmUrl, '/vendor/pdfjs/wasm/');
+  assert.equal(seen.options.standardFontDataUrl, '/vendor/pdfjs/standard_fonts/');
+  assert.equal(seen.options.iccUrl, '/vendor/pdfjs/iccs/');
+  assert.equal(pdfjs.GlobalWorkerOptions.workerSrc, '/vendor/pdfjs/pdf.worker.mjs');
+  assert.match(h.elements.status.textContent, /page image\(s\) ready/);
+  await h.elements['compare-form'].fire('submit');
+  const payload = JSON.parse(h.calls.find(call => call.method === 'POST').body);
+  assert.deepEqual(payload, { filename: 'deed.pdf', pages: [{ mediaType: 'image/png', data: 'YWJj' }] });
+  assert.equal(payload.documentText, undefined);
+  const paragraphs = h.elements.baseline.children.filter(child => child.tagName === 'p');
+  const cost = paragraphs.findIndex(item => item.textContent.startsWith('Estimated cost:'));
+  assert.equal(paragraphs[cost + 1].textContent, 'Document accuracy: 20% (1 of 5 fields found in the document).');
+  assert.equal(h.elements['accuracy-note'].textContent, 'Ranked on 1 document. The percent is transcribed fields found in the document text.');
+  assert.deepEqual(h.elements['accuracy-rank'].children.map(row => row.children.map(cell => cell.textContent)), [
+    ['1', 'Baseline', '20% (1 of 5 fields)'],
+    ['2', 'Candidate', '0% (0 of 5 fields)'],
+    ['2', 'Challenger', '0% (0 of 5 fields)'],
+  ]);
+  await h.elements.download.fire('click');
+  const report = JSON.parse(await h.blobs.at(-1).text());
+  assert.deepEqual(report.files[0].models[0].accuracy, { matched: 1, scored: 5, percent: 20 });
+  assert.equal(report.files[0].models[1].accuracy.percent, 0);
+  assert.ok(!JSON.stringify(report).includes('documentText'));
+  assert.ok(!JSON.stringify(report).includes('YWJj'));
+});
+
+test('an image file with no text renders no embedded text', async () => {
+  let loaded = 0;
+  const h = harness();
+  h.deps.loadPdfjs = async () => { loaded += 1; throw new Error('pdf.js should not load'); };
+  ui.createCompareUI(h.deps);
+  await selected(h);
+  assert.equal(loaded, 0);
+  await h.elements['compare-form'].fire('submit');
+  assert.match(allText(h.elements.baseline), /Document accuracy: no embedded text in this document\./);
+  assert.equal(h.elements['accuracy-rank'].children.length, 0);
+  assert.equal(h.elements['accuracy-note'].textContent, 'Accuracy is the share of transcribed fields found in the document\'s own text. Scans without embedded text have no score. Field differences below are still not accuracy.');
+  await h.elements.download.fire('click');
+  const report = JSON.parse(await h.blobs.at(-1).text());
+  assert.equal(report.files[0].models[0].accuracy, undefined);
+  assert.ok(!JSON.stringify(report).includes('documentText'));
+});
+
+test('a failed text read does not fail preparation', async () => {
+  const h = harness();
+  h.deps.loadPdfjs = async () => { throw new Error('pdf.js failed'); };
+  ui.createCompareUI(h.deps);
+  await selected(h, pdfFile());
+  assert.match(h.elements.status.textContent, /page image\(s\) ready/);
+  await h.elements['compare-form'].fire('submit');
+  assert.match(allText(h.elements.baseline), /no embedded text/);
+});
+
+test('a failed model on a text PDF is not scored and the file is not ranked', async () => {
+  const { h } = pdfHarness();
+  h.models[0].fields = { GRANTOR: 'Ada Owner' };
+  h.models[2] = { ...h.models[2], error: 'Provider failed', fields: {} };
+  ui.createCompareUI(h.deps);
+  await selected(h, pdfFile());
+  await h.elements['compare-form'].fire('submit');
+  assert.match(allText(h.elements.baseline), /Document accuracy: 20% \(1 of 5 fields found in the document\)\./);
+  assert.match(allText(h.elements.challenger), /Document accuracy: not scored \(model failed\)\./);
+  assert.equal(h.elements['accuracy-rank'].children.length, 0);
+});
+
+test('abstained transcript fields render no transcribed fields to score', async () => {
+  const { h } = pdfHarness();
+  const fields = { GRANTOR: 'n/a', GRANTEE: 'none', 'DATE EXECUTED': 'none stated', 'DATE RECORDED': 'not applicable', 'RECORDING REF': 'unclear' };
+  h.models.forEach(model => { model.fields = fields; });
+  ui.createCompareUI(h.deps);
+  await selected(h, pdfFile());
+  await h.elements['compare-form'].fire('submit');
+  assert.match(allText(h.elements.baseline), /Document accuracy: no transcribed fields to score\./);
+  assert.equal(h.elements['accuracy-rank'].children.length, 0);
 });
