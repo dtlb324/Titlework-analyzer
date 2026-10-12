@@ -98,15 +98,20 @@ export function createCompareUI(deps = {}) {
   const prepare = deps.prepareDocument || (file => prepareDocument(file));
   const urls = deps.URL || URL;
   const delay = deps.setTimeout || setTimeout;
-  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
+  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
+  const effortBars = [el['baseline-effort'], el['candidate-effort'], el['challenger-effort']];
   // One entry per selected file: { file, pages, status, message, result }.
   // status: preparing | ready | error | running | done | failed | skipped
   let entries = [], selected = 0, report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
+  // Server-owned effort options per model slot. `efforts` is the level for the next comparison;
+  // `picked` marks columns the user clicked, which keep their level across metadata refreshes.
+  let effortModels = [], efforts = [], picked = [], effortNotes = [];
   const updateControls = () => {
     el.compare.disabled = busy || preparing;
     el.document.disabled = busy;
     el.password.disabled = busy;
+    if (effortModels.length) renderEfforts();
   };
   const node = (tag, text, className) => {
     const item = doc.createElement(tag);
@@ -238,6 +243,53 @@ export function createCompareUI(deps = {}) {
     renderPreviews();
     renderResult();
   }
+  const renderEfforts = () => {
+    effortBars.forEach((bar, index) => {
+      const model = effortModels[index];
+      if (!bar || !model) return;
+      bar.replaceChildren();
+      for (const level of model.effortLevels) {
+        const button = node('button', level);
+        button.setAttribute('type', 'button');
+        button.setAttribute('aria-pressed', String(level === efforts[index]));
+        button.disabled = busy;
+        button.addEventListener('click', () => {
+          if (busy) return;
+          efforts[index] = level;
+          picked[index] = true;
+          effortNotes[index] = '';
+          renderEfforts();
+        });
+        bar.append(button);
+      }
+      if (effortNotes[index]) bar.append(node('p', effortNotes[index], 'muted'));
+    });
+  };
+  const showEffortError = message => effortBars.forEach(bar => bar?.replaceChildren(node('p', message, 'error')));
+  // Untouched columns follow the server's level; a pick survives only while the same model still offers it.
+  const applyEffortMetadata = models => {
+    effortNotes = models.map((model, index) => picked[index] && (effortModels[index]?.id !== model.id || !model.effortLevels.includes(efforts[index]))
+      ? `Your ${efforts[index]} selection is not available for ${model.id}; reset to ${model.effort}.` : '');
+    picked = models.map((model, index) => Boolean(picked[index]) && !effortNotes[index]);
+    efforts = models.map((model, index) => picked[index] ? efforts[index] : model.effort);
+    effortModels = models;
+    renderEfforts();
+  };
+  const validMetadata = metadata => Array.isArray(metadata.models) && metadata.models.length === MODEL_COUNT && metadata.renderScale === LIMITS.renderScale && Number.isInteger(metadata.maxPages) && metadata.maxPages >= 1 && Number.isInteger(metadata.maxBytes) && metadata.maxBytes >= 1 && metadata.models.every(model => model.maxTokens === metadata.models[0].maxTokens && Array.isArray(model.effortLevels) && model.effortLevels.length && model.effortLevels.every(level => typeof level === 'string') && model.effortLevels.includes(model.effort));
+  let effortLoad = 0;
+  el.password.addEventListener('change', async () => {
+    if (!el.password.value || busy) return;
+    const current = ++effortLoad;
+    try {
+      const response = await request('/api/ocr-compare', { method: 'GET', headers: { 'x-app-password': el.password.value } });
+      if (!response.ok) throw await httpError(response);
+      const metadata = await response.json();
+      if (!validMetadata(metadata)) throw new Error('Unsupported server comparison configuration.');
+      if (current === effortLoad && !busy) applyEffortMetadata(metadata.models);
+    } catch (error) {
+      if (current === effortLoad && !busy) showEffortError(`Could not load effort levels: ${error.message}`);
+    }
+  });
   const clearResults = () => {
     report = undefined;
     el.download.disabled = true;
@@ -319,13 +371,16 @@ export function createCompareUI(deps = {}) {
       if (!metadataResponse.ok) throw await httpError(metadataResponse);
       const metadata = await metadataResponse.json();
       if (current !== generation) return;
-      if (!Array.isArray(metadata.models) || metadata.models.length !== MODEL_COUNT || metadata.renderScale !== LIMITS.renderScale || !Number.isInteger(metadata.maxPages) || metadata.maxPages < 1 || !Number.isInteger(metadata.maxBytes) || metadata.maxBytes < 1 || metadata.models.some(model => model.maxTokens !== metadata.models[0].maxTokens)) throw new Error('Unsupported server comparison configuration.');
+      if (!validMetadata(metadata)) throw new Error('Unsupported server comparison configuration.');
       for (const entry of runnable) {
         if (entry.pages.length > Math.min(LIMITS.maxPages, metadata.maxPages)) throw new Error(`${entry.file.name}: document exceeds the server page limit.`);
         const byteCount = entry.pages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
         if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error(`${entry.file.name}: document exceeds the server image byte limit.`);
       }
-      el.settings.textContent = metadata.models.map(modelSettings).join('\n');
+      effortLoad++;
+      applyEffortMetadata(metadata.models);
+      const chosen = [...efforts];
+      el.settings.textContent = metadata.models.map((model, index) => `${model.label}: ${model.id} · effort ${chosen[index]} · max output ${model.maxTokens} tokens`).join('\n');
       let halted = null;
       for (const entry of runnable) {
         if (halted) { entry.status = 'skipped'; continue; }
@@ -340,7 +395,7 @@ export function createCompareUI(deps = {}) {
           ? 'Comparing the same page images with all three models. No automatic retries.'
           : `Comparing ${entry.file.name} (${runnable.indexOf(entry) + 1} of ${runnable.length}) with all three models. No automatic retries.`;
         try {
-          const response = await request('/api/ocr-compare', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: entry.file.name, pages: entry.pages.map(({ mediaType, data }) => ({ mediaType, data })) }) });
+          const response = await request('/api/ocr-compare', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: entry.file.name, pages: entry.pages.map(({ mediaType, data }) => ({ mediaType, data })), efforts: chosen }) });
           if (!response.ok) throw await httpError(response);
           const result = await response.json();
           if (current !== generation) return;
@@ -359,7 +414,7 @@ export function createCompareUI(deps = {}) {
       if (current !== generation) return;
       const done = entries.filter(entry => entry.status === 'done');
       const modelRecord = (model, documentText) => {
-        const record = Object.fromEntries(['id', 'label', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
+        const record = Object.fromEntries(['id', 'label', 'effort', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
         const accuracy = scoreModel(documentText, model);
         if (accuracy.status === 'scored') record.accuracy = { matched: accuracy.matched, scored: accuracy.scored, percent: accuracy.percent };
         return record;

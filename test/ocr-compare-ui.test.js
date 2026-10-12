@@ -14,13 +14,13 @@ class Element {
 }
 const allText = el => [el.textContent, ...el.children.map(allText)].join(' ');
 function harness(overrides = {}) {
-  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
   const calls = [], blobs = [], revoked = [];
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const models = [
-    { id: 'gemini-3.1-flash-lite', label: 'Baseline', thinkingLevel: 'default', maxTokens: 8000, text: '<script>unsafe</script>', fields: { grantor: '<img src=x onerror=bad()>', onlyBaseline: 0 }, usage: { input_tokens: 10, output_tokens: 20, thinking_tokens: 3 }, latencyMs: 120, stopReason: 'MAX_TOKENS', modelVersion: 'v1', costUsd: .001, costRates: { input: .25, output: 1.5, source: 'fixture' } },
-    { id: 'gemini-3.8-flash', label: 'Candidate', thinkingLevel: 'minimal', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } },
-    { id: 'claude-haiku-5-5', label: 'Challenger', thinkingLevel: 'adaptive, effort medium', maxTokens: 8000, text: 'GRANTOR: Third', fields: { grantor: 'Third', onlyCandidate: false }, usage: { input_tokens: 12, output_tokens: 5 }, latencyMs: 90, stopReason: 'end_turn', modelVersion: 'v3', costUsd: .0003, costRates: { input: .1, output: .5, source: 'fixture' } }
+    { id: 'gemini-3.1-flash-lite', label: 'Baseline', effort: 'default', effortLevels: ['default', 'minimal', 'low', 'medium', 'high'], thinkingLevel: 'default', maxTokens: 8000, text: '<script>unsafe</script>', fields: { grantor: '<img src=x onerror=bad()>', onlyBaseline: 0 }, usage: { input_tokens: 10, output_tokens: 20, thinking_tokens: 3 }, latencyMs: 120, stopReason: 'MAX_TOKENS', modelVersion: 'v1', costUsd: .001, costRates: { input: .25, output: 1.5, source: 'fixture' } },
+    { id: 'gemini-3.8-flash', label: 'Candidate', effort: 'medium', effortLevels: ['low', 'medium', 'high'], thinkingLevel: 'medium', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } },
+    { id: 'claude-haiku-5-5', label: 'Challenger', effort: 'medium', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], thinkingLevel: 'adaptive, effort medium', maxTokens: 8000, text: 'GRANTOR: Third', fields: { grantor: 'Third', onlyCandidate: false }, usage: { input_tokens: 12, output_tokens: 5 }, latencyMs: 90, stopReason: 'end_turn', modelVersion: 'v3', costUsd: .0003, costRates: { input: .1, output: .5, source: 'fixture' } }
   ];
   const result = { filename: 'deed.png', pageCount: 1, inputMode: 'rendered_images', models };
   const deps = {
@@ -230,7 +230,7 @@ test('one upload compares server-selected models, renders safe union differences
   assert.deepEqual(h.calls.map(c => c.method), ['GET', 'POST']);
   assert.equal(h.calls[0].headers['x-app-password'], 'private-password');
   const payload = JSON.parse(h.calls[1].body);
-  assert.deepEqual(payload, { filename: 'deed.png', pages: [{ mediaType: 'image/png', data: 'YWJj' }] });
+  assert.deepEqual(payload, { filename: 'deed.png', pages: [{ mediaType: 'image/png', data: 'YWJj' }], efforts: ['default', 'medium', 'medium'] });
   assert.match(allText(h.elements.settings), /gemini-3.1-flash-lite/);
   assert.match(allText(h.elements.baseline), /<script>unsafe<\/script>/);
   assert.match(allText(h.elements.baseline), /thinking 3/);
@@ -259,12 +259,108 @@ test('one upload compares server-selected models, renders safe union differences
   assert.ok(!read('public/ocr-compare.js').includes('localStorage'));
 });
 
+const effortButtons = bar => bar.children.filter(child => child.tagName === 'button');
+const pressed = bar => effortButtons(bar).filter(button => button['aria-pressed'] === 'true').map(button => button.textContent);
+
+test('effort buttons load from server metadata once a password is entered and drive each model\'s requested effort', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  assert.deepEqual(h.calls.map(call => call.method), ['GET'], 'loading levels makes no billable call');
+  assert.deepEqual(effortButtons(h.elements['candidate-effort']).map(button => button.textContent), ['low', 'medium', 'high']);
+  assert.deepEqual(effortButtons(h.elements['challenger-effort']).map(button => button.textContent), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual([h.elements['baseline-effort'], h.elements['candidate-effort'], h.elements['challenger-effort']].map(pressed), [['default'], ['medium'], ['medium']]);
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  await effortButtons(h.elements['challenger-effort']).find(button => button.textContent === 'low').fire('click');
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['high']);
+  assert.deepEqual(pressed(h.elements['challenger-effort']), ['low']);
+  await selected(h);
+  await h.elements['compare-form'].fire('submit');
+  const post = h.calls.find(call => call.method === 'POST');
+  assert.deepEqual(JSON.parse(post.body).efforts, ['default', 'high', 'low'], 'clicked levels survive the pre-compare metadata refresh');
+  assert.match(allText(h.elements.settings), /gemini-3.8-flash · effort high/);
+  assert.match(allText(h.elements.settings), /claude-haiku-5-5 · effort low/);
+});
+
+test('effort buttons are locked while a comparison runs', async () => {
+  let release;
+  const h = harness();
+  const base = h.deps.fetch;
+  h.deps.fetch = async (url, options) => options.method === 'POST' ? (await new Promise(resolve => { release = resolve; }), base(url, options)) : base(url, options);
+  ui.createCompareUI(h.deps);
+  await selected(h);
+  const running = h.elements['compare-form'].fire('submit');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(effortButtons(h.elements['candidate-effort']).every(button => button.disabled), 'locked during the billable call');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'low').fire('click');
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['medium'], 'a click while busy changes nothing');
+  release();
+  await running;
+  assert.ok(effortButtons(h.elements['candidate-effort']).every(button => !button.disabled));
+});
+
+test('a failed effort-level load is shown under the buttons and never replaces the document status', async () => {
+  const h = harness();
+  const base = h.deps.fetch;
+  let reject = true;
+  h.deps.fetch = async (url, options) => reject && options.method === 'GET' ? { ok: false, status: 401, json: async () => ({}) } : base(url, options);
+  ui.createCompareUI(h.deps);
+  await selected(h);
+  const status = h.elements.status.textContent;
+  h.elements.password.value = 'wrong';
+  await h.elements.password.fire('change');
+  assert.equal(h.elements.status.textContent, status, 'document status is not overwritten');
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  reject = false;
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  assert.doesNotMatch(allText(h.elements['candidate-effort']), /Could not load/, 'error clears once the right password loads levels');
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['medium']);
+});
+
+test('untouched columns follow a server level change while picked columns keep their level', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  await effortButtons(h.elements['challenger-effort']).find(button => button.textContent === 'high').fire('click');
+  h.models[0].effort = 'low';
+  h.models[1].effort = 'high';
+  await selected(h);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(JSON.parse(h.calls.find(call => call.method === 'POST').body).efforts, ['low', 'high', 'high']);
+});
+
+test('a picked level the server no longer offers resets with a note', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  await effortButtons(h.elements['challenger-effort']).find(button => button.textContent === 'max').fire('click');
+  h.models[2].effortLevels = ['low', 'medium', 'high'];
+  await h.elements.password.fire('change');
+  assert.deepEqual(pressed(h.elements['challenger-effort']), ['medium']);
+  assert.match(allText(h.elements['challenger-effort']), /max selection is not available for claude-haiku-5-5; reset to medium/);
+});
+
+test('metadata without effort options is rejected before any billable POST', async () => {
+  const h = harness();
+  h.models.forEach(model => { delete model.effortLevels; });
+  ui.createCompareUI(h.deps);
+  await selected(h);
+  await h.elements['compare-form'].fire('submit');
+  assert.match(h.elements.status.textContent, /configuration/i);
+  assert.ok(!h.calls.some(call => call.method === 'POST'));
+});
+
 const read = name => existsSync(new URL(name, root)) ? readFileSync(new URL(name, root), 'utf8') : '';
 
 test('isolated page has labelled controls, live status, local assets and responsive comparison layout', () => {
   const html = read('public/ocr-compare.html');
   assert.match(html, /<title>OCR model comparison/);
   for (const id of ['password', 'document']) assert.match(html, new RegExp(`for="${id}"`));
+  for (const slot of ['baseline', 'candidate', 'challenger']) assert.match(html, new RegExp(`id="${slot}-effort" class="effort" role="group" aria-label="[A-Za-z]+ effort level"`), `${slot} has an effort button group above its output`);
   assert.match(html, /<input id="document" type="file" multiple /, 'the document picker accepts several files');
   assert.match(html, /id="batch"/);
   assert.match(html, /type="password"/);
@@ -413,7 +509,7 @@ test('a PDF preparation records document text and does not upload it', async () 
   assert.match(h.elements.status.textContent, /page image\(s\) ready/);
   await h.elements['compare-form'].fire('submit');
   const payload = JSON.parse(h.calls.find(call => call.method === 'POST').body);
-  assert.deepEqual(payload, { filename: 'deed.pdf', pages: [{ mediaType: 'image/png', data: 'YWJj' }] });
+  assert.deepEqual(payload, { filename: 'deed.pdf', pages: [{ mediaType: 'image/png', data: 'YWJj' }], efforts: ['default', 'medium', 'medium'] });
   assert.equal(payload.documentText, undefined);
   const paragraphs = h.elements.baseline.children.filter(child => child.tagName === 'p');
   const cost = paragraphs.findIndex(item => item.textContent.startsWith('Estimated cost:'));

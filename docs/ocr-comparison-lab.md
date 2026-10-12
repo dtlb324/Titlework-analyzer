@@ -36,6 +36,8 @@ inside a hosted Hermes container is not publicly reachable on its own port.
 ## Compare
 
 1. Enter the app password, then select up to 10 PDF, PNG, JPEG, or WebP files at once.
+   Once the password is entered, each model column shows a row of effort buttons.
+   Click one to change that model's effort for the next comparison (see Effort levels).
 2. Review the file list and the rendered source-page previews, and read the stated number of billable calls (three per file).
 3. Click **Compare OCR** once. Files are compared one at a time in the order selected; within a file, the three models run in parallel.
 4. Select **View** on a file in the list to review its three outputs and field differences. Download the JSON report if you want to retain the results; it contains a `files` array with one entry per finished file.
@@ -57,6 +59,24 @@ file. There is no automatic retry, PDF splitting, Claude escalation, or
 synthesis. Only one comparison can run per server instance at a time (the batch
 runs files sequentially for this reason); this is not a cross-instance quota.
 
+## Effort levels
+
+The server lists the levels each model accepts; the browser sends one level per
+model with each comparison, and the server rejects any level a model does not
+accept before calling a provider. A column you have not clicked follows the
+server's level; a level you picked is kept until the page reloads, or reset (with
+a note under the buttons) if the server stops offering it.
+
+| Column | Levels | Starts at | Sent as |
+| --- | --- | --- | --- |
+| Current Gemini | `minimal`, `low`, `medium`, `high` (no `minimal` for 3.7/3.8 Flash or Pro baselines; plus `default` when `GEMINI_THINKING_LEVEL` is unset) | the configured level, or `default` | `thinkingLevel`; `default` sends none |
+| Gemini 3.8 Flash | `low`, `medium`, `high` (3.8 Flash rejects `minimal`) | `medium` | `thinkingLevel` |
+| Claude Haiku 5.5 | `low`, `medium`, `high`, `xhigh`, `max` | `medium` | `output_config.effort` |
+
+Higher levels spend more thinking tokens, which count against the shared output
+limit and are billed as output. The chosen level is shown in each result and
+saved as `effort` in the JSON report.
+
 ## What the comparison measures
 
 Accuracy is scored in the browser against the document's embedded text. Images and text-free scans have no score. The text is not uploaded.
@@ -70,10 +90,10 @@ Accuracy is scored in the browser against the document's embedded text. Images a
   several instruments, and medium-effort thinking tokens (Gemini 3.8 Flash and
   Haiku 5.5) count against the same limit. Above 8,192 Anthropic requires
   streaming, so the lab streams Haiku calls automatically. Output cut off by the limit is flagged in the UI as truncated.
-- The baseline uses the configured production Gemini thinking level, or the
-  provider default if none is set. 3.8 Flash explicitly uses `medium` (it does not
-  support `minimal`). Haiku 5.5 always runs with adaptive thinking; the
-  lab sets `output_config.effort` to `medium`. Sampling parameters are not sent
+- Each model runs at the effort selected on the page (see Effort levels). By
+  default the baseline uses the configured production Gemini thinking level, or
+  the provider default if none is set; 3.8 Flash and Haiku 5.5 start at `medium`.
+  Haiku 5.5 always runs with adaptive thinking. Sampling parameters are not sent
   (Haiku 5.5 rejects non-default values). Its
   `output_tokens` already include any thinking tokens; the thinking count shown
   is the portion Anthropic reports in `output_tokens_details`, not an extra charge. These settings are shown, not treated as equal.

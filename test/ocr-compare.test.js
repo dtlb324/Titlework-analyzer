@@ -39,7 +39,62 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
     assert.deepEqual(config.models.map(model => model.maxTokens), [16000, 16000, 16000], 'lab limit is shared and larger than production\'s 2,000');
     assert.equal(config.maxPages, 60);
     assert.equal(config.maxBytes, 12_000_000);
+    assert.deepEqual(config.models.map(model => model.effortLevels), [['default', 'minimal', 'low', 'medium', 'high'], ['low', 'medium', 'high'], ['low', 'medium', 'high', 'xhigh', 'max']], 'unset baseline keeps a provider-default option; 3.8 Flash rejects minimal; Haiku 5.5 takes five levels');
+    assert.deepEqual(config.models.map(model => model.effort), ['default', 'medium', 'medium']);
   });
+});
+
+test('per-model efforts from the browser reach each provider call and the report', async () => {
+  const calls = [];
+  await withServer(async base => {
+    const response = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['low', 'high', 'max'] }) });
+    assert.equal(response.status, 200);
+    const report = await response.json();
+    assert.equal(calls.find(call => call.model === 'gemini-3.1-flash-lite').thinkingLevel, 'low');
+    assert.equal(calls.find(call => call.model === 'gemini-3.8-flash').thinkingLevel, 'high');
+    const haiku = calls.find(call => call.model === 'claude-haiku-5-5');
+    assert.equal(haiku.effort, 'max');
+    assert.equal(haiku.thinkingLevel, undefined);
+    assert.deepEqual(report.models.map(model => model.effort), ['low', 'high', 'max']);
+    assert.equal(report.models[2].thinkingLevel, 'adaptive, effort max');
+  }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
+});
+
+test('a configured baseline thinking level is preselected without a separate default option', () => {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `import { createOcrCompareHandler } from './api/ocr-compare.js'; const res={setHeader(){},status(code){this.code=code;return this;},json(body){console.log(JSON.stringify(body.models[0]));}}; await createOcrCompareHandler()({method:'GET',headers:{'x-app-password':'ocr-test-password'},socket:{}},res);`], { encoding: 'utf8', env: { ...process.env, GEMINI_THINKING_LEVEL: 'minimal' } });
+  assert.equal(result.status, 0, result.stderr);
+  const baseline = JSON.parse(result.stdout);
+  assert.equal(baseline.effort, 'minimal');
+  assert.deepEqual(baseline.effortLevels, ['minimal', 'low', 'medium', 'high']);
+});
+
+test('baselines that reject minimal get no minimal button', () => {
+  const levels = model => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `import { createOcrCompareHandler } from './api/ocr-compare.js'; const res={setHeader(){},status(code){this.code=code;return this;},json(body){console.log(JSON.stringify(body.models[0].effortLevels));}}; await createOcrCompareHandler()({method:'GET',headers:{'x-app-password':'ocr-test-password'},socket:{}},res);`], { encoding: 'utf8', env: { ...process.env, ABSTRACT_MODEL: model, GEMINI_THINKING_LEVEL: '' } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  for (const model of ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-3-pro-preview']) assert.ok(!levels(model).includes('minimal'), model);
+  for (const model of ['gemini-3.8-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.6-flash']) assert.ok(levels(model).includes('minimal'), model);
+});
+
+test('the default baseline effort omits thinkingLevel so the provider default applies', async () => {
+  const calls = [];
+  await withServer(async base => {
+    assert.equal((await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['default', 'medium', 'medium'] }) })).status, 200);
+    assert.ok(!('thinkingLevel' in calls.find(call => call.model === 'gemini-3.1-flash-lite')));
+  }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
+});
+
+test('unsupported or malformed efforts are rejected before any provider call', async () => {
+  let calls = 0;
+  await withServer(async base => {
+    for (const efforts of [['minimal', 'minimal', 'medium'], ['low', 'medium', 'ultra'], ['low', 'medium'], 'high', ['low', 'medium', null], ['default', 'default', 'medium']]) {
+      const response = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts }) });
+      assert.equal(response.status, 400, JSON.stringify(efforts));
+    }
+    assert.equal(calls, 0);
+  }, { ocrCompareModelClient: async () => { calls++; return {}; } });
 });
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1kAAAAASUVORK5CYII=';
