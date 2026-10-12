@@ -100,6 +100,145 @@ test('unsupported or malformed efforts are rejected before any provider call', a
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1kAAAAASUVORK5CYII=';
 const document = { filename: 'deed.png', pages: [{ mediaType: 'image/png', data: PNG }] };
 
+function baselineWireScenario(model, configured, requests) {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { createOcrCompareHandler } from './api/ocr-compare.js';
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push({ url: String(url), body });
+      if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'GRANTOR: Wire Fixture' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } }));
+      }
+      if (String(url) === 'https://api.anthropic.com/v1/messages') {
+        return new Response(JSON.stringify({ model: body.model, content: [{ type: 'text', text: 'GRANTOR: Wire Fixture' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } }));
+      }
+      throw new Error('Unexpected network target blocked: ' + url);
+    };
+    const handler = createOcrCompareHandler();
+    const responses = [];
+    for (const request of ${JSON.stringify(requests)}) {
+      const res = { setHeader() {}, status(code) { this.code = code; return this; }, json(body) { responses.push({ code: this.code, body, calls: calls.length }); } };
+      await handler({ method: request.method, headers: { 'x-app-password': 'ocr-test-password' }, socket: {}, body: { ...${JSON.stringify(document)}, ...(request.efforts === undefined ? {} : { efforts: request.efforts }) } }, res);
+    }
+    console.log(JSON.stringify({ responses, calls }));
+  `], { encoding: 'utf8', env: { ...process.env, ABSTRACT_MODEL: model, GEMINI_THINKING_LEVEL: configured, GEMINI_THINKING_BUDGET: '', GEMINI_INCLUDE_THOUGHTS: '', OCR_COMPARE_MAX_TOKENS: '8000', GEMINI_API_KEY: 'synthetic-no-network', ANTHROPIC_API_KEY: 'synthetic-no-network', MODEL_PROVIDER: 'openrouter', OPENROUTER_API_KEY: '' } });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+// https://ai.google.dev/gemini-api/docs/generate-content/thinking lists only minimal/high for Flash-Lite Image.
+test('Flash-Lite Image metadata offers exactly minimal/high plus default only when unset', () => {
+  for (const configured of ['', 'minimal', 'high']) {
+    const { responses: [response], calls } = baselineWireScenario('gemini-3.1-flash-lite-image', configured, [{ method: 'GET' }]);
+    assert.equal(response.code, 200);
+    assert.deepEqual(response.body.models[0].effortLevels, configured ? ['minimal', 'high'] : ['default', 'minimal', 'high']);
+    assert.equal(response.body.models[0].effort, configured || 'default');
+    assert.equal(response.body.models[0].thinkingLevel, configured || 'default');
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('Flash-Lite Image rejects low/medium before any inference', () => {
+  const { responses, calls } = baselineWireScenario('gemini-3.1-flash-lite-image', '', ['low', 'medium'].map(effort => ({ method: 'POST', efforts: [effort, 'medium', 'max'] })));
+  for (const response of responses) {
+    assert.equal(response.code, 400);
+    assert.match(response.body.error, /Current Gemini does not support effort/);
+    assert.equal(response.calls, 0);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('Flash with configured minimal rejects metadata and old/explicit clients before any inference', () => {
+  const { responses, calls } = baselineWireScenario('gemini-3.8-flash', 'minimal', [{ method: 'GET' }, { method: 'POST' }, { method: 'POST', efforts: ['high', 'medium', 'max'] }]);
+  for (const response of responses) {
+    assert.equal(response.code, 503);
+    assert.match(response.body.error, /GEMINI_THINKING_LEVEL/);
+    assert.match(response.body.error, /gemini-3\.8-flash/);
+    assert.equal(response.body.models, undefined);
+    assert.equal(response.calls, 0);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('unrecognized configured thinking levels fail closed instead of becoming provider default', () => {
+  for (const configured of ['slow', 'default', '__proto__']) {
+    const { responses, calls } = baselineWireScenario('gemini-3.8-flash', configured, [{ method: 'GET' }, { method: 'POST' }]);
+    for (const response of responses) {
+      assert.equal(response.code, 503, configured);
+      assert.match(response.body.error, /GEMINI_THINKING_LEVEL/);
+      assert.equal(response.body.models, undefined);
+      assert.equal(response.calls, 0);
+    }
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('model-specific invalid configured defaults reject all slots before inference', () => {
+  for (const [model, configured] of [['gemini-3.1-flash-lite-image', 'low'], ['gemini-3.1-flash-lite-image', 'medium'], ['gemini-3.1-pro-preview', 'minimal']]) {
+    const { responses, calls } = baselineWireScenario(model, configured, [{ method: 'GET' }, { method: 'POST' }, { method: 'POST', efforts: ['high', 'medium', 'max'] }]);
+    for (const response of responses) {
+      assert.equal(response.code, 503, `${model}/${configured}`);
+      assert.match(response.body.error, /GEMINI_THINKING_LEVEL/);
+      assert.equal(response.calls, 0);
+    }
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('Flash-Lite Image supported efforts reach direct wire builders and accurate reports', () => {
+  const { responses, calls } = baselineWireScenario('gemini-3.1-flash-lite-image', '', ['default', 'minimal', 'high'].map(effort => ({ method: 'POST', efforts: [effort, 'high', 'max'] })));
+  assert.equal(calls.length, 9, 'one direct call per slot per comparison, without retries');
+  for (const [index, effort] of ['default', 'minimal', 'high'].entries()) {
+    const response = responses[index];
+    assert.equal(response.code, 200);
+    const [baseline, candidate, haiku] = calls.slice(index * 3, index * 3 + 3);
+    assert.match(baseline.url, /gemini-3\.1-flash-lite-image:generateContent$/);
+    assert.deepEqual(baseline.body.generationConfig.thinkingConfig, effort === 'default' ? undefined : { thinkingLevel: effort });
+    assert.match(candidate.url, /gemini-3\.8-flash:generateContent$/);
+    assert.deepEqual(candidate.body.generationConfig.thinkingConfig, { thinkingLevel: 'high' });
+    assert.equal(haiku.url, 'https://api.anthropic.com/v1/messages');
+    assert.equal(haiku.body.model, 'claude-haiku-5-5');
+    assert.deepEqual(haiku.body.output_config, { effort: 'max' });
+    assert.deepEqual(baseline.body.contents, candidate.body.contents);
+    assert.ok(!('thinking' in haiku.body) && !('temperature' in haiku.body));
+    assert.deepEqual(response.body.models.map(model => model.effort), [effort, 'high', 'max']);
+    assert.deepEqual(response.body.models.map(model => model.thinkingLevel), [effort, 'high', 'adaptive, effort max']);
+    assert.deepEqual(response.body.models[0].effortLevels, ['default', 'minimal', 'high']);
+    assert.equal(response.body.models[0].costUsd, null, 'an unpriced baseline must not inherit Flash-Lite pricing');
+    assert.ok(response.body.models.every(model => model.text === 'GRANTOR: Wire Fixture' && model.error === undefined));
+    assert.ok(!JSON.stringify(response.body).includes(PNG));
+  }
+});
+
+test('valid configured defaults and omitted efforts preserve old clients and fixed candidate settings', () => {
+  for (const [model, configured, expected] of [
+    ['gemini-3.1-flash-lite-image', 'minimal', 'minimal'],
+    ['gemini-3.1-flash-lite-image', ' HIGH ', 'high'],
+    ['gemini-3.8-flash', 'low', 'low'],
+    ['gemini-3.8-flash', 'medium', 'medium'],
+    ['gemini-3.8-flash', 'high', 'high'],
+    ['gemini-3.1-pro-preview', 'medium', 'medium'],
+    ['gemini-3.1-flash-lite', 'minimal', 'minimal'],
+    ['gemini-3.8-flash', '   ', 'default'],
+  ]) {
+    const { responses: [metadata, report], calls } = baselineWireScenario(model, configured, [{ method: 'GET' }, { method: 'POST' }]);
+    assert.equal(metadata.code, 200, `${model}/${configured}`);
+    assert.equal(metadata.calls, 0);
+    assert.equal(metadata.body.models[0].effort, expected);
+    assert.equal(metadata.body.models[0].effortLevels.includes('default'), expected === 'default');
+    assert.deepEqual(metadata.body.models[1].effortLevels, ['low', 'medium', 'high']);
+    assert.deepEqual(metadata.body.models[2].effortLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
+    assert.equal(report.code, 200);
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[0].body.generationConfig.thinkingConfig, expected === 'default' ? undefined : { thinkingLevel: expected });
+    assert.deepEqual(calls[1].body.generationConfig.thinkingConfig, { thinkingLevel: 'medium' });
+    assert.deepEqual(calls[2].body.output_config, { effort: 'medium' });
+    assert.deepEqual(report.body.models.map(model => model.effort), [expected, 'medium', 'medium']);
+    assert.deepEqual(report.body.models.map(model => model.thinkingLevel), [expected, 'medium', 'adaptive, effort medium']);
+  }
+});
+
 test('PDF renderer serves allowlisted local modules and image decoders, not arbitrary package files', async () => {
   await withServer(async base => {
     for (const name of ['pdf.mjs', 'pdf.worker.mjs']) {
@@ -400,9 +539,10 @@ test('Claude is streamed with effort above the 8192 non-streaming limit, and sen
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { createOcrCompareHandler } from './api/ocr-compare.js';
       const sse = events => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(events.join('\\n\\n') + '\\n\\n')); c.close(); } }), { status: 200 });
+      // Success requires message_stop after the stop reason; EOF alone is incomplete.
       globalThis.fetch = async (url, init) => {
         const body = JSON.parse(init.body);
-        if (String(url).includes('anthropic')) { console.log('CLAUDE ' + JSON.stringify({ stream: body.stream === true, effort: body.output_config?.effort, max: body.max_tokens })); if (body.stream) return sse(['event: message_start\\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":100}}}', 'event: content_block_delta\\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"GRANTOR: S"}}', 'event: message_delta\\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}']); return new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'GRANTOR: S' }], usage: { input_tokens: 100, output_tokens: 9 } }), { status: 200 }); }
+        if (String(url).includes('anthropic')) { console.log('CLAUDE ' + JSON.stringify({ stream: body.stream === true, effort: body.output_config?.effort, max: body.max_tokens })); if (body.stream) return sse(['event: message_start\\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":100}}}', 'event: content_block_delta\\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"GRANTOR: S"}}', 'event: message_delta\\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}', 'event: message_stop\\ndata: {"type":"message_stop"}']); return new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'GRANTOR: S' }], usage: { input_tokens: 100, output_tokens: 9 } }), { status: 200 }); }
         return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'GRANTOR: S' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }), { status: 200 });
       };
       const res = { setHeader() {}, status(c) { this.code = c; return this; }, json(b) { if (b.models?.[2]?.usage) console.log('USAGE ' + JSON.stringify(b.models[2].usage)); } };

@@ -1,7 +1,12 @@
 // Parse Anthropic Messages API server-sent events from a streaming response body.
 
+const VALID_STOP_REASONS = new Set([
+  'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn',
+  'refusal', 'model_context_window_exceeded',
+]);
+
 function parseSseEventBlock(block) {
-  const lines = block.split('\n');
+  const lines = block.split(/\r?\n/);
   let eventName = 'message';
   const dataLines = [];
   for (const line of lines) {
@@ -36,6 +41,7 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
   let stopReason = null;
   let usage = {};
   let firstDeltaAt = null;
+  let messageStopped = false;
 
   const onDelta = typeof handlers.onDelta === 'function' ? handlers.onDelta : null;
   const onEvent = typeof handlers.onEvent === 'function' ? handlers.onEvent : null;
@@ -44,21 +50,20 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    let splitAt = buffer.indexOf('\n\n');
-    while (splitAt !== -1) {
-      const block = buffer.slice(0, splitAt);
-      buffer = buffer.slice(splitAt + 2);
+    let boundary;
+    while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+      const block = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary[0].length);
       const parsed = parseSseEventBlock(block);
-      if (!parsed) {
-        splitAt = buffer.indexOf('\n\n');
-        continue;
-      }
+      if (!parsed) continue;
       if (onEvent) onEvent(parsed);
       if (parsed.done) continue;
       const payload = parsed.data;
-      if (!payload || typeof payload !== 'object') {
-        splitAt = buffer.indexOf('\n\n');
-        continue;
+      if (!payload || typeof payload !== 'object') continue;
+      if (parsed.event === 'error' || payload.type === 'error') {
+        const errorType = payload.error?.type || 'unknown_error';
+        const message = payload.error?.message || 'Unknown provider error.';
+        throw new Error(`Anthropic stream error (${errorType}): ${message}`);
       }
       if (payload.type === 'message_start' && payload.message?.model) {
         model = payload.message.model;
@@ -80,12 +85,17 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
         if (payload.delta?.stop_reason) stopReason = payload.delta.stop_reason;
         if (payload.usage) usage = { ...usage, ...payload.usage };
       }
-      if (payload.type === 'message_stop' && payload.message?.usage) {
-        usage = { ...usage, ...payload.message.usage };
+      if (payload.type === 'message_stop') {
+        if (!VALID_STOP_REASONS.has(stopReason)) {
+          throw new Error('Anthropic message_stop received without a valid stop reason.');
+        }
+        messageStopped = true;
+        if (payload.message?.usage) usage = { ...usage, ...payload.message.usage };
       }
-      splitAt = buffer.indexOf('\n\n');
     }
   }
+
+  if (!messageStopped) throw new Error('Anthropic stream ended before message_stop.');
 
   return {
     text,

@@ -41,6 +41,12 @@ inside a hosted Hermes container is not publicly reachable on its own port.
 2. Review the file list and the rendered source-page previews, and read the stated number of billable calls (three per file).
 3. Click **Compare OCR** once. Files are compared one at a time in the order selected; within a file, the three models run in parallel.
 4. Select **View** on a file in the list to review its three outputs and field differences. Download the JSON report if you want to retain the results; it contains a `files` array with one entry per finished file.
+5. To intentionally compare again, change the effort buttons and click **Compare OCR** again.
+   Prepared files are reused without rendering or selecting them again, including
+   files that finished, failed, or were not run. Each rerun refreshes server
+   settings and makes three new billable model calls per usable file. It replaces
+   the previous results. Changing effort alone never starts a comparison, and
+   overlapping comparisons are blocked.
 
 Limits: 10 files per selection, and 60 pages and 12,000,000 bytes of rendered
 image data per file. The page limit applies to each file separately, not to the
@@ -65,11 +71,15 @@ The server lists the levels each model accepts; the browser sends one level per
 model with each comparison, and the server rejects any level a model does not
 accept before calling a provider. A column you have not clicked follows the
 server's level; a level you picked is kept until the page reloads, or reset (with
-a note under the buttons) if the server stops offering it.
+a note under the buttons) if the server changes the model or stops offering it.
+Metadata errors stay visible through file selection and control updates until
+current credentials successfully load valid settings. Editing or clearing the
+password invalidates pending loads; stale responses cannot restore the buttons.
+Supported picks for the same model survive a successful refresh.
 
 | Column | Levels | Starts at | Sent as |
 | --- | --- | --- | --- |
-| Current Gemini | `minimal`, `low`, `medium`, `high` (no `minimal` for 3.7/3.8 Flash or Pro baselines; plus `default` when `GEMINI_THINKING_LEVEL` is unset) | the configured level, or `default` | `thinkingLevel`; `default` sends none |
+| Current Gemini | `minimal`, `low`, `medium`, `high` (only `minimal`/`high` for `gemini-3.1-flash-lite-image`; no `minimal` for 3.7/3.8 Flash or Pro baselines; plus `default` when `GEMINI_THINKING_LEVEL` is unset) | the configured level, or `default` | `thinkingLevel`; `default` sends none |
 | Gemini 3.8 Flash | `low`, `medium`, `high` (3.8 Flash rejects `minimal`) | `medium` | `thinkingLevel` |
 | Claude Haiku 5.5 | `low`, `medium`, `high`, `xhigh`, `max` | `medium` | `output_config.effort` |
 
@@ -81,7 +91,15 @@ saved as `effort` in the JSON report.
 
 Accuracy is scored in the browser against the document's embedded text. Images and text-free scans have no score. The text is not uploaded.
 
-- Every PDF is rendered into PNG pages in the browser at scale 2 before upload.
+- Every PDF is rendered in the browser at scale 2 before upload. All pages stay
+  lossless PNG when their combined size fits 12,000,000 bytes, regardless of
+  page order. Only an oversized aggregate triggers JPEG encoding of the largest
+  pages, at the same scale. The browser tries quality 0.92 through 0.45, using
+  the highest quality that resolves the remaining deficit or the smallest
+  beneficial encoding when more pages must contribute savings. PNG is retained
+  when it is smaller. A file is rejected if the aggregate still exceeds the cap
+  after every page's available savings. Rendering canvases are released after
+  each page; only page blobs are retained until the final encodings are chosen.
   Neither model receives the original PDF or its hidden/searchable text layer.
 - All three models receive the exact same rendered images, in the same order,
   with the shared `ABSTRACTION_PROMPT` and the same output-token limit. The lab

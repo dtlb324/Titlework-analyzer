@@ -24,14 +24,14 @@ function labMaxTokens() {
   return Number.isInteger(raw) && raw >= MIN_LAB_MAX_TOKENS && raw <= MAX_LAB_MAX_TOKENS ? raw : DEFAULT_LAB_MAX_TOKENS;
 }
 
-// Effort levels each lab model accepts. Gemini 3.7/3.8 Flash and Pro reject
-// `minimal`; other Gemini 3 models accept all four thinking levels. Haiku 5.5
-// takes output_config.effort with five levels.
+// Exact-model exception from https://ai.google.dev/gemini-api/docs/generate-content/thinking.
+// Keep the existing Flash/Pro rules and fallback for other baseline IDs.
+const GEMINI_EFFORTS = new Map([['gemini-3.1-flash-lite-image', ['minimal', 'high']]]);
 const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*-pro(?:-|$))/i;
 const HAIKU_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function geminiEfforts(model) {
-  return GEMINI_NO_MINIMAL.test(model) ? ['low', 'medium', 'high'] : ['minimal', 'low', 'medium', 'high'];
+  return GEMINI_EFFORTS.get(model.toLowerCase()) || (GEMINI_NO_MINIMAL.test(model) ? ['low', 'medium', 'high'] : ['minimal', 'low', 'medium', 'high']);
 }
 
 function withEffort(model, effort) {
@@ -48,10 +48,16 @@ function models() {
     throw error;
   }
   // 'default' omits thinkingLevel so the provider's own default applies.
+  const configuredRaw = String(process.env.GEMINI_THINKING_LEVEL || '').trim();
   const configured = resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default';
   const baselineLevels = geminiEfforts(config.model);
+  if (configuredRaw && !baselineLevels.includes(configured)) {
+    const error = new Error(`GEMINI_THINKING_LEVEL ${JSON.stringify(configuredRaw)} is not supported by ${config.model}.`);
+    error.statusCode = 503;
+    throw error;
+  }
   return [
-    withEffort({ id: config.model, label: 'Current Gemini', effortLevels: baselineLevels.includes(configured) ? baselineLevels : [configured, ...baselineLevels], maxTokens }, configured),
+    withEffort({ id: config.model, label: 'Current Gemini', effortLevels: configured === 'default' ? ['default', ...baselineLevels] : baselineLevels, maxTokens }, configured),
     withEffort({ id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', effortLevels: geminiEfforts('gemini-3.8-flash'), maxTokens }, 'medium'),
     withEffort({ id: HAIKU_ID, label: 'Claude Haiku 5.5', effortLevels: HAIKU_EFFORTS, maxTokens }, 'medium'),
   ];

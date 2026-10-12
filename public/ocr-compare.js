@@ -11,22 +11,22 @@ async function encodePage(blob, width, height) {
   return { mediaType: blob.type, data: btoa(binary), blob, width, height };
 }
 
-// Lossless PNG while the page fits its share of the remaining byte budget (the
-// whole file's budget split across the pages still to render); otherwise the
-// same pixels as JPEG at the highest quality that fits. This is what lets a
-// 60-page scan fit the 12 MB cap without lowering the render scale.
 const JPEG_QUALITIES = [0.92, 0.85, 0.75, 0.65, 0.55, 0.45];
 
-async function encodeRenderedPage(canvas, index, budget) {
+async function encodeRenderedPage(canvas, index, png, deficit) {
   const toBlob = (type, quality) => new Promise(resolve => canvas.toBlob(resolve, type, quality));
-  const png = await toBlob('image/png');
-  if (!png) throw new Error(`Could not encode PDF page ${index}.`);
-  if (png.size <= budget) return png;
+  if (!png) {
+    const blob = await toBlob('image/png');
+    if (!blob) throw new Error(`Could not encode PDF page ${index}.`);
+    return blob;
+  }
+  let smallest = png;
   for (const quality of JPEG_QUALITIES) {
     const jpeg = await toBlob('image/jpeg', quality);
-    if (jpeg && jpeg.size <= budget) return jpeg;
+    if (jpeg && jpeg.size < smallest.size) smallest = jpeg;
+    if (png.size - smallest.size >= deficit) return smallest;
   }
-  throw new Error('Rendered PDF page images exceed the total 12 MB limit.');
+  return smallest;
 }
 
 export async function prepareDocument(file, deps = {}) {
@@ -54,21 +54,38 @@ export async function prepareDocument(file, deps = {}) {
   try {
     const pdf = await task.promise;
     if (pdf.numPages > LIMITS.maxPages) throw new Error(`PDF exceeds the ${LIMITS.maxPages} pages limit.`);
-    for (let index = 1; index <= pdf.numPages; index++) {
+    const renderPage = async (index, png, deficit) => {
       const page = await pdf.getPage(index);
-      const viewport = page.getViewport({ scale: LIMITS.renderScale });
-      const canvas = deps.createCanvas ? deps.createCanvas() : document.createElement('canvas');
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
+      let canvas;
       try {
+        const viewport = page.getViewport({ scale: LIMITS.renderScale });
+        canvas = deps.createCanvas ? deps.createCanvas() : document.createElement('canvas');
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
         await page.render({ canvasContext: canvas.getContext('2d'), viewport, background: '#ffffff' }).promise;
-        const blob = await encodeRenderedPage(canvas, index, Math.floor((LIMITS.maxBytes - totalBytes) / (pdf.numPages - index + 1)));
-        totalBytes += blob.size;
-        if (totalBytes > LIMITS.maxBytes) throw new Error('Rendered PDF page images exceed the total 12 MB limit.');
-        pages.push(await encodePage(blob, canvas.width, canvas.height));
-      } finally { canvas.width = 0; canvas.height = 0; page.cleanup(); }
+        const blob = await encodeRenderedPage(canvas, index, png, deficit);
+        return { blob, width: canvas.width, height: canvas.height };
+      } finally { if (canvas) { canvas.width = 0; canvas.height = 0; } page.cleanup(); }
+    };
+    for (let index = 1; index <= pdf.numPages; index++) {
+      const page = await renderPage(index);
+      pages.push(page);
+      totalBytes += page.blob.size;
     }
-    return pages;
+    if (totalBytes > LIMITS.maxBytes) {
+      const largestFirst = pages.map((page, index) => index).sort((a, b) => pages[b].blob.size - pages[a].blob.size || a - b);
+      for (const index of largestFirst) {
+        const png = pages[index].blob;
+        const page = await renderPage(index + 1, png, totalBytes - LIMITS.maxBytes);
+        totalBytes += page.blob.size - png.size;
+        pages[index] = page;
+        if (totalBytes <= LIMITS.maxBytes) break;
+      }
+      if (totalBytes > LIMITS.maxBytes) throw new Error('Rendered PDF page images exceed the total 12 MB limit.');
+    }
+    const encoded = [];
+    for (const page of pages) encoded.push(await encodePage(page.blob, page.width, page.height));
+    return encoded;
   } finally { await task.destroy(); }
 }
 
@@ -104,14 +121,16 @@ export function createCompareUI(deps = {}) {
   // status: preparing | ready | error | running | done | failed | skipped
   let entries = [], selected = 0, report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
+  const canCompare = entry => entry.pages?.length > 0 && !['preparing', 'error', 'running'].includes(entry.status);
   // Server-owned effort options per model slot. `efforts` is the level for the next comparison;
   // `picked` marks columns the user clicked, which keep their level across metadata refreshes.
   let effortModels = [], efforts = [], picked = [], effortNotes = [];
+  let metadataState = { status: 'idle', generation: 0, error: '' };
   const updateControls = () => {
     el.compare.disabled = busy || preparing;
     el.document.disabled = busy;
     el.password.disabled = busy;
-    if (effortModels.length) renderEfforts();
+    renderEfforts();
   };
   const node = (tag, text, className) => {
     const item = doc.createElement(tag);
@@ -244,6 +263,14 @@ export function createCompareUI(deps = {}) {
     renderResult();
   }
   const renderEfforts = () => {
+    if (metadataState.error) {
+      effortBars.forEach(bar => bar?.replaceChildren(node('p', metadataState.error, 'error')));
+      return;
+    }
+    if (metadataState.status !== 'ready') {
+      effortBars.forEach(bar => bar?.replaceChildren(node('p', metadataState.status === 'loading' ? 'Loading effort levels…' : 'Enter the application password to load effort levels.', 'muted')));
+      return;
+    }
     effortBars.forEach((bar, index) => {
       const model = effortModels[index];
       if (!bar || !model) return;
@@ -254,7 +281,7 @@ export function createCompareUI(deps = {}) {
         button.setAttribute('aria-pressed', String(level === efforts[index]));
         button.disabled = busy;
         button.addEventListener('click', () => {
-          if (busy) return;
+          if (busy || metadataState.status !== 'ready') return;
           efforts[index] = level;
           picked[index] = true;
           effortNotes[index] = '';
@@ -265,7 +292,10 @@ export function createCompareUI(deps = {}) {
       if (effortNotes[index]) bar.append(node('p', effortNotes[index], 'muted'));
     });
   };
-  const showEffortError = message => effortBars.forEach(bar => bar?.replaceChildren(node('p', message, 'error')));
+  const showEffortError = message => {
+    metadataState = { ...metadataState, status: 'error', error: message };
+    renderEfforts();
+  };
   // Untouched columns follow the server's level; a pick survives only while the same model still offers it.
   const applyEffortMetadata = models => {
     effortNotes = models.map((model, index) => picked[index] && (effortModels[index]?.id !== model.id || !model.effortLevels.includes(efforts[index]))
@@ -273,22 +303,38 @@ export function createCompareUI(deps = {}) {
     picked = models.map((model, index) => Boolean(picked[index]) && !effortNotes[index]);
     efforts = models.map((model, index) => picked[index] ? efforts[index] : model.effort);
     effortModels = models;
+    metadataState = { ...metadataState, status: 'ready', error: '' };
     renderEfforts();
   };
   const validMetadata = metadata => Array.isArray(metadata.models) && metadata.models.length === MODEL_COUNT && metadata.renderScale === LIMITS.renderScale && Number.isInteger(metadata.maxPages) && metadata.maxPages >= 1 && Number.isInteger(metadata.maxBytes) && metadata.maxBytes >= 1 && metadata.models.every(model => model.maxTokens === metadata.models[0].maxTokens && Array.isArray(model.effortLevels) && model.effortLevels.length && model.effortLevels.every(level => typeof level === 'string') && model.effortLevels.includes(model.effort));
-  let effortLoad = 0;
-  el.password.addEventListener('change', async () => {
-    if (!el.password.value || busy) return;
-    const current = ++effortLoad;
+  const invalidateMetadata = () => {
+    metadataState = { ...metadataState, status: metadataState.error ? 'error' : 'idle', generation: metadataState.generation + 1 };
+    renderEfforts();
+  };
+  const loadMetadata = async headers => {
+    const current = metadataState.generation + 1;
+    metadataState = { ...metadataState, status: 'loading', generation: current };
+    renderEfforts();
     try {
-      const response = await request('/api/ocr-compare', { method: 'GET', headers: { 'x-app-password': el.password.value } });
+      const response = await request('/api/ocr-compare', { method: 'GET', headers });
       if (!response.ok) throw await httpError(response);
       const metadata = await response.json();
+      if (current !== metadataState.generation) return null;
       if (!validMetadata(metadata)) throw new Error('Unsupported server comparison configuration.');
-      if (current === effortLoad && !busy) applyEffortMetadata(metadata.models);
+      applyEffortMetadata(metadata.models);
+      return metadata;
     } catch (error) {
-      if (current === effortLoad && !busy) showEffortError(`Could not load effort levels: ${error.message}`);
+      if (current !== metadataState.generation) return null;
+      showEffortError(`Could not load effort levels: ${error.message}`);
+      throw error;
     }
+  };
+  el.password.addEventListener('input', invalidateMetadata);
+  el.password.addEventListener('change', async () => {
+    invalidateMetadata();
+    if (!el.password.value || busy) return;
+    try { await loadMetadata({ 'x-app-password': el.password.value }); }
+    catch { /* The metadata state renders the error separately from document status. */ }
   });
   const clearResults = () => {
     report = undefined;
@@ -358,27 +404,22 @@ export function createCompareUI(deps = {}) {
   el['compare-form'].addEventListener('submit', async event => {
     event.preventDefault();
     if (busy || preparing) return;
-    if (!entries.some(entry => entry.status === 'ready') || !el.password.value) { el.status.textContent = 'Choose a valid document and enter the application password.'; return; }
+    if (!entries.some(canCompare) || !el.password.value) { el.status.textContent = 'Choose a valid document and enter the application password.'; return; }
+    const runnable = entries.filter(canCompare);
     clearResults();
     const current = generation;
-    const runnable = entries.filter(entry => entry.status === 'ready');
     busy = true;
     updateControls();
     el.status.textContent = 'Loading server model settings…';
     const headers = { 'x-app-password': el.password.value };
     try {
-      const metadataResponse = await request('/api/ocr-compare', { method: 'GET', headers });
-      if (!metadataResponse.ok) throw await httpError(metadataResponse);
-      const metadata = await metadataResponse.json();
-      if (current !== generation) return;
-      if (!validMetadata(metadata)) throw new Error('Unsupported server comparison configuration.');
+      const metadata = await loadMetadata(headers);
+      if (!metadata || current !== generation) return;
       for (const entry of runnable) {
         if (entry.pages.length > Math.min(LIMITS.maxPages, metadata.maxPages)) throw new Error(`${entry.file.name}: document exceeds the server page limit.`);
         const byteCount = entry.pages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
         if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error(`${entry.file.name}: document exceeds the server image byte limit.`);
       }
-      effortLoad++;
-      applyEffortMetadata(metadata.models);
       const chosen = [...efforts];
       el.settings.textContent = metadata.models.map((model, index) => `${model.label}: ${model.id} · effort ${chosen[index]} · max output ${model.maxTokens} tokens`).join('\n');
       let halted = null;
