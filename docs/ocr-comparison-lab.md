@@ -63,12 +63,13 @@ runs files sequentially for this reason); this is not a cross-instance quota.
 
 The server lists the levels each model accepts; the browser sends one level per
 model with each comparison, and the server rejects any level a model does not
-accept before calling a provider. Selections are not saved and reset when the
-page reloads.
+accept before calling a provider. A column you have not clicked follows the
+server's level; a level you picked is kept until the page reloads, or reset (with
+a note under the buttons) if the server stops offering it.
 
 | Column | Levels | Starts at | Sent as |
 | --- | --- | --- | --- |
-| Current Gemini | `minimal`, `low`, `medium`, `high` (plus `default` when `GEMINI_THINKING_LEVEL` is unset) | the configured level, or `default` | `thinkingLevel`; `default` sends none |
+| Current Gemini | `minimal`, `low`, `medium`, `high` (no `minimal` for 3.7/3.8 Flash or Pro baselines; plus `default` when `GEMINI_THINKING_LEVEL` is unset) | the configured level, or `default` | `thinkingLevel`; `default` sends none |
 | Gemini 3.8 Flash | `low`, `medium`, `high` (3.8 Flash rejects `minimal`) | `medium` | `thinkingLevel` |
 | Claude Haiku 5.5 | `low`, `medium`, `high`, `xhigh`, `max` | `medium` | `output_config.effort` |
 

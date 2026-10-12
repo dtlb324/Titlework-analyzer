@@ -68,6 +68,16 @@ test('a configured baseline thinking level is preselected without a separate def
   assert.deepEqual(baseline.effortLevels, ['minimal', 'low', 'medium', 'high']);
 });
 
+test('baselines that reject minimal get no minimal button', () => {
+  const levels = model => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `import { createOcrCompareHandler } from './api/ocr-compare.js'; const res={setHeader(){},status(code){this.code=code;return this;},json(body){console.log(JSON.stringify(body.models[0].effortLevels));}}; await createOcrCompareHandler()({method:'GET',headers:{'x-app-password':'ocr-test-password'},socket:{}},res);`], { encoding: 'utf8', env: { ...process.env, ABSTRACT_MODEL: model, GEMINI_THINKING_LEVEL: '' } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  for (const model of ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-3-pro-preview']) assert.ok(!levels(model).includes('minimal'), model);
+  for (const model of ['gemini-3.8-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.6-flash']) assert.ok(levels(model).includes('minimal'), model);
+});
+
 test('the default baseline effort omits thinkingLevel so the provider default applies', async () => {
   const calls = [];
   await withServer(async base => {

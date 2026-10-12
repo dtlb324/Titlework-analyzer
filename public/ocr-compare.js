@@ -104,8 +104,9 @@ export function createCompareUI(deps = {}) {
   // status: preparing | ready | error | running | done | failed | skipped
   let entries = [], selected = 0, report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
-  // Server-owned effort options per model slot; `efforts` holds the level selected for the next comparison.
-  let effortModels = [], efforts = [];
+  // Server-owned effort options per model slot. `efforts` is the level for the next comparison;
+  // `picked` marks columns the user clicked, which keep their level across metadata refreshes.
+  let effortModels = [], efforts = [], picked = [], effortNotes = [];
   const updateControls = () => {
     el.compare.disabled = busy || preparing;
     el.document.disabled = busy;
@@ -245,6 +246,7 @@ export function createCompareUI(deps = {}) {
   const renderEfforts = () => {
     effortBars.forEach((bar, index) => {
       const model = effortModels[index];
+      if (!bar || !model) return;
       bar.replaceChildren();
       for (const level of model.effortLevels) {
         const button = node('button', level);
@@ -254,15 +256,22 @@ export function createCompareUI(deps = {}) {
         button.addEventListener('click', () => {
           if (busy) return;
           efforts[index] = level;
+          picked[index] = true;
+          effortNotes[index] = '';
           renderEfforts();
         });
         bar.append(button);
       }
+      if (effortNotes[index]) bar.append(node('p', effortNotes[index], 'muted'));
     });
   };
-  // Keeps a selection while the server still offers it; otherwise falls back to the server's level.
+  const showEffortError = message => effortBars.forEach(bar => bar?.replaceChildren(node('p', message, 'error')));
+  // Untouched columns follow the server's level; a pick survives only while the same model still offers it.
   const applyEffortMetadata = models => {
-    efforts = models.map((model, index) => effortModels[index]?.id === model.id && model.effortLevels.includes(efforts[index]) ? efforts[index] : model.effort);
+    effortNotes = models.map((model, index) => picked[index] && (effortModels[index]?.id !== model.id || !model.effortLevels.includes(efforts[index]))
+      ? `Your ${efforts[index]} selection is not available for ${model.id}; reset to ${model.effort}.` : '');
+    picked = models.map((model, index) => Boolean(picked[index]) && !effortNotes[index]);
+    efforts = models.map((model, index) => picked[index] ? efforts[index] : model.effort);
     effortModels = models;
     renderEfforts();
   };
@@ -278,7 +287,7 @@ export function createCompareUI(deps = {}) {
       if (!validMetadata(metadata)) throw new Error('Unsupported server comparison configuration.');
       if (current === effortLoad && !busy) applyEffortMetadata(metadata.models);
     } catch (error) {
-      if (current === effortLoad && !busy) el.status.textContent = `Could not load effort levels: ${error.message}`;
+      if (current === effortLoad && !busy) showEffortError(`Could not load effort levels: ${error.message}`);
     }
   });
   const clearResults = () => {

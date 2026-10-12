@@ -300,6 +300,50 @@ test('effort buttons are locked while a comparison runs', async () => {
   assert.ok(effortButtons(h.elements['candidate-effort']).every(button => !button.disabled));
 });
 
+test('a failed effort-level load is shown under the buttons and never replaces the document status', async () => {
+  const h = harness();
+  const base = h.deps.fetch;
+  let reject = true;
+  h.deps.fetch = async (url, options) => reject && options.method === 'GET' ? { ok: false, status: 401, json: async () => ({}) } : base(url, options);
+  ui.createCompareUI(h.deps);
+  await selected(h);
+  const status = h.elements.status.textContent;
+  h.elements.password.value = 'wrong';
+  await h.elements.password.fire('change');
+  assert.equal(h.elements.status.textContent, status, 'document status is not overwritten');
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  reject = false;
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  assert.doesNotMatch(allText(h.elements['candidate-effort']), /Could not load/, 'error clears once the right password loads levels');
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['medium']);
+});
+
+test('untouched columns follow a server level change while picked columns keep their level', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  await effortButtons(h.elements['challenger-effort']).find(button => button.textContent === 'high').fire('click');
+  h.models[0].effort = 'low';
+  h.models[1].effort = 'high';
+  await selected(h);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(JSON.parse(h.calls.find(call => call.method === 'POST').body).efforts, ['low', 'high', 'high']);
+});
+
+test('a picked level the server no longer offers resets with a note', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  await effortButtons(h.elements['challenger-effort']).find(button => button.textContent === 'max').fire('click');
+  h.models[2].effortLevels = ['low', 'medium', 'high'];
+  await h.elements.password.fire('change');
+  assert.deepEqual(pressed(h.elements['challenger-effort']), ['medium']);
+  assert.match(allText(h.elements['challenger-effort']), /max selection is not available for claude-haiku-5-5; reset to medium/);
+});
+
 test('metadata without effort options is rejected before any billable POST', async () => {
   const h = harness();
   h.models.forEach(model => { delete model.effortLevels; });

@@ -27,7 +27,7 @@ function labMaxTokens() {
 // Effort levels each lab model accepts. Gemini 3.7/3.8 Flash and Pro reject
 // `minimal`; other Gemini 3 models accept all four thinking levels. Haiku 5.5
 // takes output_config.effort with five levels.
-const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*pro)/i;
+const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*-pro(?:-|$))/i;
 const HAIKU_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function geminiEfforts(model) {
