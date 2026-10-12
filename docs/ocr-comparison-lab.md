@@ -16,7 +16,7 @@ In your git-ignored `.env.local`, configure:
 - `ANTHROPIC_API_KEY` — for Claude Haiku 5.5. If it is missing, only the Haiku
   column reports an error; the Gemini results are still returned
 - Optional `ABSTRACT_MODEL` — baseline model override, restricted to Gemini 3-series
-- Optional `OCR_COMPARE_MAX_TOKENS` — shared output-token limit (default 8000)
+- Optional `OCR_COMPARE_MAX_TOKENS` — shared output-token limit, including thinking tokens (default 16000)
 
 The isolated lab rejects other baseline models (including Gemini 2.5) with
 HTTP 503 for both metadata and comparisons, before starting either provider.
@@ -40,7 +40,7 @@ inside a hosted Hermes container is not publicly reachable on its own port.
 3. Click **Compare OCR** once. Files are compared one at a time in the order selected; within a file, the three models run in parallel.
 4. Select **View** on a file in the list to review its three outputs and field differences. Download the JSON report if you want to retain the results; it contains a `files` array with one entry per finished file.
 
-Limits: 10 files per selection, and 10 pages and 12,000,000 bytes of rendered
+Limits: 10 files per selection, and 60 pages and 12,000,000 bytes of rendered
 image data per file. The page limit applies to each file separately, not to the
 whole selection. Use one recorded instrument per file; the models abstract only
 the first instrument they find in a file.
@@ -65,13 +65,14 @@ Accuracy is scored in the browser against the document's embedded text. Images a
   Neither model receives the original PDF or its hidden/searchable text layer.
 - All three models receive the exact same rendered images, in the same order,
   with the shared `ABSTRACTION_PROMPT` and the same output-token limit. The lab
-  limit is 8,000 by default (set `OCR_COMPARE_MAX_TOKENS`, 512–8192, to change
+  limit is 16,000 by default (set `OCR_COMPARE_MAX_TOKENS`, 512–32000, to change
   it) rather than production's roughly 2,000: a multi-page upload can contain
-  several instruments, and Haiku 5.5's thinking tokens count against the same
-  limit. Output cut off by the limit is flagged in the UI as truncated.
+  several instruments, and medium-effort thinking tokens (Gemini 3.8 Flash and
+  Haiku 5.5) count against the same limit. Above 8,192 Anthropic requires
+  streaming, so the lab streams Haiku calls automatically. Output cut off by the limit is flagged in the UI as truncated.
 - The baseline uses the configured production Gemini thinking level, or the
-  provider default if none is set. 3.8 Flash explicitly uses `low` because it
-  does not support `minimal`. Haiku 5.5 always runs with adaptive thinking; the
+  provider default if none is set. 3.8 Flash explicitly uses `medium` (it does not
+  support `minimal`). Haiku 5.5 always runs with adaptive thinking; the
   lab sets `output_config.effort` to `medium`. Sampling parameters are not sent
   (Haiku 5.5 rejects non-default values). Its
   `output_tokens` already include any thinking tokens; the thinking count shown

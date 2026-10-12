@@ -32,12 +32,12 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
     assert.match(response.headers.get('content-type'), /application\/json/);
     const config = await response.json();
     assert.deepEqual(config.models.map(model => model.id), ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'claude-haiku-5-5']);
-    assert.equal(config.models[1].thinkingLevel, 'low');
+    assert.equal(config.models[1].thinkingLevel, 'medium');
     assert.equal(config.models[2].label, 'Claude Haiku 5.5');
     assert.equal(config.models[2].effort, 'medium');
     assert.equal(config.models[2].thinkingLevel, 'adaptive, effort medium');
-    assert.deepEqual(config.models.map(model => model.maxTokens), [8000, 8000, 8000], 'lab limit is shared and larger than production\'s 2,000');
-    assert.equal(config.maxPages, 10);
+    assert.deepEqual(config.models.map(model => model.maxTokens), [16000, 16000, 16000], 'lab limit is shared and larger than production\'s 2,000');
+    assert.equal(config.maxPages, 60);
     assert.equal(config.maxBytes, 12_000_000);
   });
 });
@@ -80,7 +80,7 @@ test('one upload starts all models concurrently with identical visual input and 
       assert.equal(calls[0].system, calls[1].system);
       assert.match(calls[0].system, /expert oil and gas title attorney/);
       assert.equal(calls[0].messages[0].content[0].source.data, PNG);
-      assert.equal(calls[1].thinkingLevel, 'low');
+      assert.equal(calls[1].thinkingLevel, 'medium');
     } finally { releases.forEach(resolve => resolve()); }
     const response = await pending;
     assert.equal(response.status, 200);
@@ -128,6 +128,20 @@ test('rendered PDF pages are all sent as images despite the original .pdf filena
   }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
 });
 
+test('accepts 60 rendered pages and rejects 61 without calling providers', async () => {
+  const calls = [];
+  await withServer(async base => {
+    const ok = await request(base, { method: 'POST', body: JSON.stringify({ filename: 'long.pdf', pages: Array.from({ length: 60 }, () => document.pages[0]) }) });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).pageCount, 60);
+    assert.equal(calls.length, 3);
+    for (const call of calls) assert.equal(call.messages[0].content.filter(block => block.type === 'image').length, 60);
+    const tooMany = await request(base, { method: 'POST', body: JSON.stringify({ filename: 'long.pdf', pages: Array.from({ length: 61 }, () => document.pages[0]) }) });
+    assert.equal(tooMany.status, 400);
+    assert.equal(calls.length, 3);
+  }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
+});
+
 test('handler itself fails closed without APP_PASSWORD even outside production', async () => {
   const handler = createOcrCompareHandler();
   const response = { setHeader() {}, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
@@ -161,7 +175,7 @@ test('a failed model is sanitized and does not discard the other output or retry
 test('invalid, non-image and excessive page inputs are rejected before provider calls', async () => {
   let calls = 0;
   await withServer(async base => {
-    const invalid = [null, {}, { ...document, filename: '' }, { ...document, pages: [] }, { ...document, pages: Array(11).fill(document.pages[0]) }, { ...document, pages: [{ mediaType: 'application/pdf', data: PNG }] }, { ...document, pages: [{ mediaType: 'image/png', data: 'not base64' }] }, { ...document, pages: [{ mediaType: 'image/png', data: Buffer.from('plain text').toString('base64') }] }];
+    const invalid = [null, {}, { ...document, filename: '' }, { ...document, pages: [] }, { ...document, pages: Array(61).fill(document.pages[0]) }, { ...document, pages: [{ mediaType: 'application/pdf', data: PNG }] }, { ...document, pages: [{ mediaType: 'image/png', data: 'not base64' }] }, { ...document, pages: [{ mediaType: 'image/png', data: Buffer.from('plain text').toString('base64') }] }];
     for (const body of invalid) assert.equal((await request(base, { method: 'POST', body: JSON.stringify(body) })).status, 400);
     assert.equal(calls, 0);
   }, { ocrCompareModelClient: async () => { calls++; return {}; } });
@@ -198,6 +212,7 @@ test('the lab uses direct Gemini and direct Anthropic even when production provi
   delete process.env.OPENROUTER_API_KEY;
   process.env.MODEL_PROVIDER = 'openrouter';
   process.env.GEMINI_THINKING_LEVEL = 'minimal';
+  process.env.OCR_COMPARE_MAX_TOKENS = '8000'; // non-streaming Claude path; streaming is covered separately
   globalThis.fetch = async (url, options) => {
     if (String(url) === 'https://api.anthropic.com/v1/messages') {
       anthropicCalls.push({ headers: options.headers, body: JSON.parse(options.body) });
@@ -215,7 +230,7 @@ test('the lab uses direct Gemini and direct Anthropic even when production provi
       assert.equal(providerCalls.length, 2, 'two Gemini calls; Haiku goes to Anthropic');
       assert.match(providerCalls[1].url, /gemini-3\.8-flash:generateContent$/);
       assert.equal(providerCalls[0].body.generationConfig.thinkingConfig.thinkingLevel, 'minimal');
-      assert.equal(providerCalls[1].body.generationConfig.thinkingConfig.thinkingLevel, 'low');
+      assert.equal(providerCalls[1].body.generationConfig.thinkingConfig.thinkingLevel, 'medium');
       assert.deepEqual(providerCalls[0].body.contents, providerCalls[1].body.contents);
       assert.equal(report.models[0].text, 'GRANTOR: API Fixture');
       assert.equal(anthropicCalls.length, 1);
@@ -238,6 +253,7 @@ test('the lab uses direct Gemini and direct Anthropic even when production provi
     delete process.env.GEMINI_API_KEY;
     delete process.env.MODEL_PROVIDER;
     delete process.env.GEMINI_THINKING_LEVEL;
+    delete process.env.OCR_COMPARE_MAX_TOKENS;
   }
 });
 
@@ -320,7 +336,30 @@ test('OCR_COMPARE_MAX_TOKENS overrides the shared limit and invalid values fall 
     return JSON.parse(result.stdout);
   };
   assert.deepEqual(run('4096'), [4096, 4096, 4096]);
-  for (const bad of ['100', '9000', 'abc', '']) assert.deepEqual(run(bad), [8000, 8000, 8000], `value ${bad}`);
+  assert.deepEqual(run('32000'), [32000, 32000, 32000]);
+  for (const bad of ['100', '32001', 'abc', '']) assert.deepEqual(run(bad), [16000, 16000, 16000], `value ${bad}`);
+});
+
+test('Claude is streamed with effort above the 8192 non-streaming limit, and sent non-streaming at or below it', async () => {
+  const run = async maxTokens => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { createOcrCompareHandler } from './api/ocr-compare.js';
+      const sse = events => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(events.join('\\n\\n') + '\\n\\n')); c.close(); } }), { status: 200 });
+      globalThis.fetch = async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (String(url).includes('anthropic')) { console.log('CLAUDE ' + JSON.stringify({ stream: body.stream === true, effort: body.output_config?.effort, max: body.max_tokens })); if (body.stream) return sse(['event: message_start\\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":100}}}', 'event: content_block_delta\\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"GRANTOR: S"}}', 'event: message_delta\\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}']); return new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'GRANTOR: S' }], usage: { input_tokens: 100, output_tokens: 9 } }), { status: 200 }); }
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'GRANTOR: S' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }), { status: 200 });
+      };
+      const res = { setHeader() {}, status(c) { this.code = c; return this; }, json(b) { if (b.models?.[2]?.usage) console.log('USAGE ' + JSON.stringify(b.models[2].usage)); } };
+      await createOcrCompareHandler()({ method: 'POST', headers: { 'x-app-password': 'ocr-test-password', 'content-type': 'application/json' }, socket: {}, body: { filename: 'a.png', pages: [{ mediaType: 'image/png', data: '${PNG}' }] } }, res);
+    `], { encoding: 'utf8', env: { ...process.env, OCR_COMPARE_MAX_TOKENS: String(maxTokens), ANTHROPIC_API_KEY: 'test-key', GEMINI_API_KEY: 'test-key', APP_PASSWORD: 'ocr-test-password', OCR_COMPARE_ENABLED: 'true' } });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const streamed = await run(16000);
+  assert.match(streamed, /CLAUDE \{"stream":true,"effort":"medium","max":16000\}/);
+  assert.match(streamed, /USAGE \{[^}]*"input_tokens":100[^}]*"output_tokens":9/, 'streamed usage keeps input tokens for cost');
+  assert.match(await run(8192), /CLAUDE \{"stream":false,"effort":"medium","max":8192\}/);
 });
 
 test('Haiku thinking tokens are shown from output_tokens_details without being billed twice', async () => {

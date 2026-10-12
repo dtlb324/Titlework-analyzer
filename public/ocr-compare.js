@@ -1,6 +1,6 @@
 import { assessAccuracy, scoreModel } from './ocr-accuracy.js';
 
-const LIMITS = { maxPages: 10, maxBytes: 12000000, renderScale: 2 };
+const LIMITS = { maxPages: 60, maxBytes: 12000000, renderScale: 2 };
 const MODEL_COUNT = 3;
 const MAX_FILES = 10;
 
@@ -9,6 +9,24 @@ async function encodePage(blob, width, height) {
   let binary = '';
   for (let index = 0; index < bytes.length; index += 32768) binary += String.fromCharCode(...bytes.subarray(index, index + 32768));
   return { mediaType: blob.type, data: btoa(binary), blob, width, height };
+}
+
+// Lossless PNG while the page fits its share of the remaining byte budget (the
+// whole file's budget split across the pages still to render); otherwise the
+// same pixels as JPEG at the highest quality that fits. This is what lets a
+// 60-page scan fit the 12 MB cap without lowering the render scale.
+const JPEG_QUALITIES = [0.92, 0.85, 0.75, 0.65, 0.55, 0.45];
+
+async function encodeRenderedPage(canvas, index, budget) {
+  const toBlob = (type, quality) => new Promise(resolve => canvas.toBlob(resolve, type, quality));
+  const png = await toBlob('image/png');
+  if (!png) throw new Error(`Could not encode PDF page ${index}.`);
+  if (png.size <= budget) return png;
+  for (const quality of JPEG_QUALITIES) {
+    const jpeg = await toBlob('image/jpeg', quality);
+    if (jpeg && jpeg.size <= budget) return jpeg;
+  }
+  throw new Error('Rendered PDF page images exceed the total 12 MB limit.');
 }
 
 export async function prepareDocument(file, deps = {}) {
@@ -35,7 +53,7 @@ export async function prepareDocument(file, deps = {}) {
   let totalBytes = 0;
   try {
     const pdf = await task.promise;
-    if (pdf.numPages > LIMITS.maxPages) throw new Error('PDF exceeds the 10 pages limit.');
+    if (pdf.numPages > LIMITS.maxPages) throw new Error(`PDF exceeds the ${LIMITS.maxPages} pages limit.`);
     for (let index = 1; index <= pdf.numPages; index++) {
       const page = await pdf.getPage(index);
       const viewport = page.getViewport({ scale: LIMITS.renderScale });
@@ -44,8 +62,7 @@ export async function prepareDocument(file, deps = {}) {
       canvas.height = Math.ceil(viewport.height);
       try {
         await page.render({ canvasContext: canvas.getContext('2d'), viewport, background: '#ffffff' }).promise;
-        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-        if (!blob) throw new Error(`Could not encode PDF page ${index}.`);
+        const blob = await encodeRenderedPage(canvas, index, Math.floor((LIMITS.maxBytes - totalBytes) / (pdf.numPages - index + 1)));
         totalBytes += blob.size;
         if (totalBytes > LIMITS.maxBytes) throw new Error('Rendered PDF page images exceed the total 12 MB limit.');
         pages.push(await encodePage(blob, canvas.width, canvas.height));

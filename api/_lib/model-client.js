@@ -62,7 +62,9 @@ function createDefaultTimeoutSignal(ms) {
 }
 
 export async function invokeAnthropicModelStream(request, options = {}) {
-  const keyError = modelApiKeyError(request.model);
+  const keyError = options.direct
+    ? (anthropicApiKey() ? null : 'ANTHROPIC_API_KEY is required for Claude models.')
+    : modelApiKeyError(request.model);
   if (keyError) {
     const error = new Error(keyError);
     error.statusCode = 503;
@@ -76,6 +78,7 @@ export async function invokeAnthropicModelStream(request, options = {}) {
       maxTokens: request.maxTokens,
       system: request.system,
       messages: request.messages,
+      effort: request.effort,
     }),
     stream: true,
   });

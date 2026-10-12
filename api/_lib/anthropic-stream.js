@@ -63,6 +63,11 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
       if (payload.type === 'message_start' && payload.message?.model) {
         model = payload.message.model;
       }
+      // message_start carries input/cache token counts; later message_delta
+      // usage (cumulative output tokens) is merged over it.
+      if (payload.type === 'message_start' && payload.message?.usage) {
+        usage = { ...usage, ...payload.message.usage };
+      }
       if (payload.type === 'content_block_delta' && payload.delta?.type === 'text_delta') {
         const delta = String(payload.delta.text || '');
         if (delta) {

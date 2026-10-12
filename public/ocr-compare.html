@@ -18,7 +18,7 @@
       <form id="compare-form">
         <div class="controls">
           <div><label for="password">Application password</label><input id="password" type="password" autocomplete="off" required><small>Not saved in browser storage. Provider API keys stay on the server.</small></div>
-          <div><label for="document">Documents (up to 10 PDF, PNG, JPEG or WebP files)</label><input id="document" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" required><small>Each file is compared on its own: up to 10 pages and 12 MB of decoded image bytes after rendering per file. Each file makes three billable model calls.</small></div>
+          <div><label for="document">Documents (up to 10 PDF, PNG, JPEG or WebP files)</label><input id="document" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" required><small>Each file is compared on its own: up to 60 pages and 12 MB of decoded image bytes after rendering per file. Long scans are rendered as JPEG pages (same resolution) to fit that budget. Each file makes three billable model calls.</small></div>
         </div>
         <button id="compare" type="submit">Compare OCR</button>
       </form>

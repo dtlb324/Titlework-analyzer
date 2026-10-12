@@ -56,6 +56,17 @@ test('consumeAnthropicMessageStream ignores malformed blocks', async () => {
   assert(result.text === 'ok', 'Expected lone delta text');
 });
 
+test('consumeAnthropicMessageStream keeps message_start input usage and merges later output usage', async () => {
+  const events = [
+    'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":1200,"cache_read_input_tokens":30,"output_tokens":1}}}',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}',
+  ];
+  const result = await consumeAnthropicMessageStream(mockStreamBody([encodeSse(events)]), {});
+  assert(result.usage.input_tokens === 1200 && result.usage.cache_read_input_tokens === 30, 'Expected input usage from message_start');
+  assert(result.usage.output_tokens === 42, 'Expected final output usage from message_delta');
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {
