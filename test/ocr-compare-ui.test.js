@@ -73,9 +73,9 @@ test('preparation rejects invalid signatures, undecodable images, oversized imag
   await assert.rejects(ui.prepareDocument(new Blob([png], { type: 'image/png' }), { decodeImage: async () => { throw Error('decode failed'); } }), /decode failed/);
   await assert.rejects(ui.prepareDocument(new Blob([png, new Uint8Array(12000000)], { type: 'image/png' })), /12 MB/);
   let destroyed = 0;
-  const pdf = { numPages: 11, getPage: async () => { throw Error('must not render'); } };
+  const pdf = { numPages: 61, getPage: async () => { throw Error('must not render'); } };
   const deps = { loadPdfjs: async () => ({ GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve(pdf), destroy: async () => destroyed++ }) }) };
-  await assert.rejects(ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps), /10 pages/);
+  await assert.rejects(ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps), /60 pages/);
   assert.equal(destroyed, 1);
   pdf.numPages = 2;
   pdf.getPage = async () => ({ getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }), cleanup() {} });
@@ -84,6 +84,28 @@ test('preparation rejects invalid signatures, undecodable images, oversized imag
   pdf.getPage = async () => { throw Error('broken PDF page'); };
   await assert.rejects(ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps), /broken PDF page/);
   assert.equal(destroyed, 3);
+});
+
+test('a 60-page PDF stays inside the byte cap by falling back to JPEG for pages too big as PNG', async () => {
+  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const jpeg = new Uint8Array([255, 216, 255, 224]);
+  const pdf = { numPages: 60, getPage: async () => ({ getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }), cleanup() {} }) };
+  const requested = [];
+  const deps = {
+    loadPdfjs: async () => ({ GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve(pdf), destroy: async () => {} }) }),
+    // 1 MB PNGs exceed the 200 KB-per-page share of 12 MB; JPEG at 0.92 does not.
+    createCanvas: () => ({ getContext: () => ({}), toBlob: (fn, type, quality) => { requested.push([type, quality]); fn(type === 'image/png' ? new Blob([png, new Uint8Array(1000000)], { type }) : new Blob([jpeg, new Uint8Array(150000)], { type })); } })
+  };
+  const pages = await ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps);
+  assert.equal(pages.length, 60);
+  // Early pages don't fit their share as PNG; savings let the last few pages stay lossless.
+  assert.equal(pages[0].mediaType, 'image/jpeg');
+  assert.ok(pages.filter(page => page.mediaType === 'image/jpeg').length >= 50);
+  assert.ok(requested.some(([type, quality]) => type === 'image/jpeg' && quality === 0.92));
+  assert.ok(pages.reduce((sum, page) => sum + page.blob.size, 0) <= 12000000);
+  // Small pages stay lossless PNG.
+  deps.createCanvas = () => ({ getContext: () => ({}), toBlob: (fn, type) => fn(new Blob([png], { type })) });
+  assert.ok((await ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps)).every(page => page.mediaType === 'image/png'));
 });
 
 test('failed PDF loading destroys the PDF.js loading task', async () => {

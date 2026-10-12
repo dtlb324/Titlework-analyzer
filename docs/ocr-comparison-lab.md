@@ -40,7 +40,7 @@ inside a hosted Hermes container is not publicly reachable on its own port.
 3. Click **Compare OCR** once. Files are compared one at a time in the order selected; within a file, the three models run in parallel.
 4. Select **View** on a file in the list to review its three outputs and field differences. Download the JSON report if you want to retain the results; it contains a `files` array with one entry per finished file.
 
-Limits: 10 files per selection, and 10 pages and 12,000,000 bytes of rendered
+Limits: 10 files per selection, and 60 pages and 12,000,000 bytes of rendered
 image data per file. The page limit applies to each file separately, not to the
 whole selection. Use one recorded instrument per file; the models abstract only
 the first instrument they find in a file.

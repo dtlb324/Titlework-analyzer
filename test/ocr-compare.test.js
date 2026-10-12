@@ -37,7 +37,7 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
     assert.equal(config.models[2].effort, 'medium');
     assert.equal(config.models[2].thinkingLevel, 'adaptive, effort medium');
     assert.deepEqual(config.models.map(model => model.maxTokens), [8000, 8000, 8000], 'lab limit is shared and larger than production\'s 2,000');
-    assert.equal(config.maxPages, 10);
+    assert.equal(config.maxPages, 60);
     assert.equal(config.maxBytes, 12_000_000);
   });
 });
@@ -128,6 +128,20 @@ test('rendered PDF pages are all sent as images despite the original .pdf filena
   }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
 });
 
+test('accepts 60 rendered pages and rejects 61 without calling providers', async () => {
+  const calls = [];
+  await withServer(async base => {
+    const ok = await request(base, { method: 'POST', body: JSON.stringify({ filename: 'long.pdf', pages: Array.from({ length: 60 }, () => document.pages[0]) }) });
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).pageCount, 60);
+    assert.equal(calls.length, 3);
+    for (const call of calls) assert.equal(call.messages[0].content.filter(block => block.type === 'image').length, 60);
+    const tooMany = await request(base, { method: 'POST', body: JSON.stringify({ filename: 'long.pdf', pages: Array.from({ length: 61 }, () => document.pages[0]) }) });
+    assert.equal(tooMany.status, 400);
+    assert.equal(calls.length, 3);
+  }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
+});
+
 test('handler itself fails closed without APP_PASSWORD even outside production', async () => {
   const handler = createOcrCompareHandler();
   const response = { setHeader() {}, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
@@ -161,7 +175,7 @@ test('a failed model is sanitized and does not discard the other output or retry
 test('invalid, non-image and excessive page inputs are rejected before provider calls', async () => {
   let calls = 0;
   await withServer(async base => {
-    const invalid = [null, {}, { ...document, filename: '' }, { ...document, pages: [] }, { ...document, pages: Array(11).fill(document.pages[0]) }, { ...document, pages: [{ mediaType: 'application/pdf', data: PNG }] }, { ...document, pages: [{ mediaType: 'image/png', data: 'not base64' }] }, { ...document, pages: [{ mediaType: 'image/png', data: Buffer.from('plain text').toString('base64') }] }];
+    const invalid = [null, {}, { ...document, filename: '' }, { ...document, pages: [] }, { ...document, pages: Array(61).fill(document.pages[0]) }, { ...document, pages: [{ mediaType: 'application/pdf', data: PNG }] }, { ...document, pages: [{ mediaType: 'image/png', data: 'not base64' }] }, { ...document, pages: [{ mediaType: 'image/png', data: Buffer.from('plain text').toString('base64') }] }];
     for (const body of invalid) assert.equal((await request(base, { method: 'POST', body: JSON.stringify(body) })).status, 400);
     assert.equal(calls, 0);
   }, { ocrCompareModelClient: async () => { calls++; return {}; } });

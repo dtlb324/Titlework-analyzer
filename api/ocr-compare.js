@@ -3,9 +3,9 @@ import { requireJobPassword, setJobSecurityHeaders } from './_lib/jobs.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingConfig } from './_lib/gemini-request.js';
 import { invokeAnthropicModel, isAnthropicModel, sanitizeModelClientError } from './_lib/model-client.js';
 
-const MAX_PAGES = 10;
+const MAX_PAGES = 60;
 // Lab-only output limit shared by all models. Production abstraction uses ~2,000
-// tokens per chunk, but a 10-page upload can hold several instruments, and Haiku
+// tokens per chunk, but a multi-page upload can hold several instruments, and Haiku
 // 5.5's thinking tokens count against the same limit. 8192 is the largest value
 // the non-streaming Anthropic call allows (NON_STREAMING_MAX_TOKENS).
 const DEFAULT_LAB_MAX_TOKENS = 8000;
