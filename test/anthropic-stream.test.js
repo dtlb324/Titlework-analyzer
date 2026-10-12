@@ -203,6 +203,170 @@ test('consumeAnthropicMessageStream rejects fragmented CRLF error events', async
   );
 });
 
+test('consumeAnthropicMessageStream cancels an abandoned open stream and releases its reader', async () => {
+  let cancellations = 0;
+  let cancellationReason;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encodeSse(['event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Synthetic overload"}}']));
+    },
+    cancel(reason) { cancellations++; cancellationReason = reason; },
+  });
+  let failure;
+  await assertStrict.rejects(consumeAnthropicMessageStream(body), error => {
+    failure = error;
+    assertStrict.equal(error.message, 'Anthropic stream error (overloaded_error): Synthetic overload');
+    return true;
+  });
+  assertStrict.equal(cancellations, 1, 'An abandoned open response must be cancelled once');
+  assertStrict.equal(cancellationReason, failure, 'Cancellation must carry the original failure');
+  assertStrict.equal(body.locked, false, 'The reader must release its lock after rejection');
+});
+
+function observeReader(body) {
+  const stats = { cancellations: 0, releases: 0 };
+  const getReader = body.getReader.bind(body);
+  body.getReader = () => {
+    const reader = getReader();
+    return {
+      read: () => reader.read(),
+      cancel: reason => { stats.cancellations++; return reader.cancel(reason); },
+      releaseLock: () => { stats.releases++; reader.releaseLock(); },
+    };
+  };
+  return stats;
+}
+
+const partialEvent = 'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Synthetic text"}}';
+const completeEvents = [
+  partialEvent,
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}',
+  'event: message_stop\ndata: {"type":"message_stop"}',
+];
+
+test('consumeAnthropicMessageStream releases a normally exhausted reader without cancellation', async () => {
+  const body = new ReadableStream({ start(controller) { controller.enqueue(encodeSse(completeEvents)); controller.close(); } });
+  const stats = observeReader(body);
+  const result = await consumeAnthropicMessageStream(body);
+  assertStrict.equal(result.text, 'Synthetic text');
+  assertStrict.equal(result.stopReason, 'end_turn');
+  assertStrict.deepEqual(result.usage, { output_tokens: 3 });
+  assertStrict.deepEqual(stats, { cancellations: 0, releases: 1 });
+  assertStrict.equal(body.locked, false);
+});
+
+test('consumeAnthropicMessageStream releases premature EOF without cancelling an already exhausted stream', async () => {
+  const body = new ReadableStream({ start(controller) { controller.enqueue(encodeSse([partialEvent])); controller.close(); } });
+  const stats = observeReader(body);
+  await assertStrict.rejects(consumeAnthropicMessageStream(body), { message: 'Anthropic stream ended before message_stop.' });
+  assertStrict.deepEqual(stats, { cancellations: 0, releases: 1 });
+  assertStrict.equal(body.locked, false);
+});
+
+test('consumeAnthropicMessageStream releases an already failed transport without cancelling it again', async () => {
+  const failure = new Error('Synthetic transport failure');
+  const body = new ReadableStream({ start(controller) { controller.error(failure); } });
+  const stats = observeReader(body);
+  await assertStrict.rejects(consumeAnthropicMessageStream(body), error => error === failure);
+  assertStrict.deepEqual(stats, { cancellations: 0, releases: 1 });
+  assertStrict.equal(body.locked, false);
+});
+
+test('consumeAnthropicMessageStream cancels on callback failure without replacing that failure', async () => {
+  for (const callback of ['onDelta', 'onEvent']) {
+    const failure = new Error(`Synthetic ${callback} failure`);
+    let reason;
+    const body = new ReadableStream({
+      start(controller) { controller.enqueue(encodeSse([partialEvent])); },
+      cancel(error) { reason = error; },
+    });
+    const stats = observeReader(body);
+    const handler = callback === 'onDelta' ? async () => { throw failure; } : () => { throw failure; };
+    await assertStrict.rejects(consumeAnthropicMessageStream(body, { [callback]: handler }), error => error === failure);
+    assertStrict.equal(reason, failure);
+    assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+    assertStrict.equal(body.locked, false);
+  }
+});
+
+test('consumeAnthropicMessageStream cancels a malformed terminal response and releases the reader', async () => {
+  const body = new ReadableStream({ start(controller) { controller.enqueue(encodeSse(['event: message_stop\ndata: {"type":"message_stop"}'])); } });
+  const stats = observeReader(body);
+  await assertStrict.rejects(consumeAnthropicMessageStream(body), { message: 'Anthropic message_stop received without a valid stop reason.' });
+  assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+  assertStrict.equal(body.locked, false);
+});
+
+test('consumeAnthropicMessageStream observes rejected cancellation without hiding the original error', async () => {
+  const failures = [];
+  const unhandled = error => failures.push(error);
+  process.on('unhandledRejection', unhandled);
+  try {
+    const body = new ReadableStream({
+      start(controller) { controller.enqueue(encodeSse(['event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Original failure"}}'])); },
+      cancel() { throw new Error('Synthetic cancellation rejection'); },
+    });
+    const stats = observeReader(body);
+    await assertStrict.rejects(consumeAnthropicMessageStream(body), { message: 'Anthropic stream error (api_error): Original failure' });
+    await new Promise(resolve => setImmediate(resolve));
+    assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+    assertStrict.equal(body.locked, false);
+    assertStrict.deepEqual(failures, []);
+  } finally { process.off('unhandledRejection', unhandled); }
+});
+
+test('consumeAnthropicMessageStream observes cancellation that rejects after the original failure is reported', async () => {
+  let rejectCancellation;
+  const unhandled = [];
+  const onUnhandled = error => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const body = new ReadableStream({
+      start(controller) { controller.enqueue(encodeSse(['event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Original failure"}}'])); },
+      cancel() { return new Promise((_, reject) => { rejectCancellation = reject; }); },
+    });
+    const stats = observeReader(body);
+    await assertStrict.rejects(consumeAnthropicMessageStream(body), { message: 'Anthropic stream error (api_error): Original failure' });
+    assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+    assertStrict.equal(body.locked, false);
+    rejectCancellation(new Error('Synthetic delayed cancellation rejection'));
+    await new Promise(resolve => setImmediate(resolve));
+    assertStrict.deepEqual(unhandled, []);
+  } finally { process.off('unhandledRejection', onUnhandled); }
+});
+
+test('consumeAnthropicMessageStream does not wait for stalled cancellation before reporting failure', async () => {
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(encodeSse(['event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Original failure"}}'])); },
+    cancel() { return new Promise(() => {}); },
+  });
+  const stats = observeReader(body);
+  const outcome = await Promise.race([
+    consumeAnthropicMessageStream(body).then(() => 'unexpected success', error => error),
+    new Promise(resolve => setImmediate(() => resolve('still waiting for cancellation'))),
+  ]);
+  assertStrict.equal(outcome?.message, 'Anthropic stream error (api_error): Original failure');
+  assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+  assertStrict.equal(body.locked, false);
+});
+
+test('consumeAnthropicMessageStream preserves results and errors when reader methods throw during cleanup', async () => {
+  for (const success of [true, false]) {
+    const failure = new Error('Original callback failure');
+    let cancellations = 0, releases = 0, reads = 0;
+    const reader = {
+      read: async () => reads++ === 0 ? { done: false, value: encodeSse(completeEvents) } : { done: true },
+      cancel() { cancellations++; throw new Error('Synthetic synchronous cancellation failure'); },
+      releaseLock() { releases++; throw new Error('Synthetic release failure'); },
+    };
+    const promise = consumeAnthropicMessageStream({ getReader: () => reader }, success ? {} : { onEvent() { throw failure; } });
+    if (success) assertStrict.equal((await promise).text, 'Synthetic text');
+    else await assertStrict.rejects(promise, error => error === failure);
+    assertStrict.equal(cancellations, success ? 0 : 1);
+    assertStrict.equal(releases, 1);
+  }
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {
