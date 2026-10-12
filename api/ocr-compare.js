@@ -1,16 +1,17 @@
 import { ABSTRACTION_PROMPT, buildAbstractMessagesForChunk, getAbstractionConfig } from './_lib/abstraction.js';
 import { requireJobPassword, setJobSecurityHeaders } from './_lib/jobs.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingConfig } from './_lib/gemini-request.js';
-import { invokeAnthropicModel, isAnthropicModel, sanitizeModelClientError } from './_lib/model-client.js';
+import { invokeAnthropicModel, invokeAnthropicModelStream, isAnthropicModel, NON_STREAMING_MAX_TOKENS, sanitizeModelClientError } from './_lib/model-client.js';
 
 const MAX_PAGES = 60;
 // Lab-only output limit shared by all models. Production abstraction uses ~2,000
-// tokens per chunk, but a multi-page upload can hold several instruments, and Haiku
-// 5.5's thinking tokens count against the same limit. 8192 is the largest value
-// the non-streaming Anthropic call allows (NON_STREAMING_MAX_TOKENS).
-const DEFAULT_LAB_MAX_TOKENS = 8000;
+// tokens per chunk, but a multi-page upload can hold several instruments, and
+// medium-effort thinking tokens (Gemini and Haiku) count against the same limit.
+// Above NON_STREAMING_MAX_TOKENS (8192) Anthropic requires a streamed request, so
+// invokeLabModel streams Claude calls automatically.
+const DEFAULT_LAB_MAX_TOKENS = 16000;
 const MIN_LAB_MAX_TOKENS = 512;
-const MAX_LAB_MAX_TOKENS = 8192;
+const MAX_LAB_MAX_TOKENS = 32000;
 const MAX_BYTES = 12_000_000;
 const MAX_BASE64_CHARS = Math.ceil(MAX_BYTES / 3) * 4;
 const PRICING_SOURCE = 'https://ai.google.dev/gemini-api/docs/pricing';
@@ -33,7 +34,7 @@ function models() {
   }
   return [
     { id: config.model, label: 'Current Gemini', thinkingLevel: resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default', maxTokens },
-    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'low', maxTokens },
+    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'medium', maxTokens },
     // Haiku 5.5 thinks adaptively. Medium effort is the lab setting under test for accuracy.
     { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort medium', effort: 'medium', maxTokens },
   ];
@@ -42,9 +43,10 @@ function models() {
 // Gemini and Claude are both called directly (never through OpenRouter),
 // regardless of the production MODEL_PROVIDER.
 function invokeLabModel(call, options) {
-  return isAnthropicModel(call.model)
-    ? invokeAnthropicModel(call, { ...options, direct: true })
-    : invokeGeminiGenerateContent(call, options);
+  if (!isAnthropicModel(call.model)) return invokeGeminiGenerateContent(call, options);
+  return Number(call.maxTokens) > NON_STREAMING_MAX_TOKENS
+    ? invokeAnthropicModelStream(call, { ...options, direct: true })
+    : invokeAnthropicModel(call, { ...options, direct: true });
 }
 
 function validateUpload(body) {
