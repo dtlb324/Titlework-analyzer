@@ -24,6 +24,21 @@ function labMaxTokens() {
   return Number.isInteger(raw) && raw >= MIN_LAB_MAX_TOKENS && raw <= MAX_LAB_MAX_TOKENS ? raw : DEFAULT_LAB_MAX_TOKENS;
 }
 
+// Effort levels each lab model accepts. Gemini 3.7/3.8 Flash and Pro reject
+// `minimal`; other Gemini 3 models accept all four thinking levels. Haiku 5.5
+// takes output_config.effort with five levels.
+const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*pro)/i;
+const HAIKU_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function geminiEfforts(model) {
+  return GEMINI_NO_MINIMAL.test(model) ? ['low', 'medium', 'high'] : ['minimal', 'low', 'medium', 'high'];
+}
+
+function withEffort(model, effort) {
+  const thinkingLevel = isAnthropicModel(model.id) ? `adaptive, effort ${effort}` : effort;
+  return { ...model, effort, thinkingLevel };
+}
+
 function models() {
   const config = getAbstractionConfig();
   const maxTokens = labMaxTokens();
@@ -32,12 +47,24 @@ function models() {
     error.statusCode = 503;
     throw error;
   }
+  // 'default' omits thinkingLevel so the provider's own default applies.
+  const configured = resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default';
+  const baselineLevels = geminiEfforts(config.model);
   return [
-    { id: config.model, label: 'Current Gemini', thinkingLevel: resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default', maxTokens },
-    { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', thinkingLevel: 'medium', maxTokens },
-    // Haiku 5.5 thinks adaptively. Medium effort is the lab setting under test for accuracy.
-    { id: HAIKU_ID, label: 'Claude Haiku 5.5', thinkingLevel: 'adaptive, effort medium', effort: 'medium', maxTokens },
+    withEffort({ id: config.model, label: 'Current Gemini', effortLevels: baselineLevels.includes(configured) ? baselineLevels : [configured, ...baselineLevels], maxTokens }, configured),
+    withEffort({ id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', effortLevels: geminiEfforts('gemini-3.8-flash'), maxTokens }, 'medium'),
+    withEffort({ id: HAIKU_ID, label: 'Claude Haiku 5.5', effortLevels: HAIKU_EFFORTS, maxTokens }, 'medium'),
   ];
+}
+
+// Optional `efforts`: one level per model slot, chosen in the browser.
+function applyEfforts(pair, efforts) {
+  if (efforts === undefined) return pair;
+  if (!Array.isArray(efforts) || efforts.length !== pair.length) throw new Error(`efforts must list one level per model (${pair.length}).`);
+  return pair.map((model, index) => {
+    if (!model.effortLevels.includes(efforts[index])) throw new Error(`${model.label} does not support effort ${JSON.stringify(efforts[index])}.`);
+    return withEffort(model, efforts[index]);
+  });
 }
 
 // Gemini and Claude are both called directly (never through OpenRouter),
@@ -137,8 +164,10 @@ export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
     catch (error) { return res.status(error.statusCode || 500).json({ error: error.message }); }
     if (req.method === 'GET') return res.status(200).json({ models: pair, maxPages: MAX_PAGES, maxBytes: MAX_BYTES, renderScale: 2 });
     let upload;
-    try { upload = validateUpload(req.body); }
-    catch (error) { return res.status(400).json({ error: error.message }); }
+    try {
+      upload = validateUpload(req.body);
+      pair = applyEfforts(pair, req.body.efforts);
+    } catch (error) { return res.status(400).json({ error: error.message }); }
     if (modelClient === invokeLabModel && geminiApiKeyError()) return res.status(503).json({ error: geminiApiKeyError() });
     if (active) {
       res.setHeader('Retry-After', '5');
@@ -155,7 +184,7 @@ export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
       const results = await Promise.all(pair.map(async model => {
         const started = Date.now();
         try {
-          const result = await modelClient({ model: model.id, maxTokens: model.maxTokens, system: ABSTRACTION_PROMPT, messages, ...(model.effort ? { effort: model.effort } : model.thinkingLevel === 'default' ? {} : { thinkingLevel: model.thinkingLevel }) }, { timeoutMs: 240_000, createTimeoutSignal: ms => ({ signal: AbortSignal.timeout(ms), cleanup() {} }) });
+          const result = await modelClient({ model: model.id, maxTokens: model.maxTokens, system: ABSTRACTION_PROMPT, messages, ...(isAnthropicModel(model.id) ? { effort: model.effort } : model.effort === 'default' ? {} : { thinkingLevel: model.effort }) }, { timeoutMs: 240_000, createTimeoutSignal: ms => ({ signal: AbortSignal.timeout(ms), cleanup() {} }) });
           const text = String(result.text || '');
           const usage = withThinkingTokens(result.usage || {});
           return { ...model, text, fields: fieldsFromText(text), usage, latencyMs: Date.now() - started, stopReason: result.stopReason || null, modelVersion: result.model || model.id, ...estimateCost(model.id, usage) };
