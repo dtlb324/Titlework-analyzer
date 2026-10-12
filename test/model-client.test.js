@@ -1,3 +1,4 @@
+import assertStrict from 'node:assert/strict';
 import {
   abstractionApiKeyError,
   invokeModel,
@@ -6,6 +7,7 @@ import {
   mapModelResponseToAnalyzeProxy,
   shouldUseOpenRouter,
   openRouterApiKeyError,
+  sanitizeModelClientError,
 } from '../api/_lib/model-client.js';
 import { buildOpenRouterRequestBody } from '../api/_lib/openrouter-request.js';
 
@@ -87,6 +89,11 @@ test('invokeAnthropicModelStream requests stream=true and forwards deltas', asyn
       '',
       'event: message_delta',
       'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+      '',
+      // Successful Anthropic streams require a dispatched message_stop before EOF.
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
       '',
     ].join('\n'));
     return {
@@ -245,6 +252,99 @@ test('invokeModel streams through OpenRouter when MODEL_PROVIDER=openrouter', as
     if (prevProvider) process.env.MODEL_PROVIDER = prevProvider; else delete process.env.MODEL_PROVIDER;
   }
 });
+
+async function withAnthropicStream(wire, fn, readError) {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevProvider = process.env.MODEL_PROVIDER;
+  const prevFetch = global.fetch;
+  process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+  delete process.env.MODEL_PROVIDER;
+  const requests = [];
+  let cleanups = 0;
+  global.fetch = async (url, init) => {
+    requests.push({ url, body: JSON.parse(init.body) });
+    const bytes = new TextEncoder().encode(wire);
+    let index = 0;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (index < bytes.length) controller.enqueue(Uint8Array.of(bytes[index++]));
+        else if (readError) controller.error(readError);
+        else controller.close();
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } });
+  };
+  try {
+    return await fn({
+      stream: true,
+      direct: true,
+      createTimeoutSignal: () => ({ signal: new AbortController().signal, cleanup: () => { cleanups++; } }),
+    });
+  } finally {
+    global.fetch = prevFetch;
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+    if (prevProvider === undefined) delete process.env.MODEL_PROVIDER; else process.env.MODEL_PROVIDER = prevProvider;
+    assertStrict.equal(requests.length, 1, 'Interrupted streams must not trigger retries or fallback requests');
+    assertStrict.equal(requests[0].url, 'https://api.anthropic.com/v1/messages');
+    assertStrict.equal(requests[0].body.stream, true);
+    assertStrict.equal(cleanups, 1, 'The real client must clean up its timeout on both success and failure');
+  }
+}
+
+for (const [name, invoke] of [['invokeAnthropicModelStream', invokeAnthropicModelStream], ['invokeModel', invokeModel]]) {
+  const request = { model: 'claude-haiku-5-5', maxTokens: 16000, messages: [{ role: 'user', content: 'Synthetic document' }] };
+  const start = 'event: message_start\r\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":12,"cache_read_input_tokens":3,"output_tokens":0}}}';
+  const partial = 'event: content_block_delta\r\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Partial"}}';
+  const error = 'event: error\r\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded sk-ant-test-only-token"}}';
+  for (const [scenario, events, message, expectedDeltas] of [
+    ['error before text', [error], 'Anthropic stream error (overloaded_error): Overloaded sk-ant-test-only-token', []],
+    ['error after partial text', [start, partial, error], 'Anthropic stream error (overloaded_error): Overloaded sk-ant-test-only-token', ['Partial']],
+    ['EOF before terminal completion', [start, partial, 'event: message_delta\r\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}'], 'Anthropic stream ended before message_stop.', ['Partial']],
+  ]) {
+    test(`${name} propagates ${scenario} without returning partial success or retrying`, async () => {
+      const deltas = [];
+      await withAnthropicStream(events.join('\r\n\r\n') + '\r\n\r\n', async options => {
+        await assertStrict.rejects(invoke(request, { ...options, onDelta: delta => deltas.push(delta) }), err => {
+          assertStrict.equal(err.message, message);
+          assertStrict.equal(sanitizeModelClientError(err), message.replace('sk-ant-test-only-token', '[REDACTED]'));
+          return true;
+        });
+      });
+      assertStrict.deepEqual(deltas, expectedDeltas);
+    });
+  }
+  test(`${name} propagates reader transport failures after partial text`, async () => {
+    const failure = new Error('Synthetic connection reset');
+    const deltas = [];
+    const wire = ([start, partial].join('\r\n\r\n') + '\r\n\r\n').replaceAll('\r\n', '\n');
+    await withAnthropicStream(wire, async options => {
+      await assertStrict.rejects(invoke(request, { ...options, onDelta: delta => deltas.push(delta) }), err => {
+        assertStrict.equal(err, failure);
+        return true;
+      });
+    }, failure);
+    assertStrict.deepEqual(deltas, ['Partial']);
+  });
+  test(`${name} preserves completed normal and token-limit stream results`, async () => {
+    for (const stopReason of ['end_turn', 'max_tokens']) {
+      const events = [start, partial,
+        `event: message_delta\r\ndata: {"type":"message_delta","delta":{"stop_reason":"${stopReason}"},"usage":{"output_tokens":42}}`,
+        'event: message_stop\r\ndata: {"type":"message_stop"}',
+      ];
+      const deltas = [];
+      const result = await withAnthropicStream(events.join('\r\n\r\n') + '\r\n\r\n', options =>
+        invoke(request, { ...options, onDelta: delta => deltas.push(delta) }));
+      assertStrict.equal(result.text, 'Partial');
+      assertStrict.equal(result.model, 'claude-haiku-5-5');
+      assertStrict.equal(result.stopReason, stopReason);
+      assertStrict.deepEqual(result.usage, { input_tokens: 12, cache_read_input_tokens: 3, output_tokens: 42 });
+      assertStrict.deepEqual(deltas, ['Partial']);
+      assertStrict.equal(typeof result.firstDeltaAt, 'number');
+      assertStrict.equal(typeof result.latencyMs, 'number');
+      assertStrict.equal(typeof result.timeToFirstDeltaMs, 'number');
+      assertStrict.ok(result.timeToFirstDeltaMs >= 0 && result.timeToFirstDeltaMs <= result.latencyMs);
+    }
+  });
+}
 
 let failed = 0;
 for (const { name, fn } of tests) {

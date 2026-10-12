@@ -93,12 +93,12 @@ test('a 60-page PDF stays inside the byte cap by falling back to JPEG for pages 
   const requested = [];
   const deps = {
     loadPdfjs: async () => ({ GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve(pdf), destroy: async () => {} }) }),
-    // 1 MB PNGs exceed the 200 KB-per-page share of 12 MB; JPEG at 0.92 does not.
+    // The 60 lossless 1 MB PNGs exceed 12 MB; JPEG at 0.92 is much smaller.
     createCanvas: () => ({ getContext: () => ({}), toBlob: (fn, type, quality) => { requested.push([type, quality]); fn(type === 'image/png' ? new Blob([png, new Uint8Array(1000000)], { type }) : new Blob([jpeg, new Uint8Array(150000)], { type })); } })
   };
   const pages = await ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps);
   assert.equal(pages.length, 60);
-  // Early pages don't fit their share as PNG; savings let the last few pages stay lossless.
+  // Equal-size pages compress in selection order until the whole file fits.
   assert.equal(pages[0].mediaType, 'image/jpeg');
   assert.ok(pages.filter(page => page.mediaType === 'image/jpeg').length >= 50);
   assert.ok(requested.some(([type, quality]) => type === 'image/jpeg' && quality === 0.92));
@@ -106,6 +106,137 @@ test('a 60-page PDF stays inside the byte cap by falling back to JPEG for pages 
   // Small pages stay lossless PNG.
   deps.createCanvas = () => ({ getContext: () => ({}), toBlob: (fn, type) => fn(new Blob([png], { type })) });
   assert.ok((await ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps)).every(page => page.mediaType === 'image/png'));
+});
+
+function renderedPdfFixture(pngSizes, jpegSizes = () => 100000) {
+  const seen = { rendered: [], scales: [], encodings: [], cleaned: [], destroyed: 0, canvases: [], encoded: [] };
+  const pdf = {
+    numPages: pngSizes.length,
+    getPage: async index => ({
+      getViewport: ({ scale }) => { seen.scales.push(scale); return { width: index * 10, height: 20 }; },
+      render: ({ canvasContext }) => { canvasContext.index = index; seen.rendered.push(index); return { promise: Promise.resolve() }; },
+      cleanup: () => seen.cleaned.push(index),
+    }),
+  };
+  const deps = {
+    loadPdfjs: async () => ({ GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve(pdf), destroy: async () => seen.destroyed++ }) }),
+    createCanvas: () => {
+      assert.ok(seen.canvases.every(canvas => canvas.width === 0 && canvas.height === 0), 'previous canvas is released before rendering another page');
+      const context = {};
+      const canvas = { getContext: () => context, toBlob: (callback, type, quality) => {
+        const index = context.index;
+        seen.encodings.push({ index, type, quality });
+        const size = type === 'image/png' ? pngSizes[index - 1] : jpegSizes(index, quality);
+        const blob = new Blob([new Uint8Array(size).fill(index)], { type });
+        const arrayBuffer = blob.arrayBuffer.bind(blob);
+        blob.arrayBuffer = () => { seen.encoded.push(index); return arrayBuffer(); };
+        callback(blob);
+      } };
+      seen.canvases.push(canvas);
+      return canvas;
+    },
+  };
+  return { deps, seen, pdf, file: new Blob(['%PDF-1.7'], { type: 'application/pdf' }) };
+}
+
+test('whole-file PNGs below the byte cap stay lossless regardless of page order', async () => {
+  for (const sizes of [[6000000, 1000000, 1000000], [1000000, 6000000, 1000000], [1000000, 1000000, 6000000]]) {
+    const { deps, seen, file } = renderedPdfFixture(sizes);
+    const pages = await ui.prepareDocument(file, deps);
+    assert.deepEqual(pages.map(page => page.mediaType), ['image/png', 'image/png', 'image/png']);
+    assert.deepEqual(pages.map(page => page.blob.size), sizes);
+    assert.deepEqual(pages.map(page => [page.width, page.height]), [[10, 20], [20, 20], [30, 20]]);
+    assert.deepEqual(seen.rendered, [1, 2, 3]);
+    assert.deepEqual(seen.scales, [2, 2, 2]);
+    assert.equal(seen.encodings.filter(encoding => encoding.type === 'image/jpeg').length, 0);
+    assert.deepEqual(seen.cleaned, [1, 2, 3]);
+    assert.equal(seen.destroyed, 1);
+    assert.ok(seen.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+  }
+});
+
+test('oversized aggregate compresses only the largest page at the highest quality resolving the deficit', async () => {
+  const { deps, seen, file } = renderedPdfFixture([9000000, 3000000, 1000000], (index, quality) => quality === 0.92 ? 8800000 : quality === 0.85 ? 8000000 : 2000000);
+  const pages = await ui.prepareDocument(file, deps);
+  assert.deepEqual(pages.map(page => page.mediaType), ['image/jpeg', 'image/png', 'image/png']);
+  assert.deepEqual(pages.map(page => page.blob.size), [8000000, 3000000, 1000000]);
+  assert.deepEqual(seen.encodings.filter(encoding => encoding.type === 'image/jpeg'), [
+    { index: 1, type: 'image/jpeg', quality: 0.92 },
+    { index: 1, type: 'image/jpeg', quality: 0.85 },
+  ]);
+  assert.deepEqual(seen.rendered, [1, 2, 3, 1]);
+  assert.deepEqual(seen.scales, [2, 2, 2, 2]);
+  assert.deepEqual(seen.cleaned, [1, 2, 3, 1]);
+  assert.equal(seen.destroyed, 1);
+  assert.deepEqual(seen.encoded, [1, 2, 3], 'only final selected blobs become base64');
+  assert.deepEqual(pages.map(page => Buffer.from(page.data, 'base64').length), [8000000, 3000000, 1000000]);
+});
+
+test('aggregate compression combines savings across pages without changing their order', async () => {
+  const { deps, seen, file } = renderedPdfFixture([8000000, 7000000, 1000000], (index, quality) => index === 1
+    ? ({ 0.92: 7900000, 0.85: 7800000, 0.75: 7700000, 0.65: 7500000, 0.55: 7200000, 0.45: 7000000 })[quality]
+    : quality === 0.92 ? 4500000 : 4000000);
+  const pages = await ui.prepareDocument(file, deps);
+  assert.deepEqual(pages.map(page => page.blob.size), [7000000, 4000000, 1000000]);
+  assert.deepEqual(pages.map(page => page.mediaType), ['image/jpeg', 'image/jpeg', 'image/png']);
+  assert.deepEqual(pages.map(page => Buffer.from(page.data, 'base64')[0]), [1, 2, 3]);
+  assert.deepEqual(seen.rendered, [1, 2, 3, 1, 2]);
+  assert.deepEqual(seen.encodings.filter(encoding => encoding.type === 'image/jpeg').map(({ index, quality }) => [index, quality]), [
+    [1, 0.92], [1, 0.85], [1, 0.75], [1, 0.65], [1, 0.55], [1, 0.45], [2, 0.92], [2, 0.85],
+  ]);
+  assert.deepEqual(seen.encoded, [1, 2, 3]);
+  assert.equal(seen.destroyed, 1);
+});
+
+test('aggregate compression keeps PNG when JPEG is larger and saves bytes on another page', async () => {
+  const { deps, seen, file } = renderedPdfFixture([7000000, 6000000], index => index === 1 ? 8000000 : 5000000);
+  const pages = await ui.prepareDocument(file, deps);
+  assert.deepEqual(pages.map(page => page.blob.size), [7000000, 5000000]);
+  assert.deepEqual(pages.map(page => page.mediaType), ['image/png', 'image/jpeg']);
+  assert.deepEqual(seen.rendered, [1, 2, 1, 2]);
+  assert.deepEqual(seen.cleaned, [1, 2, 1, 2]);
+  assert.equal(seen.destroyed, 1);
+});
+
+test('truly oversized aggregate exhausts the JPEG ladder before rejection and releases all rendering resources', async () => {
+  const { deps, seen, file } = renderedPdfFixture([8000000, 8000000], () => 6500000);
+  await assert.rejects(ui.prepareDocument(file, deps), /exceed the total 12 MB limit/);
+  assert.deepEqual(seen.rendered, [1, 2, 1, 2]);
+  assert.deepEqual(seen.encodings.filter(encoding => encoding.type === 'image/jpeg').map(({ index, quality }) => [index, quality]), [1, 2].flatMap(index => [0.92, 0.85, 0.75, 0.65, 0.55, 0.45].map(quality => [index, quality])));
+  assert.deepEqual(seen.cleaned, [1, 2, 1, 2]);
+  assert.deepEqual(seen.encoded, [], 'rejected files never allocate base64 payloads');
+  assert.equal(seen.destroyed, 1);
+  assert.ok(seen.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+});
+
+test('PDF rendering failures release the page, canvas and loading task at every preparation stage', async () => {
+  for (const stage of ['viewport', 'canvas', 'render', 'png', 'jpeg']) {
+    const { deps, seen, pdf, file } = renderedPdfFixture(stage === 'jpeg' ? [13000000] : [100]);
+    const getPage = pdf.getPage;
+    pdf.getPage = async index => {
+      const page = await getPage(index);
+      if (stage === 'viewport') page.getViewport = () => { throw Error('failed viewport'); };
+      if (stage === 'render') page.render = () => ({ promise: Promise.reject(Error('failed render')) });
+      return page;
+    };
+    const createCanvas = deps.createCanvas;
+    deps.createCanvas = () => {
+      if (stage === 'canvas') throw Error('failed canvas');
+      const canvas = createCanvas();
+      const toBlob = canvas.toBlob;
+      canvas.toBlob = (callback, type, quality) => {
+        if (stage === 'png' && type === 'image/png') return callback(null);
+        if (stage === 'jpeg' && type === 'image/jpeg') throw Error('failed jpeg');
+        return toBlob(callback, type, quality);
+      };
+      return canvas;
+    };
+    await assert.rejects(ui.prepareDocument(file, deps), stage === 'png' ? /Could not encode PDF page 1/ : new RegExp(`failed ${stage}`));
+    assert.deepEqual(seen.cleaned, stage === 'jpeg' ? [1, 1] : [1]);
+    assert.equal(seen.destroyed, 1);
+    assert.deepEqual(seen.encoded, []);
+    assert.ok(seen.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+  }
 });
 
 test('failed PDF loading destroys the PDF.js loading task', async () => {
@@ -319,6 +450,91 @@ test('a failed effort-level load is shown under the buttons and never replaces t
   assert.deepEqual(pressed(h.elements['candidate-effort']), ['medium']);
 });
 
+test('metadata error survives file selection and control updates until current credentials refresh successfully', async () => {
+  const h = harness();
+  const fetch = h.deps.fetch;
+  h.deps.fetch = async (url, options) => options.headers['x-app-password'] === 'wrong'
+    ? { ok: false, status: 401, json: async () => ({}) } : fetch(url, options);
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  h.elements.password.value = 'wrong';
+  await h.elements.password.fire('change');
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  h.elements.document.files = [named('new.png')];
+  await h.elements.document.fire('change');
+  assert.match(h.elements.status.textContent, /new.png: 1 page image/);
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  assert.equal(effortButtons(h.elements['candidate-effort']).length, 0, 'stale choices are not rendered under a credential error');
+  await h.elements['compare-form'].fire('submit');
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  assert.match(h.elements.status.textContent, /Comparison failed: Application password rejected/);
+  assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  assert.doesNotMatch(allText(h.elements['candidate-effort']), /Could not load/);
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['high'], 'supported picks survive a valid refresh of the same model');
+});
+
+test('clearing the password invalidates a pending metadata response immediately', async () => {
+  for (const event of ['input', 'change']) {
+    const h = harness();
+    let release;
+    h.deps.fetch = async (url, options) => {
+      h.calls.push({ url, ...options });
+      return new Promise(resolve => { release = resolve; });
+    };
+    ui.createCompareUI(h.deps);
+    h.elements.password.value = 'private-password';
+    const loading = h.elements.password.fire('change');
+    h.elements.password.value = '';
+    await h.elements.password.fire(event);
+    release({ ok: true, json: async () => ({ models: h.models, maxPages: 60, maxBytes: 12000000, renderScale: 2 }) });
+    await loading;
+    assert.equal(h.calls.length, 1, 'clearing the credential starts no request');
+    for (const slot of ['baseline', 'candidate', 'challenger']) {
+      assert.equal(effortButtons(h.elements[`${slot}-effort`]).length, 0, `${event} discards obsolete levels`);
+      assert.match(allText(h.elements[`${slot}-effort`]), /Enter the application password/);
+    }
+  }
+});
+
+test('pre-compare metadata failure supersedes pending loads and remains visible until a valid refresh', async () => {
+  const h = harness();
+  let requests = 0, release;
+  const fetch = h.deps.fetch;
+  h.deps.fetch = async (url, options) => {
+    if (options.method === 'GET') {
+      requests++;
+      if (requests === 2) return new Promise(resolve => { release = resolve; });
+      if (requests === 3) return { ok: false, status: 401, json: async () => ({}) };
+    }
+    return fetch(url, options);
+  };
+  ui.createCompareUI(h.deps);
+  await selected(h);
+  await h.elements.password.fire('change');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  h.elements.password.value = 'wrong';
+  const obsolete = h.elements.password.fire('change');
+  await h.elements['compare-form'].fire('submit');
+  assert.match(h.elements.status.textContent, /Application password rejected/);
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  release({ ok: true, json: async () => ({ models: h.models, maxPages: 60, maxBytes: 12000000, renderScale: 2 }) });
+  await obsolete;
+  h.elements.document.files = [named('new.png')];
+  await h.elements.document.fire('change');
+  assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
+  assert.equal(effortButtons(h.elements['candidate-effort']).length, 0);
+  assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('input');
+  await h.elements['compare-form'].fire('submit');
+  assert.doesNotMatch(allText(h.elements['candidate-effort']), /Could not load/);
+  assert.deepEqual(JSON.parse(h.calls.find(call => call.method === 'POST').body).efforts, ['default', 'high', 'medium']);
+});
+
 test('untouched columns follow a server level change while picked columns keep their level', async () => {
   const h = harness();
   ui.createCompareUI(h.deps);
@@ -467,6 +683,45 @@ test('a request-level failure stops the remaining files, keeps finished results 
   await h.elements.download.fire('click');
   assert.deepEqual(JSON.parse(await h.blobs.at(-1).text()).files.map(file => file.filename), ['a.png']);
   assert.equal(h.elements.compare.disabled, false);
+});
+
+test('explicit rerun reuses prepared done, failed and skipped files with newly selected effort', async () => {
+  const h = multiHarness();
+  const prepare = h.deps.prepareDocument;
+  let preparations = 0;
+  h.deps.prepareDocument = async file => { preparations++; return prepare(file); };
+  h.failOn = 'b.png';
+  const fetch = h.deps.fetch;
+  let release, hold = false;
+  h.deps.fetch = async (url, options) => {
+    if (options.method === 'POST' && hold && !release) await new Promise(resolve => { release = resolve; });
+    return fetch(url, options);
+  };
+  ui.createCompareUI(h.deps);
+  await selectMany(h, [named('a.png'), named('b.png'), named('c.png')]);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(h.calls.map(call => call.method), ['GET', 'POST', 'POST']);
+  assert.deepEqual(h.elements.batch.children.map(row => row.children[2].textContent), ['Done', 'Failed: HTTP 429: A comparison is already running', 'Not run']);
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  assert.equal(h.calls.length, 3, 'effort selection never starts an automatic comparison');
+  h.failOn = null;
+  hold = true;
+  const rerun = h.elements['compare-form'].fire('submit');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.elements.compare.disabled, true);
+  await h.elements['compare-form'].fire('submit');
+  assert.deepEqual(h.calls.map(call => call.method), ['GET', 'POST', 'POST', 'GET'], 'overlapping rerun cannot load metadata or send a second request');
+  release();
+  await rerun;
+  assert.equal(preparations, 3, 'rerun never prepares the files a second time');
+  const posts = h.calls.filter(call => call.method === 'POST').map(call => JSON.parse(call.body));
+  assert.deepEqual(posts.map(post => post.filename), ['a.png', 'b.png', 'a.png', 'b.png', 'c.png']);
+  assert.deepEqual(posts.slice(2).map(post => post.efforts), Array.from({ length: 3 }, () => ['default', 'high', 'medium']));
+  assert.deepEqual(posts.map(post => post.pages), Array.from({ length: 5 }, () => [{ mediaType: 'image/png', data: 'YWJj' }]));
+  assert.deepEqual(h.elements.batch.children.map(row => row.children[2].textContent), ['Done', 'Done', 'Done']);
+  assert.match(h.elements.status.textContent, /Comparison complete for 3 files/);
+  await h.elements.download.fire('click');
+  assert.deepEqual(JSON.parse(await h.blobs.at(-1).text()).files.map(file => file.filename), ['a.png', 'b.png', 'c.png']);
 });
 
 function pdfHarness() {
