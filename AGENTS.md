@@ -39,7 +39,7 @@ in `README.md` — follow it; this file is a pointer, not a copy.
 - Outside the chain: `node test/openrouter-request.test.js` and
   `node test/openrouter-stream.test.js`. `test/smoke-server.js` is a manual
   server on port 3456.
-- CI (`.github/workflows/test.yml`, pull requests and pushes to `main`) runs
+- CI (`.github/workflows/test.yml`, pull requests and pushes to `Main` and `main`) runs
   `npm ci`, `npm test`, and `docker build` on Node 22. There is no lint script.
 - Local dev loads git-ignored `.env.local`: `npm run dev`, plus
   `npm run dev:worker` in a second terminal. Open `http://localhost:8080`.
