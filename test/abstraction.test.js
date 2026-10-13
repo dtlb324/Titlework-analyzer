@@ -662,6 +662,24 @@ test('POST /api/jobs/:id/chunks/:chunkId/retry retries only the failed chunk', a
   assert(saved.some(item => item.abstractText.includes('Retried CSV abstract')), 'Expected failed chunk retried');
 });
 
+test('POST /api/jobs/:id/chunks/:chunkId/retry refuses a canceled job', async () => {
+  const store = createMemoryPhase3Store([
+    makeChunk({ id: 'chk_failed', abstractionStatus: 'failed', abstractionErrorType: 'canceled' }),
+  ], { jobStatus: 'canceled' });
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  let modelCalls = 0;
+  globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
+    modelCalls += 1;
+    return { text: 'DOCUMENT #1:\nShould not run.', model: 'gemini-2.5-flash', usage: {} };
+  };
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1', chunkId: 'chk_failed' }, '/api/jobs/job_test_1/chunks/chk_failed/retry'), res);
+
+  assert(res.statusCode === 409, `Expected 409 for a canceled job, got ${res.statusCode}`);
+  assert(modelCalls === 0, `Expected no model call on a canceled job, got ${modelCalls}`);
+});
+
 test('processJobAbstraction preserves completed chunks when another chunk fails', async () => {
   const store = createMemoryPhase3Store([
     makeChunk({ id: 'chk_ok', chunkOrder: 0, originalFilename: 'ok.pdf' }),

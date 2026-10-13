@@ -861,6 +861,16 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   if (!claimed) {
     return { status: 'skipped', segmentId: segment.id };
   }
+  // Each claim increments the stored attempt count. Resume from it so a
+  // retry_wait segment uses up its budget instead of restarting at attempt 1
+  // on every poll.
+  const firstAttempt = Math.max(1, Number(claimed.attemptCount) || 1);
+  if (firstAttempt > config.maxAttempts) {
+    const failure = { errorType: 'max_attempts', errorMessage: 'Synthesis attempt limit exceeded.' };
+    const updated = await store.markSynthesisSegmentFailed(jobId, segment.id, { ...failure, workerId });
+    if (!updated) return { status: 'stale', segmentId: segment.id };
+    return { status: 'failed', segmentId: segment.id, failure };
+  }
 
   // Build the abstracts list for this segment in stable order.
   const byDocumentId = new Map(
@@ -913,7 +923,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
 
   const startedAt = Date.now();
   let lastError = null;
-  for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
+  for (let attempt = firstAttempt; attempt <= config.maxAttempts; attempt++) {
     try {
       const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options);
       const validation = isSinglePass ? validateFinalOpinion(result.text) : validateSegmentSummary(result.text);

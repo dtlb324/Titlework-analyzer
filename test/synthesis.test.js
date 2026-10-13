@@ -412,7 +412,7 @@ function createMemoryPhase5Store(initialState = {}) {
     async resetFailedSynthesisSegments(jobId, planId) {
       const reset = [];
       for (const segment of [...segments.values()].filter(s => s.jobId === jobId && s.planId === planId && ['failed', 'retry_wait'].includes(s.status))) {
-        const next = { ...segment, status: 'pending', errorType: null, errorMessage: null, retryAt: null, claimedAt: null, leaseExpiresAt: null, workerId: null, updatedAt: now() };
+        const next = { ...segment, status: 'pending', attemptCount: 0, errorType: null, errorMessage: null, retryAt: null, claimedAt: null, leaseExpiresAt: null, workerId: null, updatedAt: now() };
         segments.set(segment.id, next);
         reset.push(next);
       }
@@ -1326,6 +1326,54 @@ test('Synthesis retryable errors schedule durable retry_wait instead of terminal
   assert(result.retryScheduledInBatch === 1, `Expected one retry_wait segment, got ${result.retryScheduledInBatch}`);
   assert(segments[0].status === 'retry_wait', `Expected segment retry_wait, got ${segments[0].status}`);
   assert(!result.result, 'Retry-waiting synthesis should not persist a terminal result');
+});
+
+test('Synthesis retryable errors stop at maxAttempts across polls', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  // Make every retry_wait due on the next poll.
+  const markRetryWait = store.markSynthesisSegmentRetryWait.bind(store);
+  store.markSynthesisSegmentRetryWait = (jobId, segmentId, failure) => markRetryWait(jobId, segmentId, { ...failure, retryAtIso: new Date(0).toISOString() });
+  let calls = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    calls += 1;
+    throw Object.assign(new Error('rate limit'), { status: 429 });
+  };
+
+  for (let poll = 0; poll < 5; poll++) {
+    await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { maxAttempts: 2 } });
+  }
+  const [segment] = await store.listSynthesisSegments('job_test_1');
+
+  assert(calls === 2, `Expected 2 model calls with maxAttempts 2, got ${calls}`);
+  assert(segment.status === 'failed', `Expected segment failed after its attempt budget, got ${segment.status}`);
+});
+
+test('Synthesis segment reclaimed past maxAttempts fails without a model call', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  const { plan } = await planJobSynthesis('job_test_1', { store });
+  const segmentId = plan.segments[0].id;
+  // Two claims whose workers died mid-call; the 1ms lease has expired.
+  await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_dead_1', leaseMs: 1 });
+  await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_dead_2', leaseMs: 1 });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  let calls = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    calls += 1;
+    throw new Error('should not be called');
+  };
+
+  await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { maxAttempts: 2 } });
+  const [segment] = await store.listSynthesisSegments('job_test_1');
+
+  assert(calls === 0, `Expected no model call past the attempt budget, got ${calls}`);
+  assert(segment.status === 'failed' && segment.errorType === 'max_attempts', `Expected max_attempts failure, got ${segment.status}/${segment.errorType}`);
+});
+
+test('Retry synthesis resets the segment attempt budget', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf('async resetFailedSynthesisSegments(');
+  const body = source.slice(start, source.indexOf('\n    async ', start + 1));
+  assert(body.includes('attempt_count = 0'), 'resetFailedSynthesisSegments must reset attempt_count');
 });
 
 test('Mixed synthesis segment failures persist partial_failed result instead of stranding the job', async () => {

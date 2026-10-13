@@ -451,6 +451,49 @@ test('retry-failed clears the stale saved result before requeueing chunks', asyn
   assert(savedResult === null, 'Expected stale saved result to be cleared');
 });
 
+test('cancel leaves a complete job and its opinion alone', async () => {
+  const { cancelAbstractionJob } = await import('../api/_lib/queue.js');
+  let cancelCalls = 0;
+  const completeStore = {
+    async getJob() { return { id: 'job_1', status: 'complete' }; },
+    async cancelJob() { cancelCalls += 1; return { id: 'job_1', status: 'canceled' }; },
+  };
+  let rejected = null;
+  try { await cancelAbstractionJob('job_1', { store: completeStore }); } catch (err) { rejected = err; }
+  assert(rejected?.statusCode === 409, `Expected 409 for a complete job, got ${rejected?.statusCode}`);
+  assert(cancelCalls === 0, 'Complete job must not be canceled');
+
+  // Race: the final merge commits after cancel read the job, so the store's
+  // guarded UPDATE matches no row.
+  let reads = 0;
+  const racingStore = {
+    async getJob() { reads += 1; return { id: 'job_1', status: reads === 1 ? 'synthesizing' : 'complete' }; },
+    async cancelJob() { return null; },
+  };
+  rejected = null;
+  try { await cancelAbstractionJob('job_1', { store: racingStore }); } catch (err) { rejected = err; }
+  assert(rejected?.statusCode === 409, `Expected 409 when the job completed mid-cancel, got ${rejected?.statusCode}`);
+
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf('async cancelJob(');
+  const body = source.slice(start, source.indexOf('\n    async ', start + 1));
+  assert(body.includes("AND status <> 'complete'"), 'cancelJob SQL must not overwrite a complete job');
+});
+
+test('retry resets give exhausted chunks a fresh attempt budget', () => {
+  // A chunk fails once abstraction_attempts reaches the max. If a retry keeps
+  // that count, the next claim pushes it past the max and fails it again as
+  // max_attempts without calling the model.
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  for (const method of ['async retryFailedChunks(', 'async resetChunkAbstraction(']) {
+    const start = source.indexOf(method);
+    assert(start >= 0, `Expected ${method} in jobs.js`);
+    const body = source.slice(start, source.indexOf('\n    async ', start + method.length));
+    assert(body.includes('abstraction_attempts = 0'), `${method} must reset abstraction_attempts`);
+    assert(body.includes('abstraction_reclaims = 0'), `${method} must reset abstraction_reclaims`);
+  }
+});
+
 let passed = 0;
 let failed = 0;
 

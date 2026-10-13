@@ -467,6 +467,53 @@ test('POST /api/jobs/:id/finalize-uploads accepts server-created split children 
   assert(res.statusCode === 200, `Expected 200 when split children are present, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
 });
 
+test('POST /api/jobs/:id/finalize-uploads accepts imported continuation chunks', async () => {
+  const store = createMemoryJobStore();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  await store.createDocument('job_test_1', {
+    originalFilename: 'Deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'deed-fingerprint',
+    checksumSha256: 'a'.repeat(64),
+  });
+  await store.createChunk('job_test_1', 'doc_test_1', {
+    chunkOrder: 0,
+    originalFilename: 'Prior deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 0,
+    fingerprint: 'continuation:job_source:chk_source',
+  });
+  // Imported chunks are already abstracted and keep the source job's object URL.
+  await store.updateChunk('job_test_1', 'chk_test_1', {
+    uploadStatus: 'uploaded',
+    blobKey: 'jobs/job_test_1/chunks/chk_test_1/Prior-deed.pdf',
+    blobUrl: 'gs://titlework-test/jobs/job_source/chunks/chk_source/prior-deed.pdf',
+    abstractionStatus: 'completed',
+  });
+  await store.createChunk('job_test_1', 'doc_test_1', {
+    chunkOrder: 1,
+    originalFilename: 'New deed.pdf',
+    mediaType: 'application/pdf',
+    sizeBytes: 123456,
+    fingerprint: 'new-deed-fingerprint',
+  });
+  await store.updateChunk('job_test_1', 'chk_test_2', {
+    uploadStatus: 'uploaded',
+    blobKey: 'jobs/job_test_1/chunks/chk_test_2/new-deed.pdf',
+    blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_2/new-deed.pdf',
+  });
+
+  const res = mockRes();
+  await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
+  assert(res.statusCode === 200, `Expected 200 with imported continuation chunks, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
+
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf('async finalizeUploads(');
+  const finalizeBody = source.slice(start, source.indexOf('\n    },\n', start));
+  assert(finalizeBody.includes("chunk.abstractionStatus === 'completed'"), 'Store finalizeUploads must skip already-abstracted imports too');
+});
+
 test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable storage metadata', async () => {
   const store = createMemoryJobStore();
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
@@ -569,11 +616,34 @@ test('synthesis persistence casts nullable values for Neon parameter typing', ()
   assert(source.includes('${payload.mergeWorkerId ?? null}::text'), 'job result persistence should cast nullable mergeWorkerId for Neon');
 });
 
+test('IS NULL guards cast their parameter so Neon can type it', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const untyped = source.match(/\$\{[^}]*\}\s+IS\s+(NOT\s+)?NULL/g) || [];
+  assert(untyped.length === 0, `Cast IS NULL parameters (e.g. \${workerId ?? null}::text IS NULL): ${untyped.join(', ')}`);
+});
+
+test('continuation import keeps zero metrics and skips chunks it already imported', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf('async importContinuationAbstracts(');
+  const body = source.slice(start, source.indexOf('\n    async ', start + 1));
+  // payload_bytes and latency_ms are NOT NULL; reused abstracts store payloadBytes 0.
+  assert(!body.includes('${row.payloadBytes || null}'), 'Import must not turn payloadBytes 0 into NULL');
+  assert(!body.includes('${row.latencyMs || null}'), 'Import must not turn latencyMs 0 into NULL');
+  assert(!/findChunkByFingerprint\([^)]*orderOffset/.test(body), 'Import dedupe must not depend on the new chunk order');
+  // Completed-only imports would roll the job to synthesizing before its new uploads finalize.
+  assert(!body.includes('refreshAbstractionCounts('), 'Import must not recompute job status');
+});
+
 test('PATCH chunk blobUrl cannot retarget another bucket or object', async () => {
   const previousBucket = process.env.GCS_BUCKET;
   process.env.GCS_BUCKET = 'titlework-test';
   const store = createMemoryJobStore();
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  // GCS_BUCKET switches the rate limiter to GCS; keep this test off the network.
+  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
+    async read() { return { data: null, generation: 0 }; },
+    async write() {},
+  };
   try {
     await store.createDocument('job_test_1', {
       originalFilename: 'Deed.pdf',
@@ -603,6 +673,7 @@ test('PATCH chunk blobUrl cannot retarget another bucket or object', async () =>
     assert(otherKey.statusCode === 400, `Expected object key mismatch rejection, got ${otherKey.statusCode}`);
   } finally {
     delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
+    delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
     if (previousBucket === undefined) delete process.env.GCS_BUCKET;
     else process.env.GCS_BUCKET = previousBucket;
   }

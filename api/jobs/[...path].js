@@ -72,6 +72,8 @@ async function chunkHasUsableBlobMetadata(chunk) {
   if (!chunk || chunk.uploadStatus !== 'uploaded') return true;
   // Server-created split children use a parent-based blob key path; skip prefix check.
   if (chunk.splitParentChunkId) return true;
+  // Continuation imports arrive already abstracted and point at the source job's object.
+  if (chunk.abstractionStatus === 'completed') return true;
   if (typeof chunk.blobKey !== 'string' || !chunk.blobKey.startsWith(expectedChunkBlobPrefix(chunk.jobId, chunk.id))) {
     return false;
   }

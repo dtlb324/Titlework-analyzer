@@ -1,6 +1,7 @@
 import jobsHandler from '../api/jobs.js';
 import jobHandler from '../api/jobs/[...path].js';
-import { validateSaveJobResultInput, inferSynthesisDriver } from '../api/_lib/jobs.js';
+import { validateSaveJobResultInput, inferSynthesisDriver, validateImportContinuationInput } from '../api/_lib/jobs.js';
+import { randomUUID } from 'crypto';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -337,6 +338,15 @@ test('PATCH /api/jobs/:id rejects invalid status transitions', async () => {
   }, {}, { id: 'job_test_1' }), invalidRes);
 
   assert(invalidRes.statusCode === 409, `Expected 409, got ${invalidRes.statusCode}`);
+});
+
+test('import-continuation accepts the job ids createJob issues', () => {
+  // createJob ids are job_ + randomUUID(), which contains hyphens.
+  const sourceJobId = `job_${randomUUID()}`;
+  const accepted = validateImportContinuationInput({ sourceJobId });
+  assert(accepted.valid && accepted.value.sourceJobId === sourceJobId, `Expected ${sourceJobId} to be accepted: ${accepted.reason}`);
+  assert(!validateImportContinuationInput({ sourceJobId: 'job_../x' }).valid, 'Expected path-like id rejection');
+  assert(!validateImportContinuationInput({ sourceJobId: 'doc_123' }).valid, 'Expected non-job id rejection');
 });
 
 test('POST /api/jobs/:id/result saves browser synthesis fallback output', async () => {

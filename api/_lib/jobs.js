@@ -563,7 +563,7 @@ export function validateImportContinuationInput(input) {
     return { valid: false, reason: 'Import-continuation must not include raw documents, abstracts, CSV text, base64 payloads, or title opinions.' };
   }
   const sourceJobId = truncateText(input.sourceJobId, 200);
-  if (!sourceJobId || !/^job_[a-z0-9_]+$/i.test(sourceJobId)) {
+  if (!sourceJobId || !/^job_[a-z0-9_-]+$/i.test(sourceJobId)) {
     return { valid: false, reason: 'sourceJobId must be a valid job id.' };
   }
   return { valid: true, value: { sourceJobId } };
@@ -1671,7 +1671,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${failure.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}))
+          AND (${failure.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}::text))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1734,8 +1734,12 @@ function createPostgresJobStore() {
             completed_at = COALESCE(completed_at, now()),
             updated_at = now()
         WHERE id = ${jobId}
+          AND status <> 'complete'
         RETURNING *
       `;
+      // VALID_TRANSITIONS keeps complete final; a cancel that lands after the
+      // final merge saved leaves the job and its opinion alone.
+      if (!rows[0]) return null;
       await sql`
         UPDATE document_chunks
         SET abstraction_status = 'failed',
@@ -1759,6 +1763,8 @@ function createPostgresJobStore() {
       const rows = await sql`
         UPDATE document_chunks
         SET abstraction_status = 'pending',
+            abstraction_attempts = 0,
+            abstraction_reclaims = 0,
             abstraction_error_type = NULL,
             abstraction_error_message = NULL,
             abstraction_retry_at = NULL,
@@ -1792,7 +1798,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${failure.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}))
+          AND (${failure.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}::text))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1813,7 +1819,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId}))
+          AND (${workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId}::text))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1839,7 +1845,7 @@ function createPostgresJobStore() {
           SELECT 1 FROM document_chunks parent
           WHERE parent.job_id = ${jobId}
             AND parent.id = ${input.splitParentChunkId}
-            AND (${input.workerId ?? null} IS NULL OR (parent.abstraction_status = 'processing' AND parent.abstraction_worker_id = ${input.workerId}))
+            AND (${input.workerId ?? null}::text IS NULL OR (parent.abstraction_status = 'processing' AND parent.abstraction_worker_id = ${input.workerId}::text))
         )
         ON CONFLICT (job_id, split_parent_chunk_id, fingerprint)
         WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL
@@ -2000,6 +2006,8 @@ function createPostgresJobStore() {
         UPDATE document_chunks
         SET
           abstraction_status = 'pending',
+          abstraction_attempts = 0,
+          abstraction_reclaims = 0,
           abstraction_error_type = NULL,
           abstraction_error_message = NULL,
           abstraction_retry_at = NULL,
@@ -2391,6 +2399,7 @@ function createPostgresJobStore() {
         UPDATE synthesis_segments
         SET
           status = 'pending',
+          attempt_count = 0,
           error_type = NULL,
           error_message = NULL,
           retry_at = NULL,
@@ -2764,11 +2773,14 @@ function createPostgresJobStore() {
         const chunkFilename = row.originalFilename || row.sourceFilename || row.chunkId;
         const blobKey = buildChunkBlobKey(targetJobId, chunkId, chunkFilename);
         const importFingerprint = `continuation:${sourceJobId}:${row.chunkId}`;
-        const existingChunk = await this.findChunkByFingerprint(targetJobId, documentId, importFingerprint, orderOffset);
-        if (existingChunk) {
-          orderOffset += 1;
-          continue;
-        }
+        // Match on the import fingerprint alone: orderOffset starts after rows a
+        // previous call already imported, so it never equals their chunk_order.
+        const existingChunk = await sql`
+          SELECT id FROM document_chunks
+          WHERE job_id = ${targetJobId} AND document_id = ${documentId} AND fingerprint = ${importFingerprint}
+          LIMIT 1
+        `;
+        if (existingChunk.length) continue;
         await sql`
           INSERT INTO document_chunks (
             id, job_id, document_id, chunk_order, original_filename, blob_key,
@@ -2792,7 +2804,7 @@ function createPostgresJobStore() {
           )
           VALUES (
             ${abstractId}, ${targetJobId}, ${documentId}, ${chunkId}, ${row.abstractText}, ${row.modelUsed || null},
-            ${row.payloadBytes || null}, ${row.latencyMs || null}, ${row.inputTokens || null}, ${row.outputTokens || null},
+            ${row.payloadBytes ?? 0}, ${row.latencyMs ?? 0}, ${row.inputTokens || null}, ${row.outputTokens || null},
             'completed', ${row.attemptCount || 1}, NULL, NULL
           )
           ON CONFLICT (chunk_id) DO UPDATE
@@ -2805,7 +2817,8 @@ function createPostgresJobStore() {
         orderOffset += 1;
         imported += 1;
       }
-      await refreshAbstractionCounts(targetJobId);
+      // No refreshAbstractionCounts here: with only completed imports it would
+      // move the job to synthesizing before the new uploads are registered.
       await refreshUploadCounts(targetJobId);
       return { imported, sourceJobId, targetJobId, nextChunkOrder: orderOffset };
     },
@@ -2817,6 +2830,8 @@ function createPostgresJobStore() {
         if (chunk.uploadStatus !== 'uploaded') return false;
         // Server-created split children use a parent-based key path; skip them.
         if (chunk.splitParentChunkId) return false;
+        // Continuation imports arrive already abstracted and point at the source job's object.
+        if (chunk.abstractionStatus === 'completed') return false;
         return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(buildChunkBlobPrefix(jobId, chunk.id));
       });
       if (invalidUploaded.length) {

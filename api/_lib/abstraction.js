@@ -1038,6 +1038,12 @@ export async function retryChunkAbstraction(jobId, chunkId, options = {}) {
   if (store.resetStaleProcessingChunks) {
     await store.resetStaleProcessingChunks(jobId, options.staleProcessingMs || STALE_PROCESSING_MS);
   }
+  const job = await store.getJob(jobId);
+  if (job?.status === 'canceled') {
+    const error = new Error('Job has been canceled.');
+    error.statusCode = 409;
+    throw error;
+  }
   const chunk = await store.getChunk(jobId, chunkId);
   if (!chunk) {
     const error = new Error('Chunk not found.');
