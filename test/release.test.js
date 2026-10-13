@@ -1,5 +1,7 @@
-import { readFileSync } from 'fs';
+import { spawnSync } from 'child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { request } from 'http';
+import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from '../server.js';
@@ -308,12 +310,107 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(releaseWorkflow.includes('BULK_SYNTHESIS_CHUNK_SIZE=50'), 'Expected bulk synthesis chunk cap to match parallel chunk cap');
   assert(releaseWorkflow.includes('ABSTRACTION_ESCALATION_ENABLED=false'), 'Expected Phase 0 abstraction escalation off on API deploy');
   assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
+  assert(releaseWorkflow.includes('GH_REPO: ${{ github.repository }}'), 'Expected github-release job to set GH_REPO without a checkout');
   assert(releaseWorkflow.includes('--json tagName,isLatest'), 'Expected workflow to enforce that the GitHub Release is marked Latest');
   assert(releaseWorkflow.includes('verify-release.mjs'), 'Expected workflow to verify production before release creation');
+
+  const secretScan = readFileSync(join(root, '.github/workflows/secret-scan.yml'), 'utf8');
+  assert(secretScan.includes('persist-credentials: false'), 'Expected secret scan checkout to drop credentials');
+  assert(secretScan.includes('origin/${DEFAULT_BRANCH}'), 'Expected a missing before SHA to scan from the default branch');
+  assert(secretScan.includes('0000000000000000000000000000000000000000'), 'Expected the all-zero before SHA to be treated as unusable');
 
   const dockerignore = readFileSync(join(root, '.dockerignore'), 'utf8');
   assert(dockerignore.includes('test/'), 'Expected tests to be excluded from production image context');
   assert(dockerignore.includes('docs/'), 'Expected docs to be excluded from production image context');
+});
+
+function workflowRunScript(workflow, jobName) {
+  const lines = workflow.split('\n');
+  const jobAt = lines.findIndex(line => line === `  ${jobName}:`);
+  assert(jobAt >= 0, `Expected job ${jobName}`);
+  let runAt = -1;
+  for (let i = jobAt + 1; i < lines.length; i++) {
+    if (/^  [^ \n]/.test(lines[i])) break;
+    if (lines[i].trim() === 'run: |') runAt = i;
+  }
+  assert(runAt >= 0, `Expected run script in ${jobName}`);
+  const body = [];
+  for (let i = runAt + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '') {
+      body.push('');
+      continue;
+    }
+    const indent = line.match(/^ */)?.[0].length ?? 0;
+    if (indent < 10) break;
+    body.push(line.slice(10));
+  }
+  return body.join('\n');
+}
+
+test('github-release script dry-runs outside a checkout when GH_REPO is set', () => {
+  const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+  const script = workflowRunScript(releaseWorkflow, 'github-release');
+  assert(script.includes('gh release view'), 'Expected to dry-run the github-release script');
+  const job = releaseWorkflow.slice(releaseWorkflow.indexOf('  github-release:'));
+  assert(!job.includes('actions/checkout'), 'Expected github-release job to keep working without a checkout');
+
+  const dir = mkdtempSync(join(tmpdir(), 'github-release-'));
+  const bin = join(dir, 'bin');
+  const stubPath = join(bin, 'gh');
+  mkdirSync(bin);
+  writeFileSync(stubPath, `#!/bin/bash
+printf '%s\\n' "$*" >> "$GH_STUB_LOG"
+if [[ -z "\${GH_REPO:-}" ]]; then
+  echo "missing GH_REPO" >&2
+  exit 1
+fi
+if [[ "$1 $2" == "release view" ]]; then
+  if [[ "\${GH_STUB_EXISTS:-}" == "1" ]]; then exit 0; fi
+  exit 1
+fi
+if [[ "$1 $2" == "release list" && "$*" == *"--jq"* ]]; then
+  printf '%s\\n' "\${GH_STUB_LATEST:-true}"
+  exit 0
+fi
+exit 0
+`);
+  chmodSync(stubPath, 0o755);
+  const scriptPath = join(dir, 'release.sh');
+  writeFileSync(scriptPath, script);
+  const work = join(dir, 'empty');
+  mkdirSync(work);
+
+  function runRelease({ ghRepo, exists, latest }) {
+    const logPath = join(dir, `calls-${exists}-${latest}-${ghRepo ? 'repo' : 'norepo'}.txt`);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_STUB_LOG: logPath, GH_STUB_EXISTS: exists, GH_STUB_LATEST: latest, GITHUB_REF_NAME: 'v9.9.9', GITHUB_SHA: 'abc123', GH_TOKEN: 'stub-token' };
+    delete env.GIT_DIR;
+    delete env.GIT_WORK_TREE;
+    delete env.GH_REPO;
+    delete env.GITHUB_REPOSITORY;
+    if (ghRepo) env.GH_REPO = 'example/repo';
+    const result = spawnSync('bash', [scriptPath], { cwd: work, env, encoding: 'utf8' });
+    const calls = readFileSync(logPath, 'utf8');
+    return { status: result.status, calls, stderr: result.stderr };
+  }
+
+  const created = runRelease({ ghRepo: true, exists: '0', latest: 'true' });
+  assert(created.status === 0, `Expected create path to pass, stderr=${created.stderr}`);
+  assert(created.calls.includes('release create'), 'Expected a missing release to call gh release create');
+  assert(created.calls.includes('--target'), 'Expected create to target the tag commit');
+
+  const edited = runRelease({ ghRepo: true, exists: '1', latest: 'true' });
+  assert(edited.status === 0, `Expected edit path to pass, stderr=${edited.stderr}`);
+  assert(edited.calls.includes('release edit'), 'Expected an existing release to call gh release edit');
+  assert(!edited.calls.includes('release create'), 'Expected edit path not to create a release');
+
+  const notLatest = runRelease({ ghRepo: true, exists: '1', latest: 'false' });
+  assert(notLatest.status !== 0, 'Expected the script to fail when the release is not Latest');
+
+  const missingRepo = runRelease({ ghRepo: false, exists: '0', latest: 'true' });
+  assert(missingRepo.status !== 0, 'Expected gh release to fail outside a checkout when GH_REPO is unset');
+
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test('release documentation describes automated deploy, verification, and rollback', () => {
