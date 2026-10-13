@@ -575,6 +575,16 @@ test('IS NULL guards cast their parameter so Neon can type it', () => {
   assert(untyped.length === 0, `Cast IS NULL parameters (e.g. \${workerId ?? null}::text IS NULL): ${untyped.join(', ')}`);
 });
 
+test('continuation import keeps zero metrics and skips chunks it already imported', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf('async importContinuationAbstracts(');
+  const body = source.slice(start, source.indexOf('\n    async ', start + 1));
+  // payload_bytes and latency_ms are NOT NULL; reused abstracts store payloadBytes 0.
+  assert(!body.includes('${row.payloadBytes || null}'), 'Import must not turn payloadBytes 0 into NULL');
+  assert(!body.includes('${row.latencyMs || null}'), 'Import must not turn latencyMs 0 into NULL');
+  assert(!/findChunkByFingerprint\([^)]*orderOffset/.test(body), 'Import dedupe must not depend on the new chunk order');
+});
+
 test('PATCH chunk blobUrl cannot retarget another bucket or object', async () => {
   const previousBucket = process.env.GCS_BUCKET;
   process.env.GCS_BUCKET = 'titlework-test';

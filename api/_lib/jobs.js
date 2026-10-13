@@ -2768,11 +2768,14 @@ function createPostgresJobStore() {
         const chunkFilename = row.originalFilename || row.sourceFilename || row.chunkId;
         const blobKey = buildChunkBlobKey(targetJobId, chunkId, chunkFilename);
         const importFingerprint = `continuation:${sourceJobId}:${row.chunkId}`;
-        const existingChunk = await this.findChunkByFingerprint(targetJobId, documentId, importFingerprint, orderOffset);
-        if (existingChunk) {
-          orderOffset += 1;
-          continue;
-        }
+        // Match on the import fingerprint alone: orderOffset starts after rows a
+        // previous call already imported, so it never equals their chunk_order.
+        const existingChunk = await sql`
+          SELECT id FROM document_chunks
+          WHERE job_id = ${targetJobId} AND document_id = ${documentId} AND fingerprint = ${importFingerprint}
+          LIMIT 1
+        `;
+        if (existingChunk.length) continue;
         await sql`
           INSERT INTO document_chunks (
             id, job_id, document_id, chunk_order, original_filename, blob_key,
@@ -2796,7 +2799,7 @@ function createPostgresJobStore() {
           )
           VALUES (
             ${abstractId}, ${targetJobId}, ${documentId}, ${chunkId}, ${row.abstractText}, ${row.modelUsed || null},
-            ${row.payloadBytes || null}, ${row.latencyMs || null}, ${row.inputTokens || null}, ${row.outputTokens || null},
+            ${row.payloadBytes ?? 0}, ${row.latencyMs ?? 0}, ${row.inputTokens || null}, ${row.outputTokens || null},
             'completed', ${row.attemptCount || 1}, NULL, NULL
           )
           ON CONFLICT (chunk_id) DO UPDATE
