@@ -563,7 +563,7 @@ export function validateImportContinuationInput(input) {
     return { valid: false, reason: 'Import-continuation must not include raw documents, abstracts, CSV text, base64 payloads, or title opinions.' };
   }
   const sourceJobId = truncateText(input.sourceJobId, 200);
-  if (!sourceJobId || !/^job_[a-z0-9_]+$/i.test(sourceJobId)) {
+  if (!sourceJobId || !/^job_[a-z0-9_-]+$/i.test(sourceJobId)) {
     return { valid: false, reason: 'sourceJobId must be a valid job id.' };
   }
   return { valid: true, value: { sourceJobId } };
