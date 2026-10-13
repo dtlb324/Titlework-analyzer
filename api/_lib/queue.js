@@ -516,8 +516,18 @@ export async function cancelAbstractionJob(jobId, options = {}) {
   if (isJobCanceled(job)) {
     return { job, alreadyCanceled: true };
   }
+  if (job.status === 'complete') {
+    const error = new Error('Job is already complete.');
+    error.statusCode = 409;
+    throw error;
+  }
   if (store.cancelJob) {
     const canceledJob = await store.cancelJob(jobId, options.reason || 'User canceled job.');
+    if (!canceledJob && (await store.getJob(jobId))?.status === 'complete') {
+      const error = new Error('Job is already complete.');
+      error.statusCode = 409;
+      throw error;
+    }
     return { job: canceledJob || job, alreadyCanceled: false };
   }
   if (store.updateJob) {

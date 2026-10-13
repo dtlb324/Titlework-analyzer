@@ -1734,8 +1734,12 @@ function createPostgresJobStore() {
             completed_at = COALESCE(completed_at, now()),
             updated_at = now()
         WHERE id = ${jobId}
+          AND status <> 'complete'
         RETURNING *
       `;
+      // VALID_TRANSITIONS keeps complete final; a cancel that lands after the
+      // final merge saved leaves the job and its opinion alone.
+      if (!rows[0]) return null;
       await sql`
         UPDATE document_chunks
         SET abstraction_status = 'failed',
