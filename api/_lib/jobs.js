@@ -2395,6 +2395,7 @@ function createPostgresJobStore() {
         UPDATE synthesis_segments
         SET
           status = 'pending',
+          attempt_count = 0,
           error_type = NULL,
           error_message = NULL,
           retry_at = NULL,
