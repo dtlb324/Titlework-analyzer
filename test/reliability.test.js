@@ -451,6 +451,20 @@ test('retry-failed clears the stale saved result before requeueing chunks', asyn
   assert(savedResult === null, 'Expected stale saved result to be cleared');
 });
 
+test('retry resets give exhausted chunks a fresh attempt budget', () => {
+  // A chunk fails once abstraction_attempts reaches the max. If a retry keeps
+  // that count, the next claim pushes it past the max and fails it again as
+  // max_attempts without calling the model.
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  for (const method of ['async retryFailedChunks(', 'async resetChunkAbstraction(']) {
+    const start = source.indexOf(method);
+    assert(start >= 0, `Expected ${method} in jobs.js`);
+    const body = source.slice(start, source.indexOf('\n    async ', start + method.length));
+    assert(body.includes('abstraction_attempts = 0'), `${method} must reset abstraction_attempts`);
+    assert(body.includes('abstraction_reclaims = 0'), `${method} must reset abstraction_reclaims`);
+  }
+});
+
 let passed = 0;
 let failed = 0;
 

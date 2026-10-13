@@ -1759,6 +1759,8 @@ function createPostgresJobStore() {
       const rows = await sql`
         UPDATE document_chunks
         SET abstraction_status = 'pending',
+            abstraction_attempts = 0,
+            abstraction_reclaims = 0,
             abstraction_error_type = NULL,
             abstraction_error_message = NULL,
             abstraction_retry_at = NULL,
@@ -2000,6 +2002,8 @@ function createPostgresJobStore() {
         UPDATE document_chunks
         SET
           abstraction_status = 'pending',
+          abstraction_attempts = 0,
+          abstraction_reclaims = 0,
           abstraction_error_type = NULL,
           abstraction_error_message = NULL,
           abstraction_retry_at = NULL,
