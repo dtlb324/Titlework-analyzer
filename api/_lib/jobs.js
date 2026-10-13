@@ -2817,7 +2817,8 @@ function createPostgresJobStore() {
         orderOffset += 1;
         imported += 1;
       }
-      await refreshAbstractionCounts(targetJobId);
+      // No refreshAbstractionCounts here: with only completed imports it would
+      // move the job to synthesizing before the new uploads are registered.
       await refreshUploadCounts(targetJobId);
       return { imported, sourceJobId, targetJobId, nextChunkOrder: orderOffset };
     },
@@ -2829,6 +2830,8 @@ function createPostgresJobStore() {
         if (chunk.uploadStatus !== 'uploaded') return false;
         // Server-created split children use a parent-based key path; skip them.
         if (chunk.splitParentChunkId) return false;
+        // Continuation imports arrive already abstracted and point at the source job's object.
+        if (chunk.abstractionStatus === 'completed') return false;
         return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(buildChunkBlobPrefix(jobId, chunk.id));
       });
       if (invalidUploaded.length) {
