@@ -590,6 +590,11 @@ test('PATCH chunk blobUrl cannot retarget another bucket or object', async () =>
   process.env.GCS_BUCKET = 'titlework-test';
   const store = createMemoryJobStore();
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  // GCS_BUCKET switches the rate limiter to GCS; keep this test off the network.
+  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
+    async read() { return { data: null, generation: 0 }; },
+    async write() {},
+  };
   try {
     await store.createDocument('job_test_1', {
       originalFilename: 'Deed.pdf',
@@ -619,6 +624,7 @@ test('PATCH chunk blobUrl cannot retarget another bucket or object', async () =>
     assert(otherKey.statusCode === 400, `Expected object key mismatch rejection, got ${otherKey.statusCode}`);
   } finally {
     delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
+    delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
     if (previousBucket === undefined) delete process.env.GCS_BUCKET;
     else process.env.GCS_BUCKET = previousBucket;
   }
