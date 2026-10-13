@@ -569,6 +569,12 @@ test('synthesis persistence casts nullable values for Neon parameter typing', ()
   assert(source.includes('${payload.mergeWorkerId ?? null}::text'), 'job result persistence should cast nullable mergeWorkerId for Neon');
 });
 
+test('IS NULL guards cast their parameter so Neon can type it', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const untyped = source.match(/\$\{[^}]*\}\s+IS\s+(NOT\s+)?NULL/g) || [];
+  assert(untyped.length === 0, `Cast IS NULL parameters (e.g. \${workerId ?? null}::text IS NULL): ${untyped.join(', ')}`);
+});
+
 test('PATCH chunk blobUrl cannot retarget another bucket or object', async () => {
   const previousBucket = process.env.GCS_BUCKET;
   process.env.GCS_BUCKET = 'titlework-test';

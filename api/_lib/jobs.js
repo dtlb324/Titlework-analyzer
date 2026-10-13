@@ -1671,7 +1671,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${failure.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}))
+          AND (${failure.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}::text))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1792,7 +1792,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${failure.workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}))
+          AND (${failure.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}::text))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1813,7 +1813,7 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${workerId ?? null} IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId}))
+          AND (${workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${workerId}::text))
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);
@@ -1839,7 +1839,7 @@ function createPostgresJobStore() {
           SELECT 1 FROM document_chunks parent
           WHERE parent.job_id = ${jobId}
             AND parent.id = ${input.splitParentChunkId}
-            AND (${input.workerId ?? null} IS NULL OR (parent.abstraction_status = 'processing' AND parent.abstraction_worker_id = ${input.workerId}))
+            AND (${input.workerId ?? null}::text IS NULL OR (parent.abstraction_status = 'processing' AND parent.abstraction_worker_id = ${input.workerId}::text))
         )
         ON CONFLICT (job_id, split_parent_chunk_id, fingerprint)
         WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL
