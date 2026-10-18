@@ -9,10 +9,6 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-/**
- * Helper: create a mock ReadableStream body that yields the given text as
- * OpenAI-format SSE lines, split into chunks.
- */
 function makeSSEBody(sseLines, chunkSize = 128) {
   const full = sseLines.join('\n');
   const chunks = [];
@@ -119,7 +115,6 @@ test('consumeOpenRouterMessageStream handles empty body', async () => {
   assert(result.usage.input_tokens === null);
 });
 
-// ── Run ──────────────────────────────────────────────────────────────
 
 let failed = 0;
 for (const { name, fn } of tests) {

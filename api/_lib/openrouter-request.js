@@ -1,4 +1,3 @@
-// OpenRouter chat-completions helpers (Anthropic-shaped messages in, OpenAI-format out, normalized usage back).
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
@@ -19,9 +18,7 @@ export function openRouterApiKeyError() {
  */
 export function shouldUseOpenRouter(model) {
   const modelName = String(model || '').trim();
-  // Rule 1: slash-name → OpenRouter
   if (modelName.includes('/')) return true;
-  // Rule 2: global toggle
   if (process.env.MODEL_PROVIDER === 'openrouter') return true;
   return false;
 }
@@ -42,7 +39,6 @@ function mapModelName(model) {
   return modelName;
 }
 
-// Shared non-streaming max-tokens threshold (mirrors Anthropic behaviour).
 export const NON_STREAMING_MAX_TOKENS = 8192;
 
 /**
@@ -55,7 +51,6 @@ export const NON_STREAMING_MAX_TOKENS = 8192;
 export function buildOpenRouterRequestBody({ model, maxTokens, system, messages }) {
   const openaiMessages = [];
 
-  // system → leading system message
   if (system != null) {
     const systemText = typeof system === 'string'
       ? system
@@ -67,7 +62,6 @@ export function buildOpenRouterRequestBody({ model, maxTokens, system, messages 
     }
   }
 
-  // user/assistant messages
   for (const message of messages) {
     if (!message || typeof message !== 'object') continue;
     const role = message.role === 'assistant' ? 'assistant' : 'user';
@@ -108,7 +102,6 @@ export function buildOpenRouterRequestBody({ model, maxTokens, system, messages 
 
         if (source.type === 'base64' && source.data && source.media_type) {
           if (block.type === 'image') {
-            // Image → data URL in image_url format
             parts.push({
               type: 'image_url',
               image_url: {
@@ -116,7 +109,6 @@ export function buildOpenRouterRequestBody({ model, maxTokens, system, messages 
               },
             });
           } else {
-            // Document (PDF) → OpenAI file format
             parts.push({
               type: 'file',
               file: {
@@ -138,7 +130,6 @@ export function buildOpenRouterRequestBody({ model, maxTokens, system, messages 
   const target = mapModelName(model);
   const isAnthropicTarget = target.startsWith('anthropic/');
 
-  // Strip cache_control from content parts unless targeting anthropic/*
   const sanitizedMessages = openaiMessages.map(msg => {
     if (typeof msg.content === 'string') return msg;
     if (!Array.isArray(msg.content)) return msg;
@@ -204,9 +195,6 @@ export function normalizeOpenRouterResponse(data = {}, requestedModel) {
   };
 }
 
-/**
- * Invoke a non-streaming OpenRouter chat-completions request.
- */
 export async function invokeOpenRouterModel(request, options = {}) {
   const keyError = openRouterApiKeyError();
   if (keyError) {

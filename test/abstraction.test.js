@@ -3,6 +3,9 @@ import {
   ABSTRACTION_PROMPT,
   assertSafeBlobUrl,
   buildAbstractMessagesForChunk,
+  buildAbstractMessagesForChunks,
+  resolveChunkDelivery,
+  estimateAbstractPayloadBytes,
   defaultBlobLoader,
   getAbstractionConfig,
   resolveAbstractModel,
@@ -131,9 +134,7 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
     const job = jobs.get(jobId);
     let status = job.status;
     if (status === 'canceled') {
-      // do not transition away from canceled
     } else if (status === 'complete' && pending === 0 && processing === 0 && retry_wait === 0) {
-      // do not regress a finished job back to synthesizing
     } else if (jobChunks.length && terminal === jobChunks.length) {
       status = completed > 0 && failed > 0 ? 'partial_failed' : completed > 0 ? 'synthesizing' : 'failed';
     } else if (jobChunks.some(chunk => ['pending', 'processing', 'retry_wait'].includes(chunk.abstractionStatus))) {
@@ -432,10 +433,6 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-// Regression: when the request will route through OpenRouter, large visual PDFs
-// must NOT be uploaded to the Gemini Files API — that produces a file_uri source
-// openrouter-request.js rejects, hard-failing the chunk. Enrichment must leave the
-// inline 'visual' delivery untouched and make no upload call.
 test('enrichVisualDeliveryForModel skips Gemini Files upload when routing to OpenRouter', async () => {
   const prevProvider = process.env.MODEL_PROVIDER;
   const prevGeminiKey = process.env.GEMINI_API_KEY;
@@ -444,14 +441,14 @@ test('enrichVisualDeliveryForModel skips Gemini Files upload when routing to Ope
   process.env.GEMINI_API_KEY = 'test-gemini-key';
   let fetchCalled = false;
   global.fetch = async (...args) => {
-    fetchCalled = true; // any call here means an upload was attempted
+    fetchCalled = true;
     throw new Error(`unexpected upload fetch: ${String(args[0])}`);
   };
 
   try {
     const delivery = { mode: 'visual', extractedText: '' };
     const chunk = { id: 'c1', mediaType: 'application/pdf', originalFilename: 'big.pdf' };
-    const payload = new Uint8Array(2_000_000); // ≥ 1.5 MB → would trigger upload
+    const payload = new Uint8Array(2_000_000);
     const result = await enrichVisualDeliveryForModel(delivery, chunk, payload, 'gemini-2.5-flash');
     assert(result.mode === 'visual', `Expected delivery to stay 'visual', got '${result.mode}'`);
     assert(result.fileUri === undefined, 'Expected no file_uri to be set');
@@ -548,6 +545,25 @@ test('buildAbstractMessagesForChunk supports PDF, image, and CSV chunks', async 
   assert(imageMessages[0].content.some(block => block.type === 'image'), 'Expected image block');
   assert(csvMessages[0].content.some(block => block.type === 'text' && block.text.includes('CSV DATA')), 'Expected CSV text prompt');
   assert(!JSON.stringify(csvMessages).includes('base64'), 'CSV messages should not use base64 document payloads');
+});
+
+test('rendered image chunks ignore PDF and CSV source extensions without changing the filename', async () => {
+  const bytes = Buffer.from('rendered image');
+  for (const filename of ['deed.pdf', 'owners.csv']) {
+    const chunk = { originalFilename: filename, mediaType: 'image/png', renderedImages: true };
+    const single = buildAbstractMessagesForChunk(chunk, bytes);
+    const batch = buildAbstractMessagesForChunks([{ chunk, payloadBytes: bytes }]);
+    for (const messages of [single, batch]) {
+      const images = messages[0].content.filter(block => block.type === 'image');
+      assert(images.length === 1, `Expected an image block for rendered ${filename}`);
+      assert(images[0].source.data === bytes.toString('base64'), 'Expected unchanged rendered bytes');
+      assert(!messages[0].content.some(block => block.type === 'document'), 'Rendered images must not become PDF blocks');
+      assert(messages[0].content.at(-1).text.includes(`${filename} (rendered pages)`), 'Expected unchanged model-visible rendered filename');
+    }
+    assert(chunk.originalFilename === filename, 'Expected the original filename to remain unchanged');
+    assert((await resolveChunkDelivery(chunk, bytes)).mode === 'visual', 'Rendered images must bypass PDF text extraction');
+    assert(estimateAbstractPayloadBytes(chunk, bytes) === estimateAbstractPayloadBytes({ ...chunk, originalFilename: 'scan.png' }, bytes), 'Rendered image planning must not use PDF or CSV estimates');
+  }
 });
 
 test('abstraction prompt treats each PDF as one recorded instrument', () => {
@@ -749,9 +765,6 @@ test('frontend contains server-abstraction start, poll, fetch, and fallback hook
   assert(indexHtml.includes('falling back to browser abstraction'), 'Expected user-visible fallback warning');
 });
 
-// ---------------------------------------------------------------------------
-// Phase 4 tests
-// ---------------------------------------------------------------------------
 
 test('Phase 4: worker claims pending chunks under a lease', async () => {
   const store = createMemoryPhase3Store([
@@ -996,7 +1009,6 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
     };
   };
 
-  // Build a real multi-page PDF so pdf-lib can split it
   const { PDFDocument } = await import('pdf-lib');
   const pdf = await PDFDocument.create();
   for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
@@ -1204,7 +1216,6 @@ test('Phase 4: cancellation stops future chunk processing', async () => {
     makeChunk({ id: 'chk_two', chunkOrder: 1 }),
   ]);
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
-  // Cancel BEFORE any processing
   await store.cancelJob('job_test_1', 'test cancel');
 
   let modelCalls = 0;
@@ -1475,7 +1486,6 @@ test('Phase 4: WORKFLOW_DRIVER=inngest without keys returns 503 setup error', as
   process.env.WORKFLOW_DRIVER = 'inngest';
   const store = createMemoryPhase3Store([makeChunk()]);
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
-  // Make sure Phase 3 setup error is past
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({ text: 'DOCUMENT #1:\nok.', model: 'gemini-2.5-flash', usage: {} });
 
@@ -1608,7 +1618,6 @@ for (const { name, fn } of tests) {
   try {
     await fn();
     console.log(`ok - ${name}`);
-    // Reset globals between tests to avoid cross-test pollution
     delete globalThis.__TITLE_ANALYZER_BLOB_WRITER__;
   } catch (err) {
     console.error(`not ok - ${name}`);

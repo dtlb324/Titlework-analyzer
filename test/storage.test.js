@@ -33,6 +33,29 @@ function mockRes() {
   };
 }
 
+async function withOfflineStorageRoute(fn) {
+  const previousBucket = process.env.GCS_BUCKET;
+  const previousBackend = globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
+  const previousStore = globalThis.__TITLE_ANALYZER_JOB_STORE__;
+  const store = createMemoryJobStore();
+  process.env.GCS_BUCKET = 'titlework-test';
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
+    async read() { return { data: null, generation: 0 }; },
+    async write() {},
+  };
+  try {
+    return await fn(store);
+  } finally {
+    if (previousBucket === undefined) delete process.env.GCS_BUCKET;
+    else process.env.GCS_BUCKET = previousBucket;
+    if (previousBackend === undefined) delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
+    else globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = previousBackend;
+    if (previousStore === undefined) delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
+    else globalThis.__TITLE_ANALYZER_JOB_STORE__ = previousStore;
+  }
+}
+
 function createMemoryJobStore() {
   const now = '2026-05-22T22:15:00.000Z';
   let documentCount = 0;
@@ -484,7 +507,6 @@ test('POST /api/jobs/:id/finalize-uploads accepts imported continuation chunks',
     sizeBytes: 0,
     fingerprint: 'continuation:job_source:chk_source',
   });
-  // Imported chunks are already abstracted and keep the source job's object URL.
   await store.updateChunk('job_test_1', 'chk_test_1', {
     uploadStatus: 'uploaded',
     blobKey: 'jobs/job_test_1/chunks/chk_test_1/Prior-deed.pdf',
@@ -508,10 +530,34 @@ test('POST /api/jobs/:id/finalize-uploads accepts imported continuation chunks',
   await jobsRouteHandler(mockReq('POST', null, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/finalize-uploads'), res);
   assert(res.statusCode === 200, `Expected 200 with imported continuation chunks, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
 
+  const { runInNewContext } = await import('node:vm');
+  const storage = await import('../api/_lib/storage.js');
+  const { JobApiError, assertValidStatusTransition } = await import('../api/_lib/jobs.js');
   const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
   const start = source.indexOf('async finalizeUploads(');
-  const finalizeBody = source.slice(start, source.indexOf('\n    },\n', start));
-  assert(finalizeBody.includes("chunk.abstractionStatus === 'completed'"), 'Store finalizeUploads must skip already-abstracted imports too');
+  const end = source.indexOf('\n    },\n', start) + 6;
+  const finalize = runInNewContext(`({ ${source.slice(start, end)} })`, {
+    ensureSchema: async () => {},
+    sql: async () => [{ id: 'job_test_1', status: 'ready' }],
+    refreshUploadCounts: async () => ({ status: 'uploading' }),
+    buildChunkBlobPrefix: (jobId, chunkId) => `jobs/${jobId}/chunks/${chunkId}/`,
+    validateChunkFinalizationStorage: storage.validateChunkFinalizationStorage,
+    JobApiError, assertValidStatusTransition, rowToJob: row => row,
+  }).finalizeUploads;
+  const result = await finalize.call({
+    listChunks: () => store.listChunks('job_test_1'), getJob: async () => ({ status: 'uploading' }),
+  }, 'job_test_1');
+  assert(result.ready === true && result.job.status === 'ready', 'Expected the production finalizer to accept imported abstracts');
+  for (const chunk of [
+    { id: 'chk_missing', jobId: 'job_test_1', uploadStatus: 'uploaded' },
+    { id: 'chk_foreign', jobId: 'job_test_1', uploadStatus: 'uploaded', blobKey: 'jobs/other/chunks/other/file.pdf', blobUrl: 'gs://titlework-test/foreign.pdf' },
+  ]) {
+    let error;
+    try {
+      await finalize.call({ listChunks: async () => [chunk], getJob: async () => ({ status: 'uploading' }) }, 'job_test_1');
+    } catch (err) { error = err; }
+    assert(error?.statusCode === 409, 'Expected the production finalizer to reject invalid normal-upload metadata');
+  }
 });
 
 test('POST /api/jobs/:id/finalize-uploads rejects uploaded chunks missing usable storage metadata', async () => {
@@ -626,25 +672,14 @@ test('continuation import keeps zero metrics and skips chunks it already importe
   const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
   const start = source.indexOf('async importContinuationAbstracts(');
   const body = source.slice(start, source.indexOf('\n    async ', start + 1));
-  // payload_bytes and latency_ms are NOT NULL; reused abstracts store payloadBytes 0.
   assert(!body.includes('${row.payloadBytes || null}'), 'Import must not turn payloadBytes 0 into NULL');
   assert(!body.includes('${row.latencyMs || null}'), 'Import must not turn latencyMs 0 into NULL');
   assert(!/findChunkByFingerprint\([^)]*orderOffset/.test(body), 'Import dedupe must not depend on the new chunk order');
-  // Completed-only imports would roll the job to synthesizing before its new uploads finalize.
   assert(!body.includes('refreshAbstractionCounts('), 'Import must not recompute job status');
 });
 
 test('PATCH chunk blobUrl cannot retarget another bucket or object', async () => {
-  const previousBucket = process.env.GCS_BUCKET;
-  process.env.GCS_BUCKET = 'titlework-test';
-  const store = createMemoryJobStore();
-  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
-  // GCS_BUCKET switches the rate limiter to GCS; keep this test off the network.
-  globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__ = {
-    async read() { return { data: null, generation: 0 }; },
-    async write() {},
-  };
-  try {
+  await withOfflineStorageRoute(async store => {
     await store.createDocument('job_test_1', {
       originalFilename: 'Deed.pdf',
       mediaType: 'application/pdf',
@@ -671,12 +706,7 @@ test('PATCH chunk blobUrl cannot retarget another bucket or object', async () =>
       blobUrl: 'gs://titlework-test/jobs/job_test_1/chunks/chk_test_1/other.pdf',
     }, {}, { id: 'job_test_1', chunkId: 'chk_test_1' }, '/api/jobs/job_test_1/chunks/chk_test_1'), otherKey);
     assert(otherKey.statusCode === 400, `Expected object key mismatch rejection, got ${otherKey.statusCode}`);
-  } finally {
-    delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
-    delete globalThis.__TITLE_ANALYZER_RATE_LIMIT_BACKEND__;
-    if (previousBucket === undefined) delete process.env.GCS_BUCKET;
-    else process.env.GCS_BUCKET = previousBucket;
-  }
+  });
 });
 
 test('readable storage refs stay on the configured bucket and reject dot segments', async () => {
@@ -709,6 +739,25 @@ test('readable storage refs stay on the configured bucket and reject dot segment
   } finally {
     if (previousBucket === undefined) delete process.env.GCS_BUCKET;
     else process.env.GCS_BUCKET = previousBucket;
+  }
+});
+
+test('finalization storage validation distinguishes pending, split, completed and uploaded chunks', async () => {
+  const { validateChunkFinalizationStorage } = await import('../api/_lib/storage.js');
+  const normal = { id: 'chk_test', jobId: 'job_test', uploadStatus: 'uploaded',
+    blobKey: 'jobs/job_test/chunks/chk_test/deed.pdf', blobUrl: 'gs://titlework-test/jobs/job_test/chunks/chk_test/deed.pdf' };
+  for (const [chunk, kind, valid] of [
+    [null, 'not_uploaded', true],
+    [{ uploadStatus: 'pending' }, 'not_uploaded', true],
+    [{ uploadStatus: 'uploaded', splitParentChunkId: 'chk_parent' }, 'split_child', true],
+    [{ uploadStatus: 'uploaded', abstractionStatus: 'completed' }, 'completed_abstract', true],
+    [normal, 'uploaded_object', true],
+    [{ ...normal, blobKey: null }, 'uploaded_object', false],
+    [{ ...normal, blobUrl: null }, 'uploaded_object', false],
+    [{ ...normal, blobKey: 'jobs/other/chunks/chk_test/deed.pdf' }, 'uploaded_object', false],
+  ]) {
+    const result = validateChunkFinalizationStorage(chunk);
+    assert(result.kind === kind && result.valid === valid, `Expected ${kind}/${valid}, got ${JSON.stringify(result)}`);
   }
 });
 

@@ -105,7 +105,7 @@ function normalizeBytes(payload) {
 }
 
 function isPdfChunk(chunk) {
-  return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
+  return !chunk.renderedImages && (chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || ''));
 }
 
 function isPotentiallySplittablePdfChunk(chunk) {
@@ -117,7 +117,7 @@ function isImageChunk(chunk) {
 }
 
 function isCsvChunk(chunk) {
-  return chunk.mediaType === 'text/csv' || /\.csv$/i.test(chunk.originalFilename || '');
+  return !chunk.renderedImages && (chunk.mediaType === 'text/csv' || /\.csv$/i.test(chunk.originalFilename || ''));
 }
 
 function maxRawBlobBytesForChunk(chunk) {
@@ -139,6 +139,7 @@ function assertBlobSizeWithinBudget(chunk, sizeBytes) {
 }
 
 function chunkDisplayName(chunk) {
+  if (chunk.renderedImages) return `${chunk.originalFilename || chunk.id} (rendered pages)`;
   if (chunk.pageStart && chunk.pageEnd && !/\(pp\s+\d+/i.test(chunk.originalFilename || '')) {
     return `${chunk.originalFilename} (pp ${chunk.pageStart}${chunk.pageEnd === chunk.pageStart ? '' : `-${chunk.pageEnd}`})`;
   }
@@ -160,7 +161,7 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
     const csvText = bytes.toString('utf8');
     textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
   } else if (isPdfChunk(chunk)) {
-    const pdf = pdfDeliveryParts(chunk, bytes, delivery, docNum, name);
+    const pdf = pdfDeliveryParts(bytes, delivery, docNum, name);
     textPrompt += pdf.promptSuffix;
     if (pdf.documentBlock) content.push(pdf.documentBlock);
   } else if (isImageChunk(chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
@@ -213,7 +214,7 @@ function visualPdfDocumentBlock(delivery, bytes) {
   };
 }
 
-function pdfDeliveryParts(_chunk, bytes, delivery, docNum, name) {
+function pdfDeliveryParts(bytes, delivery, docNum, name) {
   if (delivery?.mode === 'text' && delivery.extractedText) {
     return {
       promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - EXTRACTED PDF TEXT:\n${delivery.extractedText}\n\nAbstract from this extracted text. If extraction omitted visible content, note gaps under ISSUES and write ILLEGIBLE - VERIFY MANUALLY where needed.`,
@@ -235,10 +236,6 @@ function pdfDeliveryParts(_chunk, bytes, delivery, docNum, name) {
   return { promptSuffix: '', documentBlock: visualPdfDocumentBlock(delivery, bytes) };
 }
 
-/**
- * Build one user message abstracting multiple chunks (server/browser batch path).
- * Each item: { chunk, payloadBytes, delivery?, sequenceIndex? }
- */
 export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
   const content = [];
   const labels = items.map((item, index) => {
@@ -264,7 +261,7 @@ Extract every relevant fact. Do not guess at anything illegible.`;
       const csvText = bytes.toString('utf8');
       textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
     } else if (isPdfChunk(item.chunk)) {
-      const pdf = pdfDeliveryParts(item.chunk, bytes, delivery, docNum, name);
+      const pdf = pdfDeliveryParts(bytes, delivery, docNum, name);
       textPrompt += pdf.promptSuffix;
       if (pdf.documentBlock) content.push(pdf.documentBlock);
     } else if (isImageChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
@@ -301,7 +298,6 @@ export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
   try {
     parsed = JSON.parse(trimmed);
   } catch (_) {
-    // JSON parse failure — all items get empty abstractText and fall back to singles
   }
   return items.map((item, index) => ({
     chunk: item.chunk,
@@ -376,7 +372,6 @@ function logChunkStage(stage, chunk, details = {}, enabled = false) {
       ...details,
     }));
   } catch {
-    // Logging must never affect document processing.
   }
 }
 
@@ -440,9 +435,6 @@ export async function resolveChunkDelivery(chunk, payloadBytes) {
   return { mode: 'visual' };
 }
 
-/**
- * Upload large visual PDFs/images to Gemini Files API so generateContent stays under JSON envelope limits.
- */
 export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model) {
   if (!delivery || !isGeminiModel(model)) {
     return delivery;
@@ -544,7 +536,6 @@ export async function runModelAbstraction({
     ...(schemaForModel ? { responseSchema: schemaForModel } : {}),
   });
   let usage = extractUsage(response.usage);
-  // Structured output mode (batch JSON) skips escalation — fallback-to-singles handles per-doc quality.
   const escalationEnabled = !responseSchema
     && options.escalationEnabled !== false
     && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
@@ -565,7 +556,6 @@ export async function runModelAbstraction({
       response = escalatedResponse;
       escalated = true;
     } catch (_) {
-      // Keep initial Flash abstract when escalation fails.
     }
   }
   return {
@@ -783,7 +773,6 @@ export async function tryReuseExistingAbstract(store, chunk, workerId) {
   if (existing?.abstractText?.trim()) {
     return { source: 'same_chunk', abstractText: existing.abstractText, modelUsed: existing.modelUsed || ABSTRACT_MODEL };
   }
-  // Skip peer reuse on retries (attempt > 1) so failed chunks are re-read and re-abstracted.
   const attemptCount = Math.max(0, Number(chunk.abstractionAttempts) || 0);
   if (attemptCount <= 1 && store.findReusableAbstractForChunk) {
     const donor = await store.findReusableAbstractForChunk(chunk.jobId, chunk);

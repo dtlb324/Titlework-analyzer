@@ -1,4 +1,3 @@
-// Shared Anthropic Messages API helpers (prompt caching, request shaping).
 
 const DEFAULT_MERGE_USER_CACHE_MIN_TOKENS = 1024;
 

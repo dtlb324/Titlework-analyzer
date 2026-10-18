@@ -22,14 +22,11 @@ export function isAnthropicModel(model) {
 }
 
 export function modelApiKeyError(model) {
-  if (isGeminiModel(model)) return geminiApiKeyError();
-
-  // OpenRouter has priority for slash-names or when MODEL_PROVIDER=openrouter
   if (shouldUseOpenRouter(model)) {
     return openRouterApiKeyError();
   }
+  if (isGeminiModel(model)) return geminiApiKeyError();
 
-  // Existing Anthropic behaviour for non-slash Claude models
   if (isAnthropicModel(model)) {
     if (!anthropicApiKey()) {
       return 'ANTHROPIC_API_KEY is required for Claude models.';
@@ -122,8 +119,6 @@ export async function invokeAnthropicModelStream(request, options = {}) {
   }
 }
 
-// `options.direct` skips OpenRouter key routing: the OCR lab always calls
-// api.anthropic.com, so only ANTHROPIC_API_KEY is relevant there.
 export async function invokeAnthropicModel(request, options = {}) {
   const keyError = options.direct
     ? (anthropicApiKey() ? null : 'ANTHROPIC_API_KEY is required for Claude models.')
@@ -173,10 +168,6 @@ export async function invokeAnthropicModel(request, options = {}) {
   }
 }
 
-/**
- * Stream an OpenRouter chat-completions request.
- * Returns the same shape as invokeAnthropicModelStream.
- */
 async function invokeOpenRouterModelStream(request, options = {}) {
   const keyError = modelApiKeyError(request.model);
   if (keyError) {
@@ -249,7 +240,6 @@ export async function invokeModel(request, options = {}) {
     onEvent: options.onEvent || request.onEvent,
   };
 
-  // OpenRouter routing: slash-name detection or global toggle
   if (shouldUseOpenRouter(model)) {
     if (stream || Number(request.maxTokens) > NON_STREAMING_MAX_TOKENS) {
       return await invokeOpenRouterModelStream(request, streamOptions);
@@ -257,12 +247,10 @@ export async function invokeModel(request, options = {}) {
     return await invokeOpenRouterModel(request, options);
   }
 
-  // Gemini routing
   if (isGeminiModel(model)) {
     return await invokeGeminiGenerateContent(request, options);
   }
 
-  // Anthropic routing
   if (isAnthropicModel(model)) {
     if (stream || Number(request.maxTokens) > NON_STREAMING_MAX_TOKENS) {
       return await invokeAnthropicModelStream(request, streamOptions);

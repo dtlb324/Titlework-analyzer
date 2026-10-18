@@ -36,9 +36,7 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   chain in `package.json` and stops at the first failing file. Each file is
   a small script with its own `assert` / `test()` helper. A new file runs in
   CI only after it is added to that script.
-- Outside the chain: `node test/openrouter-request.test.js` and
-  `node test/openrouter-stream.test.js`. `test/smoke-server.js` is a manual
-  server on port 3456.
+- Outside the chain: `test/smoke-server.js` is a manual server on port 3456.
 - CI (`.github/workflows/test.yml`, pull requests and pushes to `Main` and `main`) runs
   `npm ci`, `npm test`, and `docker build` on Node 22. There is no lint script.
 - Local dev loads git-ignored `.env.local`: `npm run dev`, plus
@@ -63,6 +61,17 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   status is `canceled`, on both the all-segments-complete path and the
   degraded failed-segment path (fixed 2026-09). A late cancel must not
   start a billable Sonnet merge.
+- `saveJobResult` advances the job status only if it still equals the
+  status it read (`AND status = ...`), so a concurrent completion or cancel
+  is never overwritten. Its merge-lease release runs in `finally`, guarded
+  by the merge worker id.
+- Final-merge preview writes and writer-owned clears (`setSynthesisPreview`,
+  `clearSynthesisPreview`) match the active `synthesis_plan_id` and merge
+  worker id when `mergeWorkerId` is passed. Both merge paths in
+  `processSynthesisJob` pass `planId` and `mergeWorkerId`, so a stale writer
+  cannot leave a complete preview that `tryRecoverMergePreview` reuses.
+- Queue status catches swallow only `isInvalidJobStatusTransition` errors;
+  storage failures propagate.
 - Status transitions go through `VALID_TRANSITIONS` and `TERMINAL_STATUSES`
   in `api/_lib/jobs.js`. Update both when adding a state.
 - Re-saving the same `planId` in `saveSynthesisPlan` is safe in production:

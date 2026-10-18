@@ -1,4 +1,3 @@
-// Gemini Files API — upload large PDFs/images for generateContent by URI (avoids base64 in JSON).
 
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 const DEFAULT_UPLOAD_BASE_URL = 'https://generativelanguage.googleapis.com/upload';
@@ -151,7 +150,6 @@ export async function deleteGeminiFile(fileName) {
   try {
     await fetch(url, { method: 'DELETE', headers: { 'x-goog-api-key': key } });
   } catch {
-    // Non-fatal cleanup.
   }
 }
 

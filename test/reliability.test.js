@@ -463,8 +463,6 @@ test('cancel leaves a complete job and its opinion alone', async () => {
   assert(rejected?.statusCode === 409, `Expected 409 for a complete job, got ${rejected?.statusCode}`);
   assert(cancelCalls === 0, 'Complete job must not be canceled');
 
-  // Race: the final merge commits after cancel read the job, so the store's
-  // guarded UPDATE matches no row.
   let reads = 0;
   const racingStore = {
     async getJob() { reads += 1; return { id: 'job_1', status: reads === 1 ? 'synthesizing' : 'complete' }; },
@@ -481,9 +479,6 @@ test('cancel leaves a complete job and its opinion alone', async () => {
 });
 
 test('retry resets give exhausted chunks a fresh attempt budget', () => {
-  // A chunk fails once abstraction_attempts reaches the max. If a retry keeps
-  // that count, the next claim pushes it past the max and fails it again as
-  // max_attempts without calling the model.
   const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
   for (const method of ['async retryFailedChunks(', 'async resetChunkAbstraction(']) {
     const start = source.indexOf(method);
@@ -492,6 +487,138 @@ test('retry resets give exhausted chunks a fresh attempt budget', () => {
     assert(body.includes('abstraction_attempts = 0'), `${method} must reset abstraction_attempts`);
     assert(body.includes('abstraction_reclaims = 0'), `${method} must reset abstraction_reclaims`);
   }
+});
+
+function postgresMethod(name, bindings = {}) {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf(`    async ${name}(`);
+  const end = source.indexOf('\n    },', start) + 6;
+  return vm.runInNewContext(`({ ${source.slice(start, end)} })`, bindings)[name];
+}
+
+test('saveJobResult does not overwrite a concurrently completed or canceled job', async () => {
+  const { assertValidStatusTransition, isInvalidJobStatusTransition } = await import('../api/_lib/jobs.js');
+  for (const concurrentStatus of ['complete', 'canceled']) {
+    let status = 'synthesizing';
+    let released = false;
+    const sql = async (strings, ...values) => {
+      const query = strings.join('?');
+      if (query.includes('INSERT INTO job_results')) {
+        status = concurrentStatus;
+        return [{ id: 'res_test', job_id: 'job_test', status: 'partial_failed' }];
+      }
+      if (query.includes('SET status =')) {
+        const expectedStatusIndex = strings.findIndex(text => /AND status =\s*$/.test(text));
+        if (expectedStatusIndex < 0 || values[expectedStatusIndex] === status) status = values[0];
+      }
+      if (query.includes('SET synthesis_merge_worker_id = NULL')) released = true;
+      return [];
+    };
+    const save = postgresMethod('saveJobResult', {
+      ensureSchema: async () => {}, sql, randomUUID: () => 'test',
+      JOB_RESULT_STATUSES: new Set(['complete', 'partial_failed', 'failed']),
+      assertValidStatusTransition, isInvalidJobStatusTransition, rowToJobResult: row => row,
+    });
+    await save.call({
+      getJob: async () => ({ status }), clearSynthesisPreview: async () => {},
+    }, 'job_test', { status: 'partial_failed', mergeWorkerId: 'worker_old', planId: 'plan_test' });
+    assert(status === concurrentStatus, `Expected concurrent ${concurrentStatus} to survive, got ${status}`);
+    assert(released, 'Expected the merge lease to be released after a lost status race');
+  }
+});
+
+test('enqueue abstraction propagates non-transition update failures', async () => {
+  const { enqueueAbstractionJob } = await import('../api/_lib/queue.js');
+  const { JobApiError, assertValidStatusTransition } = await import('../api/_lib/jobs.js');
+  const errors = [new Error('database offline'), new JobApiError('A different conflict.', 409)];
+  for (const error of errors) {
+    let caught;
+    try {
+      await enqueueAbstractionJob('job_test', { store: {
+        getJob: async () => ({ status: 'ready' }), updateJob: async () => { throw error; },
+      } });
+    } catch (err) { caught = err; }
+    assert(caught === error, `Expected enqueue to propagate ${error.message}`);
+  }
+  let conflict;
+  try { assertValidStatusTransition('complete', 'abstracting'); } catch (err) { conflict = err; }
+  const snapshot = await enqueueAbstractionJob('job_test', { store: {
+    getJob: async () => ({ status: 'ready' }), updateJob: async () => { throw conflict; },
+  } });
+  assert(snapshot.job.status === 'ready', 'Expected invalid-transition conflicts alone to be tolerated');
+});
+
+test('synthesis enqueue and abstraction retry propagate update failures in every branch', async () => {
+  const { isInvalidJobStatusTransition } = await import('../api/_lib/jobs.js');
+  const source = readFileSync(join(root, 'api/_lib/queue.js'), 'utf8');
+  for (const [name, statuses] of [['enqueueSynthesisJob', ['abstracting', 'failed', 'partial_failed']], ['retryFailedAbstractionChunks', ['partial_failed']]]) {
+    const start = source.indexOf(`export async function ${name}(`);
+    const end = source.indexOf('\n}', start) + 2;
+    const fn = vm.runInNewContext(`${source.slice(start, end).replace('export ', '')}; ${name}`, {
+      getJobOrThrow: store => store.getJob(), isJobCanceled: job => job.status === 'canceled',
+      planJobSynthesis: async () => ({ plan: { planId: 'plan_test' } }),
+      getAbstractionSnapshot: async () => ({}), publicSynthesisStatus: status => status,
+      isInvalidJobStatusTransition, DEFAULT_STALE_LEASE_MS: 1000, nowIso: () => 'test-time',
+    });
+    for (const status of statuses) {
+      const failure = new Error(`database offline while ${name}/${status}`);
+      let caught;
+      try {
+        await fn('job_test', { store: {
+          getJob: async () => ({ status }), updateJob: async () => { throw failure; },
+          getJobResult: async () => null, getSynthesisStatus: async () => ({}), retryFailedChunks: async () => 1,
+        } });
+      } catch (error) { caught = error; }
+      assert(caught === failure, `Expected ${name}/${status} to propagate its update failure`);
+    }
+  }
+});
+
+test('saveJobResult propagates storage failures and releases its merge lease', async () => {
+  const { assertValidStatusTransition, isInvalidJobStatusTransition } = await import('../api/_lib/jobs.js');
+  for (const stage of ['status', 'read', 'insert', 'preview']) {
+    const failure = new Error(`database offline during ${stage}`);
+    let released = false;
+    const sql = async strings => {
+      const query = strings.join('?');
+      if (query.includes('SET synthesis_merge_worker_id = NULL')) { released = true; return []; }
+      if ((stage === 'insert' && query.includes('INSERT INTO job_results')) || (stage === 'status' && query.includes('SET status ='))) throw failure;
+      return [{ id: 'res_test' }];
+    };
+    const save = postgresMethod('saveJobResult', {
+      ensureSchema: async () => {}, sql, randomUUID: () => 'test',
+      JOB_RESULT_STATUSES: new Set(['complete', 'partial_failed', 'failed']),
+      assertValidStatusTransition, isInvalidJobStatusTransition, rowToJobResult: row => row,
+    });
+    let caught;
+    try {
+      await save.call({
+        getJob: async () => { if (stage === 'read') throw failure; return { status: 'synthesizing' }; },
+        clearSynthesisPreview: async () => { if (stage === 'preview') throw failure; },
+      }, 'job_test', { status: 'complete', mergeWorkerId: 'worker_test', planId: 'plan_test' });
+    } catch (error) { caught = error; }
+    assert(caught === failure, `Expected ${stage} failure to propagate`);
+    assert(released, `Expected merge lease release after ${stage} failure`);
+  }
+});
+
+test('throwing waitUntil hooks are logged without rejecting scheduled work', async () => {
+  const { scheduleBackgroundProcessing, scheduleBackgroundSynthesis } = await import('../api/_lib/queue.js');
+  const events = [];
+  const originalError = console.error;
+  console.error = text => events.push(JSON.parse(text));
+  try {
+    for (const [index, schedule] of [scheduleBackgroundProcessing, scheduleBackgroundSynthesis].entries()) {
+      const jobId = `job_hook_${index}`;
+      const promise = schedule(jobId, {
+        budgetMs: 1, store: { getJob: async () => ({ status: 'canceled' }) },
+        waitUntil: () => { throw new Error('hook registration failed'); },
+      });
+      await promise;
+      assert(events.some(event => event.event === 'workflow_wait_until_error' && event.jobId === jobId && event.reason === 'hook registration failed'),
+        'Expected a structured hook-registration error for each scheduler');
+    }
+  } finally { console.error = originalError; }
 });
 
 let passed = 0;

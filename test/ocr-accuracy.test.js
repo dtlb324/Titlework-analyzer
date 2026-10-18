@@ -1,8 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { assessAccuracy, scoreModel } from '../public/ocr-accuracy.js';
 
 const identity = fields => ({ fields });
+
+const comparisonScript = readFileSync(new URL('../scripts/compare-ocr-models.mjs', import.meta.url), 'utf8');
+const comparisonScorer = runInNewContext(`${comparisonScript.slice(comparisonScript.indexOf('function normDate('), comparisonScript.indexOf('function mediaTypeForExt('))}\n${comparisonScript.slice(comparisonScript.indexOf('function isAbstained('), comparisonScript.indexOf('function countIllegible('))}\nscoreField`);
+
+test('comparison CLI scores dates and recording references using their ground-truth field key', () => {
+  assert.equal(comparisonScorer('April 7th, 1923', 'April 7, 1923', false, 'DATE_EXECUTED'), 'correct');
+  assert.equal(comparisonScorer('Jan. 2, A.D. 1923', 'January 2, 1923', false, 'DATE_RECORDED'), 'correct');
+  assert.equal(comparisonScorer('Vol. 1, Page 2', 'Volume 1, Pg. 2', false, 'RECORDING_REF'), 'correct');
+});
+
+test('comparison CLI preserves name, mismatch, missing, and degraded-field scores', () => {
+  assert.equal(comparisonScorer('ADA OWNER', 'Ada Owner', false, 'GRANTOR'), 'correct');
+  assert.equal(comparisonScorer('Ada Owner and wife', 'Ada Owner', false, 'GRANTOR'), 'partial');
+  assert.equal(comparisonScorer('Ida Owner', 'Ada Owner', false, 'GRANTOR'), 'wrong');
+  assert.equal(comparisonScorer('n/a', 'Ada Owner', false, 'GRANTOR'), 'missed');
+  assert.equal(comparisonScorer('Ada Owner', null, false, 'GRANTOR'), 'no_gt');
+  assert.equal(comparisonScorer('ILLEGIBLE - VERIFY MANUALLY', null, true, 'DATE_RECORDED'), 'correct_illegible');
+  assert.equal(comparisonScorer('April 7, 1923', null, true, 'DATE_RECORDED'), 'fabricated');
+});
 
 test('April 7th, 1923 matches a document that says April 7, 1923', () => {
   assert.deepEqual(scoreModel('April 7, 1923', identity({

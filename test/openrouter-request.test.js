@@ -15,7 +15,6 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-// ── shouldUseOpenRouter ───────────────────────────────────────────────
 
 test('shouldUseOpenRouter returns false by default for simple claude models', () => {
   const prev = process.env.MODEL_PROVIDER;
@@ -48,7 +47,6 @@ test('shouldUseOpenRouter ignores MODEL_PROVIDER other than openrouter', () => {
   process.env.MODEL_PROVIDER = prev;
 });
 
-// ── openRouterApiKeyError ────────────────────────────────────────────
 
 test('openRouterApiKeyError returns error when key is missing', () => {
   const prev = process.env.OPENROUTER_API_KEY;
@@ -66,7 +64,6 @@ test('openRouterApiKeyError returns null when key is set', () => {
   process.env.OPENROUTER_API_KEY = prev;
 });
 
-// ── buildOpenRouterRequestBody ───────────────────────────────────────
 
 test('buildOpenRouterRequestBody maps model with auto name-mapping', () => {
   const req = buildOpenRouterRequestBody({ model: 'claude-sonnet-5', maxTokens: 100, messages: [] });
@@ -209,7 +206,6 @@ test('buildOpenRouterRequestBody omits thinking and sampling fields', () => {
   assert(!('top_k' in req), 'Sonnet 5 rejects non-default top_k');
 });
 
-// ── normalizeOpenRouterResponse ──────────────────────────────────────
 
 test('normalizeOpenRouterResponse extracts text and usage', () => {
   const data = {
@@ -232,7 +228,6 @@ test('normalizeOpenRouterResponse handles null input gracefully', () => {
   assert(result.usage.output_tokens === null);
 });
 
-// ── invokeOpenRouterModel ────────────────────────────────────────────
 
 test('invokeOpenRouterModel calls fetch with correct URL and headers', async () => {
   const prevKey = process.env.OPENROUTER_API_KEY;
@@ -292,7 +287,6 @@ test('invokeOpenRouterModel throws key error when API key is missing', async () 
   process.env.OPENROUTER_API_KEY = prevKey;
 });
 
-// ── Run ──────────────────────────────────────────────────────────────
 
 let failed = 0;
 for (const { name, fn } of tests) {

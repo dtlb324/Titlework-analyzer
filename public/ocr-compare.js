@@ -117,14 +117,10 @@ export function createCompareUI(deps = {}) {
   const delay = deps.setTimeout || setTimeout;
   const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
   const effortBars = [el['baseline-effort'], el['candidate-effort'], el['challenger-effort']];
-  // One entry per selected file: { file, pages, status, message, result }.
-  // status: preparing | ready | error | running | done | failed | skipped
   let entries = [], selected = 0, report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
   const canCompare = entry => entry.pages?.length > 0 && !['preparing', 'error', 'running'].includes(entry.status);
-  // Server-owned effort options per model slot. `efforts` is the level for the next comparison;
-  // `picked` marks columns the user clicked, which keep their level across metadata refreshes.
-  let effortModels = [], efforts = [], picked = [], effortNotes = [];
+  let modelSlots = [];
   let metadataState = { status: 'idle', generation: 0, error: '' };
   const updateControls = () => {
     el.compare.disabled = busy || preparing;
@@ -272,37 +268,39 @@ export function createCompareUI(deps = {}) {
       return;
     }
     effortBars.forEach((bar, index) => {
-      const model = effortModels[index];
-      if (!bar || !model) return;
+      const slot = modelSlots[index];
+      if (!bar || !slot) return;
+      const { model } = slot;
       bar.replaceChildren();
       for (const level of model.effortLevels) {
         const button = node('button', level);
         button.setAttribute('type', 'button');
-        button.setAttribute('aria-pressed', String(level === efforts[index]));
+        button.setAttribute('aria-pressed', String(level === slot.effort));
         button.disabled = busy;
         button.addEventListener('click', () => {
           if (busy || metadataState.status !== 'ready') return;
-          efforts[index] = level;
-          picked[index] = true;
-          effortNotes[index] = '';
+          slot.effort = level;
+          slot.picked = true;
+          slot.note = '';
           renderEfforts();
         });
         bar.append(button);
       }
-      if (effortNotes[index]) bar.append(node('p', effortNotes[index], 'muted'));
+      if (slot.note) bar.append(node('p', slot.note, 'muted'));
     });
   };
   const showEffortError = message => {
     metadataState = { ...metadataState, status: 'error', error: message };
     renderEfforts();
   };
-  // Untouched columns follow the server's level; a pick survives only while the same model still offers it.
   const applyEffortMetadata = models => {
-    effortNotes = models.map((model, index) => picked[index] && (effortModels[index]?.id !== model.id || !model.effortLevels.includes(efforts[index]))
-      ? `Your ${efforts[index]} selection is not available for ${model.id}; reset to ${model.effort}.` : '');
-    picked = models.map((model, index) => Boolean(picked[index]) && !effortNotes[index]);
-    efforts = models.map((model, index) => picked[index] ? efforts[index] : model.effort);
-    effortModels = models;
+    modelSlots = models.map((model, index) => {
+      const previous = modelSlots[index];
+      const note = previous?.picked && (previous.model.id !== model.id || !model.effortLevels.includes(previous.effort))
+        ? `Your ${previous.effort} selection is not available for ${model.id}; reset to ${model.effort}.` : '';
+      const picked = Boolean(previous?.picked) && !note;
+      return { model, effort: picked ? previous.effort : model.effort, picked, note };
+    });
     metadataState = { ...metadataState, status: 'ready', error: '' };
     renderEfforts();
   };
@@ -334,7 +332,7 @@ export function createCompareUI(deps = {}) {
     invalidateMetadata();
     if (!el.password.value || busy) return;
     try { await loadMetadata({ 'x-app-password': el.password.value }); }
-    catch { /* The metadata state renders the error separately from document status. */ }
+    catch {}
   });
   const clearResults = () => {
     report = undefined;
@@ -420,7 +418,7 @@ export function createCompareUI(deps = {}) {
         const byteCount = entry.pages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
         if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error(`${entry.file.name}: document exceeds the server image byte limit.`);
       }
-      const chosen = [...efforts];
+      const chosen = modelSlots.map(slot => slot.effort);
       el.settings.textContent = metadata.models.map((model, index) => `${model.label}: ${model.id} · effort ${chosen[index]} · max output ${model.maxTokens} tokens`).join('\n');
       let halted = null;
       for (const entry of runnable) {

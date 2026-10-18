@@ -1,4 +1,3 @@
-// Gemini generateContent helpers (Anthropic-shaped messages in, normalized usage out).
 
 import { deleteGeminiFiles } from './gemini-files.js';
 
@@ -14,7 +13,6 @@ export function isGeminiModel(model) {
 
 const GEMINI_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
 
-/** Gemini 3+ uses thinkingLevel; Gemini 2.5 uses thinkingBudget (see Google thinking docs). */
 export function isGemini3SeriesModel(model) {
   return /^gemini-3/i.test(String(model || '').trim());
 }
@@ -24,11 +22,6 @@ function normalizeThinkingLevel(raw) {
   return GEMINI_THINKING_LEVELS.has(level) ? level : null;
 }
 
-/**
- * Resolve thinkingConfig for generateContent.
- * - Gemini 3.x: GEMINI_THINKING_LEVEL (minimal|low|medium|high); omit for API default (medium on 3.5 Flash).
- * - Gemini 2.5: GEMINI_THINKING_BUDGET (0 off, -1 dynamic, or token count).
- */
 export function resolveGeminiThinkingConfig(model, overrides = {}) {
   if (!isGeminiModel(model)) return null;
 
@@ -120,7 +113,6 @@ export function buildGeminiGenerateContentBody({
   if (resolvedThinking && Object.keys(resolvedThinking).length) {
     body.generationConfig.thinkingConfig = resolvedThinking;
   } else if (Number.isFinite(Number(thinkingBudget))) {
-    // Explicit legacy call sites may still pass thinkingBudget directly.
     body.generationConfig.thinkingConfig = { thinkingBudget: Number(thinkingBudget) };
   }
   if (responseSchema) {
@@ -149,7 +141,6 @@ export function extractGeminiText(data = {}) {
     .join('');
 }
 
-/** Thought summaries when includeThoughts is enabled (debug / eval only). */
 export function extractGeminiThoughtSummaries(data = {}) {
   const parts = data?.candidates?.[0]?.content?.parts || [];
   return parts.filter(part => part.thought && part.text).map(part => String(part.text));

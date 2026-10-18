@@ -4,11 +4,6 @@ import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingCo
 import { invokeAnthropicModel, invokeAnthropicModelStream, isAnthropicModel, NON_STREAMING_MAX_TOKENS, sanitizeModelClientError } from './_lib/model-client.js';
 
 const MAX_PAGES = 60;
-// Lab-only output limit shared by all models. Production abstraction uses ~2,000
-// tokens per chunk, but a multi-page upload can hold several instruments, and
-// medium-effort thinking tokens (Gemini and Haiku) count against the same limit.
-// Above NON_STREAMING_MAX_TOKENS (8192) Anthropic requires a streamed request, so
-// invokeLabModel streams Claude calls automatically.
 const DEFAULT_LAB_MAX_TOKENS = 16000;
 const MIN_LAB_MAX_TOKENS = 512;
 const MAX_LAB_MAX_TOKENS = 32000;
@@ -25,7 +20,6 @@ function labMaxTokens() {
 }
 
 // Exact-model exception from https://ai.google.dev/gemini-api/docs/generate-content/thinking.
-// Keep the existing Flash/Pro rules and fallback for other baseline IDs.
 const GEMINI_EFFORTS = new Map([['gemini-3.1-flash-lite-image', ['minimal', 'high']]]);
 const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*-pro(?:-|$))/i;
 const HAIKU_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -47,7 +41,6 @@ function models() {
     error.statusCode = 503;
     throw error;
   }
-  // 'default' omits thinkingLevel so the provider's own default applies.
   const configuredRaw = String(process.env.GEMINI_THINKING_LEVEL || '').trim();
   const configured = resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default';
   const baselineLevels = geminiEfforts(config.model);
@@ -63,7 +56,6 @@ function models() {
   ];
 }
 
-// Optional `efforts`: one level per model slot, chosen in the browser.
 function applyEfforts(pair, efforts) {
   if (efforts === undefined) return pair;
   if (!Array.isArray(efforts) || efforts.length !== pair.length) throw new Error(`efforts must list one level per model (${pair.length}).`);
@@ -73,8 +65,6 @@ function applyEfforts(pair, efforts) {
   });
 }
 
-// Gemini and Claude are both called directly (never through OpenRouter),
-// regardless of the production MODEL_PROVIDER.
 function invokeLabModel(call, options) {
   if (!isAnthropicModel(call.model)) return invokeGeminiGenerateContent(call, options);
   return Number(call.maxTokens) > NON_STREAMING_MAX_TOKENS
@@ -151,7 +141,6 @@ function estimateCost(id, usage) {
   const input = usage?.input_tokens;
   const output = usage?.output_tokens;
   // Gemini omits thoughtsTokenCount when the model did not think, so absent means zero.
-  // Missing input/output counts still produce no estimate.
   const thinking = usage?.thinking_tokens ?? 0;
   if (!rates || ![input, output, thinking].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) return { costUsd: null, costRates: rates && { ...rates, source: PRICING_SOURCE } };
   return { costUsd: (input * rates.input + (output + thinking) * rates.output) / 1_000_000, costRates: { ...rates, source: PRICING_SOURCE } };
@@ -182,9 +171,7 @@ export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
     active = true;
     try {
       const first = upload.pages[0];
-      // The helper also infers PDF/CSV from the filename. Mark this as rendered
-      // input so a .pdf source name cannot mislabel PNG bytes as a PDF block.
-      const messages = buildAbstractMessagesForChunk({ originalFilename: `${upload.filename} (rendered pages)`, mediaType: first.mediaType }, first.bytes);
+      const messages = buildAbstractMessagesForChunk({ originalFilename: upload.filename, mediaType: first.mediaType, renderedImages: true }, first.bytes);
       const content = messages[0].content;
       content.splice(1, 0, ...upload.pages.slice(1).map(page => ({ type: 'image', source: { type: 'base64', media_type: page.mediaType, data: page.bytes.toString('base64') } })));
       const results = await Promise.all(pair.map(async model => {

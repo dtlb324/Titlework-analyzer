@@ -72,7 +72,6 @@ function mockRes() {
   };
 }
 
-// --- Memory store for Phase 5 synthesis tests -------------------------------
 
 function makeAbstract(overrides = {}) {
   return {
@@ -113,10 +112,10 @@ function createMemoryPhase5Store(initialState = {}) {
   const abstracts = (initialState.abstracts || []).slice();
   const failedChunks = (initialState.failedChunks || []).slice();
   const pendingChunks = (initialState.pendingChunks || []).slice();
-  const segments = new Map(); // segmentId -> row
-  const results = new Map(); // jobId -> result row
-  const followups = []; // ordered
-  const synthesisPreviews = new Map(); // jobId -> preview
+  const segments = new Map();
+  const results = new Map();
+  const followups = [];
+  const synthesisPreviews = new Map();
   let currentPlanIdByJob = new Map();
   let mergeClaimCalls = 0;
   let lastMergeLeaseMs = null;
@@ -211,14 +210,12 @@ function createMemoryPhase5Store(initialState = {}) {
     },
     async saveSynthesisPlan(jobId, planInput) {
       const planId = planInput.planId;
-      // Remove segments for other plans.
       for (const [id, segment] of segments.entries()) {
         if (segment.jobId === jobId && segment.planId !== planId) segments.delete(id);
       }
       currentPlanIdByJob.set(jobId, planId);
       const saved = [];
       for (const segment of planInput.segments) {
-        const key = `${jobId}:${planId}:${segment.segmentIndex}`;
         const existing = [...segments.values()].find(s => s.jobId === jobId && s.planId === planId && s.segmentIndex === segment.segmentIndex);
         const id = existing?.id || `seg_${segment.segmentIndex}_${Math.random().toString(36).slice(2, 8)}`;
         const row = {
@@ -307,13 +304,18 @@ function createMemoryPhase5Store(initialState = {}) {
     async claimSynthesisSegment(jobId, segmentId, options = {}) {
       const segment = segments.get(segmentId);
       if (!segment || segment.jobId !== jobId) return null;
-      if (!['pending', 'retry_wait'].includes(segment.status) && segment.status !== 'processing') return null;
+      const asOf = Date.now();
+      const claimable = segment.status === 'pending'
+        || (segment.status === 'retry_wait' && (segment.retryAt == null || Date.parse(segment.retryAt) <= asOf))
+        || (segment.status === 'processing' && (segment.leaseExpiresAt == null || Date.parse(segment.leaseExpiresAt) <= asOf));
+      if (!claimable) return null;
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 120_000) / 1000));
       const next = {
         ...segment,
         status: 'processing',
         attemptCount: (segment.attemptCount || 0) + 1,
-        claimedAt: now(),
-        leaseExpiresAt: new Date(Date.now() + (options.leaseMs || 120_000)).toISOString(),
+        claimedAt: new Date(asOf).toISOString(),
+        leaseExpiresAt: new Date(asOf + leaseSeconds * 1000).toISOString(),
         workerId: options.workerId || 'wkr_test',
         retryAt: null,
         errorType: null,
@@ -606,7 +608,6 @@ function goodFinalOpinion(noteWarnings = '') {
   ].join('\n');
 }
 
-// --- Tests ------------------------------------------------------------------
 
 const tests = [];
 function test(name, fn) {
@@ -621,7 +622,6 @@ test('Ordering: chunk order preserved and failed abstracts excluded from segment
   const store = createMemoryPhase5Store({ abstracts });
   const planInput = await store.listDocumentAbstracts('job_test_1');
   assert(planInput.map(a => a.chunkId).join(',') === 'chk_1,chk_2', 'Expected sorted by chunkOrder');
-  // failed abstract should be omitted (abstractText empty)
   const mixed = [
     ...planInput,
     { chunkId: 'chk_3', chunkOrder: 2, originalFilename: 'C.pdf', abstractText: '' },
@@ -732,7 +732,6 @@ test('buildSynthesisChunks respects 120-doc cap and byte cap', () => {
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulkMin;
   if (previousChunkSize === undefined) delete process.env.SYNTHESIS_CHUNK_SIZE;
   else process.env.SYNTHESIS_CHUNK_SIZE = previousChunkSize;
-  // Single huge abstract gets its own chunk (b > safe envelope means [a,b] and [b,c] both blow budget).
   const big = [
     { filename: 'a.pdf', abstract: 'a'.repeat(10) },
     { filename: 'b.pdf', abstract: 'x'.repeat(13_000_000) },
@@ -748,7 +747,6 @@ test('planSynthesisSegments produces stable planId for same inputs', () => {
   const planId1 = computePlanId({ jobId: 'job_test_1', tract: 'Tract A', contextNotes: 'Notes', documentIds: abstracts.map(a => a.chunkId) });
   const planId2 = computePlanId({ jobId: 'job_test_1', tract: 'Tract A', contextNotes: 'Notes', documentIds: abstracts.map(a => a.chunkId) });
   assert(planId1 === planId2, 'Expected stable planId');
-  // Different document set -> different planId
   const planId3 = computePlanId({ jobId: 'job_test_1', tract: 'Tract A', contextNotes: 'Notes', documentIds: abstracts.slice(0, 5).map(a => a.chunkId) });
   assert(planId3 !== planId1, 'Expected different planId when documents change');
   assert(plan1.segments.length >= 1, 'Expected at least one segment');
@@ -1196,18 +1194,15 @@ test('Split-degraded documents produce final result warnings even when all chunk
 });
 
 test('Segment timeout triggers binary split retry', async () => {
-  // Force a 504 on the first segment call so we hit the binary split path.
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
   const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
   let segmentCalls = 0;
-  let mergeCalls = 0;
   let timeoutTriggered = false;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       segmentCalls += 1;
-      // First call hits a 504 once on the largest input
       if (!timeoutTriggered) {
         timeoutTriggered = true;
         const err = new Error('Timeout error (HTTP 504): synthetic test');
@@ -1216,7 +1211,6 @@ test('Segment timeout triggers binary split retry', async () => {
       }
       return { text: goodSegmentSummary(segmentCalls - 1), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
     }
-    mergeCalls += 1;
     return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
   };
   const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
@@ -1228,18 +1222,15 @@ test('Segment timeout triggers binary split retry', async () => {
 });
 
 test('Merge too large triggers tree merge of segment summaries', async () => {
-  // Force tree merge by making segment summaries huge so the merge call would exceed budget.
   const previousBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
   const previousCompaction = process.env.SYNTHESIS_COMPACTION_ENABLED;
   process.env.BULK_JOB_MIN_ABSTRACTS = '999';
   process.env.SYNTHESIS_COMPACTION_ENABLED = 'false';
   const abstracts = manyAbstracts(250);
   const store = createMemoryPhase5Store({ abstracts });
-  let mergeCalls = 0;
   let treeMergeCalls = 0;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
-      // Two cases: original segment work or tree-merge partials. Both are PARTIAL.
       const userText = request.messages[0].content;
       if (/Merge these two adjacent partial chain-of-title segments/.test(userText)) {
         treeMergeCalls += 1;
@@ -1249,11 +1240,9 @@ test('Merge too large triggers tree merge of segment summaries', async () => {
           usage: { input_tokens: 1, output_tokens: 1 },
         };
       }
-      // Original segment: return a huge summary so the merge step blows past budget
       const big = 'a'.repeat(5_000_000);
       return { text: 'CHAIN big section ' + big, model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
     }
-    mergeCalls += 1;
     return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
   };
   const result = await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
@@ -1275,7 +1264,6 @@ test('Resume: completed segments are not re-run on a second process pass', async
     totalCalls += 1;
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       if (pass === 0 && totalCalls >= 2) {
-        // Simulate worker death after first segment completes - throw to break the loop.
         const err = new Error('synthetic worker crash');
         err.status = 500;
         throw err;
@@ -1284,21 +1272,17 @@ test('Resume: completed segments are not re-run on a second process pass', async
     }
     return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
   };
-  // First pass: complete 1 segment, then "crash" causes others to fail.
   await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { maxAttempts: 1 } }).catch(() => {});
   const after1 = await store.listSynthesisSegments('job_test_1');
   const completedAfter1 = after1.filter(s => s.status === 'complete').length;
   assert(completedAfter1 >= 1, 'Expected at least one segment complete after crash');
-  // Reset failed segments to pending so the second pass picks them up.
   const currentPlanId = await store.getCurrentSynthesisPlanId('job_test_1');
   await store.resetFailedSynthesisSegments('job_test_1', currentPlanId);
   pass = 1;
-  // Second pass: only the remaining segments should be called; total calls should be limited.
   const callsBeforePass2 = totalCalls;
   await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
   const callsAfterPass2 = totalCalls;
   const segmentsCount = (await store.listSynthesisSegments('job_test_1')).length;
-  // Pass 2 should not redo completed segments: pass2 calls < remaining segments + merge*2
   assert(callsAfterPass2 - callsBeforePass2 <= segmentsCount, `Expected at most ${segmentsCount} model calls in pass 2, got ${callsAfterPass2 - callsBeforePass2}`);
   const finalSegments = await store.listSynthesisSegments('job_test_1');
   assert(finalSegments.every(s => s.status === 'complete'), 'Expected all segments complete after resume');
@@ -1330,7 +1314,6 @@ test('Synthesis retryable errors schedule durable retry_wait instead of terminal
 
 test('Synthesis retryable errors stop at maxAttempts across polls', async () => {
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
-  // Make every retry_wait due on the next poll.
   const markRetryWait = store.markSynthesisSegmentRetryWait.bind(store);
   store.markSynthesisSegmentRetryWait = (jobId, segmentId, failure) => markRetryWait(jobId, segmentId, { ...failure, retryAtIso: new Date(0).toISOString() });
   let calls = 0;
@@ -1348,14 +1331,54 @@ test('Synthesis retryable errors stop at maxAttempts across polls', async () => 
   assert(segment.status === 'failed', `Expected segment failed after its attempt budget, got ${segment.status}`);
 });
 
+test('Memory synthesis claims admit only pending, due retries, or expired processing', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  const { plan } = await planJobSynthesis('job_test_1', { store });
+  const segmentId = plan.segments[0].id;
+  const original = store.segments.get(segmentId);
+  const future = new Date(Date.now() + 60_000).toISOString();
+  const expired = new Date(0).toISOString();
+  for (const [patch, workerId, accepted] of [
+    [{ status: 'pending' }, 'wkr_next', true],
+    [{ status: 'retry_wait', retryAt: null }, 'wkr_next', true],
+    [{ status: 'retry_wait', retryAt: expired }, 'wkr_next', true],
+    [{ status: 'retry_wait', retryAt: future }, 'wkr_next', false],
+    [{ status: 'processing', leaseExpiresAt: null }, 'wkr_next', true],
+    [{ status: 'processing', leaseExpiresAt: expired }, 'wkr_next', true],
+    [{ status: 'processing', leaseExpiresAt: future }, 'wkr_next', false],
+    [{ status: 'processing', leaseExpiresAt: future }, 'wkr_current', false],
+    [{ status: 'complete' }, 'wkr_next', false],
+    [{ status: 'failed' }, 'wkr_next', false],
+  ]) {
+    const row = { ...original, ...patch, workerId: 'wkr_current', attemptCount: 2 };
+    store.segments.set(segmentId, row);
+    const claim = await store.claimSynthesisSegment('job_test_1', segmentId, { workerId, leaseMs: 1001 });
+    assert(Boolean(claim) === accepted, `Expected ${patch.status}/${patch.retryAt || patch.leaseExpiresAt}/${workerId} claim accepted=${accepted}`);
+    if (accepted) {
+      assert(claim.attemptCount === 3 && claim.workerId === workerId, 'Expected one claim attempt owned by the new worker');
+      assert(Date.parse(claim.leaseExpiresAt) - Date.parse(claim.claimedAt) === 2000, 'Expected leases rounded up to whole seconds');
+      assert(claim.retryAt === null, 'Expected a claimed retry to clear its due time');
+    } else {
+      assert(store.segments.get(segmentId) === row, 'Rejected claims must not mutate the row');
+    }
+  }
+  store.segments.set(segmentId, original);
+  assert(await store.claimSynthesisSegment('job_other', segmentId) === null, 'Expected wrong-job claims rejected');
+  assert(await store.claimSynthesisSegment('job_test_1', 'seg_missing') === null, 'Expected missing-segment claims rejected');
+});
+
 test('Synthesis segment reclaimed past maxAttempts fails without a model call', async () => {
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
   const { plan } = await planJobSynthesis('job_test_1', { store });
   const segmentId = plan.segments[0].id;
-  // Two claims whose workers died mid-call; the 1ms lease has expired.
-  await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_dead_1', leaseMs: 1 });
-  await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_dead_2', leaseMs: 1 });
-  await new Promise(resolve => setTimeout(resolve, 5));
+  const first = await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_dead_1', leaseMs: 1 });
+  assert(Date.parse(first.leaseExpiresAt) - Date.parse(first.claimedAt) === 1000, 'Expected the minimum one-second lease');
+  assert(await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_other', leaseMs: 1 }) === null,
+    'A different worker must not claim a live lease');
+  store.segments.get(segmentId).leaseExpiresAt = new Date(0).toISOString();
+  const second = await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_dead_2', leaseMs: 1 });
+  assert(second?.attemptCount === 2, 'Expected the second attempt only after lease expiry');
+  store.segments.get(segmentId).leaseExpiresAt = new Date(0).toISOString();
   let calls = 0;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
     calls += 1;
@@ -1495,7 +1518,6 @@ test('Synthesize with warnings does not clobber an existing partial_failed opini
 test('canceled jobs skip the final merge and save no result', async () => {
   const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
   await planJobSynthesis('job_test_1', { store });
-  // Cancel lands after the last segment completes but before the merge gate runs.
   const realList = store.listSynthesisSegments.bind(store);
   store.listSynthesisSegments = async (...args) => {
     const list = await realList(...args);
@@ -1523,14 +1545,12 @@ test('canceled jobs skip the final merge and save no result', async () => {
 test('Cancellation during synthesis stops further segment work', async () => {
   const abstracts = manyAbstracts(120);
   const store = createMemoryPhase5Store({ abstracts });
-  // Cancel the job immediately
   await store.cancelJob('job_test_1', 'test cancel');
   let calls = 0;
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
     calls += 1;
     return { text: goodSegmentSummary(0), model: 'claude-sonnet-5', usage: {} };
   };
-  // enqueueSynthesisJob should throw because of canceled state.
   let threw = false;
   try {
     await enqueueSynthesisJob('job_test_1', { store });
@@ -1538,9 +1558,7 @@ test('Cancellation during synthesis stops further segment work', async () => {
     threw = err.statusCode === 409;
   }
   assert(threw, 'Expected 409 when enqueueing canceled job');
-  // processSynthesisBatch should also not call the model.
   await processSynthesisJob('job_test_1', { store }).catch(() => {});
-  // No segments planned because plan was never persisted; model not called.
   assert(calls === 0, `Expected zero model calls after cancel, got ${calls}`);
 });
 
@@ -1571,7 +1589,6 @@ test('Follow-up uses stored title opinion only — no raw analysis-input payload
   globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
     callCount += 1;
     if (callCount === 1) {
-      // synthesis call
       return { text: goodFinalOpinion('Reservation noted in deed #3.'), model: 'claude-sonnet-5', usage: {} };
     }
     observedMessages = request.messages;
@@ -1585,7 +1602,6 @@ test('Follow-up uses stored title opinion only — no raw analysis-input payload
   assert(res.body.followup?.answer === 'Direct answer using only title opinion.', `Expected stored answer, got ${res.body.followup?.answer}`);
   const followupContent = observedMessages?.[0]?.content || '';
   assert(followupContent.includes('Completed Title Opinion'), 'Expected title opinion in follow-up prompt');
-  // Verify we did NOT send raw abstracts (no DOC TYPE per-doc headers from abstractText)
   assert(!/Document\s+\d+:\s+chk_/i.test(followupContent), 'Expected no raw analysis-input bundle in follow-up');
 });
 
@@ -1768,6 +1784,19 @@ test('Frontend contains server-synthesis start/poll/result hooks and browser fal
   assert(indexHtml.includes('hierarchicalSynthesis'), 'Expected browser fallback synthesis preserved');
 });
 
+test('buildFollowupMessages keeps the full opinion after dropping the last history turn', () => {
+  const opinion = 'Full opinion detail. '.repeat(100);
+  const { messages, truncationWarning } = buildFollowupMessages({
+    question: 'Who owns the minerals?',
+    finalTitleOpinion: opinion,
+    recentTurns: [{ question: 'Earlier question', answer: 'Earlier answer. '.repeat(2000) }],
+    configOverrides: { requestEnvelopeSafeBytes: 10_000, followupHistoryTurns: 1 },
+  });
+  assert(truncationWarning === null, 'Expected no truncation after dropping the last history turn');
+  assert(messages[0].content.includes(opinion), 'Expected the full opinion to remain');
+  assert(!messages[0].content.includes('Earlier question'), 'Expected the last history turn to be dropped');
+});
+
 test('buildFollowupMessages prefers full title opinion + recent turns and truncates when oversized', () => {
   const recent = Array.from({ length: 8 }, (_, i) => ({ question: `q${i}`, answer: `a${i}` }));
   const { messages, truncationWarning } = buildFollowupMessages({
@@ -1781,7 +1810,6 @@ test('buildFollowupMessages prefers full title opinion + recent turns and trunca
   assert(messages[0].content.includes('Opinion content.'), 'Expected opinion included');
   assert(messages[0].content.includes('final question'), 'Expected current question included');
   assert(!truncationWarning, 'Did not expect truncation for small opinion');
-  // Oversized opinion: ensure truncation kicks in
   const big = 'x'.repeat(14_000_000);
   const oversized = buildFollowupMessages({
     question: 'q',
@@ -1930,18 +1958,16 @@ test('merge recovers a completed preview after a lost save without re-running So
     if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
       return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
     }
-    mergeCalls += 1; // final Sonnet merge
+    mergeCalls += 1;
     if (request.onDelta) await request.onDelta(opinion, opinion);
     return { text: opinion, model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
   };
 
-  // First pass: simulate the worker dying after the preview is marked complete
-  // but before the result row commits (drop the first saveJobResult write).
   const realSave = store.saveJobResult.bind(store);
   let saveAttempts = 0;
   store.saveJobResult = async (...args) => {
     saveAttempts += 1;
-    if (saveAttempts === 1) return null; // lost write == crash before commit
+    if (saveAttempts === 1) return null;
     return realSave(...args);
   };
   await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
@@ -1949,7 +1975,6 @@ test('merge recovers a completed preview after a lost save without re-running So
   assert((await store.getSynthesisPreview('job_test_1')).complete === true, 'Expected a completed preview after the crashed first pass');
   assert((await store.getJobResult('job_test_1')) === null, 'Expected no saved result after the crashed first pass');
 
-  // Second pass: must recover from the completed preview and NOT call Sonnet again.
   const mergeCallsBefore = mergeCalls;
   await processSynthesisJob('job_test_1', { store, budgetMs: 60_000, batchLimit: 8 });
   assert(mergeCalls === mergeCallsBefore, `Expected NO additional Sonnet merge on recovery, got ${mergeCalls - mergeCallsBefore}`);
@@ -1960,6 +1985,57 @@ test('merge recovers a completed preview after a lost save without re-running So
   if (prevStream === undefined) delete process.env.SYNTHESIS_STREAM_ENABLED; else process.env.SYNTHESIS_STREAM_ENABLED = prevStream;
   if (prevBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS; else process.env.BULK_JOB_MIN_ABSTRACTS = prevBulk;
   if (prevCompact === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED; else process.env.SYNTHESIS_COMPACTION_ENABLED = prevCompact;
+});
+
+test('a stale merge writer cannot republish a recoverable preview after a re-plan', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const synthesisSource = readFileSync(join(root, 'api/_lib/synthesis.js'), 'utf8');
+  const writerStart = synthesisSource.indexOf('function createPreviewWriter(');
+  const writerEnd = synthesisSource.indexOf('\nexport function logSynthesisMetrics', writerStart);
+  const createWriter = runInNewContext(`${synthesisSource.slice(writerStart, writerEnd)}; createPreviewWriter;`, { Date });
+  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  let activePlan = 'plan_old';
+  let activeWorker = 'worker_old';
+  let preview = null;
+  const sql = async (strings, ...values) => {
+    for (const [column, expected] of [['synthesis_plan_id', activePlan], ['synthesis_merge_worker_id', activeWorker]]) {
+      const index = strings.findIndex(text => text.trimEnd().endsWith(`${column} =`));
+      if (index >= 0 && values[index] !== expected) return [];
+    }
+    const query = strings.join('?');
+    if (query.includes('synthesis_preview_text = NULL')) { preview = null; return [{ id: 'job_test_1' }]; }
+    preview = { text: values[0], complete: values[1], bytesReceived: values[2], modelUsed: values[3] };
+    return [{ synthesis_preview_text: preview.text, synthesis_preview_complete: preview.complete,
+      synthesis_preview_bytes: preview.bytesReceived, synthesis_preview_model_used: preview.modelUsed }];
+  };
+  const store = { getSynthesisPreview: async () => preview };
+  for (const name of ['setSynthesisPreview', 'clearSynthesisPreview']) {
+    const start = jobsSource.indexOf(`    async ${name}(`);
+    const end = jobsSource.indexOf('\n    },', start) + 6;
+    store[name] = runInNewContext(`({ ${jobsSource.slice(start, end)} })`, { ensureSchema: async () => {}, sql })[name];
+  }
+  const oldWriter = createWriter(store, 'job_test_1', 'claude-sonnet-5-5', { planId: activePlan, mergeWorkerId: activeWorker });
+  await oldWriter.begin();
+  const opinion = goodFinalOpinion('Old plan opinion.');
+  await oldWriter.onDelta(opinion, opinion);
+  assert(preview?.text === opinion, 'Expected the current writer to persist its preview');
+  activePlan = 'plan_new';
+  activeWorker = null;
+  preview = null;
+  await oldWriter.complete();
+  assert(await tryRecoverMergePreview(store, 'job_test_1', getSynthesisConfig()) === null,
+    'Expected no recovery of an old writer preview after a re-plan clears ownership');
+  activeWorker = 'worker_old';
+  await oldWriter.complete();
+  assert(preview === null, 'Expected plan identity to guard against reusing a worker id on a new plan');
+  const newWriter = createWriter(store, 'job_test_1', 'claude-sonnet-5-5', { planId: activePlan, mergeWorkerId: activeWorker });
+  await newWriter.begin();
+  await newWriter.onDelta(opinion, opinion);
+  await newWriter.complete();
+  assert((await tryRecoverMergePreview(store, 'job_test_1', getSynthesisConfig()))?.text === opinion,
+    'Expected recovery of a current-plan writer preview');
+  await oldWriter.discard();
+  assert(preview?.complete === true, 'Expected stale discard not to clear the current preview');
 });
 
 test('final merge uses a higher merge-specific max_tokens than the single-pass cap', async () => {
@@ -1979,7 +2055,7 @@ test('final merge uses a higher merge-specific max_tokens than the single-pass c
       partialMaxTokensSeen.push(request.maxTokens);
       return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
     }
-    finalMergeMaxTokens = request.maxTokens; // final consolidation (SYNTHESIS_PROMPT)
+    finalMergeMaxTokens = request.maxTokens;
     if (request.onDelta) await request.onDelta(goodFinalOpinion(), goodFinalOpinion());
     return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 20 }, timeToFirstDeltaMs: 5 };
   };
@@ -2076,12 +2152,10 @@ test('shouldCompactBeforeMerge triggers at segment threshold', () => {
 });
 
 test('totalAbstractsFromSegments counts the document span of each segment', () => {
-  // Single segment covering sequence indices 0..4 -> 5 documents.
   assert(
     totalAbstractsFromSegments([{ startSequenceIndex: 0, endSequenceIndex: 4 }]) === 5,
     'Expected an inclusive span of 0..4 to count 5 documents',
   );
-  // Two segments -> sum of their spans (5 + 3 = 8).
   assert(
     totalAbstractsFromSegments([
       { startSequenceIndex: 0, endSequenceIndex: 4 },
@@ -2089,9 +2163,7 @@ test('totalAbstractsFromSegments counts the document span of each segment', () =
     ]) === 8,
     'Expected the count to be the sum of segment spans',
   );
-  // No segments -> 0 (guards the partial-failure preamble against NaN/undefined).
   assert(totalAbstractsFromSegments([]) === 0, 'Expected an empty segment list to count 0 documents');
-  // Malformed segment where end < start -> clamped to 0, not negative.
   assert(
     totalAbstractsFromSegments([{ startSequenceIndex: 5, endSequenceIndex: 2 }]) === 0,
     'Expected an inverted span to clamp to 0',
@@ -2162,7 +2234,6 @@ test('planSynthesisSegments uses configured chunk size for all forced multi-segm
   else process.env.BULK_SYNTHESIS_CHUNK_SIZE = previousBulkSize;
 });
 
-// --- Run --------------------------------------------------------------------
 
 let passed = 0;
 let failed = 0;

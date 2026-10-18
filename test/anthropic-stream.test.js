@@ -54,7 +54,6 @@ test('consumeAnthropicMessageStream ignores malformed blocks', async () => {
   const events = [
     ': keep-alive',
     'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
-    // Keep this malformed-block test protocol-complete on its successful path.
     'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
     'event: message_stop\ndata: {"type":"message_stop"}',
   ];
@@ -67,7 +66,6 @@ test('consumeAnthropicMessageStream keeps message_start input usage and merges l
     'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":1200,"cache_read_input_tokens":30,"output_tokens":1}}}',
     'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
     'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}',
-    // Usage remains provisional until the terminal event completes the message.
     'event: message_stop\ndata: {"type":"message_stop"}',
   ];
   const result = await consumeAnthropicMessageStream(mockStreamBody([encodeSse(events)]), {});
@@ -93,7 +91,6 @@ test('consumeAnthropicMessageStream rejects a structured error before text', asy
 test('consumeAnthropicMessageStream rejects a structured error after partial text', async () => {
   const events = [
     'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Partial"}}',
-    // Error payloads are authoritative even when the optional SSE event field is absent.
     'data: {"type":"error","error":{"type":"api_error","message":"Interrupted"}}',
     'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
     'event: message_stop\ndata: {"type":"message_stop"}',

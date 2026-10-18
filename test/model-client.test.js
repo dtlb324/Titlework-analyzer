@@ -10,6 +10,7 @@ import {
   sanitizeModelClientError,
 } from '../api/_lib/model-client.js';
 import { buildOpenRouterRequestBody } from '../api/_lib/openrouter-request.js';
+import { consumeOpenRouterMessageStream } from '../api/_lib/openrouter-stream.js';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -41,6 +42,62 @@ test('abstractionApiKeyError requires Gemini key for gemini models', () => {
   else delete process.env.GEMINI_API_KEY;
   if (prevGoogle) process.env.GOOGLE_API_KEY = prevGoogle;
   else delete process.env.GOOGLE_API_KEY;
+});
+
+test('abstractionApiKeyError uses the OpenRouter key for a bare Gemini model when globally routed', () => {
+  const names = ['MODEL_PROVIDER', 'OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    process.env.MODEL_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    assert(abstractionApiKeyError('gemini-3.1-flash-lite') === null, 'Expected OpenRouter routing not to require a Gemini key');
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
+test('OpenRouter stream frames preserve results and callback order with or without a trailing newline', async () => {
+  const frames = [
+    ': keepalive',
+    'data: invalid JSON',
+    'data: {"model":"anthropic/claude-sonnet-5.5","choices":[{"delta":{"content":"Hello"}}],"usage":{"prompt_tokens":12}}',
+    'data: {"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}',
+  ];
+  const previousNow = Date.now;
+  Date.now = () => 12345;
+  try {
+    for (const ending of [[], ['data: [DONE]'], ['data: [DONE]', 'data: {"choices":[{"delta":{"content":"ignored"}}]}']]) {
+      const runs = [];
+      for (const newline of ['', '\n']) {
+        const callbacks = [];
+        const bytes = new TextEncoder().encode([...frames, ...ending].join('\n') + newline);
+        const body = new ReadableStream({
+          start(controller) {
+            for (let i = 0; i < bytes.length; i += 17) controller.enqueue(bytes.slice(i, i + 17));
+            controller.close();
+          },
+        });
+        const result = await consumeOpenRouterMessageStream(body, {
+          onDelta: delta => callbacks.push(['delta', delta]),
+          onEvent: event => callbacks.push(['event', event]),
+        });
+        assertStrict.deepEqual(result, {
+          text: 'Hello world', model: 'anthropic/claude-sonnet-5.5',
+          usage: { input_tokens: 12, output_tokens: 3 }, stopReason: 'stop', firstDeltaAt: 12345,
+        });
+        assertStrict.deepEqual(callbacks.map(([kind]) => kind), ['delta', 'event', 'delta', 'event']);
+        runs.push({ result, callbacks });
+      }
+      assertStrict.deepEqual(runs[0], runs[1]);
+    }
+  } finally {
+    Date.now = previousNow;
+  }
 });
 
 test('invokeModel routes Gemini models to Gemini API', async () => {
@@ -90,7 +147,6 @@ test('invokeAnthropicModelStream requests stream=true and forwards deltas', asyn
       'event: message_delta',
       'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
       '',
-      // Successful Anthropic streams require a dispatched message_stop before EOF.
       'event: message_stop',
       'data: {"type":"message_stop"}',
       '',
@@ -147,9 +203,6 @@ test('isGeminiModel is exported for analyze validation', () => {
   assert(isGeminiModel('gemini-2.5-flash'), 'Expected gemini matcher');
 });
 
-// Regression: the OpenRouter streaming path must NOT call response.json() on a
-// successful response. A fetch body is single-consumption — draining it as JSON
-// leaves consumeOpenRouterMessageStream with an empty stream and an empty opinion.
 test('invokeModel streaming path does not consume the SSE body via json()', async () => {
   const prevKey = process.env.OPENROUTER_API_KEY;
   const prevProvider = process.env.MODEL_PROVIDER;
@@ -163,35 +216,15 @@ test('invokeModel streaming path does not consume the SSE body via json()', asyn
     'data: [DONE]',
   ];
 
-  global.fetch = async () => {
-    // Model real fetch single-consumption: reading the body as JSON drains it,
-    // after which the stream reader yields nothing.
-    let bodyConsumed = false;
-    const encoder = new TextEncoder();
-    return {
-      ok: true,
-      status: 200,
-      json: async () => { bodyConsumed = true; return {}; },
-      body: {
-        getReader() {
-          let idx = 0;
-          const chunks = bodyConsumed ? [] : [sseLines.join('\n')];
-          return {
-            async read() {
-              if (idx >= chunks.length) return { done: true, value: undefined };
-              return { done: false, value: encoder.encode(chunks[idx++]) };
-            },
-            releaseLock() {},
-          };
-        },
-      },
-    };
-  };
+  global.fetch = async () => new Response(sseLines.join('\n'), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
 
   try {
     const result = await invokeModel({
-      model: 'anthropic/claude-sonnet-5', // slash-name → OpenRouter
-      maxTokens: 16000, // > NON_STREAMING_MAX_TOKENS → streaming path
+      model: 'anthropic/claude-sonnet-5',
+      maxTokens: 16000,
       system: 'system',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'merge' }] }],
     });

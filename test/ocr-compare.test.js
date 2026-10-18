@@ -313,7 +313,13 @@ test('rendered PDF pages are all sent as images despite the original .pdf filena
   await withServer(async base => {
     const response = await request(base, { method: 'POST', body: JSON.stringify({ filename: 'deed.pdf', pages: [document.pages[0], document.pages[0]] }) });
     assert.equal(response.status, 200);
+    assert.equal((await response.json()).filename, 'deed.pdf');
     for (const call of calls) {
+      assert.deepEqual(call.messages, [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } },
+        { type: 'text', text: 'Abstract the following document as DOCUMENT #1 (deed.pdf (rendered pages)). Label the section clearly as DOCUMENT #1:. Extract every relevant fact. Do not guess at anything illegible.' },
+      ] }]);
       assert.equal(call.messages[0].content.filter(block => block.type === 'image').length, 2);
       assert.ok(call.messages[0].content.every(block => block.type !== 'document'));
       assert.ok(call.messages[0].content.filter(block => block.type === 'image').every(block => block.source.media_type === 'image/png'));
@@ -406,7 +412,7 @@ test('the lab uses direct Gemini and direct Anthropic even when production provi
   delete process.env.OPENROUTER_API_KEY;
   process.env.MODEL_PROVIDER = 'openrouter';
   process.env.GEMINI_THINKING_LEVEL = 'minimal';
-  process.env.OCR_COMPARE_MAX_TOKENS = '8000'; // non-streaming Claude path; streaming is covered separately
+  process.env.OCR_COMPARE_MAX_TOKENS = '8000';
   globalThis.fetch = async (url, options) => {
     if (String(url) === 'https://api.anthropic.com/v1/messages') {
       anthropicCalls.push({ headers: options.headers, body: JSON.parse(options.body) });
@@ -539,7 +545,6 @@ test('Claude is streamed with effort above the 8192 non-streaming limit, and sen
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
       import { createOcrCompareHandler } from './api/ocr-compare.js';
       const sse = events => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(events.join('\\n\\n') + '\\n\\n')); c.close(); } }), { status: 200 });
-      // Success requires message_stop after the stop reason; EOF alone is incomplete.
       globalThis.fetch = async (url, init) => {
         const body = JSON.parse(init.body);
         if (String(url).includes('anthropic')) { console.log('CLAUDE ' + JSON.stringify({ stream: body.stream === true, effort: body.output_config?.effort, max: body.max_tokens })); if (body.stream) return sse(['event: message_start\\ndata: {"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":100}}}', 'event: content_block_delta\\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"GRANTOR: S"}}', 'event: message_delta\\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}', 'event: message_stop\\ndata: {"type":"message_stop"}']); return new Response(JSON.stringify({ model: 'claude-haiku-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'GRANTOR: S' }], usage: { input_tokens: 100, output_tokens: 9 } }), { status: 200 }); }

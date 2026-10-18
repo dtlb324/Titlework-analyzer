@@ -3,7 +3,7 @@ import { neon } from '@neondatabase/serverless';
 import { getClientIp } from './client-ip.js';
 import { isProductionRuntime } from './runtime-info.js';
 import { delayAuthFailure, mutateSharedRateLimit, resetSharedRateLimits } from './shared-rate-limit.js';
-import { buildObjectKey, isAllowedStorageUrl, validateObjectRef } from './storage.js';
+import { buildObjectKey, isAllowedStorageUrl, validateChunkFinalizationStorage, validateObjectRef } from './storage.js';
 
 const ALLOWED_STATUSES = new Set([
   'created',
@@ -637,8 +637,14 @@ export function isValidStatusTransition(fromStatus, toStatus) {
 
 export function assertValidStatusTransition(fromStatus, toStatus) {
   if (!isValidStatusTransition(fromStatus, toStatus)) {
-    throw new JobApiError(`Invalid job status transition from ${fromStatus} to ${toStatus}.`, 409);
+    const error = new JobApiError(`Invalid job status transition from ${fromStatus} to ${toStatus}.`, 409);
+    error.code = 'invalid_job_status_transition';
+    throw error;
   }
+}
+
+export function isInvalidJobStatusTransition(error) {
+  return error instanceof JobApiError && error.statusCode === 409 && error.code === 'invalid_job_status_transition';
 }
 
 function rowToJob(row) {
@@ -1737,8 +1743,6 @@ function createPostgresJobStore() {
           AND status <> 'complete'
         RETURNING *
       `;
-      // VALID_TRANSITIONS keeps complete final; a cancel that lands after the
-      // final merge saved leaves the job and its opinion alone.
       if (!rows[0]) return null;
       await sql`
         UPDATE document_chunks
@@ -2076,12 +2080,10 @@ function createPostgresJobStore() {
       const planId = String(planInput?.planId || '').slice(0, 128);
       if (!planId) throw new JobApiError('planId is required to save a synthesis plan.', 400);
       const segments = Array.isArray(planInput?.segments) ? planInput.segments : [];
-      // Remove any segments from prior plans so resume cannot mix versions.
       await sql`
         DELETE FROM synthesis_segments
         WHERE job_id = ${jobId} AND plan_id <> ${planId}
       `;
-      // Persist the currently-active plan id on the job row.
       await sql`
         UPDATE analysis_jobs
         SET synthesis_plan_id = ${planId},
@@ -2433,6 +2435,10 @@ function createPostgresJobStore() {
           synthesis_preview_updated_at = now(),
           updated_at = now()
         WHERE id = ${jobId}
+          AND (${patch.mergeWorkerId ?? null}::text IS NULL OR (
+            synthesis_plan_id = ${patch.planId ?? null}::text
+            AND synthesis_merge_worker_id = ${patch.mergeWorkerId ?? null}::text
+          ))
         RETURNING synthesis_preview_text, synthesis_preview_complete, synthesis_preview_bytes, synthesis_preview_model_used
       `;
       const row = rows[0];
@@ -2458,7 +2464,7 @@ function createPostgresJobStore() {
       };
     },
 
-    async clearSynthesisPreview(jobId) {
+    async clearSynthesisPreview(jobId, options = {}) {
       await ensureSchema();
       const rows = await sql`
         UPDATE analysis_jobs
@@ -2469,6 +2475,10 @@ function createPostgresJobStore() {
           synthesis_preview_updated_at = NULL,
           updated_at = now()
         WHERE id = ${jobId}
+          AND (${options.mergeWorkerId ?? null}::text IS NULL OR (
+            synthesis_plan_id = ${options.planId ?? null}::text
+            AND synthesis_merge_worker_id = ${options.mergeWorkerId ?? null}::text
+          ))
         RETURNING id
       `;
       return rows.length > 0;
@@ -2506,91 +2516,84 @@ function createPostgresJobStore() {
 
     async saveJobResult(jobId, payload) {
       await ensureSchema();
-      const job = await this.getJob(jobId);
-      if (!job) return null;
-      if (job.status === 'canceled') return null;
-      const id = `res_${randomUUID()}`;
-      const status = JOB_RESULT_STATUSES.has(payload.status) ? payload.status : 'complete';
-      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
-      const failedDocuments = Array.isArray(payload.failedDocuments) ? payload.failedDocuments : [];
-      const rows = await sql`
-        INSERT INTO job_results (
-          id, job_id, plan_id, status,
-          final_title_opinion, warnings_json, failed_documents_json,
-          model_used, input_tokens, output_tokens, payload_bytes,
-          synthesis_duration_ms, generated_at
-        )
-        SELECT
-          ${id}::text, ${jobId}::text, ${payload.planId || null}::text, ${status}::text,
-          ${payload.finalTitleOpinion || ''}, ${JSON.stringify(warnings)}::jsonb, ${JSON.stringify(failedDocuments)}::jsonb,
-          ${payload.modelUsed || null}::text, ${payload.inputTokens ?? null}::integer, ${payload.outputTokens ?? null}::integer, ${payload.payloadBytes ?? null}::integer,
-          ${payload.synthesisDurationMs ?? null}::integer, now()
-        FROM analysis_jobs aj
-        WHERE aj.id = ${jobId}::text
-          AND aj.status <> 'canceled'
-          AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
-            aj.synthesis_plan_id = ${payload.planId || null}::text
-            AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
-          ))
-        ON CONFLICT (job_id) DO UPDATE
-        SET
-          plan_id = EXCLUDED.plan_id,
-          status = EXCLUDED.status,
-          final_title_opinion = EXCLUDED.final_title_opinion,
-          warnings_json = EXCLUDED.warnings_json,
-          failed_documents_json = EXCLUDED.failed_documents_json,
-          model_used = EXCLUDED.model_used,
-          input_tokens = EXCLUDED.input_tokens,
-          output_tokens = EXCLUDED.output_tokens,
-          payload_bytes = EXCLUDED.payload_bytes,
-          synthesis_duration_ms = EXCLUDED.synthesis_duration_ms,
-          generated_at = now()
-        RETURNING *
-      `;
-      if (!rows[0]) return null;
-      await this.clearSynthesisPreview(jobId);
-      // Roll the job into its terminal status. assertValidStatusTransition
-      // forbids regressing once a job has reached 'complete'.
-      const desiredJobStatus = status === 'complete' ? 'complete'
-        : status === 'partial_failed' ? 'partial_failed'
-        : 'failed';
-      if (job.status !== 'canceled' && job.status !== desiredJobStatus) {
-        try {
-          assertValidStatusTransition(job.status, desiredJobStatus);
-          await sql`
-            UPDATE analysis_jobs
-            SET status = ${desiredJobStatus},
-                current_phase = ${status === 'complete' ? 'complete' : status === 'partial_failed' ? 'complete with synthesis warnings' : 'synthesis failed'},
-                synthesis_merge_worker_id = NULL,
-                synthesis_merge_lease_expires_at = NULL,
-                completed_at = COALESCE(completed_at, now()),
-                updated_at = now()
-            WHERE id = ${jobId}
-          `;
-        } catch {
-          if (payload.mergeWorkerId) {
+      try {
+        const job = await this.getJob(jobId);
+        if (!job) return null;
+        if (job.status === 'canceled') return null;
+        const id = `res_${randomUUID()}`;
+        const status = JOB_RESULT_STATUSES.has(payload.status) ? payload.status : 'complete';
+        const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+        const failedDocuments = Array.isArray(payload.failedDocuments) ? payload.failedDocuments : [];
+        const rows = await sql`
+          INSERT INTO job_results (
+            id, job_id, plan_id, status,
+            final_title_opinion, warnings_json, failed_documents_json,
+            model_used, input_tokens, output_tokens, payload_bytes,
+            synthesis_duration_ms, generated_at
+          )
+          SELECT
+            ${id}::text, ${jobId}::text, ${payload.planId || null}::text, ${status}::text,
+            ${payload.finalTitleOpinion || ''}, ${JSON.stringify(warnings)}::jsonb, ${JSON.stringify(failedDocuments)}::jsonb,
+            ${payload.modelUsed || null}::text, ${payload.inputTokens ?? null}::integer, ${payload.outputTokens ?? null}::integer, ${payload.payloadBytes ?? null}::integer,
+            ${payload.synthesisDurationMs ?? null}::integer, now()
+          FROM analysis_jobs aj
+          WHERE aj.id = ${jobId}::text
+            AND aj.status <> 'canceled'
+            AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
+              aj.synthesis_plan_id = ${payload.planId || null}::text
+              AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
+            ))
+          ON CONFLICT (job_id) DO UPDATE
+          SET
+            plan_id = EXCLUDED.plan_id,
+            status = EXCLUDED.status,
+            final_title_opinion = EXCLUDED.final_title_opinion,
+            warnings_json = EXCLUDED.warnings_json,
+            failed_documents_json = EXCLUDED.failed_documents_json,
+            model_used = EXCLUDED.model_used,
+            input_tokens = EXCLUDED.input_tokens,
+            output_tokens = EXCLUDED.output_tokens,
+            payload_bytes = EXCLUDED.payload_bytes,
+            synthesis_duration_ms = EXCLUDED.synthesis_duration_ms,
+            generated_at = now()
+          RETURNING *
+        `;
+        if (!rows[0]) return null;
+        await this.clearSynthesisPreview(jobId);
+        const desiredJobStatus = status === 'complete' ? 'complete'
+          : status === 'partial_failed' ? 'partial_failed'
+          : 'failed';
+        if (job.status !== desiredJobStatus) {
+          try {
+            assertValidStatusTransition(job.status, desiredJobStatus);
             await sql`
               UPDATE analysis_jobs
-              SET synthesis_merge_worker_id = NULL,
+              SET status = ${desiredJobStatus},
+                  current_phase = ${status === 'complete' ? 'complete' : status === 'partial_failed' ? 'complete with synthesis warnings' : 'synthesis failed'},
+                  synthesis_merge_worker_id = NULL,
                   synthesis_merge_lease_expires_at = NULL,
+                  completed_at = COALESCE(completed_at, now()),
                   updated_at = now()
               WHERE id = ${jobId}
-                AND synthesis_merge_worker_id = ${payload.mergeWorkerId}
+                AND status = ${job.status}
             `;
+          } catch (error) {
+            if (!isInvalidJobStatusTransition(error)) throw error;
           }
-          // ignore invalid transition; the result is still saved
         }
-      } else if (payload.mergeWorkerId) {
-        await sql`
-          UPDATE analysis_jobs
-          SET synthesis_merge_worker_id = NULL,
-              synthesis_merge_lease_expires_at = NULL,
-              updated_at = now()
-          WHERE id = ${jobId}
-            AND synthesis_merge_worker_id = ${payload.mergeWorkerId}
-        `;
+        return rowToJobResult(rows[0]);
+      } finally {
+        if (payload.mergeWorkerId) {
+          await sql`
+            UPDATE analysis_jobs
+            SET synthesis_merge_worker_id = NULL,
+                synthesis_merge_lease_expires_at = NULL,
+                updated_at = now()
+            WHERE id = ${jobId}
+              AND synthesis_merge_worker_id = ${payload.mergeWorkerId}
+          `;
+        }
       }
-      return rowToJobResult(rows[0]);
     },
 
     async clearJobResult(jobId) {
@@ -2773,8 +2776,6 @@ function createPostgresJobStore() {
         const chunkFilename = row.originalFilename || row.sourceFilename || row.chunkId;
         const blobKey = buildChunkBlobKey(targetJobId, chunkId, chunkFilename);
         const importFingerprint = `continuation:${sourceJobId}:${row.chunkId}`;
-        // Match on the import fingerprint alone: orderOffset starts after rows a
-        // previous call already imported, so it never equals their chunk_order.
         const existingChunk = await sql`
           SELECT id FROM document_chunks
           WHERE job_id = ${targetJobId} AND document_id = ${documentId} AND fingerprint = ${importFingerprint}
@@ -2817,8 +2818,6 @@ function createPostgresJobStore() {
         orderOffset += 1;
         imported += 1;
       }
-      // No refreshAbstractionCounts here: with only completed imports it would
-      // move the job to synthesizing before the new uploads are registered.
       await refreshUploadCounts(targetJobId);
       return { imported, sourceJobId, targetJobId, nextChunkOrder: orderOffset };
     },
@@ -2826,14 +2825,7 @@ function createPostgresJobStore() {
     async finalizeUploads(jobId) {
       await ensureSchema();
       const chunks = await this.listChunks(jobId);
-      const invalidUploaded = chunks.filter(chunk => {
-        if (chunk.uploadStatus !== 'uploaded') return false;
-        // Server-created split children use a parent-based key path; skip them.
-        if (chunk.splitParentChunkId) return false;
-        // Continuation imports arrive already abstracted and point at the source job's object.
-        if (chunk.abstractionStatus === 'completed') return false;
-        return !chunk.blobUrl || !chunk.blobKey || !chunk.blobKey.startsWith(buildChunkBlobPrefix(jobId, chunk.id));
-      });
+      const invalidUploaded = chunks.filter(chunk => !validateChunkFinalizationStorage(chunk).valid);
       if (invalidUploaded.length) {
         throw new JobApiError('Uploaded chunks must include valid durable storage metadata before finalization.', 409);
       }

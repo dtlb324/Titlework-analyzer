@@ -136,13 +136,6 @@ test('synthesis runnable query skips jobs with an active final merge lease', () 
   assert(jobsSource.includes('j.synthesis_merge_lease_expires_at <= now()'), 'Expected runnable synthesis query to wait for active merge leases to expire');
 });
 
-// Regression guard: zombie 'synthesizing' jobs whose abstraction never finished
-// must not surface as runnable. Without the NOT EXISTS guard, the worker drain
-// repeatedly picks them up, planJobSynthesis throws ("Synthesis cannot start
-// until all abstraction chunks are completed or failed."), and Cloud Scheduler
-// churns on worker_synthesis_error until DEADLINE_EXCEEDED. listRunnableSynthesisJobIds
-// is Postgres-only and mocked everywhere else, so this source check is the only
-// signal that protects the guard from being edited away.
 test('synthesis runnable query excludes abstraction-incomplete jobs', () => {
   const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
   const fnStart = jobsSource.indexOf('async listRunnableSynthesisJobIds');
@@ -157,9 +150,6 @@ test('synthesis runnable query excludes abstraction-incomplete jobs', () => {
     'Expected NOT EXISTS guard on document_chunks',
   );
 
-  // Drift guard: the SQL runnable filter and the planJobSynthesis JS blocker
-  // check must agree on the same three "incomplete" abstraction statuses, or a
-  // job can pass one gate and fail the other (reintroducing the churn loop).
   const synthesisSource = readFileSync(join(root, 'api/_lib/synthesis.js'), 'utf8');
   assert(
     synthesisSource.includes("['pending', 'processing', 'retry_wait']"),
@@ -207,7 +197,7 @@ test('runWorkerDrain processes runnable synthesis once then stops on idle', asyn
     async listRunnableAbstractionJobIds() { return []; },
     async listRunnableSynthesisJobIds() { listCalls += 1; return listCalls === 1 ? ['job_syn_1'] : []; },
   };
-  const controller = new AbortController(); // pass a signal so no internal deadline timer is used
+  const controller = new AbortController();
   const result = await runWorkerDrain({
     store,
     signal: controller.signal,

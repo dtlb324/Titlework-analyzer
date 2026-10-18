@@ -1,6 +1,3 @@
-// Cloud Run API handler — hardened for production use
-// Protections: rate limiting, input validation, secure password comparison,
-// request size limiting, XSS headers, data leakage prevention
 
 import { getClientIp } from './_lib/client-ip.js';
 import { publicRequestId, secureCompare } from './_lib/jobs.js';
@@ -21,7 +18,6 @@ export const config = {
 };
 
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-// Default 200 req/min supports bulk runs (~400 docs). Override via ANALYZE_RATE_LIMIT_MAX env var.
 const RATE_LIMIT_MAX_REQUESTS = Math.min(
   Math.max(parseInt(process.env.ANALYZE_RATE_LIMIT_MAX || '300', 10) || 300, 10),
   600

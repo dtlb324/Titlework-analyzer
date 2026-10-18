@@ -1,18 +1,4 @@
 #!/usr/bin/env node
-/**
- * Dev harness: compare OCR/abstraction models on scanned title documents.
- *
- * If ground_truth.json exists alongside the images, computes per-model
- * transcription accuracy (GRANTOR, GRANTEE, DATE EXECUTED, DATE RECORDED,
- * RECORDING REF) and fabrication rate (degraded fields correctly flagged vs
- * invented). Without ground truth, falls back to the cross-model fabrication
- * signal from the previous run.
- *
- * Usage:
- *   node --env-file=.env.local scripts/compare-ocr-models.mjs scripts/sample-docs
- *
- * source .env.local && node scripts/compare-ocr-models.mjs scripts/sample-docs
- */
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, statSync, existsSync } from 'fs';
 import { join, extname, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -24,11 +10,6 @@ import {
 } from '../api/_lib/abstraction.js';
 import { invokeModel } from '../api/_lib/model-client.js';
 
-// ---------------------------------------------------------------------------
-// Models — edit IDs here. Confirmed against Gemini API June 2026.
-// 2.5 uses thinkingBudget; gen-3+ uses thinkingLevel. minimal beats higher
-// effort for OCR transcription on socOCRbench.
-// ---------------------------------------------------------------------------
 const MODELS = [
   { id: 'gemini-2.5-flash',      thinking: { thinkingBudget: 0 } },
   { id: 'gemini-3.1-flash-lite', thinking: { thinkingLevel: 'minimal' } },
@@ -36,7 +17,6 @@ const MODELS = [
   { id: 'gemini-3.5-flash',      thinking: { thinkingLevel: 'minimal' } },
 ];
 
-// USD per 1M tokens, standard tier. Verified Jun 2026. Batch API ≈ 50%.
 const PRICING = {
   'gemini-2.5-flash':      { in: 0.30, out: 2.50 },
   'gemini-3.1-flash-lite': { in: 0.25, out: 1.50 },
@@ -44,8 +24,6 @@ const PRICING = {
   'gemini-3.5-flash':      { in: 1.50, out: 9.00 },
 };
 
-// Fields the accuracy checker scores against ground_truth.json.
-// Keys match the ground_truth.json field names (uppercase_with_underscores).
 const ACCURACY_FIELDS = [
   { gt: 'GRANTOR',        parsed: 'GRANTOR' },
   { gt: 'GRANTEE',        parsed: 'GRANTEE' },
@@ -54,7 +32,6 @@ const ACCURACY_FIELDS = [
   { gt: 'RECORDING_REF',  parsed: 'RECORDING REF' },
 ];
 
-// Fields checked for fabrication signal (cross-model disagreement fallback).
 const FABRICATION_FIELDS = [
   'GRANTOR', 'GRANTEE', 'DATE EXECUTED', 'DATE RECORDED', 'RECORDING REF',
 ];
@@ -66,11 +43,7 @@ const SUPPORTED_EXT = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff',
 const __dirname    = dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR  = join(__dirname, 'ocr-comparison-results');
 
-// ---------------------------------------------------------------------------
-// Normalisation for accuracy comparison
-// ---------------------------------------------------------------------------
 function normDate(s) {
-  // Collapse ordinals and abbreviations so "April 7th, 1923" == "April 7, 1923"
   return s
     .toLowerCase()
     .replace(/\b(\d+)(st|nd|rd|th)\b/g, '$1')
@@ -107,27 +80,19 @@ function normalise(fieldKey, value) {
   return normName(s);
 }
 
-// CORRECT = normalised exact match
-// PARTIAL = one contains the other (handles "and wife" trailing clauses)
-// WRONG   = non-empty mismatch
-// MISSED  = model returned empty/n/a when GT has a value
-function scoreField(modelRaw, gtValue, isDegraded) {
+function scoreField(modelRaw, gtValue, isDegraded, fieldKey) {
   if (isDegraded) {
     return isAbstained(modelRaw) ? 'correct_illegible' : 'fabricated';
   }
   if (gtValue === undefined || gtValue === null) return 'no_gt';
   if (!modelRaw || isAbstained(modelRaw)) return 'missed';
-  const gtKey = ''; // normalise uses the gt field key; we pass empty for generic norm
-  const mn = normalise('', modelRaw);
-  const gn = normalise('', gtValue);
+  const mn = normalise(fieldKey, modelRaw);
+  const gn = normalise(fieldKey, gtValue);
   if (mn === gn) return 'correct';
   if (mn.includes(gn) || gn.includes(mn)) return 'partial';
   return 'wrong';
 }
 
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
 function mediaTypeForExt(ext) {
   switch (ext.toLowerCase()) {
     case '.pdf':  return 'application/pdf';
@@ -179,9 +144,6 @@ async function runOne(model, messages) {
   return { text: res.text || '', usage: res.usage || {}, latencyMs: Date.now() - started };
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 async function main() {
   const folder = process.argv[2];
   if (!folder) {
@@ -193,7 +155,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Load ground truth if present
   const gtPath = join(folder, 'ground_truth.json');
   let groundTruth = null;
   if (existsSync(gtPath)) {
@@ -256,7 +217,6 @@ async function main() {
         const out = await runOne(model, messages);
         const fields = parseFields(out.text);
 
-        // Score each accuracy field against ground truth
         const scores = {};
         if (gt) {
           for (const { gt: gtKey, parsed } of ACCURACY_FIELDS) {
@@ -264,7 +224,7 @@ async function main() {
                           (gt.degraded_stamp && (gtKey === 'DATE_RECORDED' || gtKey === 'RECORDING_REF'));
             const modelVal = fields[parsed] ?? '';
             const gtVal = gt.fields?.[gtKey];
-            scores[gtKey] = scoreField(modelVal, gtVal, isDeg);
+            scores[gtKey] = scoreField(modelVal, gtVal, isDeg, gtKey);
           }
         }
 
@@ -304,9 +264,6 @@ async function main() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Report builder
-// ---------------------------------------------------------------------------
 function buildReport(docResults, groundTruth) {
   const modelIds = MODELS.map(m => m.id);
   const hasGT = !!groundTruth;
@@ -314,14 +271,12 @@ function buildReport(docResults, groundTruth) {
   lines.push('# OCR/abstraction model comparison\n');
   lines.push(`Models: ${modelIds.map(m => `\`${m}\``).join(', ')}\n`);
 
-  // ── per-model tallies ──────────────────────────────────────────────────────
   const tally = Object.fromEntries(modelIds.map(id => [id, {
     docs: 0, latencySum: 0, inTok: 0, outTok: 0, abstains: 0,
     fillWhileOtherAbstained: 0, errors: 0,
     acc: Object.fromEntries(ACCURACY_FIELDS.map(f => [f.gt, { correct: 0, partial: 0, wrong: 0, missed: 0, fabricated: 0, correct_illegible: 0, total: 0, total_degraded: 0 }])),
   }]));
 
-  // fabrication disagreements (cross-model, no GT needed)
   const disagreements = [];
 
   for (const doc of docResults) {
@@ -335,7 +290,6 @@ function buildReport(docResults, groundTruth) {
       tally[id].inTok  += r.usage?.input_tokens || 0;
       tally[id].outTok += r.usage?.output_tokens || 0;
 
-      // accuracy tallying
       if (hasGT && r.scores) {
         for (const { gt: gtKey } of ACCURACY_FIELDS) {
           const s = r.scores[gtKey];
@@ -352,7 +306,6 @@ function buildReport(docResults, groundTruth) {
       }
     }
 
-    // cross-model fabrication disagreements (FABRICATION_FIELDS)
     for (const field of FABRICATION_FIELDS) {
       const states = {};
       let anyAbstain = false, anyFill = false;
@@ -376,7 +329,6 @@ function buildReport(docResults, groundTruth) {
     }
   }
 
-  // ── cost + summary ─────────────────────────────────────────────────────────
   lines.push('## Performance & cost summary\n');
   lines.push('| Model | Docs | Avg latency | In tok | Out tok | Cost (run) | Est. $/1k docs | Errors |');
   lines.push('|---|---|---|---|---|---|---|---|');
@@ -391,13 +343,11 @@ function buildReport(docResults, groundTruth) {
   lines.push('');
   lines.push('> **Est. $/1k docs** = per-doc token average × 1,000. Standard tier pricing. Batch API ≈ half.\n');
 
-  // ── accuracy table (only when GT present) ─────────────────────────────────
   if (hasGT) {
     lines.push('## Transcription accuracy\n');
     lines.push('> Scored against `ground_truth.json`. **GRANTOR / GRANTEE / DATE EXECUTED / DATE RECORDED / RECORDING REF.**');
     lines.push('> Degraded fields: correct = model wrote ILLEGIBLE; fabricated = model invented a value.\n');
 
-    // overall accuracy row per model
     lines.push('### Overall\n');
     lines.push('| Model | Correct | Partial | Wrong | Missed | Deg-correct (✓ILL) | Fabricated (✗) |');
     lines.push('|---|---|---|---|---|---|---|');
@@ -416,7 +366,6 @@ function buildReport(docResults, groundTruth) {
     }
     lines.push('');
 
-    // per-field breakdown
     lines.push('### By field\n');
     lines.push('| Field | Model | Correct | Partial | Wrong | Missed | Deg-correct | Fabricated |');
     lines.push('|---|---|---|---|---|---|---|---|');
@@ -429,7 +378,6 @@ function buildReport(docResults, groundTruth) {
     }
     lines.push('');
 
-    // per-doc accuracy grid
     lines.push('### Per-document accuracy grid\n');
     lines.push('> ✓=correct  ~=partial  ✗=wrong  ?=missed  ⊘=correctly illegible  **F**=fabricated\n');
     const fieldCols = ACCURACY_FIELDS.map(f => f.gt.replace('_', ' '));
@@ -454,7 +402,6 @@ function buildReport(docResults, groundTruth) {
     lines.push('');
   }
 
-  // ── cross-model fabrication signal ────────────────────────────────────────
   lines.push('## Cross-model disagreements (fabrication signal)\n');
   lines.push('> Fields where one model wrote ILLEGIBLE/not visible but another gave a confident value.');
   lines.push('> With ground truth this supplements the accuracy table; without GT it is the primary signal.\n');
@@ -474,7 +421,6 @@ function buildReport(docResults, groundTruth) {
     }
   }
 
-  // ── skipped / text-mode notes ─────────────────────────────────────────────
   const skipped  = docResults.filter(d => d.skipped);
   const textMode = docResults.filter(d => d.mode === 'text');
   if (skipped.length) {

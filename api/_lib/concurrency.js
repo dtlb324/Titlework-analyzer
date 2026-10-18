@@ -1,4 +1,3 @@
-// Shared bounded-concurrency helper for workflow batches.
 
 export async function runWithConcurrency(items, concurrency, worker) {
   if (!items.length) return [];

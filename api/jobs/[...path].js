@@ -39,7 +39,7 @@ import {
   answerFollowupQuestion,
   synthesisSetupError,
 } from '../_lib/synthesis.js';
-import { isAllowedStorageUrl, objectExists, validateObjectRef } from '../_lib/storage.js';
+import { objectExists, validateChunkFinalizationStorage, validateObjectRef } from '../_lib/storage.js';
 
 export const config = {
   runtime: 'nodejs',
@@ -64,27 +64,11 @@ function isTerminalJob(job) {
   return TERMINAL_JOB_STATUSES.has(job?.status);
 }
 
-function expectedChunkBlobPrefix(jobId, chunkId) {
-  return `jobs/${jobId}/chunks/${chunkId}/`;
-}
-
-async function chunkHasUsableBlobMetadata(chunk) {
-  if (!chunk || chunk.uploadStatus !== 'uploaded') return true;
-  // Server-created split children use a parent-based blob key path; skip prefix check.
-  if (chunk.splitParentChunkId) return true;
-  // Continuation imports arrive already abstracted and point at the source job's object.
-  if (chunk.abstractionStatus === 'completed') return true;
-  if (typeof chunk.blobKey !== 'string' || !chunk.blobKey.startsWith(expectedChunkBlobPrefix(chunk.jobId, chunk.id))) {
-    return false;
-  }
-  if (!isAllowedStorageUrl(chunk.blobUrl)) return false;
-  const ref = validateObjectRef({
-    jobId: chunk.jobId,
-    chunkId: chunk.id,
-    objectKey: chunk.blobKey,
-    objectUrl: chunk.blobUrl,
-  });
-  if (!ref.valid) return false;
+async function chunkCanFinalize(chunk) {
+  const validation = validateChunkFinalizationStorage(chunk);
+  if (!validation.valid) return false;
+  if (validation.kind !== 'uploaded_object') return true;
+  if (!validateObjectRef(validation.objectRef).valid) return false;
   if (process.env.VERIFY_GCS_OBJECTS === 'true') {
     return await objectExists(chunk);
   }
@@ -145,12 +129,6 @@ function publicAbstract(record) {
   };
 }
 
-// Defense-in-depth check for the sensitive workflow endpoints (start/process/
-// retry/followup/abstracts). Unlike requireJobPassword — which passes when
-// APP_PASSWORD is unset so local dev works on metadata routes — these endpoints
-// must NEVER be anonymous: they trigger billable model calls. This helper
-// verifies the credential itself (instead of trusting that the main handler
-// already did), and fails closed when APP_PASSWORD is not configured.
 function requireServerAbstractionPassword(req, res, requestId) {
   const requiredPassword = process.env.APP_PASSWORD;
   if (!requiredPassword) {
@@ -290,7 +268,7 @@ async function handleFinalizeUploads(req, res, requestId, store, jobId) {
   const chunks = await store.listChunks(jobId);
   const checks = await Promise.all(chunks.map(async chunk => ({
     chunk,
-    usable: await chunkHasUsableBlobMetadata(chunk),
+    usable: await chunkCanFinalize(chunk),
   })));
   const invalidUploaded = checks.filter(item => !item.usable).map(item => item.chunk);
   if (invalidUploaded.length) {
