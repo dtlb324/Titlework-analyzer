@@ -101,9 +101,6 @@ export async function runWorkerOnce(options = {}) {
 }
 
 export async function runWorkerDrain(options = {}) {
-  // Drain all runnable jobs once (stop on the first idle pass). When no caller
-  // signal is supplied, bound the drain with a time budget under the worker's
-  // request timeout so the HTTP response always returns.
   if (options.signal) {
     return runWorkerLoop({ ...options, maxIdleCycles: 1 });
   }

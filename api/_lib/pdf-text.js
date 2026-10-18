@@ -1,4 +1,3 @@
-// PDF text extraction and quality gates for text-first abstraction (lower token cost).
 
 function clampInt(raw, fallback, min, max) {
   const value = Number(raw);
@@ -52,10 +51,7 @@ function normalizeBytes(payload) {
   return Buffer.from(String(payload || ''), 'utf8');
 }
 
-/**
- * Extract merged plain text from a PDF buffer using unpdf (PDF.js).
- */
-export async function extractPdfText(payloadBytes, options = {}) {
+export async function extractPdfText(payloadBytes) {
   const bytes = normalizeBytes(payloadBytes);
   if (!bytes.length) {
     return { text: '', totalPages: 0, error: 'empty_pdf' };
@@ -79,9 +75,6 @@ export async function extractPdfText(payloadBytes, options = {}) {
   }
 }
 
-/**
- * Decide whether extracted text is dense/legible enough to skip visual PDF tokens.
- */
 export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTexts }, configOverrides = {}) {
   const config = { ...getPdfTextConfig(), ...configOverrides };
   const pagesFromExtract = Array.isArray(pageTexts)
@@ -176,9 +169,6 @@ function labeledExtractedPages(pageTexts, densePageIndexes, pageStart) {
   }).join('\n\n');
 }
 
-/**
- * Estimate abstraction request payload bytes for batch planning (before loading blobs).
- */
 export function estimatePdfPlanningPayloadBytes(sizeBytes, options = {}) {
   const size = Math.max(0, Number(sizeBytes) || 0);
   if (!size) return 500;
@@ -203,7 +193,7 @@ export async function resolvePdfTextDelivery(payloadBytes, options = {}) {
     return { mode: 'visual', reason: 'disabled' };
   }
   const bytes = normalizeBytes(payloadBytes);
-  const extracted = await extractPdfText(bytes, options);
+  const extracted = await extractPdfText(bytes);
   if (extracted.error) {
     return { mode: 'visual', reason: 'extract_failed', error: extracted.error };
   }

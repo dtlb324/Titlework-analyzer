@@ -1,25 +1,3 @@
-// Phase 5 — durable server-side synthesis.
-//
-// Reads completed abstracts from Postgres, plans dynamic synthesis segments,
-// runs partial synthesis per segment with checkpointing, then merges segments
-// into a final title opinion. Falls back to a binary split when a single
-// segment hits 413/timeout, and to a tree-merge when the merge call itself
-// would exceed the safe request envelope.
-//
-// Required env vars:
-//   - GEMINI_API_KEY (partial segment synthesis)
-//   - ANTHROPIC_API_KEY (final title opinion, follow-ups)
-//   Override per call with options.modelClient
-//
-// Configurable (env):
-//   - SYNTHESIS_MODEL (default: claude-sonnet-5-5 for final title opinion; Gemini/Haiku ignored)
-//   - SYNTHESIS_MAX_TOKENS (default: 8000)
-//   - SYNTHESIS_CHUNK_SIZE (default: 50)
-//   - REQUEST_ENVELOPE_SAFE_BYTES (default: 3_900_000)
-//   - REQUEST_OVERHEAD_BYTES (default: 350_000)
-//   - SYNTHESIS_MAX_ATTEMPTS (default: 3)
-//   - SYNTHESIS_FOLLOWUP_HISTORY_TURNS (default: 4)
-//   - SYNTHESIS_UPSTREAM_TIMEOUT_MS (default: 52_000)
 
 import { createHash } from 'crypto';
 import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
@@ -146,7 +124,7 @@ export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeI
   return tokens >= resolveCompactionMinMergeTokens();
 }
 
-function createPreviewWriter(store, jobId, model) {
+function createPreviewWriter(store, jobId, model, { planId, mergeWorkerId } = {}) {
   if (!store?.setSynthesisPreview || !jobId) {
     return {
       async begin() {},
@@ -167,14 +145,16 @@ function createPreviewWriter(store, jobId, model) {
       complete: false,
       bytesReceived: buffer.length,
       modelUsed: model,
+      planId,
+      mergeWorkerId,
     });
   }
   return {
     async begin() {
       buffer = '';
       lastFlushAt = 0;
-      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
-      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0, modelUsed: model });
+      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId });
+      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0, modelUsed: model, planId, mergeWorkerId });
     },
     async onDelta(_delta, fullText) {
       buffer = fullText;
@@ -186,10 +166,12 @@ function createPreviewWriter(store, jobId, model) {
         complete: true,
         bytesReceived: buffer.length,
         modelUsed: model,
+        planId,
+        mergeWorkerId,
       });
     },
     async discard() {
-      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId });
     },
     get text() {
       return buffer;
@@ -674,7 +656,7 @@ async function callSynthesisModel({
     && systemPrompt === SYNTHESIS_PROMPT
     && isAnthropicModel(config.model);
   const previewWriter = shouldStream
-    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId, config.model))
+    ? (options.previewWriter || createPreviewWriter(options.store, options.jobId, config.model, options))
     : null;
   if (previewWriter?.begin) await previewWriter.begin();
   const started = Date.now();
@@ -788,9 +770,6 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
       config,
       options,
     });
-    // Output truncated by max_tokens — replan by splitting docs in half so each
-    // half gets the full token budget. Avoids infinite validation/retry loops on
-    // jobs whose full opinion exceeds the configured maxTokens.
     if (result.stopReason === 'max_tokens' && abstracts.length > 1) {
       logSynthesisMetrics({
         event: 'synthesis_max_tokens_split',
@@ -861,9 +840,6 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   if (!claimed) {
     return { status: 'skipped', segmentId: segment.id };
   }
-  // Each claim increments the stored attempt count. Resume from it so a
-  // retry_wait segment uses up its budget instead of restarting at attempt 1
-  // on every poll.
   const firstAttempt = Math.max(1, Number(claimed.attemptCount) || 1);
   if (firstAttempt > config.maxAttempts) {
     const failure = { errorType: 'max_attempts', errorMessage: 'Synthesis attempt limit exceeded.' };
@@ -872,7 +848,6 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
     return { status: 'failed', segmentId: segment.id, failure };
   }
 
-  // Build the abstracts list for this segment in stable order.
   const byDocumentId = new Map(
     abstracts
       .filter(item => item.documentId)
@@ -930,7 +905,6 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
       if (!validation.ok && attempt < config.maxAttempts && SYNTHESIS_REPAIR_ENABLED) {
-        // Repair retry: ask model to be more complete.
         const repairAbstracts = segmentAbstracts;
         const repairPreamble = `${preamble}\n\nPrevious response was incomplete or missing required sections: ${validation.reason} Produce a complete response that includes every required section.`;
         const retry = await callSynthesisModel({
@@ -1017,7 +991,6 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
         if (!updated) return { status: 'stale', segmentId: segment.id };
         return { status: 'failed', segmentId: segment.id, failure };
       }
-      // Wait then loop for another attempt within the same claim window.
       await sleep(computeRetryBackoff(attempt, extractRetryAfter(err)));
     }
   }
@@ -1084,10 +1057,6 @@ async function mergeSegmentsIntoOpinion({
   tokensAccum,
 }) {
   const partial = partialConfig || getPartialSynthesisConfig(config || {});
-  // The merged opinion is the full document, so the final consolidation gets a
-  // higher output cap than the single-pass/segment limit; otherwise large
-  // multi-segment opinions truncate before their closing sections and fail
-  // validation. Single-pass synthesis and chunk sizing keep config.maxTokens.
   const finalConfig = {
     ...(config || getSynthesisConfig()),
     maxTokens: clampInt(process.env.SYNTHESIS_MERGE_MAX_TOKENS, 16000, 1024, 32000),
@@ -1143,7 +1112,6 @@ async function mergeSegmentsIntoOpinion({
     ? preamble
     : `Below are ${workingSummaries.length} compacted partial chain-of-title segment(s) covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`;
   if (!fit.fits && mergeAbstracts.length > 2) {
-    // Tree-merge: pair segments and partial-merge until one summary remains.
     warningsAccum.push('merge_tree_applied');
     let working = workingSummaries.map((summary, idx) => ({
       filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
@@ -1314,7 +1282,6 @@ export async function planJobSynthesis(jobId, options = {}) {
   const existingPlanId = await store.getCurrentSynthesisPlanId(jobId);
   let plan = null;
   if (existingPlanId === planId) {
-    // Idempotent re-plan with identical inputs: leave existing checkpoints intact.
     const existingSegments = await store.listSynthesisSegments(jobId, planId);
     if (existingSegments.length) {
       plan = { planId, segments: existingSegments };
@@ -1332,13 +1299,6 @@ export async function planJobSynthesis(jobId, options = {}) {
   return { plan, abstracts: orderedAbstracts, job };
 }
 
-// Recover a completed-but-unsaved merge: if a prior worker streamed the full
-// final opinion into the preview row and died before saveJobResult committed,
-// reuse that text instead of re-running the expensive Sonnet merge. Both writers
-// of synthesis_plan_id (saveSynthesisPlan and the abstract-changed reset) clear
-// the preview text in the same atomic UPDATE, so a `complete` preview always
-// belongs to the current plan — no plan-id guard is needed here. Returns a
-// merge-shaped object, or null to fall through to a fresh merge.
 export async function tryRecoverMergePreview(store, jobId, config) {
   if (!store?.getSynthesisPreview || !jobId) return null;
   const preview = await store.getSynthesisPreview(jobId);
@@ -1355,7 +1315,6 @@ export async function tryRecoverMergePreview(store, jobId, config) {
   };
 }
 
-// Single funnel for the final merge so both merge branches recover identically.
 async function runOrRecoverMerge(mergeArgs) {
   const store = mergeArgs.options?.store;
   const jobId = mergeArgs.options?.jobId;
@@ -1379,7 +1338,6 @@ export async function processSynthesisJob(jobId, options = {}) {
   const deadline = startedAt + budgetMs;
   const mergeWorkerId = options.workerId || `wkr_merge_${Math.random().toString(36).slice(2, 10)}`;
 
-  // Recover any stranded leases first.
   if (store.resetStaleSynthesisSegments) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || DEFAULT_STALE_SYNTHESIS_LEASE_MS);
   }
@@ -1428,7 +1386,6 @@ export async function processSynthesisJob(jobId, options = {}) {
     if (currentJob?.status === 'canceled') break;
   }
 
-  // After segment work, attempt the final merge if every segment is complete and no result exists yet.
   const refreshedSegments = await store.listSynthesisSegments(jobId, planId);
   const completedSegments = refreshedSegments.filter(s => s.status === 'complete');
   const failedSegments = refreshedSegments.filter(s => s.status === 'failed');
@@ -1469,15 +1426,11 @@ export async function processSynthesisJob(jobId, options = {}) {
     }
     return claim;
   }
-  // A cancel that lands after the last segment completes must not trigger a
-  // (billable) final merge nor persist a result for a canceled job.
   const mergeGateJob = await store.getJob(jobId);
   const mergeCanceled = mergeGateJob?.status === 'canceled';
   if (!mergeCanceled && !existingResult && completedSegments.length === refreshedSegments.length && refreshedSegments.length > 0) {
     const mergeClaim = await claimFinalWriter();
     if (!mergeClaim) {
-      // Another worker is already performing the final write. Report hasMore so
-      // callers continue polling instead of treating segment completion as final.
     } else if (singlePass) {
       const onlySummary = completedSegments[0];
       const validation = validateFinalOpinion(onlySummary.summaryText || '');
@@ -1518,7 +1471,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           contextNotes,
           config,
           partialConfig: getPartialSynthesisConfig(options.config || {}),
-          options: { ...options, store, jobId },
+          options: { ...options, store, jobId, planId, mergeWorkerId: mergeClaim.workerId },
           warningsAccum,
           tokensAccum,
         });
@@ -1567,11 +1520,8 @@ export async function processSynthesisJob(jobId, options = {}) {
       }
     }
   } else if (!mergeCanceled && !existingResult && failedSegments.length && !stillPending.length) {
-    // All work finished with at least one failed segment. Preserve any completed
-    // segment work as a degraded result instead of stranding the job with no result.
     const mergeClaim = await claimFinalWriter();
     if (!mergeClaim) {
-      // Another worker owns finalization.
     } else {
       const failureWarnings = failedSegments.map(s => `segment_${s.segmentIndex + 1}_failed: ${s.errorType || 'unknown'}`);
       if (completedSegments.length) {
@@ -1585,15 +1535,12 @@ export async function processSynthesisJob(jobId, options = {}) {
         try {
           const merged = await runOrRecoverMerge({
             segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
-            // Partial-failure merge: count only the documents the completed
-            // segments actually cover, so the preamble doesn't claim coverage of
-            // documents that live in failed segments.
             totalAbstracts: totalAbstractsFromSegments(completedSegments),
             tract,
             contextNotes,
             config,
             partialConfig: getPartialSynthesisConfig(options.config || {}),
-            options: { ...options, store, jobId },
+            options: { ...options, store, jobId, planId, mergeWorkerId: mergeClaim.workerId },
             warningsAccum,
             tokensAccum,
           });
@@ -1769,8 +1716,6 @@ async function collectSplitDegradationWarnings(store, jobId) {
 
 function truncateForBudget(text, maxBytes) {
   if (utf8ByteLength(text) <= maxBytes) return text;
-  // Approximate by character slicing; UTF-8 chars can be multi-byte but title
-  // opinions are predominantly ASCII so this is conservative enough.
   let lo = 0;
   let hi = text.length;
   while (lo < hi) {
@@ -1815,13 +1760,11 @@ export function buildFollowupMessages({
         .join('\n\n---\n\n')
     : '';
 
-  // Drop oldest follow-up history first.
   for (let turns = config.followupHistoryTurns; turns >= 0; turns--) {
-    const subset = recentTurns.slice(-turns);
+    const subset = turns === 0 ? [] : recentTurns.slice(-turns);
     const messages = build(subset, safeOpinion, abstractBlock);
     if (fits(messages)) return { messages, truncationWarning };
   }
-  // Truncate opinion next.
   let keepBytes = Math.min(utf8ByteLength(safeOpinion), Math.max(0, config.requestEnvelopeSafeBytes - 100_000));
   while (keepBytes > 0) {
     const trimmed = truncateForBudget(safeOpinion, keepBytes);

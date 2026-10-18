@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
-"""
-Generate ONE long, fully connected synthetic chain of title as a single
-searchable PDF, plus an answer key with the expected final ownership.
-
-Every instrument covers the same tract and refers back to earlier recorded
-instruments by volume/page (or instrument number). The chain runs from the
-sovereign patent (1884) to a 2014 assignment of the producing lease. It
-includes probates, heirship affidavits, a floating NPRI, a dead lease with an
-ORRI that dies with it, a correction deed, a corporate merger, a trust
-distribution, a judgment lien and its release, and a pooled unit.
-
-Outputs (git-ignored):
-  scripts/sample-docs/synthetic_chain_of_title.pdf
-  scripts/sample-docs/synthetic_chain_of_title_key.md
-  scripts/sample-docs/synthetic_chain_of_title_key.json
-
-Requires: pip install reportlab
-Run:      python3 scripts/generate_chain_pdf.py
-"""
 import json
 import os
 from fractions import Fraction as F
 
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -34,7 +15,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "sample-docs")
 PDF_PATH = os.path.join(OUT, "synthetic_chain_of_title.pdf")
 
-# ── the tract ────────────────────────────────────────────────────────────────
 LEGAL = ("All of Section Fourteen (14), Block Fifty-Seven (57), Township Two (2), "
          "T&amp;P Ry. Co. Survey, Abstract No. 3318, Reeves County, Texas, "
          "containing 640 acres of land, more or less")
@@ -44,14 +24,12 @@ SEC13 = ("All of Section Thirteen (13), Block Fifty-Seven (57), Township Two (2)
          "T&amp;P Ry. Co. Survey, Abstract No. 3317, Reeves County, Texas, "
          "containing 640 acres of land, more or less")
 
-# ── styles ───────────────────────────────────────────────────────────────────
 S_TITLE = ParagraphStyle("t", fontName="Times-Bold", fontSize=14, leading=18,
                          alignment=TA_CENTER, spaceAfter=10)
 S_SUB = ParagraphStyle("s", fontName="Times-Roman", fontSize=10.5, leading=13,
                        alignment=TA_CENTER, spaceAfter=10)
 S_BODY = ParagraphStyle("b", fontName="Times-Roman", fontSize=11, leading=15,
                         alignment=TA_JUSTIFY, spaceAfter=8, firstLineIndent=28)
-S_FLUSH = ParagraphStyle("f", parent=S_BODY, firstLineIndent=0)
 S_SIG = ParagraphStyle("g", fontName="Times-Roman", fontSize=11, leading=14,
                        alignment=TA_LEFT, leftIndent=3.2 * inch, spaceAfter=10)
 S_ACK = ParagraphStyle("a", fontName="Times-Roman", fontSize=9.5, leading=12.5,
@@ -65,7 +43,6 @@ S_COVER = ParagraphStyle("c", fontName="Times-Roman", fontSize=12, leading=17,
                          alignment=TA_CENTER)
 
 
-# ── boilerplate helpers ──────────────────────────────────────────────────────
 def P(text):
     return Paragraph(text, S_BODY)
 
@@ -75,7 +52,6 @@ def sig(*lines):
 
 
 def ack_couple(husband, wife, date, notary, county="Reeves", privy=True):
-    """Pre-1967 Texas forms carry a separate privy examination of the wife."""
     out = [Paragraph(f"THE STATE OF TEXAS }}<br/>COUNTY OF {county.upper()} }}", S_ACKH),
            Paragraph(
                f"BEFORE ME, the undersigned authority, on this day personally appeared "
@@ -126,9 +102,6 @@ def rec(filed, recorded, ref, clerk, deputy=None):
         f"{clerk}, County Clerk, Reeves County, Texas{by}", S_REC)
 
 
-# ── instruments ──────────────────────────────────────────────────────────────
-# Each entry: ref (shown in the page header), title, subtitle, flowables.
-# The "key" dict feeds the run sheet in the answer key.
 INSTRUMENTS = []
 
 
@@ -136,7 +109,6 @@ def inst(ref, title, key, body, subtitle=None):
     INSTRUMENTS.append(dict(ref=ref, title=title, subtitle=subtitle, body=body, key=key))
 
 
-# 1 ─ Patent
 inst("Deed Records Vol. A, Page 12", "PATENT",
      dict(date="1884-06-20", rec="Vol. A, Pg. 12 (DR)", type="Patent",
           grantor="The State of Texas", grantee="Texas and Pacific Railway Company",
@@ -162,7 +134,6 @@ inst("Deed Records Vol. A, Page 12", "PATENT",
           "Deed Records of Reeves County, Texas, Volume A, Page 12", "J. W. TAYLOR")],
      subtitle="Patent No. 211, Vol. 37 &mdash; General Land Office")
 
-# 2 ─ T&P to Josiah Harlan
 inst("Deed Records Vol. 9, Page 233", "DEED",
      dict(date="1902-03-14", rec="Vol. 9, Pg. 233 (DR)", type="Deed",
           grantor="Texas and Pacific Railway Company", grantee="Josiah B. Harlan",
@@ -194,7 +165,6 @@ inst("Deed Records Vol. 9, Page 233", "DEED",
       rec("April 1, 1902, at 2:30 o'clock P.M.", "April 3, 1902",
           "Deed Records of Reeves County, Texas, Volume 9, Page 233", "J. W. TAYLOR")])
 
-# 3 ─ Deed of Trust
 inst("Deed of Trust Records Vol. 4, Page 41", "DEED OF TRUST",
      dict(date="1908-01-09", rec="Vol. 4, Pg. 41 (DTR)", type="Deed of Trust",
           grantor="Josiah B. Harlan and wife Martha E. Harlan",
@@ -227,7 +197,6 @@ inst("Deed of Trust Records Vol. 4, Page 41", "DEED OF TRUST",
       rec("January 10, 1908, at 11:00 o'clock A.M.", "January 13, 1908",
           "Deed of Trust Records of Reeves County, Texas, Volume 4, Page 41", "J. W. TAYLOR")])
 
-# 4 ─ Release of DT
 inst("Deed Records Vol. 22, Page 310", "RELEASE OF DEED OF TRUST LIEN",
      dict(date="1913-02-17", rec="Vol. 22, Pg. 310 (DR)", type="Release",
           grantor="First State Bank of Pecos", grantee="Josiah B. Harlan and wife",
@@ -251,7 +220,6 @@ inst("Deed Records Vol. 22, Page 310", "RELEASE OF DEED OF TRUST LIEN",
       rec("February 20, 1913, at 10:00 o'clock A.M.", "February 21, 1913",
           "Deed Records of Reeves County, Texas, Volume 22, Page 310", "S. C. VAUGHAN")])
 
-# 5 ─ Mineral Deed to Ashby
 inst("Deed Records Vol. 31, Page 77", "MINERAL DEED",
      dict(date="1917-08-22", rec="Vol. 31, Pg. 77 (DR)", type="Mineral Deed",
           grantor="Josiah B. Harlan and wife Martha E. Harlan", grantee="Clement R. Ashby",
@@ -288,7 +256,6 @@ inst("Deed Records Vol. 31, Page 77", "MINERAL DEED",
       rec("August 25, 1917, at 3:15 o'clock P.M.", "August 28, 1917",
           "Deed Records of Reeves County, Texas, Volume 31, Page 77", "S. C. VAUGHAN")])
 
-# 6 ─ Probate of Josiah Harlan
 inst("Deed Records Vol. 40, Page 502", "PROBATE OF WILL &mdash; ESTATE OF JOSIAH B. HARLAN",
      dict(date="1921-05-02", rec="Vol. 40, Pg. 502 (DR)", type="Probate (Cause No. 412)",
           grantor="Estate of Josiah B. Harlan, Deceased", grantee="Martha E. Harlan",
@@ -339,7 +306,6 @@ inst("Deed Records Vol. 40, Page 502", "PROBATE OF WILL &mdash; ESTATE OF JOSIAH
       rec("May 2, 1921, at 9:30 o'clock A.M.", "May 4, 1921",
           "Deed Records of Reeves County, Texas, Volume 40, Page 502", "S. C. VAUGHAN")])
 
-# 7 ─ Ashby to Pecos Royalty
 inst("Deed Records Vol. 47, Page 118", "MINERAL DEED",
      dict(date="1924-11-05", rec="Vol. 47, Pg. 118 (DR)", type="Mineral Deed",
           grantor="Clement R. Ashby and wife Florence Ashby", grantee="Pecos Royalty Company",
@@ -371,7 +337,6 @@ inst("Deed Records Vol. 47, Page 118", "MINERAL DEED",
       rec("November 12, 1924, at 1:00 o'clock P.M.", "November 14, 1924",
           "Deed Records of Reeves County, Texas, Volume 47, Page 118", "S. C. VAUGHAN")])
 
-# 8 ─ 1926 Lease
 inst("Oil and Gas Lease Records Vol. 3, Page 9", "OIL AND GAS LEASE",
      dict(date="1926-03-15", rec="Vol. 3, Pg. 9 (OGL)", type="Oil and Gas Lease",
           grantor="Martha E. Harlan; Clement R. Ashby; Pecos Royalty Company",
@@ -421,7 +386,6 @@ inst("Oil and Gas Lease Records Vol. 3, Page 9", "OIL AND GAS LEASE",
       rec("March 29, 1926, at 10:45 o'clock A.M.", "March 31, 1926",
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 3, Page 9", "S. C. VAUGHAN")])
 
-# 9 ─ Release of 1926 Lease
 inst("Oil and Gas Lease Records Vol. 12, Page 266", "RELEASE OF OIL AND GAS LEASE",
      dict(date="1937-01-20", rec="Vol. 12, Pg. 266 (OGL)", type="Release of Lease",
           grantor="Midland Oil Corporation", grantee="Lessors of record",
@@ -445,7 +409,6 @@ inst("Oil and Gas Lease Records Vol. 12, Page 266", "RELEASE OF OIL AND GAS LEAS
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 12, Page 266",
           "LOUISE B. FOWLER")])
 
-# 10 ─ Affidavit of Heirship, Martha
 inst("Deed Records Vol. 88, Page 41", "AFFIDAVIT OF FACTS CONCERNING IDENTITY OF HEIRS",
      dict(date="1938-06-30", rec="Vol. 88, Pg. 41 (DR)", type="Affidavit of Heirship",
           grantor="Estate of Martha E. Harlan, Deceased (intestate, d. 1935)",
@@ -481,7 +444,6 @@ inst("Deed Records Vol. 88, Page 41", "AFFIDAVIT OF FACTS CONCERNING IDENTITY OF
       rec("June 30, 1938, at 4:00 o'clock P.M.", "July 2, 1938",
           "Deed Records of Reeves County, Texas, Volume 88, Page 41", "LOUISE B. FOWLER")])
 
-# 11 ─ Eliza to Thomas, reserving floating NPRI
 inst("Deed Records Vol. 96, Page 377", "WARRANTY DEED WITH RESERVATION OF ROYALTY",
      dict(date="1940-04-08", rec="Vol. 96, Pg. 377 (DR)", type="Warranty Deed",
           grantor="Eliza Harlan Pruitt and husband Walter Pruitt",
@@ -525,7 +487,6 @@ inst("Deed Records Vol. 96, Page 377", "WARRANTY DEED WITH RESERVATION OF ROYALT
       rec("April 15, 1940, at 9:00 o'clock A.M.", "April 17, 1940",
           "Deed Records of Reeves County, Texas, Volume 96, Page 377", "LOUISE B. FOWLER")])
 
-# 12 ─ Ancillary probate, Ashby
 inst("Deed Records Vol. 141, Page 15", "ANCILLARY PROBATE &mdash; ESTATE OF CLEMENT R. ASHBY",
      dict(date="1948-10-11", rec="Vol. 141, Pg. 15 (DR)", type="Ancillary Probate",
           grantor="Estate of Clement R. Ashby, Deceased (d. 1947, Tarrant Co.)",
@@ -563,7 +524,6 @@ inst("Deed Records Vol. 141, Page 15", "ANCILLARY PROBATE &mdash; ESTATE OF CLEM
       rec("October 11, 1948, at 11:20 o'clock A.M.", "October 13, 1948",
           "Deed Records of Reeves County, Texas, Volume 141, Page 15", "LOUISE B. FOWLER")])
 
-# 13 ─ Merger
 inst("Deed Records Vol. 152, Page 300", "CERTIFICATE OF MERGER",
      dict(date="1950-06-01", rec="Vol. 152, Pg. 300 (DR)", type="Certificate of Merger",
           grantor="Pecos Royalty Company", grantee="Permian Basin Royalty Corporation",
@@ -589,7 +549,6 @@ inst("Deed Records Vol. 152, Page 300", "CERTIFICATE OF MERGER",
       rec("July 19, 1950, at 10:00 o'clock A.M.", "July 21, 1950",
           "Deed Records of Reeves County, Texas, Volume 152, Page 300", "LOUISE B. FOWLER")])
 
-# 14 ─ Probate of Thomas Harlan
 inst("Deed Records Vol. 168, Page 211", "PROBATE OF WILL &mdash; ESTATE OF THOMAS H. HARLAN",
      dict(date="1952-09-08", rec="Vol. 168, Pg. 211 (DR)", type="Probate (Cause No. 1187)",
           grantor="Estate of Thomas H. Harlan, Deceased",
@@ -630,7 +589,6 @@ inst("Deed Records Vol. 168, Page 211", "PROBATE OF WILL &mdash; ESTATE OF THOMA
       rec("September 8, 1952, at 8:45 o'clock A.M.", "September 10, 1952",
           "Deed Records of Reeves County, Texas, Volume 168, Page 211", "VERA G. MOORE")])
 
-# 15 ─ 1955 Lease
 inst("Oil and Gas Lease Records Vol. 61, Page 140", "OIL, GAS AND MINERAL LEASE",
      dict(date="1955-02-10", rec="Vol. 61, Pg. 140 (OGL)", type="Oil and Gas Lease",
           grantor="Robert J. Harlan; Mary Harlan Coker; Samuel E. Harlan; Lucille Ashby Brandt; "
@@ -686,7 +644,6 @@ inst("Oil and Gas Lease Records Vol. 61, Page 140", "OIL, GAS AND MINERAL LEASE"
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 61, Page 140",
           "VERA G. MOORE")])
 
-# 16 ─ Assignment Hondo to Trans-Pecos with ORRI
 inst("Oil and Gas Lease Records Vol. 66, Page 402",
      "ASSIGNMENT OF OIL AND GAS LEASE WITH RESERVATION OF OVERRIDING ROYALTY",
      dict(date="1956-05-21", rec="Vol. 66, Pg. 402 (OGL)", type="Assignment of Lease",
@@ -718,7 +675,6 @@ inst("Oil and Gas Lease Records Vol. 66, Page 402",
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 66, Page 402",
           "VERA G. MOORE")])
 
-# 17 ─ Affidavit of Production 1958
 inst("Oil and Gas Lease Records Vol. 79, Page 18", "AFFIDAVIT OF PRODUCTION",
      dict(date="1958-03-03", rec="Vol. 79, Pg. 18 (OGL)", type="Affidavit of Production",
           grantor="Trans-Pecos Exploration Company", grantee="Public notice",
@@ -743,7 +699,6 @@ inst("Oil and Gas Lease Records Vol. 79, Page 18", "AFFIDAVIT OF PRODUCTION",
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 79, Page 18",
           "VERA G. MOORE")])
 
-# 18 ─ Heirship, Eliza
 inst("Deed Records Vol. 212, Page 88", "AFFIDAVIT OF HEIRSHIP",
      dict(date="1960-11-14", rec="Vol. 212, Pg. 88 (DR)", type="Affidavit of Heirship",
           grantor="Estate of Eliza Harlan Pruitt, Deceased (intestate, d. 1959)",
@@ -772,7 +727,6 @@ inst("Deed Records Vol. 212, Page 88", "AFFIDAVIT OF HEIRSHIP",
       rec("November 21, 1960, at 10:00 o'clock A.M.", "November 23, 1960",
           "Deed Records of Reeves County, Texas, Volume 212, Page 88", "VERA G. MOORE")])
 
-# 19 ─ Samuel to Crestline, wrong section
 inst("Deed Records Vol. 249, Page 501", "MINERAL DEED",
      dict(date="1965-07-12", rec="Vol. 249, Pg. 501 (DR)", type="Mineral Deed",
           grantor="Samuel E. Harlan", grantee="Crestline Royalty Partners",
@@ -804,7 +758,6 @@ inst("Deed Records Vol. 249, Page 501", "MINERAL DEED",
       rec("July 19, 1965, at 11:00 o'clock A.M.", "July 21, 1965",
           "Deed Records of Reeves County, Texas, Volume 249, Page 501", "VERA G. MOORE")])
 
-# 20 ─ Correction deed
 inst("Deed Records Vol. 266, Page 12", "CORRECTION MINERAL DEED",
      dict(date="1967-03-01", rec="Vol. 266, Pg. 12 (DR)", type="Correction Mineral Deed",
           grantor="Samuel E. Harlan", grantee="Crestline Royalty Partners",
@@ -837,7 +790,6 @@ inst("Deed Records Vol. 266, Page 12", "CORRECTION MINERAL DEED",
       rec("March 9, 1967, at 2:00 o'clock P.M.", "March 13, 1967",
           "Deed Records of Reeves County, Texas, Volume 266, Page 12", "VERA G. MOORE")])
 
-# 21 ─ Heirship, Robert (intestate, mother survives)
 inst("Deed Records Vol. 301, Page 255", "AFFIDAVIT OF HEIRSHIP",
      dict(date="1973-04-16", rec="Vol. 301, Pg. 255 (DR)", type="Affidavit of Heirship",
           grantor="Estate of Robert J. Harlan, Deceased (intestate, d. 1971)",
@@ -869,7 +821,6 @@ inst("Deed Records Vol. 301, Page 255", "AFFIDAVIT OF HEIRSHIP",
       rec("April 18, 1973, at 9:00 o'clock A.M.", "April 20, 1973",
           "Deed Records of Reeves County, Texas, Volume 301, Page 255", "BILLIE J. GOLLADAY")])
 
-# 22 ─ Probate, Clara
 inst("Deed Records Vol. 322, Page 640", "PROBATE OF WILL &mdash; ESTATE OF CLARA HARLAN",
      dict(date="1976-02-23", rec="Vol. 322, Pg. 640 (DR)", type="Probate (Cause No. 2894)",
           grantor="Estate of Clara Harlan, Deceased (d. 1975)",
@@ -899,7 +850,6 @@ inst("Deed Records Vol. 322, Page 640", "PROBATE OF WILL &mdash; ESTATE OF CLARA
       rec("February 23, 1976, at 10:15 o'clock A.M.", "February 25, 1976",
           "Deed Records of Reeves County, Texas, Volume 322, Page 640", "BILLIE J. GOLLADAY")])
 
-# 23 ─ Release of 1955 lease
 inst("Oil and Gas Lease Records Vol. 288, Page 33", "RELEASE OF OIL, GAS AND MINERAL LEASE",
      dict(date="1980-01-15", rec="Vol. 288, Pg. 33 (OGL)", type="Release of Lease",
           grantor="Trans-Pecos Exploration Company", grantee="Lessors of record",
@@ -924,7 +874,6 @@ inst("Oil and Gas Lease Records Vol. 288, Page 33", "RELEASE OF OIL, GAS AND MIN
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 288, Page 33",
           "BILLIE J. GOLLADAY")])
 
-# 24 ─ 1981 Lease (the producing lease)
 inst("Oil and Gas Lease Records Vol. 301, Page 515", "PAID UP OIL AND GAS LEASE",
      dict(date="1981-06-01", rec="Vol. 301, Pg. 515 (OGL)", type="Oil and Gas Lease",
           grantor="Mary Harlan Coker; Crestline Royalty Partners; Samuel E. Harlan; Lucille "
@@ -995,7 +944,6 @@ inst("Oil and Gas Lease Records Vol. 301, Page 515", "PAID UP OIL AND GAS LEASE"
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 301, Page 515",
           "BILLIE J. GOLLADAY")])
 
-# 25 ─ Assignment Coyanosa to Big Spring with 2% ORRI
 inst("Oil and Gas Lease Records Vol. 327, Page 90", "ASSIGNMENT OF OIL AND GAS LEASE",
      dict(date="1983-01-10", rec="Vol. 327, Pg. 90 (OGL)", type="Assignment of Lease",
           grantor="Coyanosa Energy, Inc.", grantee="Big Spring Operating Company",
@@ -1025,7 +973,6 @@ inst("Oil and Gas Lease Records Vol. 327, Page 90", "ASSIGNMENT OF OIL AND GAS L
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 327, Page 90",
           "BILLIE J. GOLLADAY")])
 
-# 26 ─ Pipeline easement
 inst("Deed Records Vol. 371, Page 442", "RIGHT-OF-WAY AND EASEMENT",
      dict(date="1983-08-29", rec="Vol. 371, Pg. 442 (DR)", type="Pipeline Easement",
           grantor="Mary Harlan Coker and husband James Coker (surface owner)",
@@ -1055,7 +1002,6 @@ inst("Deed Records Vol. 371, Page 442", "RIGHT-OF-WAY AND EASEMENT",
       rec("September 6, 1983, at 10:30 o'clock A.M.", "September 8, 1983",
           "Deed Records of Reeves County, Texas, Volume 371, Page 442", "BILLIE J. GOLLADAY")])
 
-# 27 ─ Affidavit of Production 1984
 inst("Oil and Gas Lease Records Vol. 342, Page 61", "AFFIDAVIT OF PRODUCTION",
      dict(date="1984-04-02", rec="Vol. 342, Pg. 61 (OGL)", type="Affidavit of Production",
           grantor="Big Spring Operating Company", grantee="Public notice",
@@ -1080,7 +1026,6 @@ inst("Oil and Gas Lease Records Vol. 342, Page 61", "AFFIDAVIT OF PRODUCTION",
           "Oil and Gas Lease Records of Reeves County, Texas, Volume 342, Page 61",
           "BILLIE J. GOLLADAY")])
 
-# 28 ─ Lucille to her trust
 inst("Official Public Records Vol. 512, Page 77", "MINERAL DEED",
      dict(date="1988-09-14", rec="OPR Vol. 512, Pg. 77", type="Mineral Deed",
           grantor="Lucille Ashby Brandt",
@@ -1110,7 +1055,6 @@ inst("Official Public Records Vol. 512, Page 77", "MINERAL DEED",
           "Official Public Records of Reeves County, Texas, Volume 512, Page 77",
           "DIANNE O. FLOREZ", "M. ORTEGA")])
 
-# 29 ─ Trustee's distribution deed
 inst("Official Public Records Vol. 604, Page 215", "TRUSTEE'S DISTRIBUTION MINERAL DEED",
      dict(date="1995-05-08", rec="OPR Vol. 604, Pg. 215", type="Trustee's Distribution Deed",
           grantor="Henry A. Brandt, Trustee of the Lucille Ashby Brandt Living Trust",
@@ -1144,7 +1088,6 @@ inst("Official Public Records Vol. 604, Page 215", "TRUSTEE'S DISTRIBUTION MINER
           "Official Public Records of Reeves County, Texas, Volume 604, Page 215",
           "DIANNE O. FLOREZ", "M. ORTEGA")])
 
-# 30 ─ Surface deed Mary to Bar H Ranch
 inst("Official Public Records Vol. 655, Page 380", "WARRANTY DEED (SURFACE ONLY)",
      dict(date="1998-10-19", rec="OPR Vol. 655, Pg. 380", type="Warranty Deed",
           grantor="Mary Harlan Coker, a widow", grantee="Bar H Ranch, LLC",
@@ -1176,7 +1119,6 @@ inst("Official Public Records Vol. 655, Page 380", "WARRANTY DEED (SURFACE ONLY)
           "Official Public Records of Reeves County, Texas, Volume 655, Page 380",
           "DIANNE O. FLOREZ", "M. ORTEGA")])
 
-# 31 ─ PBRC to Sandhills
 inst("Official Public Records Vol. 702, Page 158", "MINERAL AND ROYALTY DEED",
      dict(date="2001-03-30", rec="OPR Vol. 702, Pg. 158", type="Mineral Deed",
           grantor="Permian Basin Royalty Corporation", grantee="Sandhills Mineral Fund I, LP",
@@ -1206,7 +1148,6 @@ inst("Official Public Records Vol. 702, Page 158", "MINERAL AND ROYALTY DEED",
           "Official Public Records of Reeves County, Texas, Volume 702, Page 158",
           "DIANNE O. FLOREZ", "L. SALCIDO")])
 
-# 32 ─ Heirship, Samuel E. Harlan
 inst("Official Public Records Vol. 709, Page 600", "AFFIDAVIT OF HEIRSHIP",
      dict(date="2001-06-11", rec="OPR Vol. 709, Pg. 600", type="Affidavit of Heirship",
           grantor="Estate of Samuel E. Harlan, Deceased (intestate, d. 1999)",
@@ -1238,7 +1179,6 @@ inst("Official Public Records Vol. 709, Page 600", "AFFIDAVIT OF HEIRSHIP",
           "Official Public Records of Reeves County, Texas, Volume 709, Page 600",
           "DIANNE O. FLOREZ", "L. SALCIDO")])
 
-# 33 ─ Probate, Mary Harlan Coker
 inst("Official Public Records Vol. 741, Page 302",
      "PROBATE OF WILL &mdash; ESTATE OF MARY HARLAN COKER",
      dict(date="2004-01-26", rec="OPR Vol. 741, Pg. 302", type="Probate (Cause No. 6620)",
@@ -1276,7 +1216,6 @@ inst("Official Public Records Vol. 741, Page 302",
           "Official Public Records of Reeves County, Texas, Volume 741, Page 302",
           "DIANNE O. FLOREZ", "L. SALCIDO")])
 
-# 34 ─ Muniment, Daniel Pruitt
 inst("Official Public Records Vol. 768, Page 455",
      "WILL PROBATED AS MUNIMENT OF TITLE &mdash; ESTATE OF DANIEL PRUITT",
      dict(date="2006-03-20", rec="OPR Vol. 768, Pg. 455", type="Muniment of Title",
@@ -1310,7 +1249,6 @@ inst("Official Public Records Vol. 768, Page 455",
           "Official Public Records of Reeves County, Texas, Volume 768, Page 455",
           "DIANNE O. FLOREZ", "L. SALCIDO")])
 
-# 35 ─ Abstract of Judgment
 inst("Instrument No. 2009-001922", "ABSTRACT OF JUDGMENT",
      dict(date="2009-04-14", rec="Inst. No. 2009-001922 (OPR)", type="Abstract of Judgment",
           grantor="West Texas Federal Credit Union (judgment creditor)",
@@ -1340,7 +1278,6 @@ inst("Instrument No. 2009-001922", "ABSTRACT OF JUDGMENT",
           "Official Public Records of Reeves County, Texas, Instrument No. 2009-001922",
           "DIANNE O. FLOREZ", "L. SALCIDO")])
 
-# 36 ─ Release of Judgment Lien
 inst("Instrument No. 2011-003310", "RELEASE OF JUDGMENT LIEN",
      dict(date="2011-06-30", rec="Inst. No. 2011-003310 (OPR)", type="Release of Judgment",
           grantor="West Texas Federal Credit Union", grantee="Samuel E. Harlan Jr.",
@@ -1364,7 +1301,6 @@ inst("Instrument No. 2011-003310", "RELEASE OF JUDGMENT LIEN",
           "Official Public Records of Reeves County, Texas, Instrument No. 2011-003310",
           "DIANNE O. FLOREZ", "R. HERNANDEZ")])
 
-# 37 ─ Stipulation of Interest re NPRI
 inst("Instrument No. 2012-000845", "STIPULATION OF INTEREST",
      dict(date="2012-01-23", rec="Inst. No. 2012-000845 (OPR)", type="Stipulation of Interest",
           grantor="Harlan-chain mineral owners and Pruitt NPRI owners",
@@ -1412,7 +1348,6 @@ inst("Instrument No. 2012-000845", "STIPULATION OF INTEREST",
           "Official Public Records of Reeves County, Texas, Instrument No. 2012-000845",
           "DIANNE O. FLOREZ", "R. HERNANDEZ")])
 
-# 38 ─ Designation of Pooled Unit
 inst("Instrument No. 2012-004417", "DESIGNATION OF POOLED UNIT &mdash; HARLAN-ASHBY 14-13 UNIT",
      dict(date="2012-08-06", rec="Inst. No. 2012-004417 (OPR)", type="Designation of Pooled Unit",
           grantor="Big Spring Operating Company", grantee="Public notice",
@@ -1448,7 +1383,6 @@ inst("Instrument No. 2012-004417", "DESIGNATION OF POOLED UNIT &mdash; HARLAN-AS
           "Official Public Records of Reeves County, Texas, Instrument No. 2012-004417",
           "DIANNE O. FLOREZ", "R. HERNANDEZ")])
 
-# 39 ─ NPRI Ratification of Unit
 inst("Instrument No. 2012-004980", "RATIFICATION OF POOLED UNIT BY ROYALTY OWNERS",
      dict(date="2012-09-04", rec="Inst. No. 2012-004980 (OPR)", type="Ratification of Unit",
           grantor="Ruth Pruitt Odell and Linda Pruitt (NPRI owners)",
@@ -1479,7 +1413,6 @@ inst("Instrument No. 2012-004980", "RATIFICATION OF POOLED UNIT BY ROYALTY OWNER
           "Official Public Records of Reeves County, Texas, Instrument No. 2012-004980",
           "DIANNE O. FLOREZ", "R. HERNANDEZ")])
 
-# 40 ─ Affidavit of Production, horizontal well
 inst("Instrument No. 2013-002106", "AFFIDAVIT OF COMPLETION AND PRODUCTION",
      dict(date="2013-04-22", rec="Inst. No. 2013-002106 (OPR)", type="Affidavit of Production",
           grantor="Big Spring Operating Company", grantee="Public notice",
@@ -1511,7 +1444,6 @@ inst("Instrument No. 2013-002106", "AFFIDAVIT OF COMPLETION AND PRODUCTION",
           "Official Public Records of Reeves County, Texas, Instrument No. 2013-002106",
           "DIANNE O. FLOREZ", "R. HERNANDEZ")])
 
-# 41 ─ Assignment Big Spring to Permian Crest
 inst("Instrument No. 2014-005530", "ASSIGNMENT, CONVEYANCE AND BILL OF SALE",
      dict(date="2014-10-01", rec="Inst. No. 2014-005530 (OPR)", type="Assignment of Lease",
           grantor="Big Spring Operating Company", grantee="Permian Crest Operating, LLC",
@@ -1553,7 +1485,6 @@ inst("Instrument No. 2014-005530", "ASSIGNMENT, CONVEYANCE AND BILL OF SALE",
           "DIANNE O. FLOREZ", "R. HERNANDEZ")])
 
 
-# ── expected ownership (computed, then checked) ──────────────────────────────
 def compute_key():
     royalty = F(3, 16)
     orri = F(2, 100)
@@ -1569,9 +1500,9 @@ def compute_key():
     harlan_chain = {"James Coker Jr.", "Anne Coker Whitfield", "Crestline Royalty Partners",
                     "Samuel E. Harlan Jr."}
     assert sum(mi.values()) == 1
-    npri_total = F(1, 2) * F(1, 4) * royalty                  # 3/128
-    harlan_mi = sum(mi[n] for n in harlan_chain)                # 1/2
-    burden = npri_total / (harlan_mi * royalty)                 # share of Harlan royalty lost
+    npri_total = F(1, 2) * F(1, 4) * royalty
+    harlan_mi = sum(mi[n] for n in harlan_chain)
+    burden = npri_total / (harlan_mi * royalty)
     rows = []
     for name, m in mi.items():
         r = m * royalty * ((1 - burden) if name in harlan_chain else 1)
@@ -1613,7 +1544,6 @@ TRAPS = [
 ]
 
 
-# ── rendering ────────────────────────────────────────────────────────────────
 class SetRef(Flowable):
     """Zero-size marker that tells the page footer which instrument it is on."""
 
@@ -1672,7 +1602,6 @@ def build_pdf():
         if ins["subtitle"]:
             story.append(Paragraph(ins["subtitle"], S_SUB))
         body = ins["body"]
-        # keep the closing recording certificate with the line before it
         story.extend(body[:-2])
         story.append(KeepTogether(body[-2:]))
     doc.build(story)

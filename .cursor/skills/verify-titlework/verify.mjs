@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Verification harness for the Titlework Analyzer web UI.
-// Starts an isolated server, drives it through headless Chrome, and tears down
-// only the processes this run recorded.
 
 import { spawn, execFileSync } from 'node:child_process';
 import { closeSync, openSync, readFileSync, readlinkSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -24,6 +21,7 @@ const STRIP_ENV = [
   'APP_PASSWORD',
   'GCS_BUCKET',
   'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
   'ANTHROPIC_API_KEY',
   'OPENROUTER_API_KEY',
   'MODEL_PROVIDER',
@@ -167,7 +165,6 @@ function chromeBinary() {
       const found = execFileSync('bash', ['-lc', `command -v ${JSON.stringify(candidate)}`], { encoding: 'utf8' }).trim();
       if (found) return found;
     } catch {
-      // try the next candidate
     }
   }
   fail('Chrome is not on PATH. Set CHROME_PATH.');
@@ -294,7 +291,6 @@ async function doctor(flags) {
     problems.push(`healthz request failed: ${err?.message || err}`);
   }
   if (state.passwordConfigured) {
-    // An unauthenticated ping counts as a failed password attempt (limit 5).
     pingStatus = null;
   } else {
     try {
@@ -695,7 +691,7 @@ async function httpCommand(flags, sub, positionals) {
   });
   const text = await response.text();
   let body = text;
-  try { body = JSON.parse(text); } catch { /* keep text */ }
+  try { body = JSON.parse(text); } catch {}
   const report = { method, path, status: response.status, body };
   if (flags.out && flags.out !== true) {
     const pathOut = resolve(String(flags.out));

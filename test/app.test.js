@@ -259,7 +259,6 @@ test('browser synthesis groups split server abstracts by source document', () =>
 });
 
 
-// === Phase 6 ===
 
 test('Phase 6: HTML defines view-home, view-job, view-history shells', () => {
   assert(indexHtml.includes('id="view-home"'), 'Missing #view-home wrapper');
@@ -422,8 +421,6 @@ test('Phase 6: synthesis polling waits for merge and reuses batch result', () =>
 });
 
 test('Phase 6: job actions wire to existing API endpoints', () => {
-  // Path components passed to runJobAction(job, '/<endpoint>') — URL is composed
-  // inside runJobAction as `/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`.
   assert(script.includes('/api/jobs/${encodeURIComponent(job.id)}${endpointPath}'),
     'runJobAction must compose /api/jobs/:id<endpointPath>');
   assert(script.includes("runJobAction(job, '/cancel')"),

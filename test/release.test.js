@@ -67,6 +67,19 @@ function test(name, fn) {
 const packageVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
 const releaseTag = `v${packageVersion}`;
 
+test('verification launch strips inherited provider credential aliases by default', () => {
+  const harness = readFileSync(join(root, '.cursor/skills/verify-titlework/verify.mjs'), 'utf8');
+  const declaration = harness.match(/const STRIP_ENV = (\[[\s\S]*?\]);/);
+  assert(declaration, 'Expected an explicit verification environment boundary');
+  const keys = JSON.parse(declaration[1].replace(/'/g, '"').replace(/,\s*\]/, ']'));
+  const credentials = ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY'];
+  const inherited = Object.fromEntries([...credentials, 'PATH'].map(key => [key, `synthetic-${key}`]));
+  for (const key of keys) delete inherited[key];
+  for (const key of credentials) assert(!(key in inherited), `Verification launch retained ${key}`);
+  assert(inherited.PATH === 'synthetic-PATH', 'Expected unrelated environment values to survive');
+  assert(harness.includes("const isolated = !flags['keep-env'];") && harness.includes('for (const key of STRIP_ENV) delete env[key];'), 'Expected default launch to apply the boundary and keep-env to opt out');
+});
+
 test('runtime info reports release metadata from the environment with package fallback', () => withEnv({
   RELEASE_VERSION: 'v2.3.1',
   GIT_SHA: 'abc1234',

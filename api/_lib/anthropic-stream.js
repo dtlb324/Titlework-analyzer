@@ -1,4 +1,3 @@
-// Parse Anthropic Messages API server-sent events from a streaming response body.
 
 const VALID_STOP_REASONS = new Set([
   'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn',
@@ -118,7 +117,6 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
     };
   } catch (error) {
     if (readerState === 'reading') {
-      // Cancellation is best effort: a rejected or stalled cleanup must not hide the original failure.
       try { Promise.resolve(reader.cancel?.(error)).catch(() => {}); } catch {}
     }
     throw error;

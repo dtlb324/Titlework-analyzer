@@ -36,7 +36,7 @@ Ready when launch prints `"ok": true` and `"baseUrl": "http://127.0.0.1:4173"`. 
 BASE_URL="http://127.0.0.1:4173"
 ```
 
-Launch strips `NODE_ENV`, `K_SERVICE`, database URLs, `APP_PASSWORD`, `GCS_BUCKET`, and model keys from the child process. The printed `"isolated": true` means this instance will refuse job creation with HTTP 503 and will not call a model. That is the safe default.
+Launch removes the variables listed in `STRIP_ENV` from the child environment, including `NODE_ENV`, `K_SERVICE`, database URLs, inherited `APP_PASSWORD`, `GCS_BUCKET`, and all provider key names accepted by the API (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, and `OPENROUTER_API_KEY`). The printed `"isolated": true` means this stripping ran. It is not a network sandbox. Launch does not load `.env.local`; `--password` can set a throwaway password after stripping. Without database URLs, job creation returns HTTP 503. Without provider keys, provider requests cannot authenticate. Verify those refusals before driving a workflow. `--keep-env` disables stripping.
 
 If port 4173 is taken, stop. Do not attach to the existing process. Clean up if this launch created state, pick a free port other than 8080, and start a new `--run-dir`. Two instances can run together only with different ports and different run directories. They must not share a Chrome profile or a database.
 

@@ -1,4 +1,3 @@
-// Server-side multi-chunk abstraction batches (mirrors browser fallback batching).
 
 import {
   ABSTRACTION_PROMPT,
@@ -34,10 +33,6 @@ export function isAbstractionBatchingEnabled() {
   return process.env.ABSTRACTION_BATCH_ENABLED !== 'false';
 }
 
-function isCsvChunk(chunk) {
-  return chunk.mediaType === 'text/csv' || /\.csv$/i.test(chunk.originalFilename || '');
-}
-
 function isPdfChunk(chunk) {
   return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
 }
@@ -56,9 +51,6 @@ export function chunkRequiresSoloBatch(chunk, estimatedPayload = null) {
   return false;
 }
 
-/**
- * Group ready chunks into multi-doc batches and solo queues.
- */
 export function planAbstractionWork(chunks) {
   const singles = [];
   const batches = [];
@@ -142,9 +134,6 @@ async function completeReusedAbstract(store, chunk, workerId, reuse, sequenceInd
   return { status: 'completed', chunkId: chunk.id, abstract: record, reused: true };
 }
 
-/**
- * Abstract multiple chunks in one Anthropic request.
- */
 export async function processMultiChunkAbstraction(chunks, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process abstraction batches.');

@@ -1,19 +1,4 @@
 #!/usr/bin/env node
-/**
- * Compare final title opinions: Claude Sonnet 5.5 vs Gemini 2.5 Pro on the same abstracts.
- *
- * Does NOT write to job_results — outputs markdown files for blind review.
- *
- * Usage:
- *   DATABASE_URL=... GEMINI_API_KEY=... ANTHROPIC_API_KEY=... \
- *     node scripts/compare-final-opinion.mjs --job-id job_abc123
- *
- * Optional:
- *   --out-dir eval/compare/my-run
- *   --gemini-model gemini-2.5-pro
- *   --sonnet-model claude-sonnet-5-5
- *   --gemini-thinking-level high   (or env GEMINI_THINKING_LEVEL)
- */
 
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -125,10 +110,6 @@ function resolveMode(ctx) {
 async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
   const config = getSynthesisConfig({ model });
   const started = Date.now();
-  // Gemini 3.x uses thinkingLevel and defaults to 'medium', which eats output tokens.
-  // Default to 'minimal' so output budget is preserved.
-  // Gemini 2.5.x uses thinkingBudget and refuses budget=0 (Pro requires thinking).
-  // Default to -1 (dynamic) so the model picks its own budget.
   let thinkingBudget;
   const isGemini = /^gemini-/i.test(String(model || ''));
   if (isGemini3SeriesModel(model) && !thinkingLevel) {

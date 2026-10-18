@@ -158,6 +158,16 @@ export function requireBoundUploadSize(sizeBytes, maxUploadBytes) {
   return size;
 }
 
+export function validateChunkFinalizationStorage(chunk) {
+  if (!chunk || chunk.uploadStatus !== 'uploaded') return { kind: 'not_uploaded', valid: true };
+  if (chunk.splitParentChunkId) return { kind: 'split_child', valid: true };
+  if (chunk.abstractionStatus === 'completed') return { kind: 'completed_abstract', valid: true };
+  const objectRef = { jobId: chunk.jobId, chunkId: chunk.id, objectKey: chunk.blobKey, objectUrl: chunk.blobUrl };
+  const valid = Boolean(chunk.blobUrl && typeof chunk.blobKey === 'string'
+    && chunk.blobKey.startsWith(`jobs/${chunk.jobId}/chunks/${chunk.id}/`));
+  return { kind: 'uploaded_object', valid, objectRef };
+}
+
 export function validateObjectRef({ jobId, chunkId, objectKey, objectUrl }, config = getStorageConfig()) {
   const expectedPrefix = `jobs/${jobId}/chunks/${chunkId}/`;
   if (typeof objectKey !== 'string' || !objectKey.startsWith(expectedPrefix) || objectKey.includes('..')) {

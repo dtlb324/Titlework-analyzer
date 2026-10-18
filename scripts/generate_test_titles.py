@@ -1,49 +1,23 @@
 #!/usr/bin/env python3
-"""
-Generate a 50-instrument chain of title as scanned PNG images for OCR/abstraction testing.
-Outputs scripts/sample-docs/*.png + scripts/sample-docs/ground_truth.json
-
-Rendering styles (by era):
-  handwritten  1895–1910  Bradley Hand, sepia, foxing, heavy noise
-  aged_typed   1910–1930  Courier New, cream, foxing, moderate noise
-  medium_typed 1930–1950  Courier New, light cream, standard scan look
-  clean_typed  1950–1962  Courier New, white, light noise
-
-~11 docs have deliberate degradations so models must say ILLEGIBLE. The ground
-truth marks those fields as None — the accuracy checker scores ILLEGIBLE as
-correct and a filled value as fabrication.
-
-Run:  python3 scripts/generate_test_titles.py
-"""
-import os, json, random, math
+import os, json, random
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
 OUT    = os.path.join(HERE, "sample-docs")
-W, H   = 1240, 1754          # A4 @ 150 DPI
+W, H   = 1240, 1754
 ML, MR = 108, 108
 
-# ── fonts ────────────────────────────────────────────────────────────────────
 F_HAND  = "/System/Library/Fonts/Supplemental/Bradley Hand Bold.ttf"
 F_CHANC = "/System/Library/Fonts/Supplemental/Apple Chancery.ttf"
-F_TNR   = "/System/Library/Fonts/Supplemental/Times New Roman.ttf"
-F_TNRB  = "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf"
 F_COU   = "/System/Library/Fonts/Supplemental/Courier New.ttf"
 F_COUB  = "/System/Library/Fonts/Supplemental/Courier New Bold.ttf"
-F_GEO   = "/System/Library/Fonts/Supplemental/Georgia.ttf"
 
-# ── property description ─────────────────────────────────────────────────────
 LEGAL = ("the West Half (W/2) of Section 6, Block 45, T&P Railway Company "
          "Survey, Abstract No. 1247, Reeves County, Texas, containing 320 "
          "acres, more or less")
 LEGAL_S = "the W/2 of Section 6, Block 45, T&P Ry. Co. Survey, A-1247, Reeves County, Texas (320 ac.)"
 
-# ── 50-instrument chain of title ─────────────────────────────────────────────
-# gt fields use the value a correct model should output.
-# gt value of None means the field is degraded → expect ILLEGIBLE.
-# Checked fields: GRANTOR  GRANTEE  DATE_EXECUTED  DATE_RECORDED  RECORDING_REF
 DOCS = [
-    # ══ 1895–1910: handwritten era ══════════════════════════════════════════
     dict(
         file="01_patent", style="handwritten",
         title="THE STATE OF TEXAS\nLAND PATENT",
@@ -81,7 +55,7 @@ DOCS = [
         stamp=dict(rd="March 12, 1901", vol="3", page="182", clerk="H. B. Odom"),
         deg=["EZRA D. CLAYTON"], deg_stamp=False,
         gt=dict(GRANTOR="Absalom W. Tidmore and wife Sarah J. Tidmore",
-                GRANTEE=None,  # degraded
+                GRANTEE=None,
                 DATE_EXECUTED="March 5, 1901", DATE_RECORDED="March 12, 1901",
                 RECORDING_REF="Vol. 3, Page 182"),
     ),
@@ -127,7 +101,6 @@ DOCS = [
                 DATE_EXECUTED="October 2, 1906", DATE_RECORDED="October 9, 1906",
                 RECORDING_REF="Vol. 7, Page 314"),
     ),
-    # ══ 1908–1922: aged typewriter era ══════════════════════════════════════
     dict(
         file="05_wd_clayton_sons", style="aged_typed",
         title="WARRANTY DEED",
@@ -217,7 +190,7 @@ DOCS = [
         deg=["1st day of May"], deg_stamp=False,
         gt=dict(GRANTOR="Roy N. Clayton (Lessor)",
                 GRANTEE="Continental Petroleum Company (Lessee)",
-                DATE_EXECUTED=None,  # degraded
+                DATE_EXECUTED=None,
                 DATE_RECORDED="May 8, 1915",
                 RECORDING_REF="Vol. 15, Page 90"),
     ),
@@ -335,7 +308,6 @@ DOCS = [
                 DATE_EXECUTED="August 20, 1920", DATE_RECORDED="August 26, 1920",
                 RECORDING_REF="Vol. 18, Page 440"),
     ),
-    # ══ 1923–1932: medium typed era ══════════════════════════════════════════
     dict(
         file="14_wd_moseley_whitfield", style="medium_typed",
         title="WARRANTY DEED",
@@ -400,7 +372,7 @@ DOCS = [
         deg=["1st day of July, A.D. 1924"], deg_stamp=False,
         gt=dict(GRANTOR="James R. Whitfield and Southwestern Mineral Trust (Lessors)",
                 GRANTEE="Texas Crude Inc. (Lessee)",
-                DATE_EXECUTED=None,  # degraded
+                DATE_EXECUTED=None,
                 DATE_RECORDED="July 7, 1924",
                 RECORDING_REF="Vol. 21, Page 310"),
     ),
@@ -665,8 +637,8 @@ DOCS = [
         gt=dict(GRANTOR="Reeves County, Texas (Tax Collector)",
                 GRANTEE="not applicable (tax lien notice)",
                 DATE_EXECUTED="January 5, 1934",
-                DATE_RECORDED=None,  # degraded stamp
-                RECORDING_REF=None),  # degraded stamp
+                DATE_RECORDED=None,
+                RECORDING_REF=None),
     ),
     dict(
         file="29_release_tax_lien", style="medium_typed",
@@ -779,7 +751,7 @@ DOCS = [
                    instr="1940-0180", clerk="J. A. Kilpatrick"),
         deg=["SUTTON LAND COMPANY"], deg_stamp=False,
         gt=dict(GRANTOR="Raymond G. Bauer and wife Dorothy L. Bauer",
-                GRANTEE=None,  # degraded
+                GRANTEE=None,
                 DATE_EXECUTED="January 10, 1940", DATE_RECORDED="January 15, 1940",
                 RECORDING_REF="Vol. 42, Page 344"),
     ),
@@ -855,7 +827,6 @@ DOCS = [
                 DATE_EXECUTED="February 1, 1943", DATE_RECORDED="February 4, 1943",
                 RECORDING_REF="Vol. 46, Page 10"),
     ),
-    # ══ 1943–1962: clean typed era ══════════════════════════════════════════
     dict(
         file="37_release_ogl_gulf_production", style="clean_typed",
         title="RELEASE OF OIL AND GAS LEASE",
@@ -1090,7 +1061,7 @@ DOCS = [
         deg=["15th day of September, A.D. 1954"], deg_stamp=False,
         gt=dict(GRANTOR="Harlan T. Webb and Panhandle Eastern Pipe Line Company",
                 GRANTEE="not applicable (pooling agreement)",
-                DATE_EXECUTED=None,  # degraded
+                DATE_EXECUTED=None,
                 DATE_RECORDED="September 20, 1954",
                 RECORDING_REF="Vol. 68, Page 300"),
     ),
@@ -1137,8 +1108,8 @@ DOCS = [
         gt=dict(GRANTOR="Midland National Savings Association",
                 GRANTEE="Harlan T. Webb (releases lien)",
                 DATE_EXECUTED="February 20, 1958",
-                DATE_RECORDED=None,  # degraded stamp
-                RECORDING_REF=None),  # degraded stamp
+                DATE_RECORDED=None,
+                RECORDING_REF=None),
     ),
     dict(
         file="49_release_ogl_txpacific", style="clean_typed",
@@ -1188,7 +1159,6 @@ DOCS = [
     ),
 ]
 
-# ── style parameters ─────────────────────────────────────────────────────────
 STYLES = {
     "handwritten":  dict(paper=(238, 225, 195), ink=(55, 38, 14),
                          noise=0.22, rot=1.6, blur=0.8, bright=0.94, contrast=0.88,
@@ -1208,7 +1178,6 @@ STYLES = {
                          foxing=False, fold=False),
 }
 
-# ── rendering helpers ─────────────────────────────────────────────────────────
 def fnt(path, size):
     return ImageFont.truetype(path, size)
 
@@ -1233,7 +1202,6 @@ def add_noise(img, amount):
     return Image.blend(img, n3, 0.2)
 
 def add_foxing(img, rng):
-    draw = ImageDraw.Draw(img)
     for _ in range(rng.randint(12, 30)):
         x, y = rng.randint(0, W), rng.randint(0, H)
         r = rng.randint(4, 22)
@@ -1263,7 +1231,7 @@ def degrade_region(img, box, intensity=1.0):
     base = img.crop((x0, y0, x1, y1)).convert("RGBA")
     img.paste(Image.alpha_composite(base, ov).convert("RGB"), (x0, y0))
 
-def draw_stamp(img, draw, stamp, style_name, rng):
+def draw_stamp(draw, stamp, rng):
     sf = fnt(F_COU, 17)
     lines = ["FILED FOR RECORD",
              f"{stamp['rd']}  {rng.randint(8,11):02d}:{rng.randint(0,59):02d} A.M.",
@@ -1289,15 +1257,14 @@ def render(doc, rng):
     if st["foxing"]:
         add_foxing(img, rng)
 
-    stamp_box = draw_stamp(img, draw, doc["stamp"], doc["style"], rng)
-    draw = ImageDraw.Draw(img)  # redraw after paste ops
+    stamp_box = draw_stamp(draw, doc["stamp"], rng)
+    draw = ImageDraw.Draw(img)
 
     tf = fnt(st["title_font"], st["title_size"])
     bf = fnt(st["font"], st["font_size"])
     lh = int(st["font_size"] * 1.42)
     width = W - ML - MR
 
-    # title — start below stamp
     y = max(stamp_box[3] + 24, 44)
     for tline in doc["title"].split("\n"):
         tw = draw.textlength(tline, font=tf)
@@ -1306,9 +1273,8 @@ def render(doc, rng):
     draw.line([ML, y + 4, W - MR, y + 4], fill=ink, width=2)
     y += 22
 
-    # body — track line boxes for degradation
     deg_tokens = [t.upper() for t in (doc.get("deg") or [])]
-    line_boxes = []  # (upper_text, (x0,y0,x1,y1))
+    line_boxes = []
     for para in doc["body"]:
         for line in wrap_text(draw, para, bf, width):
             draw.text((ML, y), line, font=bf, fill=ink)
@@ -1317,18 +1283,15 @@ def render(doc, rng):
             y += lh
         y += int(lh * 0.35)
 
-    # apply inline degradations
     for upper_line, box in line_boxes:
         if any(tok in upper_line for tok in deg_tokens):
             degrade_region(img, box, intensity=1.05)
 
-    # degrade stamp if requested
     if doc.get("deg_stamp"):
         degrade_region(img, stamp_box, intensity=1.15)
 
-    # global effects
     if st["foxing"]:
-        add_foxing(img, rng)  # second pass
+        add_foxing(img, rng)
     img = add_noise(img, st["noise"])
     img = ImageEnhance.Brightness(img).enhance(st["bright"])
     img = ImageEnhance.Contrast(img).enhance(st["contrast"])
@@ -1340,7 +1303,6 @@ def render(doc, rng):
                      resample=Image.BICUBIC)
     return img
 
-# ── main ─────────────────────────────────────────────────────────────────────
 def main():
     os.makedirs(OUT, exist_ok=True)
     gt_out = []
@@ -1351,7 +1313,6 @@ def main():
         img.save(path, "PNG", dpi=(150, 150))
         print(f"  {os.path.relpath(path, HERE)}")
 
-        # collect ground truth
         gt_out.append({
             "file": doc["file"] + ".png",
             "style": doc["style"],
@@ -1364,7 +1325,6 @@ def main():
         json.dump(gt_out, f, indent=2)
     print(f"\n  ground_truth.json  ({len(gt_out)} entries)")
 
-    # human-readable key
     key_lines = [
         "# Chain of Title — Ground Truth\n",
         "**Tract:** West Half (W/2) of Section 6, Block 45, T&P Ry. Co. Survey, "

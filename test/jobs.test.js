@@ -341,7 +341,6 @@ test('PATCH /api/jobs/:id rejects invalid status transitions', async () => {
 });
 
 test('import-continuation accepts the job ids createJob issues', () => {
-  // createJob ids are job_ + randomUUID(), which contains hyphens.
   const sourceJobId = `job_${randomUUID()}`;
   const accepted = validateImportContinuationInput({ sourceJobId });
   assert(accepted.valid && accepted.value.sourceJobId === sourceJobId, `Expected ${sourceJobId} to be accepted: ${accepted.reason}`);
@@ -420,15 +419,13 @@ test('POST /api/jobs/:id/result works without APP_PASSWORD in passwordless mode'
   }
 });
 
-test('server abstraction endpoints verify password themselves (defense-in-depth)', async () => {
+test('workflow routes reject wrong or unset APP_PASSWORD', async () => {
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = createMemoryJobStore();
   const previousPassword = process.env.APP_PASSWORD;
   process.env.APP_PASSWORD = 'pw';
   try {
     await jobsHandler(mockReq('POST', { totalDocuments: 1 }, { 'x-app-password': 'pw' }), mockRes());
 
-    // Wrong password on a sensitive endpoint is rejected even though the
-    // endpoint handler is invoked directly (no upstream requireJobPassword).
     const wrongPwRes = mockRes();
     await jobHandler(mockReq('POST', {}, { 'x-app-password': 'nope' }, { path: ['job_test_1', 'abstraction', 'start'] }), wrongPwRes);
     assert(wrongPwRes.statusCode === 401, `Expected 401 for wrong password on abstraction/start, got ${wrongPwRes.statusCode}`);
@@ -437,7 +434,6 @@ test('server abstraction endpoints verify password themselves (defense-in-depth)
     await jobHandler(mockReq('POST', { question: 'who owns?' }, { 'x-app-password': 'nope' }, { path: ['job_test_1', 'followup'] }), wrongPwFollowupRes);
     assert(wrongPwFollowupRes.statusCode === 401, `Expected 401 for wrong password on followup, got ${wrongPwFollowupRes.statusCode}`);
 
-    // Missing APP_PASSWORD fails closed on sensitive endpoints.
     delete process.env.APP_PASSWORD;
     const unsetRes = mockRes();
     await jobHandler(mockReq('POST', {}, { 'x-app-password': 'pw' }, { path: ['job_test_1', 'abstraction', 'start'] }), unsetRes);

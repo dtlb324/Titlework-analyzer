@@ -5,8 +5,6 @@ import { getRuntimeInfo, isProductionRuntime } from './api/_lib/runtime-info.js'
 
 export { isProductionRuntime };
 
-// Cloud Scheduler is the production caller. It already presents an OIDC bearer
-// token to Cloud Run IAM; this header is the in-app secret, sent alongside it.
 export const INTERNAL_DRAIN_HEADER = 'x-internal-drain-token';
 
 function configuredDrainToken(env) {
@@ -15,10 +13,6 @@ function configuredDrainToken(env) {
   return raw.trim();
 }
 
-// Fails closed in production (Dockerfile sets NODE_ENV=production; Cloud Run
-// also sets K_SERVICE) when INTERNAL_DRAIN_TOKEN is missing. Outside production
-// an unset token stays open so local drain POSTs keep working; a configured
-// token is required in every environment.
 export function authorizeInternalDrain(req, env = process.env) {
   const secret = configuredDrainToken(env);
   if (!secret) {

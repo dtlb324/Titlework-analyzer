@@ -93,17 +93,14 @@ test('a 60-page PDF stays inside the byte cap by falling back to JPEG for pages 
   const requested = [];
   const deps = {
     loadPdfjs: async () => ({ GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve(pdf), destroy: async () => {} }) }),
-    // The 60 lossless 1 MB PNGs exceed 12 MB; JPEG at 0.92 is much smaller.
     createCanvas: () => ({ getContext: () => ({}), toBlob: (fn, type, quality) => { requested.push([type, quality]); fn(type === 'image/png' ? new Blob([png, new Uint8Array(1000000)], { type }) : new Blob([jpeg, new Uint8Array(150000)], { type })); } })
   };
   const pages = await ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps);
   assert.equal(pages.length, 60);
-  // Equal-size pages compress in selection order until the whole file fits.
   assert.equal(pages[0].mediaType, 'image/jpeg');
   assert.ok(pages.filter(page => page.mediaType === 'image/jpeg').length >= 50);
   assert.ok(requested.some(([type, quality]) => type === 'image/jpeg' && quality === 0.92));
   assert.ok(pages.reduce((sum, page) => sum + page.blob.size, 0) <= 12000000);
-  // Small pages stay lossless PNG.
   deps.createCanvas = () => ({ getContext: () => ({}), toBlob: (fn, type) => fn(new Blob([png], { type })) });
   assert.ok((await ui.prepareDocument(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), deps)).every(page => page.mediaType === 'image/png'));
 });
@@ -601,7 +598,6 @@ async function selectMany(h, files) {
 }
 function multiHarness(overrides = {}) {
   const h = harness(overrides);
-  // Each POST echoes its filename and tags every model's text so results can be told apart.
   h.deps.fetch = async (url, options) => {
     h.calls.push({ url, ...options });
     if (options.method !== 'POST') return { ok: true, json: async () => ({ models: h.models, maxPages: 10, maxBytes: 12000000, renderScale: 2 }) };
@@ -630,7 +626,6 @@ test('several files are compared one at a time in selection order, each with its
   assert.match(allText(h.elements.batch), /a\.png/);
   assert.equal(h.elements.batch.children.filter(row => /Done/.test(allText(row))).length, 3);
   assert.match(allText(h.elements.baseline), /c\.png:gemini-3\.1-flash-lite/, 'the last file is shown after the run');
-  // Selecting View on the first row swaps the previews and outputs without a new request.
   const callsBefore = h.calls.length;
   const view = h.elements.batch.children[0].children[5].children[0];
   await view.fire('click');

@@ -1,19 +1,5 @@
-// Phase 4 — durable background workflow / queue for server-side abstraction.
-//
-// The default driver runs in-process: chunks live in Postgres (see jobs.js),
-// the start/process endpoints claim them under a short lease, and bounded
-// concurrency drives the work. The adapter pattern leaves a single seam for
-// plugging in Inngest or a similar workflow tool later via WORKFLOW_DRIVER.
-//
-// Required env vars for the default driver:
-//   - DATABASE_URL (or POSTGRES_URL / POSTGRES_PRISMA_URL)
-//   - GCS_BUCKET (so workers can fetch chunks from Google Cloud Storage)
-//   - GEMINI_API_KEY or ANTHROPIC_API_KEY (so workers can call the abstraction model)
-//
-// To select a different driver in the future, set WORKFLOW_DRIVER=inngest
-// and provide INNGEST_EVENT_KEY plus INNGEST_SIGNING_KEY. Until that adapter
-// ships, requests with WORKFLOW_DRIVER=inngest return a 503 setup error.
 
+import { isInvalidJobStatusTransition } from './jobs.js';
 import { processChunkAbstraction } from './abstraction.js';
 import {
   isAbstractionBatchingEnabled,
@@ -120,8 +106,6 @@ export async function enqueueAbstractionJob(jobId, options = {}) {
     error.statusCode = 409;
     throw error;
   }
-  // Recover any leases that were stranded across deploys / function restarts
-  // before we move the job into the "abstracting" state.
   if (store.resetStaleProcessingChunks) {
     await store.resetStaleProcessingChunks(jobId, options.staleLeaseMs || DEFAULT_STALE_LEASE_MS);
   }
@@ -134,8 +118,8 @@ export async function enqueueAbstractionJob(jobId, options = {}) {
   if (store.updateJob && enqueueable.includes(job.status)) {
     try {
       await store.updateJob(jobId, { status: 'abstracting', currentPhase: 'Queued for server-side abstraction' });
-    } catch {
-      // status transition already advanced; fine.
+    } catch (error) {
+      if (!isInvalidJobStatusTransition(error)) throw error;
     }
   }
   return await getAbstractionSnapshot(store, jobId);
@@ -323,7 +307,6 @@ export function isWorkflowKickOnStartEnabled() {
 export function kickWorkflowOnStart(jobId, phase, options = {}) {
   if (!isWorkflowKickOnStartEnabled()) return null;
   const budgetMs = options.budgetMs ?? DEFAULT_KICK_BUDGET_MS;
-  const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
   const kickOptions = { ...options, budgetMs };
   if (phase === 'synthesis') {
     return scheduleBackgroundSynthesis(jobId, kickOptions);
@@ -332,8 +315,6 @@ export function kickWorkflowOnStart(jobId, phase, options = {}) {
 }
 
 export function scheduleBackgroundProcessing(jobId, options = {}) {
-  // Legacy in-process fallback for local/manual use. Cloud Run deployments
-  // should use worker.js so route handlers only enqueue durable work.
   const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
   const existing = backgroundPromises.get(jobId);
   if (existing) return existing;
@@ -356,7 +337,11 @@ export function scheduleBackgroundProcessing(jobId, options = {}) {
   })();
   backgroundPromises.set(jobId, promise);
   if (typeof waitUntil === 'function') {
-    try { waitUntil(promise); } catch { /* waitUntil may not be available in tests */ }
+    try {
+      waitUntil(promise);
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'workflow_wait_until_error', jobId, reason: error?.message || String(error) }));
+    }
   }
   return promise;
 }
@@ -389,7 +374,6 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
   if (store.resetStaleSynthesisSegments) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
   }
-  // Plan (or reuse plan) and persist segments before the worker picks them up.
   const planResult = await planJobSynthesis(jobId, options);
   const planId = planResult?.plan?.planId;
   if (job.status === 'failed') {
@@ -400,11 +384,6 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
       await store.clearJobResult(jobId);
     }
   }
-  // Mixed abstraction leaves the job at partial_failed and waits for the
-  // landman to click "Synthesize with warnings". The worker only drains
-  // status='synthesizing' jobs, and the UI treats partial_failed as terminal
-  // (stops polling). Flip the status so both can proceed — but only when
-  // there is not already a saved opinion to keep.
   const existingPartialResult = job.status === 'partial_failed' && typeof store.getJobResult === 'function'
     ? await store.getJobResult(jobId)
     : null;
@@ -412,8 +391,8 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
   if (store.updateJob && !['synthesizing', 'complete', 'partial_failed', 'failed'].includes(job.status)) {
     try {
       await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Queued for server-side synthesis' });
-    } catch {
-      // status transition already advanced; fine.
+    } catch (error) {
+      if (!isInvalidJobStatusTransition(error)) throw error;
     }
   } else if (store.updateJob && (job.status === 'failed' || resumeFromPartialFailed)) {
     try {
@@ -423,7 +402,9 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
           ? 'Resuming synthesis after failure'
           : 'Queued for server-side synthesis with warnings',
       });
-    } catch { /* ignore */ }
+    } catch (error) {
+      if (!isInvalidJobStatusTransition(error)) throw error;
+    }
   }
   const status = await store.getSynthesisStatus(jobId, { lightweight: true });
   return {
@@ -480,8 +461,6 @@ export async function processSynthesisBatch(jobId, options = {}) {
 }
 
 export function scheduleBackgroundSynthesis(jobId, options = {}) {
-  // Legacy in-process fallback for local/manual use. Cloud Run deployments
-  // should use worker.js so route handlers only enqueue durable work.
   const waitUntil = options.waitUntil || globalThis.__TITLE_ANALYZER_WAIT_UNTIL__;
   const existing = synthesisBackgroundPromises.get(jobId);
   if (existing) return existing;
@@ -504,7 +483,11 @@ export function scheduleBackgroundSynthesis(jobId, options = {}) {
   })();
   synthesisBackgroundPromises.set(jobId, promise);
   if (typeof waitUntil === 'function') {
-    try { waitUntil(promise); } catch { /* waitUntil may not be available in tests */ }
+    try {
+      waitUntil(promise);
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'workflow_wait_until_error', jobId, reason: error?.message || String(error) }));
+    }
   }
   return promise;
 }
@@ -563,10 +546,6 @@ export async function retryFailedAbstractionChunks(jobId, options = {}) {
     }
   }
   if (reset > 0 && store.updateJob) {
-    // The saved result (if any) was synthesized from the OLD abstracts.
-    // Requeued chunks will produce new abstracts, so the stale result must be
-    // cleared — otherwise GET /result serves an outdated opinion while the
-    // job re-runs.
     if (store.clearJobResult) {
       await store.clearJobResult(jobId);
     }
@@ -574,7 +553,9 @@ export async function retryFailedAbstractionChunks(jobId, options = {}) {
     if (refreshed && ['failed', 'partial_failed'].includes(refreshed.status)) {
       try {
         await store.updateJob(jobId, { status: 'abstracting', currentPhase: 'Retrying failed chunks' });
-      } catch { /* ignore invalid transitions */ }
+      } catch (error) {
+        if (!isInvalidJobStatusTransition(error)) throw error;
+      }
     }
   }
   const snapshot = await getAbstractionSnapshot(store, jobId);
