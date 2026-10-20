@@ -19,6 +19,6 @@
     "@neondatabase/serverless": "^1.2.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "6.4.299",
-    "unpdf": "^1.8.1"
+    "unpdf": "^1.9.0"
   }
 }
