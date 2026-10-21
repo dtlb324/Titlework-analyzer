@@ -1,28 +1,23 @@
 version: 2
+multi-ecosystem-groups:
+  monthly-deps:
+    schedule:
+      interval: monthly
 updates:
   - package-ecosystem: npm
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      npm:
-        patterns:
-          - "*"
+    patterns:
+      - "*"
+    multi-ecosystem-group: monthly-deps
 
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      github-actions:
-        patterns:
-          - "*"
+    patterns:
+      - "*"
+    multi-ecosystem-group: monthly-deps
 
   - package-ecosystem: docker
     directory: /
-    schedule:
-      interval: weekly
-    groups:
-      docker:
-        patterns:
-          - "*"
+    patterns:
+      - "*"
+    multi-ecosystem-group: monthly-deps
