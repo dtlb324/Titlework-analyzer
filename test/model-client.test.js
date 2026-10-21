@@ -2,6 +2,7 @@ import assertStrict from 'node:assert/strict';
 import {
   abstractionApiKeyError,
   invokeModel,
+  invokeAnthropicModel,
   invokeAnthropicModelStream,
   isGeminiModel,
   mapModelResponseToAnalyzeProxy,
@@ -185,6 +186,46 @@ test('invokeAnthropicModelStream requests stream=true and forwards deltas', asyn
   assert(requestBody?.stream === true, 'Expected stream flag on Anthropic request');
   assert(result.text === 'Hi', 'Expected streamed text');
   assert(deltas.join('') === 'Hi', 'Expected onDelta callbacks');
+});
+
+test('Anthropic requests send anthropic-version 2026-10-21 and no sampling parameters', async () => {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevFetch = global.fetch;
+  process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+  const sent = [];
+  global.fetch = async (_url, init) => {
+    sent.push({ headers: init.headers, body: JSON.parse(init.body) });
+    const wire = [
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+      '',
+    ].join('\n');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: 'text', text: 'ok' }], usage: {}, stop_reason: 'end_turn' }),
+      body: new Response(wire).body,
+    };
+  };
+  const request = { model: 'claude-sonnet-5-5', maxTokens: 100, system: 'system prompt', messages: [{ role: 'user', content: 'hello' }] };
+  try {
+    await invokeAnthropicModel(request, { direct: true });
+    await invokeAnthropicModelStream(request, { direct: true });
+  } finally {
+    global.fetch = prevFetch;
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+  assertStrict.equal(sent.length, 2);
+  for (const { headers, body } of sent) {
+    assertStrict.equal(headers['anthropic-version'], '2026-10-21');
+    for (const key of ['temperature', 'top_p', 'top_k']) {
+      assert(!(key in body), `2026-10-21 rejects ${key}`);
+    }
+  }
 });
 
 test('mapModelResponseToAnalyzeProxy preserves analyze.js response shape', () => {

@@ -89,7 +89,7 @@ export async function invokeAnthropicModelStream(request, options = {}) {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': anthropicApiKey(),
-        'anthropic-version': '2023-06-01',
+        'anthropic-version': '2026-10-21',
       },
       body,
       signal: timeout.signal,
@@ -145,7 +145,7 @@ export async function invokeAnthropicModel(request, options = {}) {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': anthropicApiKey(),
-        'anthropic-version': '2023-06-01',
+        'anthropic-version': '2026-10-21',
       },
       body,
       signal: timeout.signal,
