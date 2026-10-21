@@ -7,7 +7,7 @@ create durable jobs, save abstracts, or run title-opinion synthesis.
 
 ## Enable locally
 
-Use Node **22.13 or newer within the 22.x series**, then `npm ci`.
+Use Node **26** (the 26.x series), then `npm ci`.
 In your git-ignored `.env.local`, configure:
 
 - `OCR_COMPARE_ENABLED=true`

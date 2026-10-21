@@ -6,7 +6,7 @@ The output is a research aid, not a legal opinion. Check it against the source d
 
 ## Quick start
 
-You need Node.js 22, git, a Neon database, a Gemini API key, an Anthropic API key, and a Google Cloud Storage bucket. The sections below explain how to get each one.
+You need Node.js 26, git, a Neon database, a Gemini API key, an Anthropic API key, and a Google Cloud Storage bucket. The sections below explain how to get each one.
 
 ```bash
 git clone <your-repo-url>
@@ -166,7 +166,7 @@ git tag "$VERSION"
 git push origin "$VERSION"
 ```
 
-The workflow runs the tests on Node 22, builds one Docker image, and pushes it to Artifact Registry. It then resolves the image digest, deploys the worker, deploys the API from the same immutable image digest, verifies both services with `scripts/verify-release.mjs`, and creates the GitHub Release.
+The workflow runs the tests on Node 26, builds one Docker image, and pushes it to Artifact Registry. It then resolves the image digest, deploys the worker, deploys the API from the same immutable image digest, verifies both services with `scripts/verify-release.mjs`, and creates the GitHub Release.
 
 Do not leave Cloud Build or Cloud Run source-deploy triggers on `main`. They can race the tag workflow and overwrite the verified image.
 

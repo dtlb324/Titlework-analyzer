@@ -21,7 +21,7 @@ Secondary surfaces, not the default drive:
 
 ## Launch
 
-From the repository root, with Node 22. Install dependencies once if `node_modules` is missing (`npm install`). Do not use `npm run dev` for this instance: that command requires `.env.local` and loads whatever secrets are in it. Do not use port 8080.
+From the repository root, with Node 26. Install dependencies once if `node_modules` is missing (`npm install`). Do not use `npm run dev` for this instance: that command requires `.env.local` and loads whatever secrets are in it. Do not use port 8080.
 
 ```bash
 RUN_ID="verify-$$"

@@ -33,7 +33,7 @@ legal conclusions in the request.
 
 ## Project Context
 
-- This repo is a Node 22 ESM app for AI-assisted mineral title research.
+- This repo is a Node 26 ESM app for AI-assisted mineral title research.
 - Cloud Run runs separate API and worker services.
 - Neon Postgres stores durable job, document, chunk, abstract, synthesis, and follow-up state.
 - Google Cloud Storage stores uploaded source documents and generated split chunks.
