@@ -301,7 +301,7 @@ test('verifyRelease checks Cloud Run parity, env configuration, and API health',
 
 test('release workflows and image context encode immutable Cloud Run deployment policy', () => {
   const testWorkflow = readFileSync(join(root, '.github/workflows/test.yml'), 'utf8');
-  assert(testWorkflow.includes('node-version: 22'), 'Expected CI to run tests on Node 22');
+  assert(testWorkflow.includes('node-version: 26'), 'Expected CI to run tests on Node 26');
   assert(testWorkflow.includes('docker build'), 'Expected CI workflow to exercise Docker build');
 
   const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');

@@ -2,7 +2,7 @@
 
 ## Project: Mineral Ownership Builder (`title-analyzer`)
 
-AI title-chain research tool for landmen. Node 22 ESM, zero web framework
+AI title-chain research tool for landmen. Node 26 ESM, zero web framework
 (`node:http` in `server.js`). The page heading is Mineral Ownership Builder,
 the document `<title>` is Mineral Title Analyzer, and `README.md` calls the
 product Titlework Analyzer. Full setup (Neon, API keys, GCS, Cloud Run) lives
@@ -38,7 +38,7 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   CI only after it is added to that script.
 - Outside the chain: `test/smoke-server.js` is a manual server on port 3456.
 - CI (`.github/workflows/test.yml`, pull requests and pushes to `Main` and `main`) runs
-  `npm ci`, `npm test`, and `docker build` on Node 22. There is no lint script.
+  `npm ci`, `npm test`, and `docker build` on Node 26. There is no lint script.
 - Local dev loads git-ignored `.env.local`: `npm run dev`, plus
   `npm run dev:worker` in a second terminal. Open `http://localhost:8080`.
   With no `.env.local`, `npm run dev` exits before listen (`node --env-file`
