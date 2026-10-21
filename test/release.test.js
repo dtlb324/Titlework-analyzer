@@ -301,10 +301,21 @@ test('verifyRelease checks Cloud Run parity, env configuration, and API health',
 
 test('release workflows and image context encode immutable Cloud Run deployment policy', () => {
   const testWorkflow = readFileSync(join(root, '.github/workflows/test.yml'), 'utf8');
-  assert(testWorkflow.includes('node-version: 26'), 'Expected CI to run tests on Node 26');
+  const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+  const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8');
+  const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const packageLock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
+  const testNode = workflowNodeVersion(testWorkflow, '.github/workflows/test.yml');
+  const releaseNode = workflowNodeVersion(releaseWorkflow, '.github/workflows/release.yml');
+  const imageNode = dockerfileNodeVersion(dockerfile);
+  const packageEngines = packageJson?.engines?.node;
+  const lockEngines = packageLock?.packages?.['']?.engines?.node;
+  assert(releaseNode === testNode, `Expected release.yml node-version ${releaseNode} to equal test.yml node-version ${testNode}`);
+  assert(imageNode === testNode, `Expected Dockerfile Node version ${imageNode} to equal workflow node-version ${testNode}`);
+  assert(enginesMajor(packageEngines) === versionMajor(testNode), `Expected package.json engines.node major ${packageEngines} to equal Node version major ${testNode}`);
+  assert(lockEngines === packageEngines, `Expected package-lock.json engines.node ${lockEngines} to equal package.json engines.node ${packageEngines}`);
   assert(testWorkflow.includes('docker build'), 'Expected CI workflow to exercise Docker build');
 
-  const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
   assert(releaseWorkflow.includes("- 'v[0-9]*.[0-9]*.[0-9]*'"), 'Expected release trigger to avoid clearly malformed release tags');
   assert(!releaseWorkflow.includes('[0-9]+'), 'Expected semver validation in script, not an unsupported regex-like tag glob');
   assert(releaseWorkflow.includes('id-token: write'), 'Expected release workflow to use OIDC auth');
@@ -336,6 +347,37 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(dockerignore.includes('test/'), 'Expected tests to be excluded from production image context');
   assert(dockerignore.includes('docs/'), 'Expected docs to be excluded from production image context');
 });
+
+function workflowNodeVersion(workflow, label) {
+  const found = [];
+  for (const line of workflow.split('\n')) {
+    const match = line.match(/^\s*node-version:\s*(.+?)\s*$/);
+    if (match) found.push(match[1].replace(/^['"]|['"]$/g, ''));
+  }
+  assert(found.length === 1, `Expected one node-version in ${label}, found ${found.length}`);
+  return found[0];
+}
+
+function dockerfileNodeVersion(dockerfile) {
+  const froms = dockerfile.split('\n').map(line => line.trim()).filter(line => line.startsWith('FROM '));
+  assert(froms.length === 1, `Expected one FROM in Dockerfile, found ${froms.length}`);
+  const ref = froms[0].slice('FROM '.length).split(/\s+/)[0].split('@')[0];
+  const match = ref.match(/^node:([^-]+)-.+$/);
+  assert(match, `Expected Dockerfile FROM node:<version>-..., got ${froms[0]}`);
+  return match[1];
+}
+
+function versionMajor(version) {
+  const match = /^(\d+)\./.exec(version);
+  assert(match, `Expected a MAJOR.MINOR.PATCH Node version, got ${version}`);
+  return match[1];
+}
+
+function enginesMajor(engines) {
+  const match = /^(\d+)\.x$/.exec(engines);
+  assert(match, `Expected package.json engines.node like 26.x, got ${engines}`);
+  return match[1];
+}
 
 function workflowRunScript(workflow, jobName) {
   const lines = workflow.split('\n');
