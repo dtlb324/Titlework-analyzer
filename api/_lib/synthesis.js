@@ -536,6 +536,7 @@ function createTimeoutSignal(ms) {
 
 function classifyError(err) {
   if (err?.code === 'output_truncated') return 'output_truncated';
+  if (err?.code === 'recombine_retry_failed') return 'recombine_retry_failed';
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
   if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
@@ -726,6 +727,7 @@ async function synthesizeWithBinarySplit({
   options,
   reason,
   truncationDepth = 0,
+  recombineRecovery = null,
 }) {
   if (abstracts.length <= 1) {
     return await callSynthesisModel({
@@ -748,7 +750,7 @@ async function synthesizeWithBinarySplit({
     { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftResult.text },
     { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightResult.text },
   ];
-  const merged = await callSynthesisModel({
+  const recombineRequest = {
     abstracts: mergeAbstracts,
     tract,
     contextNotes,
@@ -756,24 +758,70 @@ async function synthesizeWithBinarySplit({
     systemPrompt,
     config,
     options,
-  });
+  };
+  let merged;
+  let truncatedUsage = {};
+  let recoveryWarning = null;
+  try {
+    merged = await callSynthesisModel(recombineRequest);
+  } catch (err) {
+    if (classifyError(err) !== 'output_truncated' || !recombineRecovery) throw err;
+    truncatedUsage = err.usage || {};
+    if (recombineRecovery.mode === 'keep_halves') {
+      // Each half must stand on its own; otherwise its documents would vanish behind a complete-looking segment.
+      if (![leftResult, rightResult].every(half => validateSegmentSummary(half.text).ok)) throw err;
+      const label = docs => `${docs[0].filename} to ${docs[docs.length - 1].filename}`;
+      merged = {
+        text: [[left, leftResult], [right, rightResult]]
+          .map(([docs, half]) => `## Partial synthesis: ${label(docs)}\n\n${half.text}`)
+          .join('\n\n'),
+        model: rightResult.model,
+        usage: {},
+        payloadBytes: Math.max(leftResult.payloadBytes || 0, rightResult.payloadBytes || 0),
+        latencyMs: 0,
+        stopReason: null,
+      };
+      recoveryWarning = 'segment_split_halves_kept';
+    } else if (recombineRecovery.mode === 'retry_larger' && recombineRecovery.maxTokens > config.maxTokens) {
+      try {
+        merged = await callSynthesisModel({ ...recombineRequest, config: { ...config, maxTokens: recombineRecovery.maxTokens } });
+      } catch (retryErr) {
+        // Fail closed on any retry failure: a retryable class here would re-run and re-bill the whole split.
+        if (classifyError(retryErr) === 'output_truncated') throw retryErr;
+        const failed = new Error(`Recombine retry failed: ${sanitizeErrorMessage(retryErr)}`);
+        failed.code = 'recombine_retry_failed';
+        throw failed;
+      }
+      recoveryWarning = 'segment_split_recombine_retry';
+    } else {
+      throw err;
+    }
+  }
+  const parts = [merged.usage, leftResult.usage, rightResult.usage, truncatedUsage];
   return {
     ...merged,
     usage: {
-      inputTokens: (merged.usage.inputTokens || 0) + (leftResult.usage.inputTokens || 0) + (rightResult.usage.inputTokens || 0),
-      outputTokens: (merged.usage.outputTokens || 0) + (leftResult.usage.outputTokens || 0) + (rightResult.usage.outputTokens || 0),
+      inputTokens: parts.reduce((sum, usage) => sum + (usage.inputTokens || 0), 0),
+      outputTokens: parts.reduce((sum, usage) => sum + (usage.outputTokens || 0), 0),
     },
     payloadBytes: merged.payloadBytes,
     latencyMs: merged.latencyMs + leftResult.latencyMs + rightResult.latencyMs,
     splitApplied: true,
+    recoveryWarning,
   };
 }
 
 // A truncation-driven split may happen once per segment. Each level of recursion would otherwise add calls in
 // proportion to the document count, and a half that is still too long fails closed instead of fanning out.
+// A truncation split costs the original call, two halves and the recombine; a single-pass segment adds at most one
+// larger recombine retry. Request-size and timeout splits recurse further, and the validation repair call is extra.
 const MAX_TRUNCATION_SPLIT_DEPTH = 1;
 
-async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, systemPrompt, config, options, truncationDepth = 0) {
+function finalMergeMaxTokens() {
+  return clampInt(process.env.SYNTHESIS_MERGE_MAX_TOKENS, 16000, 1024, 32000);
+}
+
+async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, systemPrompt, config, options, truncationDepth = 0, recombineRecovery = null) {
   try {
     const result = await callSynthesisModel({
       abstracts,
@@ -805,6 +853,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         options,
         reason: 'max_tokens',
         truncationDepth: truncationDepth + 1,
+        recombineRecovery,
       });
     }
     if (abstracts.length > 1 && (type === 'payload_too_large' || type === 'upstream_timeout')) {
@@ -818,6 +867,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         options,
         reason: type === 'payload_too_large' ? 'request size' : 'timeout',
         truncationDepth,
+        recombineRecovery,
       });
     }
     throw err;
@@ -916,10 +966,16 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   let lastError = null;
   for (let attempt = firstAttempt; attempt <= config.maxAttempts; attempt++) {
     try {
-      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options);
+      // A truncated recombine keeps the two finished halves on a multi-segment plan, where the final merge reads them.
+      // A single-pass recombine is the final opinion itself, so it gets one retry with the final-merge output limit.
+      const recombineRecovery = isSinglePass
+        ? { mode: 'retry_larger', maxTokens: finalMergeMaxTokens() }
+        : { mode: 'keep_halves' };
+      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options, 0, recombineRecovery);
       const validation = isSinglePass ? validateFinalOpinion(result.text) : validateSegmentSummary(result.text);
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
+      if (result.recoveryWarning) warnings.push(result.recoveryWarning);
       if (!validation.ok && attempt < config.maxAttempts && SYNTHESIS_REPAIR_ENABLED) {
         const repairAbstracts = segmentAbstracts;
         const repairPreamble = `${preamble}\n\nPrevious response was incomplete or missing required sections: ${validation.reason} Produce a complete response that includes every required section.`;
@@ -1075,7 +1131,7 @@ async function mergeSegmentsIntoOpinion({
   const partial = partialConfig || getPartialSynthesisConfig(config || {});
   const finalConfig = {
     ...(config || getSynthesisConfig()),
-    maxTokens: clampInt(process.env.SYNTHESIS_MERGE_MAX_TOKENS, 16000, 1024, 32000),
+    maxTokens: finalMergeMaxTokens(),
   };
   let workingSummaries = segmentSummaries;
   const mergeAbstractsPreview = workingSummaries.map(summary => ({

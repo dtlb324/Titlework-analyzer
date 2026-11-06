@@ -522,6 +522,189 @@ test('finding 6: a Gemini finish that is not a token limit keeps its raw reason'
   });
 });
 
+// A truncated recombine after a truncation split used to fail the segment and discard both finished halves.
+function callKind(request) {
+  const text = JSON.stringify(request.messages);
+  if (/Merge these partial chain-of-title syntheses/.test(text)) return 'recombine';
+  if (request.system === PARTIAL_SYNTHESIS_PROMPT && /split automatically/.test(text)) return 'half';
+  if (/partial chain-of-title segments covering all/.test(text)) return 'final';
+  return 'original';
+}
+
+test('recombine recovery: a multi-segment plan keeps the finished halves when the recombine truncates, with no extra call', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const OUTPUT = { original: 1, half: 2, recombine: 8, final: 64 };
+    const modelClient = async request => {
+      const kind = callKind(request);
+      calls.push({ kind, text: JSON.stringify(request.messages) });
+      // Only the first segment (deed0, deed1) truncates; only a split segment ever recombines.
+      const truncated = kind === 'recombine' || (kind === 'original' && JSON.stringify(request.messages).includes('deed0.pdf'));
+      const text = kind === 'final' ? OPINION : (kind === 'half' ? `${SEGMENT} HALF_${calls.filter(c => c.kind === 'half').length}` : SEGMENT);
+      return { text, model: 'gemini-3.1-flash-lite', usage: { input_tokens: 1, output_tokens: OUTPUT[kind] }, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    const segments = store.segmentsSnapshot();
+    assertStrict.equal(segments.length, 2, JSON.stringify(segments.map(s => s.documentIds)));
+    assertStrict.deepEqual(calls.map(c => c.kind), ['original', 'half', 'half', 'recombine', 'original', 'final']);
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+    const kept = segments[0];
+    assertStrict.equal(kept.status, 'complete');
+    assertStrict.deepEqual(kept.warnings, ['segment_split', 'segment_split_halves_kept']);
+    assertStrict.ok(kept.summaryText.includes('HALF_1') && kept.summaryText.includes('HALF_2'), kept.summaryText);
+    assertStrict.ok(kept.summaryText.indexOf('HALF_1') < kept.summaryText.indexOf('HALF_2'), 'halves stay in document order');
+    // Halves plus the billed, truncated recombine: 2 + 2 + 8. The truncated original is not counted; that gap predates this change.
+    assertStrict.equal(kept.outputTokens, 12);
+    assertStrict.ok(calls.at(-1).text.includes('HALF_1') && calls.at(-1).text.includes('HALF_2'), 'the final merge reads both halves');
+    assertStrict.ok(out.result.warnings.includes('segment_1:segment_split_halves_kept'), JSON.stringify(out.result.warnings));
+  });
+});
+
+test('recombine recovery: a recombine that fails for any other reason does not keep the halves', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      if (kind === 'recombine') throw Object.assign(new Error('bad request'), { status: 400 });
+      const truncated = kind === 'original' && JSON.stringify(request.messages).includes('deed0.pdf');
+      return { text: kind === 'final' ? OPINION : SEGMENT, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    const [first] = store.segmentsSnapshot();
+    assertStrict.equal(first.status, 'failed');
+    assertStrict.equal(first.errorType, 'provider_error');
+    assertStrict.equal(first.summaryText, null, 'a non-truncation recombine failure saves no halves');
+    assertStrict.equal(kinds.filter(k => k === 'recombine').length, 1, 'the failed recombine is not retried');
+    assertStrict.deepEqual(kinds.slice(0, 4), ['original', 'half', 'half', 'recombine']);
+  });
+});
+
+test('recombine recovery: halves are not kept when either half is not a valid segment summary', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      const halfIndex = kinds.filter(k => k === 'half').length;
+      const truncated = kind === 'recombine' || (kind === 'original' && JSON.stringify(request.messages).includes('deed0.pdf'));
+      const text = kind === 'final' ? OPINION : kind === 'half' && halfIndex === 2 ? 'I cannot help with that.' : SEGMENT;
+      return { text, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    const [first] = store.segmentsSnapshot();
+    assertStrict.equal(first.status, 'failed');
+    assertStrict.equal(first.errorType, 'output_truncated');
+    assertStrict.equal(first.summaryText, null);
+  });
+});
+
+test('recombine recovery: kept halves are labelled with their real filenames, not segment-relative numbers', async () => {
+  await withEnvironment({}, async () => {
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const truncated = kind === 'recombine' || (kind === 'original' && JSON.stringify(request.messages).includes('deed2.pdf'));
+      return { text: kind === 'final' ? OPINION : SEGMENT, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    const second = store.segmentsSnapshot()[1];
+    assertStrict.deepEqual(second.warnings, ['segment_split', 'segment_split_halves_kept']);
+    assertStrict.ok(second.summaryText.includes('## Partial synthesis: deed2.pdf to deed2.pdf'), second.summaryText);
+    assertStrict.ok(second.summaryText.includes('## Partial synthesis: deed3.pdf to deed3.pdf'), second.summaryText);
+    assertStrict.ok(!/Documents 1-/.test(second.summaryText), second.summaryText);
+  });
+});
+
+test('recombine recovery: a retryable error on the single-pass retry fails closed instead of re-running the split', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      let kind = callKind(request);
+      if (kind === 'recombine' && kinds.includes('recombine')) kind = 'retry';
+      kinds.push(kind);
+      if (kind === 'retry') throw Object.assign(new Error('upstream overloaded'), { status: 529 });
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: kind === 'half' ? 'end_turn' : 'max_tokens' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(kinds, ['original', 'half', 'half', 'recombine', 'retry'], 'no second claim re-bills the tree');
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.equal(segment.status, 'failed');
+    assertStrict.equal(segment.errorType, 'recombine_retry_failed');
+    assertStrict.equal(out.result.status, 'failed');
+  });
+});
+
+test('recombine recovery: a single-pass recombine that truncates is retried once with the final-merge limit', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const OUTPUT = { original: 1, half: 2, recombine: 8, retry: 32 };
+    const modelClient = async request => {
+      let kind = callKind(request);
+      if (kind === 'recombine' && calls.some(c => c.kind === 'recombine')) kind = 'retry';
+      calls.push({ kind, maxTokens: request.maxTokens });
+      const truncated = kind === 'original' || kind === 'recombine';
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: { input_tokens: 1, output_tokens: OUTPUT[kind] }, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 1, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(calls.map(c => c.kind), ['original', 'half', 'half', 'recombine', 'retry']);
+    assertStrict.equal(calls[3].maxTokens, 8000);
+    assertStrict.equal(calls[4].maxTokens, 16000, 'the retry uses SYNTHESIS_MERGE_MAX_TOKENS (default 16000)');
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.deepEqual(segment.warnings, ['segment_split', 'segment_split_recombine_retry']);
+    // Halves, the billed truncated recombine and the retry. The truncated original is not counted; that gap predates this change.
+    assertStrict.equal(segment.outputTokens, 2 + 2 + 8 + 32);
+  });
+});
+
+test('recombine recovery: a single-pass retry that also truncates fails closed after exactly five calls', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: kind === 'half' ? 'end_turn' : 'max_tokens' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(kinds, ['original', 'half', 'half', 'recombine', 'recombine']);
+    assertStrict.equal(out.result.status, 'failed');
+    assertStrict.equal(out.result.finalTitleOpinion, '');
+    assertStrict.ok(out.result.warnings.includes('segment_1_failed: output_truncated'), JSON.stringify(out.result.warnings));
+  });
+});
+
+test('recombine recovery: the single-pass retry above 8192 tokens takes the OpenRouter streaming path', async () => {
+  await withEnvironment(openRouterEnv, async () => {
+    const requests = [];
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const text = JSON.stringify(body.messages);
+      const kind = /Merge these partial chain-of-title syntheses/.test(text)
+        ? (requests.some(r => r.kind === 'recombine') ? 'retry' : 'recombine')
+        : body.messages[0].content === PARTIAL_SYNTHESIS_PROMPT ? 'half' : 'original';
+      requests.push({ kind, stream: body.stream === true, maxTokens: body.max_tokens });
+      if (body.stream) return routerStream('normal', OPINION);
+      const finish = kind === 'half' ? 'stop' : 'length';
+      return Response.json({ model: 'anthropic/claude-sonnet-5.5', choices: [{ message: { content: kind === 'half' ? SEGMENT : OPINION }, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 10 } });
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, config: { maxAttempts: 1, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(requests.map(r => r.kind), ['original', 'half', 'half', 'recombine', 'retry']);
+    assertStrict.deepEqual(requests.at(-1), { kind: 'retry', stream: true, maxTokens: 16000 });
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+  });
+});
+
 if (process.argv.includes('--child-env-attempts')) {
   // Child mode for the environment-variable test above: module constants are read at import time.
   console.log = () => {};
