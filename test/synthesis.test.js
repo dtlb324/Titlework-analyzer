@@ -325,6 +325,14 @@ function createMemoryPhase5Store(initialState = {}) {
       segments.set(segmentId, next);
       return { ...next };
     },
+    async renewSynthesisSegmentLease(jobId, segmentId, options = {}) {
+      const segment = segments.get(segmentId);
+      if (!segment || segment.jobId !== jobId || segment.status !== 'processing' || segment.workerId !== options.workerId) return null;
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 120_000) / 1000));
+      const next = { ...segment, leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1000).toISOString(), updatedAt: now() };
+      segments.set(segmentId, next);
+      return { ...next };
+    },
     async completeSynthesisSegment(jobId, segmentId, payload) {
       const segment = segments.get(segmentId);
       if (!segment) return null;
@@ -1397,6 +1405,17 @@ test('Retry synthesis resets the segment attempt budget', () => {
   const start = source.indexOf('async resetFailedSynthesisSegments(');
   const body = source.slice(start, source.indexOf('\n    async ', start + 1));
   assert(body.includes('attempt_count = 0'), 'resetFailedSynthesisSegments must reset attempt_count');
+});
+
+test('Postgres segment lease renewal only extends a row the caller still owns', () => {
+  const source = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
+  const start = source.indexOf('async renewSynthesisSegmentLease(');
+  assert(start > 0, 'renewSynthesisSegmentLease must exist on the Postgres store');
+  const body = source.slice(start, source.indexOf('\n    async ', start + 1));
+  assert(body.includes("status = 'processing'"), 'renewal must require a processing row');
+  assert(body.includes('worker_id = ${options.workerId'), 'renewal must require the same worker');
+  assert(body.includes('lease_expires_at = now() + make_interval'), 'renewal must push the lease forward');
+  assert(!body.includes('attempt_count'), 'renewal must not spend an attempt');
 });
 
 test('Mixed synthesis segment failures persist partial_failed result instead of stranding the job', async () => {

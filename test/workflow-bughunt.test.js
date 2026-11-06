@@ -32,7 +32,7 @@ function makeStore({ docCount = 1, failedChunks = [], listFailedChunks } = {}) {
   let segments = [];
   let result = null;
   const previews = [];
-  const calls = { saveJobResult: [], claimSynthesisMerge: 0, claimSegment: [] };
+  const calls = { saveJobResult: [], claimSynthesisMerge: 0, claimSegment: [], renewSegment: [] };
   const counts = () => {
     const c = { pending: 0, processing: 0, retry_wait: 0, complete: 0, failed: 0 };
     for (const s of segments) c[s.status] += 1;
@@ -64,6 +64,14 @@ function makeStore({ docCount = 1, failedChunks = [], listFailedChunks } = {}) {
       calls.claimSegment.push(id);
       return { ...s };
     },
+    async renewSynthesisSegmentLease(_jobId, id, { workerId, leaseMs }) {
+      calls.renewSegment.push({ id, workerId, leaseMs });
+      const s = find(id);
+      if (!s || s.status !== 'processing' || s.workerId !== workerId) return null;
+      return { ...s };
+    },
+    // Test-only: simulate another worker reclaiming the row after this worker's lease expired.
+    reassignSegment(id, workerId) { Object.assign(find(id), { workerId }); },
     async completeSynthesisSegment(_jobId, id, payload) {
       const s = find(id);
       if (!s || s.status !== 'processing' || s.workerId !== payload.workerId) return null;
@@ -566,8 +574,9 @@ test('recombine recovery: a multi-segment plan keeps the finished halves when th
     assertStrict.deepEqual(kept.warnings, ['segment_split', 'segment_split_halves_kept']);
     assertStrict.ok(kept.summaryText.includes('HALF_1') && kept.summaryText.includes('HALF_2'), kept.summaryText);
     assertStrict.ok(kept.summaryText.indexOf('HALF_1') < kept.summaryText.indexOf('HALF_2'), 'halves stay in document order');
-    // Halves plus the billed, truncated recombine: 2 + 2 + 8. The truncated original is not counted; that gap predates this change.
-    assertStrict.equal(kept.outputTokens, 12);
+    // Every billed call: the truncated original, both halves and the truncated recombine.
+    assertStrict.equal(kept.outputTokens, 1 + 2 + 2 + 8);
+    assertStrict.equal(kept.inputTokens, 4);
     assertStrict.ok(calls.at(-1).text.includes('HALF_1') && calls.at(-1).text.includes('HALF_2'), 'the final merge reads both halves');
     assertStrict.ok(out.result.warnings.includes('segment_1:segment_split_halves_kept'), JSON.stringify(out.result.warnings));
   });
@@ -788,8 +797,26 @@ test('recombine recovery: a single-pass recombine that truncates is retried once
     assertStrict.equal(out.result.finalTitleOpinion, OPINION);
     const [segment] = store.segmentsSnapshot();
     assertStrict.deepEqual(segment.warnings, ['segment_split', 'segment_split_recombine_retry']);
-    // Halves, the billed truncated recombine and the retry. The truncated original is not counted; that gap predates this change.
-    assertStrict.equal(segment.outputTokens, 2 + 2 + 8 + 32);
+    // Every billed call: the truncated original, both halves, the truncated recombine and the retry.
+    assertStrict.equal(segment.outputTokens, 1 + 2 + 2 + 8 + 32);
+    assertStrict.equal(segment.inputTokens, 5);
+    assertStrict.equal(out.result.outputTokens, 1 + 2 + 2 + 8 + 32, 'the single-pass result reports the same total');
+  });
+});
+
+test('recombine recovery: a single-pass result lists the segment recovery warnings', async () => {
+  await withEnvironment({}, async () => {
+    let recombines = 0;
+    const modelClient = async request => {
+      const kind = callKind(request);
+      if (kind === 'recombine') recombines += 1;
+      const truncated = kind === 'original' || (kind === 'recombine' && recombines === 1);
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 1, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.deepEqual(out.result.warnings, ['segment_1:segment_split', 'segment_1:segment_split_recombine_retry']);
   });
 });
 
@@ -879,6 +906,141 @@ test('recombine recovery: the single-pass retry above 8192 tokens takes the Open
     assertStrict.deepEqual(requests.at(-1), { kind: 'retry', stream: true, maxTokens: 16000 });
     assertStrict.equal(out.result.status, 'complete');
     assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+  });
+});
+
+test('segment lease: a single-pass segment renews its lease before every paid call, covering the upstream timeout', async () => {
+  await withEnvironment({}, async () => {
+    let recombines = 0;
+    const modelClient = async request => {
+      const kind = callKind(request);
+      if (kind === 'recombine') recombines += 1;
+      const truncated = kind === 'original' || (kind === 'recombine' && recombines === 1);
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', {
+      store, modelClient, leaseMs: 120_000, workerId: 'probe', budgetMs: 5000,
+      config: { maxAttempts: 1, maxTokens: 8000, upstreamTimeoutMs: 240_000 },
+    });
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(store.calls.renewSegment.length, 5, 'original, two halves, recombine and the larger retry each renew first');
+    for (const renewal of store.calls.renewSegment) {
+      assertStrict.deepEqual(renewal, { id: 'seg_0', workerId: 'probe', leaseMs: 300_000 }, 'each renewal outlasts one full upstream timeout');
+    }
+  });
+});
+
+test('segment lease: a lost lease stops the chain before the larger retry is paid for', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    let store;
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      // While the first recombine is in flight, the lease expires and another worker reclaims the segment.
+      if (kind === 'recombine') store.reassignSegment('seg_0', 'other_worker');
+      const truncated = kind === 'original' || kind === 'recombine';
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    store = makeStore({ docCount: 2 });
+    const failMarks = [];
+    const markFailed = store.markSynthesisSegmentFailed;
+    store.markSynthesisSegmentFailed = async (...args) => { failMarks.push(args[2].errorType); return markFailed(...args); };
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(failMarks, [], 'a lost lease is never reported as a failure of the new owner\'s row');
+    assertStrict.deepEqual(kinds, ['original', 'half', 'half', 'recombine'], 'the 16k retry is never sent');
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.equal(segment.status, 'processing', 'the row is left to its new owner, not failed');
+    assertStrict.equal(segment.workerId, 'other_worker');
+    assertStrict.equal(store.calls.saveJobResult.length, 0);
+    assertStrict.ok(!out.result, JSON.stringify(out.result));
+  });
+});
+
+test('segment lease: a renewal DB error does not split or re-bill a healthy segment', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      kinds.push(callKind(request));
+      return { text: OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: 'end_turn' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const renew = store.renewSynthesisSegmentLease;
+    let renewals = 0;
+    store.renewSynthesisSegmentLease = async (...args) => {
+      renewals += 1;
+      if (renewals === 1) throw new Error('Connection terminated due to connection timeout');
+      return renew(...args);
+    };
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(kinds, ['original'], 'a DB blip is not a model timeout, so no split');
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.deepEqual(out.result.warnings, []);
+  });
+});
+
+test('segment lease: a renewal DB error mid-chain does not re-run the paid split', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: kind === 'original' ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const renew = store.renewSynthesisSegmentLease;
+    let renewals = 0;
+    store.renewSynthesisSegmentLease = async (...args) => {
+      renewals += 1;
+      if (renewals === 4) throw new Error('read ECONNRESET');
+      return renew(...args);
+    };
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(kinds, ['original', 'half', 'half', 'recombine'], 'the paid halves are not re-run');
+    assertStrict.equal(out.result.status, 'complete');
+  });
+});
+
+test('segment lease: the repair call renews the lease and stops when it is lost', async () => {
+  await withEnvironment({}, async () => {
+    let calls = 0;
+    let store;
+    const modelClient = async () => {
+      calls += 1;
+      // The first answer fails validation, and the lease is taken while it is in flight.
+      store.reassignSegment('seg_0', 'other_worker');
+      return { text: 'I cannot help with that.', model: 'claude-sonnet-5-5', usage: {}, stopReason: 'end_turn' };
+    };
+    store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.equal(calls, 1, 'the repair call is never paid for');
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.equal(segment.status, 'processing');
+    assertStrict.equal(segment.workerId, 'other_worker');
+    assertStrict.equal(store.calls.saveJobResult.length, 0);
+    assertStrict.ok(!out.result, JSON.stringify(out.result));
+  });
+});
+
+test('segment lease: a lease lost before a half call stops the split', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    let store;
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      if (kind === 'original') store.reassignSegment('seg_0', 'other_worker');
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: kind === 'original' ? 'max_tokens' : 'end_turn' };
+    };
+    store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(kinds, ['original'], 'no half call is paid for');
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.equal(segment.status, 'processing');
+    assertStrict.equal(segment.workerId, 'other_worker');
+    assertStrict.equal(store.calls.saveJobResult.length, 0);
+    assertStrict.ok(!out.result, JSON.stringify(out.result));
   });
 });
 
