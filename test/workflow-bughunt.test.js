@@ -775,6 +775,46 @@ test('recombine recovery: a single-pass retry that also truncates fails closed a
   });
 });
 
+// Payload splits do not consume truncation depth, so both halves can split again.
+// retry_larger is forwarded into every nested recombine. The spend comment says a single-pass
+// segment adds at most one larger recombine retry. Here the left nested retry already succeeded
+// (final-merge token limit) and the right nested recombine then truncates. A second 16000-token
+// call still runs, then the segment fails and the successful left retry is discarded.
+test('recombine recovery: a single-pass segment adds at most one larger recombine retry when nested payload splits truncate', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const text = JSON.stringify(request.messages);
+      const ids = [...new Set([...text.matchAll(/deed(\d+)\.pdf/g)].map(match => Number(match[1])))].sort((a, b) => a - b);
+      calls.push({ kind, maxTokens: request.maxTokens, span: ids.join(',') || '-' });
+      if (kind === 'original' || (kind === 'half' && ids.length > 1)) {
+        throw Object.assign(new Error('payload too large'), { status: 413 });
+      }
+      if (kind === 'half') {
+        return { text: `${SEGMENT} LEAF_${ids[0]}`, model: 'claude-sonnet-5-5', usage: { input_tokens: 1, output_tokens: 2 }, stopReason: 'end_turn' };
+      }
+      if (request.maxTokens < 16000) {
+        return { text: OPINION, model: 'claude-sonnet-5-5', usage: { input_tokens: 1, output_tokens: 8 }, stopReason: 'max_tokens' };
+      }
+      const largeSoFar = calls.filter(call => call.kind === 'recombine' && call.maxTokens >= 16000).length;
+      if (largeSoFar === 1) {
+        return { text: `${SEGMENT} LEFT_RETRY`, model: 'claude-sonnet-5-5', usage: { input_tokens: 1, output_tokens: 32 }, stopReason: 'end_turn' };
+      }
+      return { text: OPINION, model: 'claude-sonnet-5-5', usage: { input_tokens: 1, output_tokens: 32 }, stopReason: 'max_tokens' };
+    };
+    const store = makeStore({ docCount: 4 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 4, maxAttempts: 1, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    const [segment] = store.segmentsSnapshot();
+    const large = calls.filter(call => call.kind === 'recombine' && call.maxTokens >= 16000);
+    assertStrict.equal(segment.status, 'failed');
+    assertStrict.equal(segment.summaryText, null, 'the successful left retry is not kept');
+    assertStrict.equal(out.result.status, 'failed');
+    assertStrict.equal(out.result.finalTitleOpinion, '');
+    assertStrict.equal(large.length, 1, `billed ${large.length} final-merge-sized retries on a failed segment: ${JSON.stringify(calls)}`);
+  });
+});
+
 test('recombine recovery: the single-pass retry above 8192 tokens takes the OpenRouter streaming path', async () => {
   await withEnvironment(openRouterEnv, async () => {
     const requests = [];
