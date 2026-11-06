@@ -1540,6 +1540,7 @@ export async function processSynthesisJob(jobId, options = {}) {
       const onlySummary = completedSegments[0];
       const validation = validateFinalOpinion(onlySummary.summaryText || '');
       const opinionWarnings = [];
+      (onlySummary.warnings || []).forEach(w => opinionWarnings.push(`segment_${onlySummary.segmentIndex + 1}:${w}`));
       if (!validation.ok) opinionWarnings.push(`final_validation_failed: ${validation.reason}`);
       const failedDocs = await failedDocumentsForMerge();
       if (failedDocs.length) opinionWarnings.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);

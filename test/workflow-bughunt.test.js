@@ -707,6 +707,26 @@ test('recombine recovery: the single-pass retry above 8192 tokens takes the Open
   });
 });
 
+test('single-pass result surfaces the segment\'s repair retry warning', async () => {
+  await withEnvironment({}, async () => {
+    const responses = ['too short', OPINION];
+    let calls = 0;
+    const modelClient = async () => ({
+      text: responses[calls++],
+      model: 'claude-sonnet-5-5',
+      usage: {},
+      stopReason: 'end_turn',
+    });
+    const store = makeStore();
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.equal(calls, 2, 'one initial call plus the repair call');
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+    assertStrict.deepEqual(store.segmentsSnapshot()[0].warnings, ['repair_retry']);
+    assertStrict.ok(out.result.warnings.includes('segment_1:repair_retry'), JSON.stringify(out.result.warnings));
+  });
+});
+
 if (process.argv.includes('--child-env-attempts')) {
   // Child mode for the environment-variable test above: module constants are read at import time.
   console.log = () => {};
