@@ -274,6 +274,25 @@ test('finding 6: a truncated multi-document pass still takes the existing split 
   });
 });
 
+test('finding 6: truncation-driven splitting is capped at one level, so a document count cannot fan the spend out', async () => {
+  for (const docCount of [8, 32]) {
+    await withEnvironment(openRouterEnv, async () => {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return Response.json({ model: 'anthropic/claude-sonnet-5.5', choices: [{ message: { content: SEGMENT }, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 10 } });
+      };
+      const store = makeStore({ docCount });
+      const out = await processSynthesisJob('job_probe', { store, config: { maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+      assertStrict.equal(out.result.status, 'failed', `${docCount} documents`);
+      // Per planned segment: one full call, then one half that also truncates. The half does not split again and the
+      // segment fails closed, so spend grows with the number of segments and not with recursion depth.
+      const segmentCount = (await store.listSynthesisSegments()).length;
+      assertStrict.equal(calls, 2 * segmentCount, `${docCount} documents in ${segmentCount} segment(s): every call truncated`);
+    });
+  }
+});
+
 test('finding 6: a truncated final merge fails closed and its streamed preview is never marked complete', async () => {
   await withEnvironment({}, async () => {
     const systems = [];

@@ -5,7 +5,7 @@ import { processChunkAbstraction } from '../api/_lib/abstraction.js';
 import { applyAbstractionClaim } from '../api/_lib/jobs.js';
 
 for (const failurePoint of ['second-upload', 'second-insert', 'supersede']) {
-  test(`abandoned PDF split ${failurePoint === 'supersede' ? 'leaves children of a reclaimed parent alone' : 'cleans pending children'} after ${failurePoint}`, async () => {
+  test(`abandoned PDF split ${failurePoint === 'supersede' ? 'leaves children of a reclaimed parent alone' : 'removes the orphaned children'} after ${failurePoint}`, async () => {
     const pdf = await PDFDocument.create();
     for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
     const bytes = Buffer.from(await pdf.save());
@@ -31,13 +31,13 @@ for (const failurePoint of ['second-upload', 'second-insert', 'supersede']) {
         }
         chunks.get(id).abstractionStatus = 'split_superseded'; return chunks.get(id);
       },
-      async markChunkAbstractionFailed(_jobId, id, failure) {
+      // Mirrors the SQL guard: only a pending child of a parent this worker still holds is removed.
+      async discardSplitChunk(_jobId, id, { splitParentChunkId, workerId }) {
         const row = chunks.get(id);
-        if (failure.splitParentChunkId) {
-          const owner = chunks.get(failure.splitParentChunkId);
-          if (row.splitParentChunkId !== owner.id || row.abstractionStatus !== 'pending' || owner.abstractionWorkerId !== failure.workerId) return null;
-        } else if (row.abstractionStatus !== 'processing' || row.abstractionWorkerId !== failure.workerId) return null;
-        Object.assign(row, { abstractionStatus: 'failed', abstractionErrorType: failure.errorType });
+        const owner = chunks.get(splitParentChunkId);
+        if (!row || row.splitParentChunkId !== splitParentChunkId || row.abstractionStatus !== 'pending') return null;
+        if (owner.abstractionStatus !== 'processing' || owner.abstractionWorkerId !== workerId) return null;
+        chunks.delete(id);
         return row;
       },
     };
@@ -50,12 +50,13 @@ for (const failurePoint of ['second-upload', 'second-insert', 'supersede']) {
       modelClient: async () => { const error = new Error('timeout'); error.status = 504; throw error; },
     });
     const children = [...chunks.values()].filter(row => row.splitParentChunkId);
-    assert(children.length > 0);
     if (failurePoint === 'supersede') {
-      // Known limit: with the lease gone the cleanup guard must NOT fail children the new lease holder may own.
-      assert(children.every(row => row.abstractionStatus === 'pending'), JSON.stringify(children));
+      // Known limit: with the lease gone the cleanup must NOT remove children the new lease holder may own.
+      assert(children.length > 0 && children.every(row => row.abstractionStatus === 'pending'), JSON.stringify(children));
       return;
     }
-    assert(children.every(row => row.abstractionStatus === 'failed'), JSON.stringify(children));
+    // No orphan is left behind, and nothing is marked failed, so no rollup can count it once the parent succeeds unsplit.
+    assert.equal(children.length, 0, JSON.stringify(children));
+    assert.equal([...chunks.values()].filter(row => row.splitParentChunkId && row.abstractionStatus === 'failed').length, 0, 'no child is left failed');
   });
 }

@@ -106,15 +106,22 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
       buffer += decoder.decode(value, { stream: true });
 
       let lineIndex;
-      while ((lineIndex = buffer.indexOf('\n')) !== -1) {
+      while (!doneSeen && (lineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, lineIndex).trimEnd();
         buffer = buffer.slice(lineIndex + 1);
-        if (!doneSeen) await processLine(line);
+        await processLine(line);
       }
+      // A valid [DONE] ends the generation. Waiting for EOF would let a late transport error discard
+      // finished text, and a body that never closes would hang until the timeout and get billed again.
+      if (doneSeen) break;
     }
 
     if (!doneSeen) await processLine(buffer.trim());
     if (!doneSeen) throw new Error('OpenRouter stream ended before [DONE].');
+    if (readerState === 'reading') {
+      readerState = 'abandoned';
+      try { Promise.resolve(reader.cancel?.()).catch(() => {}); } catch {}
+    }
 
     return { text, model, usage, stopReason, firstDeltaAt };
   } catch (error) {

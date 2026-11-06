@@ -725,6 +725,7 @@ async function synthesizeWithBinarySplit({
   config,
   options,
   reason,
+  truncationDepth = 0,
 }) {
   if (abstracts.length <= 1) {
     return await callSynthesisModel({
@@ -741,8 +742,8 @@ async function synthesizeWithBinarySplit({
   const left = abstracts.slice(0, mid);
   const right = abstracts.slice(mid);
   const splitPreamble = `${preamble}\n\nThis subset was split automatically because the original synthesis hit ${reason}. Produce a faithful partial chain-of-title segment.`;
-  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options);
-  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options);
+  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth);
+  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth);
   const mergeAbstracts = [
     { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftResult.text },
     { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightResult.text },
@@ -768,7 +769,11 @@ async function synthesizeWithBinarySplit({
   };
 }
 
-async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, systemPrompt, config, options) {
+// A truncation-driven split may happen once per segment. Each level of recursion would otherwise add calls in
+// proportion to the document count, and a half that is still too long fails closed instead of fanning out.
+const MAX_TRUNCATION_SPLIT_DEPTH = 1;
+
+async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, systemPrompt, config, options, truncationDepth = 0) {
   try {
     const result = await callSynthesisModel({
       abstracts,
@@ -782,7 +787,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
     return result;
   } catch (err) {
     const type = classifyError(err);
-    if (abstracts.length > 1 && type === 'output_truncated') {
+    if (abstracts.length > 1 && type === 'output_truncated' && truncationDepth < MAX_TRUNCATION_SPLIT_DEPTH) {
       logSynthesisMetrics({
         event: 'synthesis_max_tokens_split',
         jobId: options.jobId || null,
@@ -799,6 +804,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         config,
         options,
         reason: 'max_tokens',
+        truncationDepth: truncationDepth + 1,
       });
     }
     if (abstracts.length > 1 && (type === 'payload_too_large' || type === 'upstream_timeout')) {
@@ -811,6 +817,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         config,
         options,
         reason: type === 'payload_too_large' ? 'request size' : 'timeout',
+        truncationDepth,
       });
     }
     throw err;

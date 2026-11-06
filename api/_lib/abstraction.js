@@ -688,7 +688,6 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
     errorType: 'storage_error',
     errorMessage: 'PDF split child creation failed.',
     workerId: options.workerId,
-    splitParentChunkId: parentChunk.id,
   };
   let splitComplete = false;
   try {
@@ -726,11 +725,18 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
     splitComplete = true;
     return true;
   } finally {
-    if (!splitComplete && options.store.markChunkAbstractionFailed) {
-      await Promise.all(createdChildIds.map(childId =>
-        options.store.markChunkAbstractionFailed(parentChunk.jobId, childId, splitFailure)));
-    }
+    if (!splitComplete) await abandonSplitChildren(options.store, parentChunk, createdChildIds, splitFailure);
   }
+}
+
+// Cleanup must never replace the error that abandoned the split, so failures here are swallowed.
+async function abandonSplitChildren(store, parentChunk, childIds, failure) {
+  const abandon = store.discardSplitChunk
+    ? childId => store.discardSplitChunk(parentChunk.jobId, childId, { splitParentChunkId: parentChunk.id, workerId: failure.workerId })
+    : store.markChunkAbstractionFailed
+      ? childId => store.markChunkAbstractionFailed(parentChunk.jobId, childId, failure)
+      : null;
+  if (abandon) await Promise.allSettled(childIds.map(abandon));
 }
 
 function computeRetryBackoff(attempt, retryAfter) {

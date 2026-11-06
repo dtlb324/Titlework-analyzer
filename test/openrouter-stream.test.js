@@ -275,18 +275,50 @@ test('consumeOpenRouterMessageStream releases a normally exhausted reader withou
   assertStrict.equal(result.text, 'Synthetic text');
   assertStrict.equal(result.stopReason, 'stop');
   assertStrict.deepEqual(result.usage, { input_tokens: 7, output_tokens: 3 });
-  assertStrict.deepEqual(stats, { cancellations: 0, releases: 1 });
+  // Superseded pin (review follow-up): this used to expect cancellations 0 because the consumer read to EOF
+  // after [DONE]. It now returns at [DONE] and cancels whatever is left, so a late transport error or a body
+  // that never closes cannot discard a finished generation.
+  assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
   assertStrict.equal(body.locked, false);
 });
 
-test('consumeOpenRouterMessageStream drains and ignores frames after [DONE]', async () => {
+test('consumeOpenRouterMessageStream returns at [DONE] and ignores frames after it', async () => {
   const body = nativeBody(completeWire + textFrame('ignored'));
   const stats = observeReader(body);
   const deltas = [];
   const result = await consumeOpenRouterMessageStream(body, { onDelta: delta => { deltas.push(delta); } });
   assertStrict.equal(result.text, 'Synthetic text');
   assertStrict.deepEqual(deltas, ['Synthetic text']);
-  assertStrict.deepEqual(stats, { cancellations: 0, releases: 1 });
+  // Superseded pin (review follow-up): was { cancellations: 0 } when the consumer drained to EOF.
+  assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+});
+
+test('consumeOpenRouterMessageStream returns the finished text when the body never closes after [DONE]', async () => {
+  const body = nativeBody(completeWire, { close: false });
+  const stats = observeReader(body);
+  const result = await Promise.race([
+    consumeOpenRouterMessageStream(body),
+    new Promise(resolve => setTimeout(() => resolve('hung after [DONE]'), 500)),
+  ]);
+  assertStrict.notEqual(result, 'hung after [DONE]');
+  assertStrict.equal(result.text, 'Synthetic text');
+  assertStrict.equal(result.stopReason, 'stop');
+  assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
+});
+
+test('consumeOpenRouterMessageStream keeps the finished text when the transport fails after [DONE]', async () => {
+  const failure = new Error('Synthetic late transport failure');
+  let pulls = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (pulls++ === 0) controller.enqueue(encoder.encode(completeWire));
+      else controller.error(failure);
+    },
+  });
+  const stats = observeReader(body);
+  const result = await consumeOpenRouterMessageStream(body);
+  assertStrict.equal(result.text, 'Synthetic text');
+  assertStrict.equal(stats.releases, 1);
 });
 
 test('consumeOpenRouterMessageStream cancels an abandoned open stream with the original failure and releases its reader', async () => {
@@ -383,7 +415,9 @@ test('consumeOpenRouterMessageStream preserves results and errors when reader me
     const promise = consumeOpenRouterMessageStream({ getReader: () => reader }, success ? {} : { onEvent() { throw failure; } });
     if (success) assertStrict.equal((await promise).text, 'Synthetic text');
     else await assertStrict.rejects(promise, error => error === failure);
-    assertStrict.equal(cancellations, success ? 0 : 1);
+    // Superseded pin (review follow-up): success used to expect 0 cancellations. The consumer now cancels the
+    // rest of the body at a valid [DONE]; a cancel that throws must still not discard the finished text.
+    assertStrict.equal(cancellations, 1);
     assertStrict.equal(releases, 1);
   }
 });
