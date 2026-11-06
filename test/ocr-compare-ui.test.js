@@ -827,3 +827,93 @@ test('abstained transcript fields render no transcribed fields to score', async 
   assert.match(allText(h.elements.baseline), /Document accuracy: no transcribed fields to score\./);
   assert.equal(h.elements['accuracy-rank'].children.length, 0);
 });
+
+test('a failed settings reload keeps the previous completed results and download until new work starts', async () => {
+  const config = (h, overrides) => ({ ok: true, json: async () => ({ models: h.models, maxPages: 10, maxBytes: 12000000, renderScale: 2, ...overrides }) });
+  const failures = {
+    'rejected password': () => ({ ok: false, status: 401, json: async () => ({}) }),
+    'malformed model configuration': h => config(h, { renderScale: 3 }),
+    'server page limit below the document': h => config(h, { maxPages: 0 }),
+    'server byte limit below the document': h => config(h, { maxBytes: 2 }),
+  };
+  for (const [label, failure] of Object.entries(failures)) {
+    const h = multiHarness();
+    const inner = h.deps.fetch;
+    let reload = null;
+    h.deps.fetch = async (url, options) => {
+      if (options.method === 'GET' && reload) { h.calls.push({ url, ...options }); return reload(); }
+      return inner(url, options);
+    };
+    ui.createCompareUI(h.deps);
+    await selectMany(h, [named('a.png'), named('b.png')]);
+    await h.elements['compare-form'].fire('submit');
+    await h.elements.download.fire('click');
+    const firstReport = await h.blobs.at(-1).text();
+    const shownBefore = allText(h.elements.baseline);
+    const diffRowsBefore = h.elements.differences.children.length;
+    const settingsBefore = h.elements.settings.textContent;
+    assert.equal(h.elements.download.disabled, false, label);
+    reload = () => failure(h);
+    const posts = h.calls.filter(call => call.method === 'POST').length;
+    await h.elements['compare-form'].fire('submit');
+    assert.equal(h.calls.filter(call => call.method === 'POST').length, posts, `${label}: no new POST`);
+    assert.match(h.elements.status.textContent, /Comparison failed/, label);
+    assert.equal(h.elements.download.disabled, false, `${label}: Download stays available`);
+    assert.deepEqual(h.elements.batch.children.map(row => row.children[2].textContent), ['Done', 'Done'], `${label}: finished rows stay Done`);
+    assert.equal(allText(h.elements.baseline), shownBefore, `${label}: shown result is unchanged`);
+    assert.equal(h.elements.differences.children.length, diffRowsBefore, label);
+    assert.equal(h.elements.settings.textContent, settingsBefore, label);
+    const blobsBefore = h.blobs.length;
+    await h.elements.download.fire('click');
+    assert.equal(h.blobs.length, blobsBefore + 1, `${label}: Download still produces a report`);
+    assert.equal(await h.blobs.at(-1).text(), firstReport, `${label}: the report is the earlier completed one`);
+  }
+});
+
+test('results are replaced once a rerun actually starts, so stale output is never shown beside new work', async () => {
+  const h = multiHarness();
+  const inner = h.deps.fetch;
+  let release, hold = false;
+  h.deps.fetch = async (url, options) => {
+    if (options.method === 'POST' && hold) { h.calls.push({ url, ...options }); await new Promise(resolve => { release = resolve; }); return { ok: true, json: async () => ({ ...h.result, filename: 'a.png', models: h.models.map(model => ({ ...model, text: 'second run', stopReason: 'STOP' })) }) }; }
+    return inner(url, options);
+  };
+  ui.createCompareUI(h.deps);
+  await selectMany(h, [named('a.png')]);
+  await h.elements['compare-form'].fire('submit');
+  assert.equal(h.elements.download.disabled, false);
+  hold = true;
+  const rerun = h.elements['compare-form'].fire('submit');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.elements.download.disabled, true, 'download is off while the replacement runs');
+  assert.doesNotMatch(allText(h.elements.baseline), /a\.png:gemini/, 'the previous output is not shown as current');
+  assert.match(h.elements.batch.children[0].children[2].textContent, /Running/);
+  release();
+  await rerun;
+  assert.match(allText(h.elements.baseline), /second run/);
+  assert.equal(h.elements.download.disabled, false);
+});
+
+test('a non-first file that finishes preparing while selected shows its page previews', async () => {
+  const release = {};
+  const pages = name => [{ mediaType: 'image/png', data: 'YWJj', blob: new Blob([name]), width: 1, height: 1 }, { mediaType: 'image/png', data: 'YWJj', blob: new Blob([name]), width: 2, height: 2 }];
+  const h = harness({ prepareDocument: file => new Promise(resolve => { release[file.name] = () => resolve(pages(file.name)); }) });
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  h.elements.document.files = [named('a.png'), named('b.png'), named('c.png')];
+  const preparing = h.elements.document.fire('change');
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick();
+  release['a.png'](); await tick();
+  assert.equal(h.elements.previews.children.length, 2, 'file 1 is selected and shown');
+  const view = index => h.elements.batch.children[index].children[5].children[0];
+  await view(1).fire('click');
+  assert.equal(h.elements.previews.children.length, 0, 'file 2 is still preparing');
+  release['b.png'](); await tick();
+  assert.equal(h.elements.previews.children.length, 2, 'the selected file shows its pages as soon as it is ready');
+  assert.match(allText(h.elements.previews), /Page 2 · 2 × 2 pixels/);
+  release['c.png'](); await preparing;
+  assert.equal(h.elements.previews.children.length, 2, 'finishing an unselected file leaves the selected pane alone');
+  await view(0).fire('click');
+  assert.equal(h.elements.previews.children.length, 2);
+});

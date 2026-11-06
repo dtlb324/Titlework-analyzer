@@ -114,6 +114,9 @@ function validateRequestBody(body) {
         if (!block.type || !['text', 'image', 'document'].includes(block.type)) {
           return { valid: false, reason: 'Invalid content block type.' };
         }
+        if (block.type === 'text' && Object.hasOwn(block, 'source')) {
+          return { valid: false, reason: 'Text blocks cannot include a source.' };
+        }
         if (block.type === 'image') {
           if (!block.source || block.source.type !== 'base64') {
             return { valid: false, reason: 'Invalid image block.' };

@@ -227,7 +227,7 @@ function collectGeminiFileNamesFromMessages(messages = []) {
     if (!Array.isArray(content)) continue;
     for (const block of content) {
       const source = block?.source;
-      if (source?.type === 'file_uri' && source.geminiFileName) {
+      if ((block.type === 'document' || block.type === 'image') && source?.type === 'file_uri' && source.geminiFileName) {
         names.add(source.geminiFileName);
       }
     }

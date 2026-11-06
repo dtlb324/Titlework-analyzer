@@ -1809,6 +1809,34 @@ function createPostgresJobStore() {
       return rowToChunk(rows[0]);
     },
 
+    // Undoes a split that did not complete. The children were created by this worker and never abstracted, so they
+    // are removed (not marked failed): a failed child would keep counting in job and document rollups after the
+    // parent later succeeds unsplit, and re-marking it superseded would make a retried split skip it for good.
+    // Only pending children of a parent this worker still holds are removed.
+    async discardSplitChunk(jobId, chunkId, { splitParentChunkId, workerId }) {
+      await ensureSchema();
+      const rows = await sql`
+        DELETE FROM document_chunks
+        WHERE job_id = ${jobId}
+          AND id = ${chunkId}
+          AND split_parent_chunk_id = ${splitParentChunkId ?? null}::text
+          AND abstraction_status = 'pending'
+          AND EXISTS (
+            SELECT 1 FROM document_chunks parent
+            WHERE parent.job_id = ${jobId}
+              AND parent.id = ${splitParentChunkId ?? null}::text
+              AND parent.abstraction_status = 'processing'
+              AND parent.abstraction_worker_id = ${workerId ?? null}::text
+          )
+        RETURNING *
+      `;
+      if (!rows[0]) return null;
+      await refreshDocumentCounts(jobId, rows[0].document_id);
+      await refreshUploadCounts(jobId);
+      await refreshAbstractionCounts(jobId);
+      return rowToChunk(rows[0]);
+    },
+
     async markChunkAbstractionSplitSuperseded(jobId, chunkId, reason, workerId = null) {
       await ensureSchema();
       const rows = await sql`

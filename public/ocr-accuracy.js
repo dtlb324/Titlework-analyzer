@@ -10,6 +10,8 @@ export function normalizeForMatch(value) {
   if (typeof value !== 'string') return '';
   return value
     .toLowerCase()
+    .replace(/[\u2018\u2019\u201B\u02BC]/g, "'")
+    .replace(/[\u2010-\u2015]/g, '-')
     .replace(/\b(\d+)(st|nd|rd|th)\b/g, '$1')
     .replace(/\b(jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b/g, month => MONTHS[month])
     .replace(/a\.d\./g, '')
@@ -18,6 +20,15 @@ export function normalizeForMatch(value) {
     .replace(/[.,;:'"]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+const WORD = '[\\p{L}\\p{N}]';
+
+function containsField(haystack, needle) {
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lead = /^[\p{L}\p{N}]/u.test(needle) ? `(?<!${WORD})(?<!${WORD}-)` : '';
+  const trail = /[\p{L}\p{N}]$/u.test(needle) ? `(?!${WORD})(?!-${WORD})` : '';
+  return new RegExp(lead + escaped + trail, 'u').test(haystack);
 }
 
 function modelFailed(model) {
@@ -33,7 +44,7 @@ function consider(model, name, required, haystack, tally) {
   if (ABSTAIN.test(raw.trim())) return;
   tally.scored += 1;
   const needle = normalizeForMatch(raw);
-  if (needle && haystack.includes(needle)) tally.matched += 1;
+  if (needle && containsField(haystack, needle)) tally.matched += 1;
 }
 
 export function scoreModel(documentText, model) {

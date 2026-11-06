@@ -1,4 +1,9 @@
 
+import { normalizeOpenRouterFinishReason } from './openrouter-request.js';
+
+// Compared after normalization: OpenRouter's 'length' is 'max_tokens' here.
+const VALID_FINISH_REASONS = new Set(['stop', 'max_tokens', 'tool_calls', 'content_filter', 'function_call']);
+
 /**
  * Consume an OpenAI-format SSE stream from OpenRouter.
  *
@@ -14,23 +19,37 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
   let stopReason = null;
   let model = null;
   let firstDeltaAt = null;
+  let doneSeen = false;
 
   const decoder = new TextDecoder();
   let buffer = '';
 
   const reader = body.getReader();
 
-  function processLine(line) {
+  async function processLine(line) {
     if (!line.startsWith('data:')) return;
 
     const data = line.slice(5).trim();
-    if (data === '[DONE]') return true;
+    if (data === '[DONE]') {
+      if (!VALID_FINISH_REASONS.has(stopReason)) {
+        throw new Error('OpenRouter [DONE] received without a valid finish reason.');
+      }
+      doneSeen = true;
+      return;
+    }
 
     let parsed;
     try {
       parsed = JSON.parse(data);
     } catch {
       return;
+    }
+
+    if (parsed?.error) {
+      if (options?.onEvent) await options.onEvent(parsed);
+      const errorCode = parsed.error.code ?? parsed.error.type ?? 'unknown_error';
+      const errorMessage = parsed.error.message || 'Unknown provider error.';
+      throw new Error(`OpenRouter stream error (${errorCode}): ${errorMessage}`);
     }
 
     const choices = parsed?.choices || [];
@@ -45,12 +64,12 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
 
     if (deltaText) {
       text += deltaText;
-      if (options?.onDelta) options.onDelta(deltaText);
+      if (options?.onDelta) await options.onDelta(deltaText, text);
     }
 
     const finishReason = choices[0]?.finish_reason;
     if (finishReason) {
-      stopReason = finishReason;
+      stopReason = normalizeOpenRouterFinishReason(finishReason);
     }
 
     const usageMeta = parsed?.usage;
@@ -64,31 +83,53 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
     }
 
     if (options?.onEvent) {
-      options.onEvent(parsed);
+      await options.onEvent(parsed);
     }
   }
 
+  let readerState = 'reading';
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        readerState = 'failed';
+        throw error;
+      }
+      const { done, value } = chunk;
+      if (done) {
+        readerState = 'exhausted';
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
 
       let lineIndex;
-      while ((lineIndex = buffer.indexOf('\n')) !== -1) {
+      while (!doneSeen && (lineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, lineIndex).trimEnd();
         buffer = buffer.slice(lineIndex + 1);
-        if (processLine(line)) {
-          return { text, model, usage, stopReason, firstDeltaAt };
-        }
+        await processLine(line);
       }
+      // A valid [DONE] ends the generation. Waiting for EOF would let a late transport error discard
+      // finished text, and a body that never closes would hang until the timeout and get billed again.
+      if (doneSeen) break;
     }
+
+    if (!doneSeen) await processLine(buffer.trim());
+    if (!doneSeen) throw new Error('OpenRouter stream ended before [DONE].');
+    if (readerState === 'reading') {
+      readerState = 'abandoned';
+      try { Promise.resolve(reader.cancel?.()).catch(() => {}); } catch {}
+    }
+
+    return { text, model, usage, stopReason, firstDeltaAt };
+  } catch (error) {
+    if (readerState === 'reading') {
+      try { Promise.resolve(reader.cancel?.(error)).catch(() => {}); } catch {}
+    }
+    throw error;
   } finally {
-    reader.releaseLock?.();
+    try { reader.releaseLock?.(); } catch {}
   }
-
-  processLine(buffer.trim());
-
-  return { text, model, usage, stopReason, firstDeltaAt };
 }

@@ -1247,17 +1247,26 @@ async function saveJobName(job, value) {
   }
 }
 
+const liveAnalysisRuns = new Set();
+
 function beginAnalysisRun(jobId) {
-  activeAnalysisRun = { jobId, cancelled: false };
-  return activeAnalysisRun;
+  const run = { jobId, cancelled: false };
+  liveAnalysisRuns.add(run);
+  activeAnalysisRun = run;
+  return run;
 }
 
-function isAnalysisCanceled(jobId) {
-  return Boolean(activeAnalysisRun?.cancelled && activeAnalysisRun.jobId === jobId);
+function isAnalysisCanceled(run) {
+  return Boolean(run?.cancelled);
 }
 
-function endAnalysisRun(jobId) {
-  if (activeAnalysisRun?.jobId === jobId) activeAnalysisRun = null;
+function cancelAllAnalysisRuns() {
+  liveAnalysisRuns.forEach(run => { run.cancelled = true; });
+}
+
+function endAnalysisRun(run) {
+  liveAnalysisRuns.delete(run);
+  if (activeAnalysisRun === run) activeAnalysisRun = null;
 }
 
 function prepareHomeForAnalysisRun() {
@@ -1271,7 +1280,7 @@ function prepareHomeForAnalysisRun() {
 function resetHomeForNewJob() {
   stopJobPolling();
   clearProgressTimer();
-  if (activeAnalysisRun) activeAnalysisRun.cancelled = true;
+  cancelAllAnalysisRuns();
   activeAnalysisRun = null;
   files.forEach(freeFileMemory);
   files = [];
@@ -1317,8 +1326,7 @@ function resetHomeForNewJob() {
   if (analyzeBtn) analyzeBtn.disabled = true;
 }
 
-function handleJobCanceled(job) {
-  if (job?.id && activeAnalysisRun?.jobId === job.id) activeAnalysisRun.cancelled = true;
+function handleJobCanceled() {
   resetHomeForNewJob();
   navigate('#/');
 }
@@ -1431,7 +1439,7 @@ async function runJobAction(job, endpointPath, opts = {}) {
       return;
     }
     if (endpointPath === '/cancel') {
-      handleJobCanceled(job);
+      handleJobCanceled();
       return;
     }
     if (activeJobPollState && !activeJobPollState.cancelled && activeJobPollState.jobId === job.id) {
@@ -1503,6 +1511,7 @@ function renderJobActions(job) {
 }
 
 const jobFollowupHistoryByJob = new Map();
+const jobFollowupsInFlight = new Set();
 
 function renderJobResults(job, result) {
   const el = document.getElementById('jobResults');
@@ -1539,7 +1548,8 @@ function renderJobResults(job, result) {
     }
     const submit = async () => {
       const q = (input?.value || '').trim();
-      if (!q || !btn) return;
+      if (!q || !btn || jobFollowupsInFlight.has(job.id)) return;
+      jobFollowupsInFlight.add(job.id);
       btn.disabled = true;
       const prevLabel = btn.textContent;
       btn.textContent = 'Asking…';
@@ -1575,6 +1585,7 @@ function renderJobResults(job, result) {
       } catch (err) {
         alert(err.message || 'Follow-up failed.');
       } finally {
+        jobFollowupsInFlight.delete(job.id);
         if (btn) {
           btn.disabled = false;
           btn.textContent = prevLabel;
@@ -2325,14 +2336,60 @@ function kickServerWorkflowBatch(runBatch) {
   void runBatch().catch(err => console.warn('Could not kick server workflow batch', err));
 }
 
-async function pollServerAbstraction(jobId, items, totalDocuments) {
+const SERVER_READ_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+
+async function readServerState(read, run) {
+  for (let failures = 0; ; failures++) {
+    try {
+      return await read();
+    } catch (err) {
+      if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
+      if (failures >= SERVER_READ_RETRY_DELAYS_MS.length) throw err;
+      console.warn('Server job read failed; retrying', err);
+      await sleep(SERVER_READ_RETRY_DELAYS_MS[failures]);
+    }
+  }
+}
+
+// Start endpoints are idempotent (they re-queue and tolerate status-transition conflicts), so a start that
+// failed ambiguously is retried with the same bounded backoff as reads. Definite answers are never retried:
+// 4xx, and 503 carrying the browser-fallback hint (server setup unavailable, nothing started).
+function isDefiniteStartAnswer(err) {
+  if (err?.status === 503 && err.data?.fallback) return true;
+  return typeof err?.status === 'number' && err.status < 500;
+}
+
+async function startServerWork(start, run) {
+  for (let failures = 0; ; failures++) {
+    try {
+      return await start();
+    } catch (err) {
+      if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
+      if (isDefiniteStartAnswer(err) || failures >= SERVER_READ_RETRY_DELAYS_MS.length) throw err;
+      console.warn('Server job start failed; retrying', err);
+      await sleep(SERVER_READ_RETRY_DELAYS_MS[failures]);
+    }
+  }
+}
+
+function allowBrowserFallbackIfNotStarted(err, fallbackHint) {
+  if (err?.status === 503 && err.data?.fallback === fallbackHint) err.browserFallback = true;
+  return err;
+}
+
+function showServerRunUnconfirmed(jobId, err) {
+  showError(`Could not confirm server job ${jobId} (${err.message}). It may still be running, so no browser analysis was started. Keep this page open to follow its status, or reopen the job from Recent jobs.`);
+  clearProgressTimer();
+}
+
+async function pollServerAbstraction(jobId, items, totalDocuments, run) {
   let latest = null;
   let lastTerminalCount = -1;
   let stallPolls = 0;
   const STALL_THRESHOLD = 4;
   for (let attempt = 0; attempt < 1800; attempt++) {
-    if (isAnalysisCanceled(jobId)) throw new Error('Job canceled.');
-    latest = await fetchServerAbstractionStatus(jobId);
+    if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
+    latest = await readServerState(() => fetchServerAbstractionStatus(jobId), run);
     const status = latest.status || {};
     const completed = status.completed || 0;
     const failed = status.failed || 0;
@@ -2455,7 +2512,7 @@ function publicJobResultFromApi(payload) {
   return payload.result || payload || null;
 }
 
-async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
+async function pollServerSynthesis(jobId, items, totalDocs, onProgress, run) {
   let latest = null;
   let cachedResult = null;
   let lastSignature = '';
@@ -2464,8 +2521,8 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   let mergeStartedAt = null;
   const STALL_THRESHOLD = 4;
   for (let attempt = 0; attempt < 1800; attempt++) {
-    if (isAnalysisCanceled(jobId)) throw new Error('Job canceled.');
-    latest = await fetchServerSynthesisStatus(jobId);
+    if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
+    latest = await readServerState(() => fetchServerSynthesisStatus(jobId), run);
     const status = latest.status || {};
     const complete = status.complete || 0;
     const total = status.total || 0;
@@ -2531,18 +2588,19 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress) {
   throw new Error('Server-side synthesis did not finish polling in this browser session.');
 }
 
-async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
+async function runServerSynthesis(jobId, totalDocs, items, onProgress, run) {
   showKeepOpenNotice();
   if (onProgress) onProgress(88, 'Starting server-side synthesis from saved abstracts...');
-  const started = await startServerSynthesis(jobId);
+  const started = await startServerWork(() => startServerSynthesis(jobId), run)
+    .catch(err => { throw allowBrowserFallbackIfNotStarted(err, 'browser_synthesis'); });
   kickServerWorkflowBatch(() => processServerSynthesisBatch(jobId));
   const status = started.status || {};
   const settled = isServerSynthesisTerminal(status)
     ? started
-    : await pollServerSynthesis(jobId, items, totalDocs, onProgress);
+    : await pollServerSynthesis(jobId, items, totalDocs, onProgress, run);
   let result = publicJobResultFromApi(settled);
   if (!result?.finalTitleOpinion) {
-    const final = await fetchServerJobResult(jobId);
+    const final = await readServerState(() => fetchServerJobResult(jobId), run);
     result = final?.result || null;
   }
   if (!result?.finalTitleOpinion) {
@@ -2551,18 +2609,19 @@ async function runServerSynthesis(jobId, totalDocs, items, onProgress) {
   return { result, status: settled.status };
 }
 
-async function runServerDocumentAbstraction(jobId, fileList, items) {
+async function runServerDocumentAbstraction(jobId, fileList, items, run) {
   showKeepOpenNotice();
   updateProgress(8, 'Starting server-side abstraction from durable chunks...', items);
-  const start = await startServerAbstraction(jobId);
+  const start = await startServerWork(() => startServerAbstraction(jobId), run)
+    .catch(err => { throw allowBrowserFallbackIfNotStarted(err, 'browser_abstraction'); });
   kickServerWorkflowBatch(() => processServerAbstractionBatch(jobId));
   const latest = isServerAbstractionTerminal(start.status)
     ? start
-    : await pollServerAbstraction(jobId, items, fileList.length);
+    : await pollServerAbstraction(jobId, items, fileList.length, run);
   const status = latest.status || {};
-  const abstracts = await fetchServerAbstracts(jobId);
+  const abstracts = await readServerState(() => fetchServerAbstracts(jobId), run);
   if (!abstracts.length) {
-    throw new Error('Server-side abstraction failed before saving any abstracts; falling back to browser abstraction.');
+    throw Object.assign(new Error('Server-side abstraction failed before saving any abstracts; falling back to browser abstraction.'), { browserFallback: true });
   }
   if ((status.failed || 0) > 0) {
     showError(`Server-side abstraction completed with ${status.failed} failed chunk(s); continuing synthesis with ${abstracts.length} saved abstract(s). Retry failed chunks from the job status API before final use if needed.`);
@@ -3487,24 +3546,20 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
 
 function parseBatchResult(result, batchFiles, globalStartIdx) {
   const trimmed = String(result || '').trim();
-  let unlabeledFallbackUsed = false;
-  return batchFiles.map((f, j) => {
+  const missing = [];
+  const parsed = batchFiles.map((f, j) => {
     const docNum = globalStartIdx + j + 1;
     const nextDocNum = docNum + 1;
-    const regex = new RegExp(`DOCUMENT\\s*#${docNum}\\s*:?([\\s\\S]*?)(?=DOCUMENT\\s*#${nextDocNum}\\s*:|$)`, 'i');
-    const match = result.match(regex);
+    const regex = new RegExp(`DOCUMENT\\s*#${docNum}(?!\\d)\\s*:?([\\s\\S]*?)(?=DOCUMENT\\s*#${nextDocNum}\\s*:|$)`, 'i');
+    const match = trimmed.match(regex);
     const pageRange = f.pageRange || [];
-    let abstract;
+    let abstract = '';
     if (match) {
       abstract = match[1].trim();
     } else if (batchFiles.length === 1) {
       abstract = trimmed;
-    } else if (!unlabeledFallbackUsed) {
-      abstract = trimmed;
-      unlabeledFallbackUsed = true;
-    } else {
-      abstract = '';
     }
+    if (!abstract) missing.push(f.name);
     return {
       filename: f.name,
       sourceFilename: f.splitFrom || f.sourceOriginalFile?.name || f.name,
@@ -3518,6 +3573,10 @@ function parseBatchResult(result, batchFiles, globalStartIdx) {
       abstract,
     };
   });
+  if (missing.length) {
+    throw new Error(`The model response had no usable DOCUMENT section for ${missing.join(', ')}.`);
+  }
+  return parsed;
 }
 
 async function analyze() {
@@ -3546,13 +3605,14 @@ async function analyze() {
     return;
   }
 
-  beginAnalysisRun(job.id);
+  const run = beginAnalysisRun(job.id);
   try {
   updateProgress(0, 'Checking durable file storage...', null);
   const uploadRegistration = await registerJobUploads(job.id, files).catch(err => ({
     durable: false,
     warning: durableUploadWarning(err.message),
   }));
+  if (isAnalysisCanceled(run)) return;
   if (uploadRegistration.warning) {
     showError(uploadRegistration.warning);
   } else if (uploadRegistration.durable) {
@@ -3581,12 +3641,14 @@ async function analyze() {
 
   if (uploadRegistration.durable) {
     try {
-      const serverAbstraction = await runServerDocumentAbstraction(job.id, files, items);
+      const serverAbstraction = await runServerDocumentAbstraction(job.id, files, items, run);
+      if (isAnalysisCanceled(run)) return;
       documentAbstracts = groupAbstractsBySourceDocument(serverAbstraction.abstracts);
       usedServerAbstraction = true;
       serverAbstractionFailedCount = serverAbstraction.failedChunkCount;
     } catch (serverErr) {
-      if (isAnalysisCanceled(job.id)) return;
+      if (isAnalysisCanceled(run)) return;
+      if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
       showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);
     }
   }
@@ -3600,9 +3662,11 @@ async function analyze() {
     });
 
     try {
-      documentAbstracts = groupAbstractsBySourceDocument(await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id));
+      const browserAbstracts = groupAbstractsBySourceDocument(await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id));
+      if (isAnalysisCanceled(run)) return;
+      documentAbstracts = browserAbstracts;
     } catch (e) {
-      if (isAnalysisCanceled(job.id)) return;
+      if (isAnalysisCanceled(run)) return;
       await safePatchAnalysisJob(job.id, {
         status: 'failed',
         completedDocuments: activeJobCompletedDocuments,
@@ -3620,7 +3684,7 @@ async function analyze() {
     }
   }
 
-  if (isAnalysisCanceled(job.id)) return;
+  if (isAnalysisCanceled(run)) return;
 
   if (activeProgressTimer) activeProgressTimer.phase = 'synthesis';
   items[items.length - 1].status = 'active';
@@ -3652,18 +3716,19 @@ async function analyze() {
             failedDocuments: serverAbstractionFailedCount,
             currentPhase: label,
           });
-        });
+        }, run);
         synthesis = serverResult.result.finalTitleOpinion;
         usedServerSynthesis = true;
         if (serverResult.result.warnings?.length) {
           showError(`Server synthesis completed with warnings: ${serverResult.result.warnings.slice(0, 3).join('; ')}.`);
         }
       } catch (serverErr) {
-        if (isAnalysisCanceled(job.id)) return;
+        if (isAnalysisCanceled(run)) return;
+        if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
         showError(`Server-side synthesis unavailable (${serverErr.message}); falling back to browser synthesis. Keep this tab open until the run finishes.`);
       }
     }
-    if (isAnalysisCanceled(job.id)) return;
+    if (isAnalysisCanceled(run)) return;
     if (!usedServerSynthesis) {
       let synthStep = 0;
       const synthSteps = Math.max(1, Math.ceil(documentAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
@@ -3680,7 +3745,7 @@ async function analyze() {
         });
       });
     }
-    if (isAnalysisCanceled(job.id)) return;
+    if (isAnalysisCanceled(run)) return;
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis complete — ${documentAbstracts.length} document abstracts synthesized${serverAbstractionFailedCount ? ` (${serverAbstractionFailedCount} failed chunk(s) omitted)` : ''}`, items);
     if (!usedServerSynthesis) {
@@ -3696,6 +3761,7 @@ async function analyze() {
         synthesisDriver: 'browser',
       });
     }
+    if (isAnalysisCanceled(run)) return;
     clearProgressTimer();
     stopJobPolling();
     files.forEach(freeFileMemory);
@@ -3704,12 +3770,13 @@ async function analyze() {
       { role: 'assistant', content: synthesis, kind: 'title-opinion', sourceJobId: usedServerSynthesis ? job.id : null },
     ];
     setTimeout(() => {
+      if (isAnalysisCanceled(run)) return;
       document.getElementById('progressSection').style.display = 'none';
       renderResults();
       document.getElementById('followupSection').style.display = 'block';
     }, 600);
   } catch (e) {
-    if (isAnalysisCanceled(job.id)) return;
+    if (isAnalysisCanceled(run)) return;
     await safePatchAnalysisJob(job.id, {
       status: 'failed',
       completedDocuments: completedDocumentsForJob(documentAbstracts.length, files.length),
@@ -3725,7 +3792,7 @@ async function analyze() {
     document.getElementById('analyzeBtn').disabled = false;
   }
   } finally {
-    endAnalysisRun(job.id);
+    endAnalysisRun(run);
   }
 }
 
@@ -3769,15 +3836,27 @@ function buildFollowupMessages(question, titleOpinionOverride = null, priorPairs
   }];
 }
 
-async function askFollowup() {
-  const q = document.getElementById('followupInput').value.trim();
+let followupTurnQueue = Promise.resolve();
+
+function askFollowup() {
+  const input = document.getElementById('followupInput');
+  const q = input.value.trim();
   if (!q) return;
-  document.getElementById('followupInput').value = '';
+  input.value = '';
   clearError();
-  conversationHistory.push({ role: 'user', content: q, kind: 'followup' });
+  const history = conversationHistory;
+  const turn = followupTurnQueue.then(() => runFollowupTurn(q, history));
+  followupTurnQueue = turn.catch(() => {});
+  return turn;
+}
+
+async function runFollowupTurn(q, history) {
+  if (conversationHistory !== history) return;
+  const question = { role: 'user', content: q, kind: 'followup' };
+  history.push(question);
   renderResults();
   try {
-    const serverJobId = conversationHistory
+    const serverJobId = history
       .slice()
       .reverse()
       .find(m => m.role === 'assistant' && m.kind === 'title-opinion' && m.sourceJobId)?.sourceJobId || null;
@@ -3812,10 +3891,13 @@ async function askFollowup() {
         label: 'Follow-up request',
       });
     }
-    conversationHistory.push({ role: 'assistant', content: reply, kind: 'followup' });
+    if (conversationHistory !== history) return;
+    history.push({ role: 'assistant', content: reply, kind: 'followup' });
   } catch (e) {
+    if (conversationHistory !== history) return;
     showError('Error: ' + e.message);
-    conversationHistory.pop();
+    const at = history.indexOf(question);
+    if (at !== -1) history.splice(at, 1);
   }
   renderResults();
 }
@@ -3868,9 +3950,13 @@ function md(text) {
   return h;
 }
 
+let addDocsListenersBound = false;
+
 function showAddDocs() {
   document.getElementById('addDocsSection').style.display = 'block';
   document.getElementById('followupSection').style.display = 'none';
+  if (addDocsListenersBound) return;
+  addDocsListenersBound = true;
   const zone2 = document.getElementById('uploadZone2');
   ['dragenter','dragover'].forEach(evt => zone2.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone2.classList.add('drag'); }));
   ['dragleave','drop'].forEach(evt => zone2.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone2.classList.remove('drag'); }));
@@ -3971,7 +4057,7 @@ async function analyzeAdditional() {
     return;
   }
 
-  beginAnalysisRun(job.id);
+  const run = beginAnalysisRun(job.id);
   try {
   updateProgress(0, 'Checking durable file storage...', null);
   let importedContinuation = false;
@@ -3991,6 +4077,7 @@ async function analyzeAdditional() {
     durable: false,
     warning: durableUploadWarning(err.message),
   }));
+  if (isAnalysisCanceled(run)) return;
   if (uploadRegistration.warning) {
     showError(uploadRegistration.warning);
   } else if (uploadRegistration.durable) {
@@ -4012,17 +4099,18 @@ async function analyzeAdditional() {
 
   if (uploadRegistration.durable) {
     try {
-      const serverAbstraction = await runServerDocumentAbstraction(job.id, newFiles, items);
+      const serverAbstraction = await runServerDocumentAbstraction(job.id, newFiles, items, run);
       newAbstracts = groupAbstractsBySourceDocument(serverAbstraction.abstracts);
       usedServerAbstraction = true;
       serverAbstractionFailedCount = serverAbstraction.failedChunkCount;
     } catch (serverErr) {
-      if (isAnalysisCanceled(job.id)) return;
+      if (isAnalysisCanceled(run)) return;
+      if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
       showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);
     }
   }
 
-  if (isAnalysisCanceled(job.id)) return;
+  if (isAnalysisCanceled(run)) return;
 
   if (!usedServerAbstraction) {
     await safePatchAnalysisJob(job.id, {
@@ -4036,7 +4124,7 @@ async function analyzeAdditional() {
         await runDocumentAbstraction(newFiles, priorCount, items, showAllProgress, `additional-${priorCount}`, job.id)
       );
     } catch (e) {
-      if (isAnalysisCanceled(job.id)) return;
+      if (isAnalysisCanceled(run)) return;
       await safePatchAnalysisJob(job.id, {
         status: 'failed',
         completedDocuments: priorCount + activeJobCompletedDocuments,
@@ -4057,6 +4145,7 @@ async function analyzeAdditional() {
   let allAbstracts;
   if (usedServerAbstraction && importedContinuation) {
     allAbstracts = groupAbstractsBySourceDocument(await fetchServerAbstracts(job.id));
+    if (isAnalysisCanceled(run)) return;
   } else {
     allAbstracts = groupAbstractsBySourceDocument([...priorAbstracts, ...newAbstracts]);
   }
@@ -4091,18 +4180,19 @@ async function analyzeAdditional() {
             failedDocuments: serverAbstractionFailedCount,
             currentPhase: label,
           });
-        });
+        }, run);
         synthesis = serverResult.result.finalTitleOpinion;
         usedServerSynthesis = true;
         if (serverResult.result.warnings?.length) {
           showError(`Server synthesis completed with warnings: ${serverResult.result.warnings.slice(0, 3).join('; ')}.`);
         }
       } catch (serverErr) {
-        if (isAnalysisCanceled(job.id)) return;
+        if (isAnalysisCanceled(run)) return;
+        if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
         showError(`Server-side synthesis unavailable (${serverErr.message}); falling back to browser synthesis. Keep this tab open until the run finishes.`);
       }
     }
-    if (isAnalysisCanceled(job.id)) return;
+    if (isAnalysisCanceled(run)) return;
     if (!usedServerSynthesis) {
       let synthStep = 0;
       const synthSteps = Math.max(1, Math.ceil(allAbstracts.length / SYNTHESIS_CHUNK_SIZE) + 1);
@@ -4129,7 +4219,7 @@ async function analyzeAdditional() {
         synthesisDriver: 'browser',
       });
     }
-    if (isAnalysisCanceled(job.id)) return;
+    if (isAnalysisCanceled(run)) return;
     items[items.length - 1].status = 'done';
     updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
     clearProgressTimer();
@@ -4153,13 +4243,14 @@ async function analyzeAdditional() {
     });
 
     setTimeout(() => {
+      if (isAnalysisCanceled(run)) return;
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('fileList2').innerHTML = '';
       document.getElementById('followupSection').style.display = 'block';
       renderResults();
     }, 600);
   } catch (e) {
-    if (isAnalysisCanceled(job.id)) return;
+    if (isAnalysisCanceled(run)) return;
     await safePatchAnalysisJob(job.id, {
       status: 'failed',
       completedDocuments: completedDocumentsForJob(allAbstracts.length, totalAfter),
@@ -4175,7 +4266,7 @@ async function analyzeAdditional() {
     document.getElementById('addDocsBtn').disabled = false;
   }
   } finally {
-    endAnalysisRun(job.id);
+    endAnalysisRun(run);
   }
 }
 

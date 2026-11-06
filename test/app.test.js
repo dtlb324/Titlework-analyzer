@@ -246,9 +246,12 @@ test('durable upload document identity includes checksum to avoid same-name merg
   assert(!script.includes('fingerprint: `${sourceName}:${entry.originalSizeBytes || entry.size || 0}`'), 'Filename and size alone should not identify source documents');
 });
 
+// Superseded by browser finding 1: the old pin required the first file of an unlabeled multi-file batch to
+// receive the whole answer and later files empty abstracts (silently dropped). Now no file receives text it
+// has no label for, and a missing section fails the batch. Behavior is covered in test/browser-bughunt.test.js.
 test('parseBatchResult does not duplicate unlabeled batch text across files', () => {
-  assert(script.includes('let unlabeledFallbackUsed = false'), 'Missing unlabeled batch fallback guard');
-  assert(script.includes("abstract = ''"), 'Extra batch files without labels should get empty abstracts');
+  assert(!script.includes('unlabeledFallbackUsed'), 'Unlabeled batch text must not be assigned to any file');
+  assert(script.includes('had no usable DOCUMENT section'), 'Missing batch sections must fail the batch');
 });
 
 test('browser synthesis groups split server abstracts by source document', () => {

@@ -440,9 +440,10 @@ export async function processSynthesisBatch(jobId, options = {}) {
     batchLimit: resolveSynthesisBatchLimit(options),
     budgetMs: options.budgetMs ?? DEFAULT_BUDGET_MS,
     leaseMs: options.leaseMs ?? Math.max(60_000, DEFAULT_LEASE_MS),
-    maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     staleLeaseMs: options.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS,
   };
+  // The synthesis retry budget comes from options.config / SYNTHESIS_MAX_ATTEMPTS inside processSynthesisJob.
+  // options.maxAttempts and ABSTRACTION_MAX_ATTEMPTS are the abstraction budget and must not apply here.
   const result = await processSynthesisJob(jobId, {
     ...options,
     store,
@@ -451,7 +452,6 @@ export async function processSynthesisBatch(jobId, options = {}) {
     mergeLeaseMs: options.mergeLeaseMs ?? config.leaseMs,
     staleLeaseMs: config.staleLeaseMs,
     batchLimit: config.batchLimit,
-    config: { maxAttempts: config.maxAttempts, ...(options.config || {}) },
   });
   return {
     ...result,
