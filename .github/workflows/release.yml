@@ -79,7 +79,10 @@ jobs:
             .
           docker push "${IMAGE_URI}:${GITHUB_REF_NAME}"
           docker push "${IMAGE_URI}:${GITHUB_SHA}"
-          DIGEST="$(docker buildx imagetools inspect "${IMAGE_URI}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}')"
+          PUSHED_DIGEST="$(docker buildx imagetools inspect "${IMAGE_URI}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}')"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE_URI}:${GITHUB_REF_NAME}" --raw | node scripts/resolve-image-digest.mjs "${PUSHED_DIGEST}")"
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Resolved image digest is invalid: ${DIGEST}" >&2; exit 1; }
+          echo "Pushed ${PUSHED_DIGEST}; deploying linux/amd64 image ${DIGEST}"
           IMAGE_DIGEST_REF="${IMAGE_URI}@${DIGEST}"
           {
             echo "image-uri=${IMAGE_URI}"

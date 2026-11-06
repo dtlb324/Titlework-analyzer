@@ -16,6 +16,7 @@ import {
   verifyHealth,
   verifyRelease,
 } from '../scripts/verify-release.mjs';
+import { resolvePlatformDigest } from '../scripts/resolve-image-digest.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -482,6 +483,82 @@ test('release documentation describes automated deploy, verification, and rollba
   const security = readFileSync(join(root, 'SECURITY.md'), 'utf8');
   assert(security.includes('Cloud Run environment variables'), 'Expected SECURITY.md to describe Cloud Run secrets');
   assert(!security.includes('Vercel environment variables'), 'Expected SECURITY.md to remove stale Vercel secret guidance');
+});
+
+// Shape of the v2.6.18 push: an OCI index holding the linux/amd64 image and a BuildKit attestation.
+const PUSHED_INDEX_DIGEST = 'sha256:93a632344c6146f7a359149422db09ab82e4eb59ba440e2510e7c29226ed1677';
+const AMD64_DIGEST = 'sha256:52b1857ef04e4781c9313e3ee5a928011f28114a8ccabdac65c4283fad7c1970';
+const ATTESTATION_DIGEST = 'sha256:90d85c8e2761bc6a2f6ae5d829779202179af48f63591480327b3a73e2ef97ee';
+const ociIndex = (manifests) => ({ schemaVersion: 2, mediaType: 'application/vnd.oci.image.index.v1+json', manifests });
+const amd64Entry = { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: AMD64_DIGEST, platform: { architecture: 'amd64', os: 'linux' } };
+const attestationEntry = {
+  mediaType: 'application/vnd.oci.image.manifest.v1+json',
+  digest: ATTESTATION_DIGEST,
+  platform: { architecture: 'unknown', os: 'unknown' },
+  annotations: { 'vnd.docker.reference.digest': AMD64_DIGEST, 'vnd.docker.reference.type': 'attestation-manifest' },
+};
+
+test('image index with an attestation resolves to the linux/amd64 digest Cloud Run reports', () => {
+  const digest = resolvePlatformDigest(ociIndex([amd64Entry, attestationEntry]), PUSHED_INDEX_DIGEST);
+  assert(digest === AMD64_DIGEST, `Expected ${AMD64_DIGEST}, got ${digest}`);
+});
+
+test('attestation listed first is still skipped', () => {
+  const digest = resolvePlatformDigest(ociIndex([attestationEntry, amd64Entry]), PUSHED_INDEX_DIGEST);
+  assert(digest === AMD64_DIGEST, `Expected ${AMD64_DIGEST}, got ${digest}`);
+});
+
+test('Docker manifest list resolves the same way as an OCI index', () => {
+  const list = { schemaVersion: 2, mediaType: 'application/vnd.docker.distribution.manifest.list.v2+json', manifests: [amd64Entry] };
+  assert(resolvePlatformDigest(list, PUSHED_INDEX_DIGEST) === AMD64_DIGEST, 'Expected the amd64 entry of a manifest list');
+});
+
+test('single-platform manifest keeps the pushed digest', () => {
+  const manifest = { schemaVersion: 2, mediaType: 'application/vnd.docker.distribution.manifest.v2+json', config: {}, layers: [] };
+  assert(resolvePlatformDigest(manifest, PUSHED_INDEX_DIGEST) === PUSHED_INDEX_DIGEST, 'Expected a plain manifest to keep its own digest');
+});
+
+test('index without exactly one linux/amd64 image is refused', () => {
+  const arm = { ...amd64Entry, digest: 'sha256:' + 'a'.repeat(64), platform: { architecture: 'arm64', os: 'linux' } };
+  for (const [label, manifests] of [['no amd64', [arm, attestationEntry]], ['two amd64', [amd64Entry, { ...amd64Entry, digest: 'sha256:' + 'b'.repeat(64) }]], ['empty', []]]) {
+    let threw = false;
+    try { resolvePlatformDigest(ociIndex(manifests), PUSHED_INDEX_DIGEST); } catch { threw = true; }
+    assert(threw, `Expected ${label} index to throw`);
+  }
+});
+
+test('malformed pushed digest or child digest is refused', () => {
+  let threw = false;
+  try { resolvePlatformDigest(ociIndex([amd64Entry]), 'latest'); } catch { threw = true; }
+  assert(threw, 'Expected a non-sha256 pushed digest to throw');
+  threw = false;
+  try { resolvePlatformDigest(ociIndex([{ ...amd64Entry, digest: 'sha256:short' }]), PUSHED_INDEX_DIGEST); } catch { threw = true; }
+  assert(threw, 'Expected a malformed child digest to throw');
+});
+
+test('resolver CLI reads the raw manifest on stdin and prints the deploy digest', () => {
+  const run = spawnSync(process.execPath, [join(root, 'scripts/resolve-image-digest.mjs'), PUSHED_INDEX_DIGEST], {
+    input: JSON.stringify(ociIndex([attestationEntry, amd64Entry])),
+    encoding: 'utf8',
+  });
+  assert(run.status === 0, `Expected exit 0, got ${run.status}: ${run.stderr}`);
+  assert(run.stdout.trim() === AMD64_DIGEST, `Expected stdout ${AMD64_DIGEST}, got ${run.stdout}`);
+  const bad = spawnSync(process.execPath, [join(root, 'scripts/resolve-image-digest.mjs'), PUSHED_INDEX_DIGEST], { input: '{not json', encoding: 'utf8' });
+  assert(bad.status !== 0 && bad.stdout === '', 'Expected invalid JSON to exit non-zero with no digest on stdout');
+});
+
+test('release workflow deploys and verifies the resolved platform digest', () => {
+  const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+  assert(releaseWorkflow.includes('--raw'), 'Expected the build step to read the raw pushed manifest');
+  assert(releaseWorkflow.includes('scripts/resolve-image-digest.mjs'), 'Expected the build step to resolve the platform digest');
+  const setupNode = releaseWorkflow.indexOf('actions/setup-node');
+  const resolve = releaseWorkflow.indexOf('scripts/resolve-image-digest.mjs');
+  assert(setupNode !== -1 && setupNode < resolve, 'Expected Node to be set up before the resolver runs');
+  assert(releaseWorkflow.includes('[[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]'), 'Expected the build step to reject an empty or malformed resolved digest');
+  assert(releaseWorkflow.includes('echo "image-digest=${DIGEST}"'), 'Expected the image-digest output to carry the resolved platform digest');
+  assert(!/image-digest(-ref)?=\$\{PUSHED_DIGEST\}/.test(releaseWorkflow), 'Expected the pushed index digest never to become a deploy output');
+  assert(releaseWorkflow.includes('IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}'), 'Expected deploy and verify steps to read the resolved digest output');
+  assert(releaseWorkflow.includes('--expected-digest "${IMAGE_DIGEST}"'), 'Expected verification to compare against the resolved digest');
 });
 
 let passed = 0;
