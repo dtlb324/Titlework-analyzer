@@ -1,7 +1,7 @@
 
 import { createHash } from 'crypto';
 import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
-import { buildMergeUserMessageContent } from './anthropic-request.js';
+import { buildMergeUserMessageContent, estimateTextTokens } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-5-5';
@@ -717,6 +717,14 @@ async function callSynthesisModel({
   }
 }
 
+// A model segment summary stops at config.maxTokens. estimateTextTokens is the chars/4 count synthesis already uses.
+function boundKeptSegmentSummary(text, maxTokens) {
+  const cap = Number(maxTokens);
+  if (!Number.isInteger(cap) || cap <= 0) return text;
+  if (estimateTextTokens(text) <= cap) return text;
+  return text.slice(0, cap * 4);
+}
+
 async function synthesizeWithBinarySplit({
   abstracts,
   tract,
@@ -744,8 +752,10 @@ async function synthesizeWithBinarySplit({
   const left = abstracts.slice(0, mid);
   const right = abstracts.slice(mid);
   const splitPreamble = `${preamble}\n\nThis subset was split automatically because the original synthesis hit ${reason}. Produce a faithful partial chain-of-title segment.`;
-  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, recombineRecovery);
-  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, recombineRecovery);
+  // retry_larger stays on the outermost recombine. Forwarding it would bill another final-merge-sized call at every nested level.
+  const halfRecovery = recombineRecovery?.mode === 'keep_halves' ? recombineRecovery : null;
+  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, halfRecovery);
+  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, halfRecovery);
   const mergeAbstracts = [
     { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftResult.text },
     { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightResult.text },
@@ -771,10 +781,11 @@ async function synthesizeWithBinarySplit({
       // Each half must stand on its own; otherwise its documents would vanish behind a complete-looking segment.
       if (![leftResult, rightResult].every(half => validateSegmentSummary(half.text).ok)) throw err;
       const label = docs => `${docs[0].filename} to ${docs[docs.length - 1].filename}`;
+      const stitched = [[left, leftResult], [right, rightResult]]
+        .map(([docs, half]) => `## Partial synthesis: ${label(docs)}\n\n${half.text}`)
+        .join('\n\n');
       merged = {
-        text: [[left, leftResult], [right, rightResult]]
-          .map(([docs, half]) => `## Partial synthesis: ${label(docs)}\n\n${half.text}`)
-          .join('\n\n'),
+        text: boundKeptSegmentSummary(stitched, config.maxTokens),
         model: rightResult.model,
         usage: {},
         payloadBytes: Math.max(leftResult.payloadBytes || 0, rightResult.payloadBytes || 0),

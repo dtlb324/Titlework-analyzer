@@ -5,6 +5,7 @@
 import assertStrict from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { estimateTextTokens } from '../api/_lib/anthropic-request.js';
 import {
   PARTIAL_SYNTHESIS_PROMPT,
   processSynthesisJob,
@@ -655,6 +656,40 @@ test('recombine recovery: an outer truncation split on the same plan still keeps
   });
 });
 
+// Payload splits can keep a half at every level. The saved segment must stay within the partial output cap
+// (the maxTokens those half calls already use), or the final merge reads the concatenation of every leaf.
+test('recombine recovery: an oversized kept-halves stitch is cut to the segment output cap before completion', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const text = JSON.stringify(request.messages);
+      const label = synthesisCallLabel(request);
+      calls.push({ label, kind, maxTokens: request.maxTokens, text });
+      const truncated = kind === 'recombine' || (kind === 'original' && text.includes('deed0.pdf') && !text.includes('deed2.pdf'));
+      const body = label === 'half:0'
+        ? `${SEGMENT} ${'x'.repeat(4000)}`
+        : label === 'half:1'
+          ? `${SEGMENT} ${'y'.repeat(4000)} OVERSIZE_TAIL`
+          : (kind === 'final' ? OPINION : SEGMENT);
+      return { text: body, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1, partialMaxTokens: 512 }, workerId: 'probe', budgetMs: 5000 });
+    const [first, second] = store.segmentsSnapshot();
+    const cap = calls.find(call => call.label === 'half:0').maxTokens;
+    assertStrict.equal(first.status, 'complete');
+    assertStrict.equal(estimateTextTokens(first.summaryText), cap);
+    assertStrict.ok(first.summaryText.includes('## CHAIN ROWS'), first.summaryText.slice(0, 80));
+    assertStrict.equal(first.summaryText.includes('OVERSIZE_TAIL'), false);
+    assertStrict.deepEqual(first.warnings, ['segment_split', 'segment_split_halves_kept']);
+    assertStrict.equal(second.status, 'complete');
+    const finalCall = calls.find(call => call.kind === 'final');
+    assertStrict.equal(finalCall.text.includes('OVERSIZE_TAIL'), false);
+    assertStrict.equal(out.result.status, 'complete');
+  });
+});
+
 test('recombine recovery: a recombine that fails for any other reason does not keep the halves', async () => {
   await withEnvironment({}, async () => {
     const kinds = [];
@@ -755,6 +790,55 @@ test('recombine recovery: a single-pass recombine that truncates is retried once
     assertStrict.deepEqual(segment.warnings, ['segment_split', 'segment_split_recombine_retry']);
     // Halves, the billed truncated recombine and the retry. The truncated original is not counted; that gap predates this change.
     assertStrict.equal(segment.outputTokens, 2 + 2 + 8 + 32);
+  });
+});
+
+// Four documents make each half multi-document. The outer recombine still gets exactly one larger retry.
+test('recombine recovery: a four-document single-pass recombine that truncates is retried once', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const modelClient = async request => {
+      let kind = callKind(request);
+      if (kind === 'recombine' && calls.some(call => call.kind === 'recombine')) kind = 'retry';
+      calls.push({ kind, maxTokens: request.maxTokens });
+      const truncated = kind === 'original' || kind === 'recombine';
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 1, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    const larger = calls.filter(call => call.maxTokens === 16000);
+    assertStrict.equal(larger.length, 1);
+    assertStrict.equal(larger[0].kind, 'retry');
+    assertStrict.equal(larger[0].maxTokens, 16000);
+    assertStrict.deepEqual(calls.map(call => call.kind), ['original', 'half', 'half', 'recombine', 'retry']);
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+  });
+});
+
+// A request-size split leaves depth at 0, so one half splits again. That nested recombine has no recovery.
+test('recombine recovery: a single-pass nested recombine that truncates fails without a larger retry', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const text = JSON.stringify(request.messages);
+      calls.push({ kind, label: synthesisCallLabel(request), maxTokens: request.maxTokens });
+      if (kind === 'original' && text.includes('deed0.pdf') && text.includes('deed3.pdf')) {
+        throw Object.assign(new Error('payload too large'), { status: 413 });
+      }
+      const truncated = kind === 'recombine' || (kind === 'half' && text.includes('deed2.pdf') && text.includes('deed3.pdf'));
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 1, maxTokens: 8000 }, workerId: 'probe', budgetMs: 5000 });
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.equal(segment.status, 'failed');
+    assertStrict.equal(segment.errorType, 'output_truncated');
+    assertStrict.equal(segment.summaryText, null);
+    assertStrict.equal(calls.filter(call => call.maxTokens === 16000).length, 0);
+    assertStrict.deepEqual(calls.map(call => call.label), ['original:0-3', 'half:0-1', 'half:2-3', 'half:2', 'half:3', 'recombine']);
+    assertStrict.equal(calls.at(-1).maxTokens, 8000);
   });
 });
 
