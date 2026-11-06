@@ -895,6 +895,29 @@ function extractRetryAfter(err) {
   return Number.isFinite(value) ? value : 0;
 }
 
+// A segment lease is fixed at claim time, but a slow single-pass run (original + two halves + recombine + retry)
+// can outlast it and let a second worker redo the paid calls. Renew it on an interval while the segment is still
+// processing. The timer is unref'd and best-effort, and it stops itself once the store reports the segment is no
+// longer owned by this worker (completed, failed, reclaimed, or canceled).
+function startSegmentLeaseRenewal(store, jobId, segmentId, workerId, leaseMs) {
+  const renew = store?.renewSynthesisSegmentLease;
+  if (typeof renew !== 'function') return;
+  const intervalMs = Math.max(1_000, Math.floor(Math.max(1, Number(leaseMs) || 120_000) / 3));
+  const timer = setInterval(() => {
+    Promise.resolve(renew(jobId, segmentId, { workerId, leaseMs }))
+      .then(renewed => {
+        if (!renewed) clearInterval(timer);
+      })
+      .catch(err => logSynthesisMetrics({
+        event: 'synthesis_segment_lease_renewal_failed',
+        jobId: jobId || null,
+        segmentId,
+        reason: sanitizeErrorMessage(err),
+      }));
+  }, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 export async function processSynthesisSegment(jobId, segment, abstracts, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process synthesis segments.');
@@ -968,6 +991,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
 
   const startedAt = Date.now();
   let lastError = null;
+  startSegmentLeaseRenewal(store, jobId, segment.id, workerId, leaseMs);
   for (let attempt = firstAttempt; attempt <= config.maxAttempts; attempt++) {
     try {
       // A truncated recombine keeps the two finished halves on a multi-segment plan, where the final merge reads them.

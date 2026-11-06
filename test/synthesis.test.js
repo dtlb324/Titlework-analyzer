@@ -325,6 +325,19 @@ function createMemoryPhase5Store(initialState = {}) {
       segments.set(segmentId, next);
       return { ...next };
     },
+    async renewSynthesisSegmentLease(jobId, segmentId, options = {}) {
+      const segment = segments.get(segmentId);
+      if (!segment || segment.jobId !== jobId) return null;
+      if (segment.status !== 'processing' || segment.workerId !== (options.workerId || 'wkr_test')) return null;
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 120_000) / 1000));
+      const next = {
+        ...segment,
+        leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1000).toISOString(),
+        updatedAt: now(),
+      };
+      segments.set(segmentId, next);
+      return { segmentId: next.id, leaseExpiresAt: next.leaseExpiresAt };
+    },
     async completeSynthesisSegment(jobId, segmentId, payload) {
       const segment = segments.get(segmentId);
       if (!segment) return null;
@@ -2234,6 +2247,55 @@ test('planSynthesisSegments uses configured chunk size for all forced multi-segm
   else process.env.BULK_SYNTHESIS_CHUNK_SIZE = previousBulkSize;
 });
 
+
+test('Synthesis segment renews its lease while a slow call is in flight', async () => {
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  const { plan } = await planJobSynthesis('job_test_1', { store });
+  const segmentId = plan.segments[0].id;
+  const renewals = [];
+  const originalRenew = store.renewSynthesisSegmentLease.bind(store);
+  store.renewSynthesisSegmentLease = async (jobId, id, options = {}) => {
+    const renewed = await originalRenew(jobId, id, options);
+    if (renewed) renewals.push({ ...renewed, workerId: options.workerId, leaseMs: options.leaseMs });
+    return renewed;
+  };
+
+  let workerDuringCall = null;
+  let leaseSeenDuringCall = null;
+  let stolenClaim = 'not-attempted';
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    // The lease is 2000ms and the heartbeat fires every 1000ms. Wake after the original
+    // lease would have expired and try to steal the segment with a second worker.
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    const segment = store.segments.get(segmentId);
+    workerDuringCall = segment ? segment.workerId : null;
+    leaseSeenDuringCall = segment
+      ? { expiresAt: segment.leaseExpiresAt, now: new Date().toISOString() }
+      : null;
+    stolenClaim = await store.claimSynthesisSegment('job_test_1', segmentId, { workerId: 'wkr_second', leaseMs: 2000 });
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {}, stopReason: 'end_turn' };
+  };
+
+  await processSynthesisJob('job_test_1', {
+    store,
+    budgetMs: 20_000,
+    leaseMs: 2000,
+    config: { maxAttempts: 1 },
+  });
+
+  const [segment] = await store.listSynthesisSegments('job_test_1');
+  assert(segment.status === 'complete', `Expected the slow segment to complete, got ${segment.status}`);
+  assert(renewals.length >= 1, `Expected at least one lease renewal, got ${renewals.length}`);
+  assert(
+    renewals.every(renewal => renewal.workerId === workerDuringCall),
+    'Expected every renewal to come from the worker that owns the segment',
+  );
+  assert(
+    Date.parse(leaseSeenDuringCall.expiresAt) > Date.parse(leaseSeenDuringCall.now),
+    'Expected the lease to still be live during the slow call',
+  );
+  assert(stolenClaim === null, 'A second worker must not reclaim a renewed segment lease');
+});
 
 let passed = 0;
 let failed = 0;

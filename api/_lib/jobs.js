@@ -2320,6 +2320,29 @@ function createPostgresJobStore() {
       return rowToSynthesisSegment(rows[0]);
     },
 
+    async renewSynthesisSegmentLease(jobId, segmentId, options = {}) {
+      await ensureSchema();
+      const workerId = options.workerId || '';
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 120000) / 1000));
+      const rows = await sql`
+        UPDATE synthesis_segments
+        SET
+          lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
+          updated_at = now()
+        WHERE job_id = ${jobId}::text
+          AND id = ${segmentId}::text
+          AND status = 'processing'
+          AND worker_id = ${workerId}::text
+        RETURNING id, lease_expires_at
+      `;
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        segmentId: row.id,
+        leaseExpiresAt: row.lease_expires_at instanceof Date ? row.lease_expires_at.toISOString() : row.lease_expires_at,
+      };
+    },
+
     async completeSynthesisSegment(jobId, segmentId, payload) {
       await ensureSchema();
       const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
