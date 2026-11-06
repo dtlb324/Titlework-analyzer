@@ -535,6 +535,7 @@ function createTimeoutSignal(ms) {
 }
 
 function classifyError(err) {
+  if (err?.code === 'output_truncated') return 'output_truncated';
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
   if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
@@ -671,6 +672,14 @@ async function callSynthesisModel({
       stream: shouldStream,
       onDelta: previewWriter ? (delta, fullText) => previewWriter.onDelta(delta, fullText) : undefined,
     });
+    // A response cut off at the token limit is never a finished result. Throwing here, before the preview is
+    // marked complete, keeps every caller (single pass, repair, split merge, final merge) from accepting it.
+    if (response.stopReason === 'max_tokens') {
+      const err = new Error('Model output was truncated at the token limit (max_tokens).');
+      err.code = 'output_truncated';
+      err.usage = extractUsage(response.usage);
+      throw err;
+    }
     if (previewWriter?.complete) await previewWriter.complete();
     if (shouldStream && response.timeToFirstDeltaMs != null) {
       logSynthesisMetrics({
@@ -770,13 +779,16 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
       config,
       options,
     });
-    if (result.stopReason === 'max_tokens' && abstracts.length > 1) {
+    return result;
+  } catch (err) {
+    const type = classifyError(err);
+    if (abstracts.length > 1 && type === 'output_truncated') {
       logSynthesisMetrics({
         event: 'synthesis_max_tokens_split',
         jobId: options.jobId || null,
         abstractCount: abstracts.length,
         maxTokens: config.maxTokens,
-        outputTokens: result.usage?.outputTokens ?? null,
+        outputTokens: err.usage?.outputTokens ?? null,
       });
       return await synthesizeWithBinarySplit({
         abstracts,
@@ -789,9 +801,6 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         reason: 'max_tokens',
       });
     }
-    return result;
-  } catch (err) {
-    const type = classifyError(err);
     if (abstracts.length > 1 && (type === 'payload_too_large' || type === 'upstream_timeout')) {
       return await synthesizeWithBinarySplit({
         abstracts,
@@ -1364,7 +1373,10 @@ export async function processSynthesisJob(jobId, options = {}) {
       if (Date.now() >= deadline) {
         return { status: 'skipped', segmentId: segment.id, reason: 'deadline' };
       }
-      if (!currentJob || currentJob.status === 'canceled') {
+      // Re-read at every admission: segments queued behind the concurrency limit start long after the
+      // batch snapshot above was taken, and cancellation is not part of the segment claim.
+      const admissionJob = await store.getJob(jobId);
+      if (!admissionJob || admissionJob.status === 'canceled') {
         return { status: 'skipped', segmentId: segment.id, reason: 'canceled' };
       }
       return await processSynthesisSegment(jobId, segment, abstracts, {
@@ -1429,6 +1441,8 @@ export async function processSynthesisJob(jobId, options = {}) {
   const mergeGateJob = await store.getJob(jobId);
   const mergeCanceled = mergeGateJob?.status === 'canceled';
   if (!mergeCanceled && !existingResult && completedSegments.length === refreshedSegments.length && refreshedSegments.length > 0) {
+    // Resolve the exclusion set before claiming the merge or paying for it. A lookup error propagates.
+    await failedDocumentsForMerge();
     const mergeClaim = await claimFinalWriter();
     if (!mergeClaim) {
     } else if (singlePass) {
@@ -1520,6 +1534,7 @@ export async function processSynthesisJob(jobId, options = {}) {
       }
     }
   } else if (!mergeCanceled && !existingResult && failedSegments.length && !stillPending.length) {
+    await failedDocumentsForMerge();
     const mergeClaim = await claimFinalWriter();
     if (!mergeClaim) {
     } else {
@@ -1664,24 +1679,21 @@ export async function processSynthesisJob(jobId, options = {}) {
   };
 }
 
+// Not knowing which documents failed is not the same as no document failing: lookup errors propagate.
 async function collectFailedDocuments(store, jobId) {
-  try {
-    const chunks = store.listFailedChunks
-      ? await store.listFailedChunks(jobId)
-      : (store.listChunks ? (await store.listChunks(jobId)).filter(chunk => chunk.abstractionStatus === 'failed') : []);
-    return chunks.map(chunk => ({
-      chunkId: chunk.id,
-      documentId: chunk.documentId,
-      chunkOrder: chunk.chunkOrder,
-      filename: chunk.originalFilename,
-      pageStart: chunk.pageStart,
-      pageEnd: chunk.pageEnd,
-      errorType: chunk.abstractionErrorType,
-      errorMessage: chunk.abstractionErrorMessage,
-    }));
-  } catch {
-    return [];
-  }
+  const chunks = store.listFailedChunks
+    ? await store.listFailedChunks(jobId)
+    : (store.listChunks ? (await store.listChunks(jobId)).filter(chunk => chunk.abstractionStatus === 'failed') : []);
+  return chunks.map(chunk => ({
+    chunkId: chunk.id,
+    documentId: chunk.documentId,
+    chunkOrder: chunk.chunkOrder,
+    filename: chunk.originalFilename,
+    pageStart: chunk.pageStart,
+    pageEnd: chunk.pageEnd,
+    errorType: chunk.abstractionErrorType,
+    errorMessage: chunk.abstractionErrorMessage,
+  }));
 }
 
 async function collectSplitDegradationWarnings(store, jobId) {

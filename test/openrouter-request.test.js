@@ -288,6 +288,20 @@ test('invokeOpenRouterModel throws key error when API key is missing', async () 
 });
 
 
+// Finding 6: OpenRouter reports a token-limit stop as 'length'. It must be reported as 'max_tokens'
+// (the shared vocabulary) so a truncated opinion is not mistaken for a finished one. 'stop' is unchanged
+// (see 'normalizeOpenRouterResponse extracts text and usage').
+test('normalizeOpenRouterResponse reports a length finish as max_tokens and keeps the text and usage', () => {
+  const result = normalizeOpenRouterResponse({
+    model: 'anthropic/claude-sonnet-5.5',
+    choices: [{ message: { content: 'truncated opinion' }, finish_reason: 'length' }],
+    usage: { prompt_tokens: 10, completion_tokens: 5 },
+  }, 'claude-sonnet-5-5');
+  assert(result.stopReason === 'max_tokens', `Expected max_tokens, got ${result.stopReason}`);
+  assert(result.text === 'truncated opinion');
+  assert(result.usage.input_tokens === 10 && result.usage.output_tokens === 5);
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

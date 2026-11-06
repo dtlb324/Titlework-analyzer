@@ -165,6 +165,14 @@ export function buildOpenRouterHeaders() {
 }
 
 /**
+ * Map OpenRouter's token-limit finish reason onto the shared vocabulary used by
+ * the Anthropic path ('max_tokens'). Other reasons pass through unchanged.
+ */
+export function normalizeOpenRouterFinishReason(reason) {
+  return reason === 'length' ? 'max_tokens' : reason;
+}
+
+/**
  * Normalize an OpenAI chat-completions response into the shared shape.
  *   { text, model, usage: { input_tokens, output_tokens }, stopReason }
  */
@@ -172,7 +180,7 @@ export function normalizeOpenRouterResponse(data = {}, requestedModel) {
   const choices = data?.choices || [];
   const firstChoice = choices[0] || {};
   const message = firstChoice.message || {};
-  const finishReason = firstChoice.finish_reason || null;
+  const finishReason = normalizeOpenRouterFinishReason(firstChoice.finish_reason) || null;
 
   const textParts = [];
   if (typeof message.content === 'string') {

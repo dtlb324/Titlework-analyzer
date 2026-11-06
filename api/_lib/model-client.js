@@ -248,7 +248,9 @@ export async function invokeModel(request, options = {}) {
   }
 
   if (isGeminiModel(model)) {
-    return await invokeGeminiGenerateContent(request, options);
+    const result = await invokeGeminiGenerateContent(request, options);
+    // Gemini's token-limit stop is 'MAX_TOKENS'; report it in the shared 'max_tokens' vocabulary. Other reasons pass through.
+    return result.stopReason === 'MAX_TOKENS' ? { ...result, stopReason: 'max_tokens' } : result;
   }
 
   if (isAnthropicModel(model)) {

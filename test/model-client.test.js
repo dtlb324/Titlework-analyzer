@@ -72,7 +72,11 @@ test('OpenRouter stream frames preserve results and callback order with or witho
   const previousNow = Date.now;
   Date.now = () => 12345;
   try {
-    for (const ending of [[], ['data: [DONE]'], ['data: [DONE]', 'data: {"choices":[{"delta":{"content":"ignored"}}]}']]) {
+    // Superseded pin (finding 5): the first ending used to be `[]`, i.e. a clean EOF with no [DONE], which
+    // resolved as a successful completion. Old intent: parsing is identical with or without a trailing
+    // newline. New intent: unchanged for every protocol-complete ending; EOF without [DONE] is now a
+    // rejection (covered in openrouter-stream.test.js), so that ending is no longer a success fixture.
+    for (const ending of [['data: [DONE]'], ['data: [DONE]', 'data: {"choices":[{"delta":{"content":"ignored"}}]}']]) {
       const runs = [];
       for (const newline of ['', '\n']) {
         const callbacks = [];
@@ -254,6 +258,7 @@ test('invokeModel streaming path does not consume the SSE body via json()', asyn
   const sseLines = [
     'data: {"choices":[{"delta":{"content":"Final"},"index":0}]}',
     'data: {"choices":[{"delta":{"content":" opinion"},"index":0}]}',
+    'data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}',
     'data: [DONE]',
   ];
 
@@ -300,7 +305,7 @@ test('invokeModel streams through OpenRouter when MODEL_PROVIDER=openrouter', as
             async read() {
               if (done) return { done: true, value: undefined };
               done = true;
-              return { done: false, value: encoder.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n') };
+              return { done: false, value: encoder.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n') };
             },
             releaseLock() {},
           };
