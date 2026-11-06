@@ -728,6 +728,7 @@ async function synthesizeWithBinarySplit({
   reason,
   truncationDepth = 0,
   recombineRecovery = null,
+  failedCallUsage = {},
 }) {
   if (abstracts.length <= 1) {
     return await callSynthesisModel({
@@ -797,7 +798,8 @@ async function synthesizeWithBinarySplit({
       throw err;
     }
   }
-  const parts = [merged.usage, leftResult.usage, rightResult.usage, truncatedUsage];
+  // `failedCallUsage` is the call that triggered the split; it was billed even though it produced no text.
+  const parts = [merged.usage, leftResult.usage, rightResult.usage, truncatedUsage, failedCallUsage];
   return {
     ...merged,
     usage: {
@@ -854,6 +856,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         reason: 'max_tokens',
         truncationDepth: truncationDepth + 1,
         recombineRecovery,
+        failedCallUsage: err.usage || {},
       });
     }
     if (abstracts.length > 1 && (type === 'payload_too_large' || type === 'upstream_timeout')) {
@@ -868,6 +871,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         reason: type === 'payload_too_large' ? 'request size' : 'timeout',
         truncationDepth,
         recombineRecovery,
+        failedCallUsage: err.usage || {},
       });
     }
     throw err;

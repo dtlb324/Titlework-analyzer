@@ -555,8 +555,9 @@ test('recombine recovery: a multi-segment plan keeps the finished halves when th
     assertStrict.deepEqual(kept.warnings, ['segment_split', 'segment_split_halves_kept']);
     assertStrict.ok(kept.summaryText.includes('HALF_1') && kept.summaryText.includes('HALF_2'), kept.summaryText);
     assertStrict.ok(kept.summaryText.indexOf('HALF_1') < kept.summaryText.indexOf('HALF_2'), 'halves stay in document order');
-    // Halves plus the billed, truncated recombine: 2 + 2 + 8. The truncated original is not counted; that gap predates this change.
-    assertStrict.equal(kept.outputTokens, 12);
+    // The billed original call (1), both halves (2 + 2) and the truncated recombine (8) are all counted.
+    assertStrict.equal(kept.outputTokens, 13);
+    assertStrict.equal(kept.inputTokens, 4);
     assertStrict.ok(calls.at(-1).text.includes('HALF_1') && calls.at(-1).text.includes('HALF_2'), 'the final merge reads both halves');
     assertStrict.ok(out.result.warnings.includes('segment_1:segment_split_halves_kept'), JSON.stringify(out.result.warnings));
   });
@@ -660,8 +661,9 @@ test('recombine recovery: a single-pass recombine that truncates is retried once
     assertStrict.equal(out.result.finalTitleOpinion, OPINION);
     const [segment] = store.segmentsSnapshot();
     assertStrict.deepEqual(segment.warnings, ['segment_split', 'segment_split_recombine_retry']);
-    // Halves, the billed truncated recombine and the retry. The truncated original is not counted; that gap predates this change.
-    assertStrict.equal(segment.outputTokens, 2 + 2 + 8 + 32);
+    // The billed original call (1), both halves (2 + 2), the truncated recombine (8) and the retry (32).
+    assertStrict.equal(segment.outputTokens, 45);
+    assertStrict.equal(segment.inputTokens, 5);
   });
 });
 
