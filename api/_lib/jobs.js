@@ -1802,7 +1802,23 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
-          AND (${failure.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}::text))
+          AND (
+            (${failure.splitParentChunkId ?? null}::text IS NULL AND (
+              ${failure.workerId ?? null}::text IS NULL
+              OR (abstraction_status = 'processing' AND abstraction_worker_id = ${failure.workerId}::text)
+            ))
+            OR (
+              split_parent_chunk_id = ${failure.splitParentChunkId ?? null}::text
+              AND abstraction_status = 'pending'
+              AND EXISTS (
+                SELECT 1 FROM document_chunks parent
+                WHERE parent.job_id = ${jobId}
+                  AND parent.id = ${failure.splitParentChunkId ?? null}::text
+                  AND parent.abstraction_status = 'processing'
+                  AND parent.abstraction_worker_id = ${failure.workerId ?? null}::text
+              )
+            )
+          )
         RETURNING *
       `;
       await refreshAbstractionCounts(jobId);

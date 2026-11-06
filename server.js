@@ -107,7 +107,12 @@ async function serveStatic(req, res, url) {
 export function createServer({ ocrCompareModelClient } = {}) {
   const ocrCompareHandler = createOcrCompareHandler({ modelClient: ocrCompareModelClient });
   return createHttpServer(async (req, res) => {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    let url;
+    try {
+      url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    } catch {
+      return sendJson(res, 400, { error: 'Invalid request URL.' });
+    }
     try {
       if (url.pathname === '/healthz' || url.pathname === '/api/healthz') {
         return sendJson(res, 200, publicHealth('title-analyzer'));

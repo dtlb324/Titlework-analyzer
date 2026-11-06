@@ -144,8 +144,8 @@ async function waitForGeminiFileActive(fileName, options = {}) {
  */
 export async function deleteGeminiFile(fileName) {
   const key = geminiApiKey();
-  if (!key || !fileName) return;
-  const resource = String(fileName).startsWith('files/') ? fileName : `files/${fileName}`;
+  if (!key || typeof fileName !== 'string' || !/^files\/[A-Za-z0-9_-]+$/.test(fileName)) return;
+  const resource = fileName;
   const url = `${apiBaseUrl()}/${resource}`;
   try {
     await fetch(url, { method: 'DELETE', headers: { 'x-goog-api-key': key } });

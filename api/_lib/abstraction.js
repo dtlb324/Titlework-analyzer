@@ -688,54 +688,49 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
     errorType: 'storage_error',
     errorMessage: 'PDF split child creation failed.',
     workerId: options.workerId,
+    splitParentChunkId: parentChunk.id,
   };
-
-  for (const range of ranges) {
-    const childDoc = await PDFDocument.create();
-    const indices = [];
-    for (let i = range.startPageIndex; i <= range.endPageIndex; i++) indices.push(i);
-    const pages = await childDoc.copyPages(source, indices);
-    for (const page of pages) childDoc.addPage(page);
-    const childBytes = Buffer.from(await childDoc.save());
-    const childName = `${baseName} (pp ${range.pageStart}${range.pageEnd === range.pageStart ? '' : `-${range.pageEnd}`}).pdf`;
-    const blob = await getBlobWriter(options)(parentChunk, childName, childBytes);
-    const child = await options.store.createSplitChunk(parentChunk.jobId, parentChunk.documentId, {
-      originalFilename: childName,
-      mediaType: 'application/pdf',
-      sizeBytes: childBytes.byteLength,
-      pageStart: range.pageStart,
-      pageEnd: range.pageEnd,
-      splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
-      fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
-      checksumSha256: sha256Hex(childBytes),
-      chunkOrder: parentChunk.chunkOrder,
-      blobKey: blob.blobKey,
-      blobUrl: blob.blobUrl,
-      splitParentChunkId: parentChunk.id,
-      splitReason: reason,
-      workerId: options.workerId,
-    });
-    if (!child) {
-      if (options.store.markChunkAbstractionFailed) {
-        for (const childId of createdChildIds) {
-          await options.store.markChunkAbstractionFailed(parentChunk.jobId, childId, splitFailure);
-        }
-      }
-      return false;
+  let splitComplete = false;
+  try {
+    for (const range of ranges) {
+      const childDoc = await PDFDocument.create();
+      const indices = [];
+      for (let i = range.startPageIndex; i <= range.endPageIndex; i++) indices.push(i);
+      const pages = await childDoc.copyPages(source, indices);
+      for (const page of pages) childDoc.addPage(page);
+      const childBytes = Buffer.from(await childDoc.save());
+      const childName = `${baseName} (pp ${range.pageStart}${range.pageEnd === range.pageStart ? '' : `-${range.pageEnd}`}).pdf`;
+      const blob = await getBlobWriter(options)(parentChunk, childName, childBytes);
+      const child = await options.store.createSplitChunk(parentChunk.jobId, parentChunk.documentId, {
+        originalFilename: childName,
+        mediaType: 'application/pdf',
+        sizeBytes: childBytes.byteLength,
+        pageStart: range.pageStart,
+        pageEnd: range.pageEnd,
+        splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
+        fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
+        checksumSha256: sha256Hex(childBytes),
+        chunkOrder: parentChunk.chunkOrder,
+        blobKey: blob.blobKey,
+        blobUrl: blob.blobUrl,
+        splitParentChunkId: parentChunk.id,
+        splitReason: reason,
+        workerId: options.workerId,
+      });
+      if (!child) return false;
+      createdChildIds.push(child.id);
     }
-    createdChildIds.push(child.id);
-  }
 
-  const superseded = await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason, options.workerId);
-  if (!superseded) {
-    if (options.store.markChunkAbstractionFailed) {
-      for (const childId of createdChildIds) {
-        await options.store.markChunkAbstractionFailed(parentChunk.jobId, childId, splitFailure);
-      }
+    const superseded = await options.store.markChunkAbstractionSplitSuperseded(parentChunk.jobId, parentChunk.id, reason, options.workerId);
+    if (!superseded) return false;
+    splitComplete = true;
+    return true;
+  } finally {
+    if (!splitComplete && options.store.markChunkAbstractionFailed) {
+      await Promise.all(createdChildIds.map(childId =>
+        options.store.markChunkAbstractionFailed(parentChunk.jobId, childId, splitFailure)));
     }
-    return false;
   }
-  return true;
 }
 
 function computeRetryBackoff(attempt, retryAfter) {
