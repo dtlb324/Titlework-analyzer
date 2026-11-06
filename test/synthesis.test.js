@@ -2297,6 +2297,83 @@ test('Synthesis segment renews its lease while a slow call is in flight', async 
   assert(stolenClaim === null, 'A second worker must not reclaim a renewed segment lease');
 });
 
+// The renewal timer is cleared only when renewSynthesisSegmentLease returns null.
+// If the segment worker throws after the timer starts, and the terminal update throws
+// too, the segment stays processing under that worker. A later successful renew must
+// not keep the lease alive: once the original lease has elapsed, another worker has to
+// be able to claim it.
+test('thrown segment exit must stop lease renewal so another worker can reclaim', async () => {
+  const started = Date.now();
+  const leaseMs = 3000;
+  const outageMs = 2500;
+  const ownerId = 'wkr_owner';
+  const store = createMemoryPhase5Store({ abstracts: manyAbstracts(1) });
+  const renewals = [];
+  const originalRenew = store.renewSynthesisSegmentLease.bind(store);
+  store.renewSynthesisSegmentLease = async (jobId, segmentId, options = {}) => {
+    const at = Date.now();
+    if (at - started < outageMs) {
+      renewals.push({ at, threw: true, leaseExpiresAt: null });
+      throw new Error('store unavailable');
+    }
+    const renewed = await originalRenew(jobId, segmentId, options);
+    renewals.push({ at, threw: false, leaseExpiresAt: renewed?.leaseExpiresAt || null, workerId: options.workerId });
+    return renewed;
+  };
+  store.completeSynthesisSegment = async () => {
+    throw new Error('store unavailable while completing segment');
+  };
+  store.markSynthesisSegmentFailed = async () => {
+    throw new Error('store unavailable while failing segment');
+  };
+  store.markSynthesisSegmentRetryWait = async () => {
+    throw new Error('store unavailable while parking segment');
+  };
+
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    await new Promise(resolve => setTimeout(resolve, 2200));
+    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 20 }, stopReason: 'end_turn' };
+  };
+
+  let jobError = null;
+  try {
+    await processSynthesisJob('job_test_1', {
+      store,
+      budgetMs: 20_000,
+      leaseMs,
+      workerId: ownerId,
+      config: { maxAttempts: 1 },
+    });
+  } catch (err) {
+    jobError = err;
+  }
+
+  const returnedAt = Date.now();
+  const [segment] = await store.listSynthesisSegments('job_test_1');
+  assert(!jobError, `processSynthesisJob should return after the segment throw, got ${jobError && jobError.message}`);
+  assert(segment, 'Expected the segment row to exist');
+  assert(segment.status === 'processing', `Expected the segment to stay processing, got ${segment.status}`);
+  assert(segment.workerId === ownerId, `Expected the original worker to still own the segment, got ${segment.workerId}`);
+  const leaseAtReturn = segment.leaseExpiresAt;
+
+  const checkAt = started + leaseMs + 4000;
+  const remaining = checkAt - Date.now();
+  if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+
+  const [later] = await store.listSynthesisSegments('job_test_1');
+  const stolen = await store.claimSynthesisSegment('job_test_1', segment.id, { workerId: 'wkr_second', leaseMs });
+  const successfulAfterReturn = renewals.filter(renewal => !renewal.threw && renewal.at >= returnedAt);
+  assert(
+    stolen && stolen.workerId === 'wkr_second',
+    `After the owner threw and the original ${leaseMs}ms lease elapsed, a second worker should reclaim the segment. ` +
+    `claim=${stolen ? stolen.workerId : 'null'} status=${later.status} owner=${later.workerId} ` +
+    `leaseAtReturn=${leaseAtReturn} leaseNow=${later.leaseExpiresAt} now=${new Date().toISOString()} ` +
+    `thrownRenewals=${renewals.filter(renewal => renewal.threw).length} ` +
+    `successfulRenewalsAfterReturn=${successfulAfterReturn.length} ` +
+    `renewals=${JSON.stringify(renewals)}`,
+  );
+});
+
 let passed = 0;
 let failed = 0;
 for (const { name, fn } of tests) {
