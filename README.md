@@ -166,7 +166,7 @@ git tag "$VERSION"
 git push origin "$VERSION"
 ```
 
-The workflow runs the tests on Node 26, builds one Docker image, and pushes it to Artifact Registry. It then resolves the image digest, deploys the worker, deploys the API from the same immutable image digest, verifies both services with `scripts/verify-release.mjs`, and creates the GitHub Release.
+The workflow runs the tests on Node 26, builds one Docker image, and pushes it to Artifact Registry. It then resolves the digest of the linux/amd64 image (`scripts/resolve-image-digest.mjs`; when the push is an image index with an attestation, this is the platform image inside it, which is the digest Cloud Run reports), deploys the worker, deploys the API from the same immutable image digest, verifies both services with `scripts/verify-release.mjs`, and creates the GitHub Release.
 
 Do not leave Cloud Build or Cloud Run source-deploy triggers on `main`. They can race the tag workflow and overwrite the verified image.
 
@@ -179,7 +179,7 @@ After a release, check these points.
 
 ### Roll back
 
-Rollback API and worker together. Redeploy a previously verified image digest to both services, then confirm both report the same digest. Database changes only move forward.
+Rollback API and worker together. Redeploy a previously verified image digest to both services, then confirm both report the same digest. Take `PREVIOUS_IMAGE_DIGEST_REF` from `gcloud run revisions describe REVISION --format='value(status.imageDigest)'` or from the release log line `deploying linux/amd64 image ...`, not from the pushed tag, which can point at an image index. Database changes only move forward.
 
 ```bash
 gcloud run deploy WORKER_SERVICE \
