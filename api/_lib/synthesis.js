@@ -744,8 +744,8 @@ async function synthesizeWithBinarySplit({
   const left = abstracts.slice(0, mid);
   const right = abstracts.slice(mid);
   const splitPreamble = `${preamble}\n\nThis subset was split automatically because the original synthesis hit ${reason}. Produce a faithful partial chain-of-title segment.`;
-  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth);
-  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth);
+  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, recombineRecovery);
+  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, recombineRecovery);
   const mergeAbstracts = [
     { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftResult.text },
     { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightResult.text },

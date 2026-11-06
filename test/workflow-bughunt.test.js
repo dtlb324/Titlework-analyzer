@@ -531,6 +531,16 @@ function callKind(request) {
   return 'original';
 }
 
+function synthesisCallLabel(request) {
+  const kind = callKind(request);
+  if (kind === 'recombine' || kind === 'final') return kind;
+  const text = JSON.stringify(request.messages);
+  const ids = [...new Set([...text.matchAll(/deed(\d+)\.pdf/g)].map(match => Number(match[1])))].sort((a, b) => a - b);
+  if (!ids.length) return kind;
+  const span = ids.length === 1 ? String(ids[0]) : `${ids[0]}-${ids.at(-1)}`;
+  return `${kind}:${span}`;
+}
+
 test('recombine recovery: a multi-segment plan keeps the finished halves when the recombine truncates, with no extra call', async () => {
   await withEnvironment({}, async () => {
     const calls = [];
@@ -558,6 +568,89 @@ test('recombine recovery: a multi-segment plan keeps the finished halves when th
     // Halves plus the billed, truncated recombine: 2 + 2 + 8. The truncated original is not counted; that gap predates this change.
     assertStrict.equal(kept.outputTokens, 12);
     assertStrict.ok(calls.at(-1).text.includes('HALF_1') && calls.at(-1).text.includes('HALF_2'), 'the final merge reads both halves');
+    assertStrict.ok(out.result.warnings.includes('segment_1:segment_split_halves_kept'), JSON.stringify(out.result.warnings));
+  });
+});
+
+// A request-size split does not increment truncation depth, so a half that then stops at max_tokens splits again.
+// That nested recombine used to run with no recovery and fail the segment, discarding the paid single-document halves.
+test('recombine recovery: a nested recombine after a payload split keeps the paid halves', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const text = JSON.stringify(request.messages);
+      const label = synthesisCallLabel(request);
+      calls.push({ label, text });
+      if (kind === 'original' && text.includes('deed0.pdf') && text.includes('deed3.pdf')) {
+        throw Object.assign(new Error('payload too large'), { status: 413 });
+      }
+      const truncated = kind === 'recombine' || (kind === 'half' && text.includes('deed2.pdf') && text.includes('deed3.pdf'));
+      const marker = label === 'half:0-1' ? 'NESTED_OUTER_LEFT' : label === 'half:2' ? 'NESTED_DOC_2' : label === 'half:3' ? 'NESTED_DOC_3' : 'BODY';
+      return {
+        text: kind === 'final' ? OPINION : `${SEGMENT} ${marker}`,
+        model: 'gemini-3.1-flash-lite',
+        usage: { input_tokens: 1, output_tokens: 2 },
+        stopReason: truncated ? 'max_tokens' : 'end_turn',
+      };
+    };
+    const store = makeStore({ docCount: 8 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 4, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(calls.map(call => call.label), [
+      'original:0-3', 'half:0-1', 'half:2-3', 'half:2', 'half:3', 'recombine', 'recombine', 'original:4-7', 'final',
+    ]);
+    const recombinations = calls.filter(call => call.label === 'recombine');
+    assertStrict.ok(recombinations[1].text.includes('NESTED_DOC_2') && recombinations[1].text.includes('NESTED_DOC_3'), 'the outer recombine reads the kept nested halves');
+    const [first, second] = store.segmentsSnapshot();
+    assertStrict.equal(first.status, 'complete');
+    assertStrict.equal(first.errorType, undefined);
+    assertStrict.equal(typeof first.summaryText, 'string');
+    assertStrict.ok(first.summaryText.includes('NESTED_OUTER_LEFT'), first.summaryText);
+    assertStrict.ok(first.summaryText.includes('NESTED_DOC_2') && first.summaryText.includes('NESTED_DOC_3'), first.summaryText);
+    assertStrict.ok(first.summaryText.indexOf('NESTED_OUTER_LEFT') < first.summaryText.indexOf('NESTED_DOC_2'), 'document order survives both keep_halves steps');
+    assertStrict.ok(first.summaryText.indexOf('NESTED_DOC_2') < first.summaryText.indexOf('NESTED_DOC_3'), first.summaryText);
+    assertStrict.ok(first.summaryText.includes('## Partial synthesis: deed2.pdf to deed2.pdf'), first.summaryText);
+    assertStrict.ok(first.summaryText.includes('## Partial synthesis: deed3.pdf to deed3.pdf'), first.summaryText);
+    assertStrict.deepEqual(first.warnings, ['segment_split', 'segment_split_halves_kept']);
+    assertStrict.equal(second.status, 'complete');
+    assertStrict.deepEqual(second.warnings, []);
+    assertStrict.equal(out.result.status, 'complete');
+    assertStrict.equal(out.result.finalTitleOpinion, OPINION);
+    assertStrict.ok(out.result.warnings.includes('segment_1:segment_split_halves_kept'), JSON.stringify(out.result.warnings));
+  });
+});
+
+// Same eight-document plan. The outer original truncates, so depth becomes 1 and the halves are not split again.
+// Only the outer recombine truncates. keep_halves still completes that segment.
+test('recombine recovery: an outer truncation split on the same plan still keeps the halves', async () => {
+  await withEnvironment({}, async () => {
+    const calls = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const text = JSON.stringify(request.messages);
+      const label = synthesisCallLabel(request);
+      calls.push(label);
+      const truncated = kind === 'recombine' || (kind === 'original' && text.includes('deed0.pdf') && text.includes('deed3.pdf'));
+      const marker = label === 'half:0-1' ? 'SHALLOW_LEFT' : label === 'half:2-3' ? 'SHALLOW_RIGHT' : 'BODY';
+      return {
+        text: kind === 'final' ? OPINION : `${SEGMENT} ${marker}`,
+        model: 'gemini-3.1-flash-lite',
+        usage: {},
+        stopReason: truncated ? 'max_tokens' : 'end_turn',
+      };
+    };
+    const store = makeStore({ docCount: 8 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 4, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(calls, ['original:0-3', 'half:0-1', 'half:2-3', 'recombine', 'original:4-7', 'final']);
+    const [first, second] = store.segmentsSnapshot();
+    assertStrict.equal(first.status, 'complete');
+    assertStrict.equal(first.errorType, undefined);
+    assertStrict.deepEqual(first.warnings, ['segment_split', 'segment_split_halves_kept']);
+    assertStrict.ok(first.summaryText.includes('SHALLOW_LEFT') && first.summaryText.includes('SHALLOW_RIGHT'), first.summaryText);
+    assertStrict.ok(first.summaryText.indexOf('SHALLOW_LEFT') < first.summaryText.indexOf('SHALLOW_RIGHT'), 'halves stay in document order');
+    assertStrict.equal(second.status, 'complete');
+    assertStrict.deepEqual(second.warnings, []);
+    assertStrict.equal(out.result.status, 'complete');
     assertStrict.ok(out.result.warnings.includes('segment_1:segment_split_halves_kept'), JSON.stringify(out.result.warnings));
   });
 });
