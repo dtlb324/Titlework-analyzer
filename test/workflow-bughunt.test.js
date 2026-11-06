@@ -576,9 +576,67 @@ test('recombine recovery: a recombine that fails for any other reason does not k
     await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
     const [first] = store.segmentsSnapshot();
     assertStrict.equal(first.status, 'failed');
-    assertStrict.notEqual(first.errorType, 'output_truncated');
+    assertStrict.equal(first.errorType, 'provider_error');
     assertStrict.equal(first.summaryText, null, 'a non-truncation recombine failure saves no halves');
-    assertStrict.deepEqual(kinds.slice(0, 4), ['original', 'half', 'half', 'recombine'], 'the failed recombine is not retried');
+    assertStrict.equal(kinds.filter(k => k === 'recombine').length, 1, 'the failed recombine is not retried');
+    assertStrict.deepEqual(kinds.slice(0, 4), ['original', 'half', 'half', 'recombine']);
+  });
+});
+
+test('recombine recovery: halves are not kept when either half is not a valid segment summary', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      const kind = callKind(request);
+      kinds.push(kind);
+      const halfIndex = kinds.filter(k => k === 'half').length;
+      const truncated = kind === 'recombine' || (kind === 'original' && JSON.stringify(request.messages).includes('deed0.pdf'));
+      const text = kind === 'final' ? OPINION : kind === 'half' && halfIndex === 2 ? 'I cannot help with that.' : SEGMENT;
+      return { text, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    const [first] = store.segmentsSnapshot();
+    assertStrict.equal(first.status, 'failed');
+    assertStrict.equal(first.errorType, 'output_truncated');
+    assertStrict.equal(first.summaryText, null);
+  });
+});
+
+test('recombine recovery: kept halves are labelled with their real filenames, not segment-relative numbers', async () => {
+  await withEnvironment({}, async () => {
+    const modelClient = async request => {
+      const kind = callKind(request);
+      const truncated = kind === 'recombine' || (kind === 'original' && JSON.stringify(request.messages).includes('deed2.pdf'));
+      return { text: kind === 'final' ? OPINION : SEGMENT, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
+    };
+    const store = makeStore({ docCount: 4 });
+    await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1 }, workerId: 'probe', budgetMs: 5000 });
+    const second = store.segmentsSnapshot()[1];
+    assertStrict.deepEqual(second.warnings, ['segment_split', 'segment_split_halves_kept']);
+    assertStrict.ok(second.summaryText.includes('## Partial synthesis: deed2.pdf to deed2.pdf'), second.summaryText);
+    assertStrict.ok(second.summaryText.includes('## Partial synthesis: deed3.pdf to deed3.pdf'), second.summaryText);
+    assertStrict.ok(!/Documents 1-/.test(second.summaryText), second.summaryText);
+  });
+});
+
+test('recombine recovery: a retryable error on the single-pass retry fails closed instead of re-running the split', async () => {
+  await withEnvironment({}, async () => {
+    const kinds = [];
+    const modelClient = async request => {
+      let kind = callKind(request);
+      if (kind === 'recombine' && kinds.includes('recombine')) kind = 'retry';
+      kinds.push(kind);
+      if (kind === 'retry') throw Object.assign(new Error('upstream overloaded'), { status: 529 });
+      return { text: kind === 'half' ? SEGMENT : OPINION, model: 'claude-sonnet-5-5', usage: {}, stopReason: kind === 'half' ? 'end_turn' : 'max_tokens' };
+    };
+    const store = makeStore({ docCount: 2 });
+    const out = await processSynthesisJob('job_probe', { store, modelClient, config: { maxAttempts: 3 }, workerId: 'probe', budgetMs: 5000 });
+    assertStrict.deepEqual(kinds, ['original', 'half', 'half', 'recombine', 'retry'], 'no second claim re-bills the tree');
+    const [segment] = store.segmentsSnapshot();
+    assertStrict.equal(segment.status, 'failed');
+    assertStrict.equal(segment.errorType, 'recombine_retry_failed');
+    assertStrict.equal(out.result.status, 'failed');
   });
 });
 

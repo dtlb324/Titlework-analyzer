@@ -536,6 +536,7 @@ function createTimeoutSignal(ms) {
 
 function classifyError(err) {
   if (err?.code === 'output_truncated') return 'output_truncated';
+  if (err?.code === 'recombine_retry_failed') return 'recombine_retry_failed';
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
   if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
@@ -767,8 +768,13 @@ async function synthesizeWithBinarySplit({
     if (classifyError(err) !== 'output_truncated' || !recombineRecovery) throw err;
     truncatedUsage = err.usage || {};
     if (recombineRecovery.mode === 'keep_halves') {
+      // Each half must stand on its own; otherwise its documents would vanish behind a complete-looking segment.
+      if (![leftResult, rightResult].every(half => validateSegmentSummary(half.text).ok)) throw err;
+      const label = docs => `${docs[0].filename} to ${docs[docs.length - 1].filename}`;
       merged = {
-        text: mergeAbstracts.map(item => `## ${item.filename}\n\n${item.abstract}`).join('\n\n'),
+        text: [[left, leftResult], [right, rightResult]]
+          .map(([docs, half]) => `## Partial synthesis: ${label(docs)}\n\n${half.text}`)
+          .join('\n\n'),
         model: rightResult.model,
         usage: {},
         payloadBytes: Math.max(leftResult.payloadBytes || 0, rightResult.payloadBytes || 0),
@@ -777,7 +783,15 @@ async function synthesizeWithBinarySplit({
       };
       recoveryWarning = 'segment_split_halves_kept';
     } else if (recombineRecovery.mode === 'retry_larger' && recombineRecovery.maxTokens > config.maxTokens) {
-      merged = await callSynthesisModel({ ...recombineRequest, config: { ...config, maxTokens: recombineRecovery.maxTokens } });
+      try {
+        merged = await callSynthesisModel({ ...recombineRequest, config: { ...config, maxTokens: recombineRecovery.maxTokens } });
+      } catch (retryErr) {
+        // Fail closed on any retry failure: a retryable class here would re-run and re-bill the whole split.
+        if (classifyError(retryErr) === 'output_truncated') throw retryErr;
+        const failed = new Error(`Recombine retry failed: ${sanitizeErrorMessage(retryErr)}`);
+        failed.code = 'recombine_retry_failed';
+        throw failed;
+      }
       recoveryWarning = 'segment_split_recombine_retry';
     } else {
       throw err;
@@ -799,8 +813,8 @@ async function synthesizeWithBinarySplit({
 
 // A truncation-driven split may happen once per segment. Each level of recursion would otherwise add calls in
 // proportion to the document count, and a half that is still too long fails closed instead of fanning out.
-// Worst case per segment: the original call, two halves and the recombine, plus one larger recombine retry
-// on a single-pass segment (recombineRecovery 'retry_larger').
+// A truncation split costs the original call, two halves and the recombine; a single-pass segment adds at most one
+// larger recombine retry. Request-size and timeout splits recurse further, and the validation repair call is extra.
 const MAX_TRUNCATION_SPLIT_DEPTH = 1;
 
 function finalMergeMaxTokens() {
