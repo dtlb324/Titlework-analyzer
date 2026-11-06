@@ -381,7 +381,7 @@ export function createCompareUI(deps = {}) {
           entry.status = 'error';
           entry.message = error.message;
         }
-        if (index === 0) renderPreviews();
+        if (index === selected) renderPreviews();
         renderBatch();
       }
       const ready = entries.filter(entry => entry.status === 'ready');
@@ -404,7 +404,6 @@ export function createCompareUI(deps = {}) {
     if (busy || preparing) return;
     if (!entries.some(canCompare) || !el.password.value) { el.status.textContent = 'Choose a valid document and enter the application password.'; return; }
     const runnable = entries.filter(canCompare);
-    clearResults();
     const current = generation;
     busy = true;
     updateControls();
@@ -418,6 +417,7 @@ export function createCompareUI(deps = {}) {
         const byteCount = entry.pages.reduce((total, page) => total + (page.data.length / 4 * 3 - (page.data.endsWith('==') ? 2 : page.data.endsWith('=') ? 1 : 0)), 0);
         if (byteCount > Math.min(LIMITS.maxBytes, metadata.maxBytes)) throw new Error(`${entry.file.name}: document exceeds the server image byte limit.`);
       }
+      clearResults();
       const chosen = modelSlots.map(slot => slot.effort);
       el.settings.textContent = metadata.models.map((model, index) => `${model.label}: ${model.id} · effort ${chosen[index]} · max output ${model.maxTokens} tokens`).join('\n');
       let halted = null;

@@ -148,3 +148,56 @@ test('a file with no result yet is not ranked', () => {
   assert.equal(assessment.ranking.fieldCount, 0);
   assert.deepEqual(assessment.byFile.get('pending.pdf'), { models: [] });
 });
+
+const blankRefs = { GRANTEE: 'ILLEGIBLE', 'DATE EXECUTED': 'ILLEGIBLE', 'DATE RECORDED': 'ILLEGIBLE' };
+const scoreGrantor = (documentText, grantor) => scoreModel(documentText, identity({ ...blankRefs, GRANTOR: grantor, 'RECORDING REF': 'ILLEGIBLE' }));
+const hit = { status: 'scored', matched: 1, scored: 1, percent: 100 };
+const miss = { status: 'scored', matched: 0, scored: 1, percent: 0 };
+
+test('a field must match whole words and numbers, not the inside of a longer one', () => {
+  const text = 'Warranty Deed. Grantor: Joanne Blacksmith. Recorded Vol 1123 Page 45. Instrument 2024001234.';
+  assert.deepEqual(scoreModel(text, identity({ ...blankRefs, GRANTOR: 'Ann', 'RECORDING REF': '112' })), { status: 'scored', matched: 0, scored: 2, percent: 0 });
+  assert.deepEqual(scoreModel(text, identity({ ...blankRefs, GRANTOR: 'Joanne', 'RECORDING REF': 'Vol 1123' })), { status: 'scored', matched: 2, scored: 2, percent: 100 });
+  assert.deepEqual(scoreModel(text, identity({ ...blankRefs, GRANTOR: 'Joanne Blacksmith', 'RECORDING REF': '1123' })), { status: 'scored', matched: 2, scored: 2, percent: 100 });
+  assert.deepEqual(scoreModel('Vol 1123 Page 45', identity({ ...blankRefs, GRANTOR: 'ol 1', 'RECORDING REF': 'Page 4' })), { status: 'scored', matched: 0, scored: 2, percent: 0 });
+  assert.deepEqual(scoreModel('Sold 1/2 interest', identity({ ...blankRefs, GRANTOR: 'Sold', 'RECORDING REF': 'ILLEGIBLE', 'FRACTION CONVEYED': '1/2' })), { status: 'scored', matched: 2, scored: 2, percent: 100 });
+  assert.deepEqual(scoreModel('Sold 11/2 interest', identity({ ...blankRefs, GRANTOR: 'Sold', 'RECORDING REF': 'ILLEGIBLE', 'FRACTION CONVEYED': '1/2' })), { status: 'scored', matched: 1, scored: 2, percent: 50 });
+});
+
+test('a whole-word match is found anywhere in the text, including after a partial hit', () => {
+  assert.deepEqual(scoreModel('Ann Anne Joanne and then Ann Lee', identity({ ...blankRefs, GRANTOR: 'Ann Lee', 'RECORDING REF': 'Anne' })), { status: 'scored', matched: 2, scored: 2, percent: 100 });
+  assert.deepEqual(scoreModel('Joanne then Annabel then Ann.', identity({ ...blankRefs, GRANTOR: 'Ann', 'RECORDING REF': 'Anna' })), { status: 'scored', matched: 1, scored: 2, percent: 50 });
+  assert.deepEqual(scoreModel('Joanne then Annabel', identity({ ...blankRefs, GRANTOR: 'Ann', 'RECORDING REF': 'Anna' })), { status: 'scored', matched: 0, scored: 2, percent: 0 });
+});
+
+test('typographic apostrophes and dashes match their plain equivalents in either direction', () => {
+  const doc = 'Grantor: Mary O\u2019Brien-Smith, a widow.';
+  for (const grantor of ['Mary O\u2019Brien-Smith', "Mary O'Brien-Smith", 'Mary O\u2019Brien\u2013Smith', 'Mary O\u2018Brien\u2014Smith', 'Mary O\u02BCBrien\u2010Smith', 'Mary O\u2019Brien\u2011Smith']) assert.deepEqual(scoreGrantor(doc, grantor), hit, grantor);
+  assert.deepEqual(scoreGrantor("Mary O'Brien-Smith", 'Mary O\u2019Brien\u2013Smith'), hit);
+  assert.deepEqual(scoreGrantor('Mary O\u2019Brien\u2014Smith', 'Mary O\u2019Brien-Smith'), hit);
+  assert.deepEqual(scoreGrantor('Range 2\u20134', 'Range 2-4'), hit);
+});
+
+test('punctuation normalization does not equate different names or numbers', () => {
+  assert.deepEqual(scoreGrantor('Mary O\u2019Brien-Smith', 'Mary OBrien Smith'), miss, 'a hyphen is not a space');
+  assert.deepEqual(scoreGrantor('Range 2\u20134', 'Range 24'), miss, 'a dash between numbers is not removed');
+  assert.deepEqual(scoreGrantor('Mary Obrian', "Mary O'Brien"), miss);
+});
+
+test('half of a hyphenated name or number is not the whole value', () => {
+  const doc = 'Grantor: Mary O\u2019Brien-Smith, lot 5-A, pages 2\u20134.';
+  assert.deepEqual(scoreGrantor(doc, 'Mary O\u2019Brien'), miss);
+  assert.deepEqual(scoreGrantor(doc, 'Smith'), miss);
+  assert.deepEqual(scoreGrantor(doc, 'lot 5'), miss);
+  assert.deepEqual(scoreGrantor(doc, 'A, pages 2'), miss);
+  assert.deepEqual(scoreGrantor(doc, 'lot 5-A'), hit);
+  assert.deepEqual(scoreGrantor('Mary Jones - John Smith', 'Mary Jones'), hit, 'a spaced dash separates words');
+});
+
+test('abstention ranking is unchanged by boundary matching', () => {
+  const text = 'Grantor John Smith grantee Mary Jones executed 5 March 1990 recorded 7 March 1990 Vol 10 Page 20';
+  const full = { id: 'full', label: 'Answers all', fields: { GRANTOR: 'John Smith', GRANTEE: 'Mary Jones', 'DATE EXECUTED': '5 March 1990', 'DATE RECORDED': '7 March 1990', 'RECORDING REF': 'Vol 11 Page 20' } };
+  const shy = { id: 'shy', label: 'Abstains on 4 of 5', fields: { GRANTOR: 'John Smith', GRANTEE: 'ILLEGIBLE', 'DATE EXECUTED': 'ILLEGIBLE', 'DATE RECORDED': 'ILLEGIBLE', 'RECORDING REF': 'ILLEGIBLE' } };
+  const { ranking } = assessAccuracy([{ filename: 'a.pdf', documentText: text, models: [full, shy] }]);
+  assert.deepEqual(ranking.rows.map(row => [row.id, row.rank, row.matched, row.scored]), [['shy', 1, 1, 1], ['full', 2, 4, 5]]);
+});
