@@ -537,6 +537,7 @@ function createTimeoutSignal(ms) {
 function classifyError(err) {
   if (err?.code === 'output_truncated') return 'output_truncated';
   if (err?.code === 'recombine_retry_failed') return 'recombine_retry_failed';
+  if (err?.code === 'lease_lost') return 'lease_lost';
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
   if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
@@ -644,6 +645,9 @@ async function callSynthesisModel({
   config,
   options,
 }) {
+  // A segment worker re-asserts its lease before each billable call, so a lease that expired or was
+  // reclaimed stops the chain here instead of paying for a result that can no longer be saved.
+  if (options.segmentLeaseGuard) await options.segmentLeaseGuard();
   const messages = buildSegmentMessages(abstracts, tract, contextNotes, preamble, {
     cacheMergeSegments: Boolean(options.cacheMergeSegments),
   });
@@ -728,6 +732,7 @@ async function synthesizeWithBinarySplit({
   reason,
   truncationDepth = 0,
   recombineRecovery = null,
+  priorUsage = {},
 }) {
   if (abstracts.length <= 1) {
     return await callSynthesisModel({
@@ -787,7 +792,7 @@ async function synthesizeWithBinarySplit({
         merged = await callSynthesisModel({ ...recombineRequest, config: { ...config, maxTokens: recombineRecovery.maxTokens } });
       } catch (retryErr) {
         // Fail closed on any retry failure: a retryable class here would re-run and re-bill the whole split.
-        if (classifyError(retryErr) === 'output_truncated') throw retryErr;
+        if (['output_truncated', 'lease_lost'].includes(classifyError(retryErr))) throw retryErr;
         const failed = new Error(`Recombine retry failed: ${sanitizeErrorMessage(retryErr)}`);
         failed.code = 'recombine_retry_failed';
         throw failed;
@@ -797,7 +802,8 @@ async function synthesizeWithBinarySplit({
       throw err;
     }
   }
-  const parts = [merged.usage, leftResult.usage, rightResult.usage, truncatedUsage];
+  // priorUsage is the billed, truncated call that triggered this split.
+  const parts = [priorUsage, merged.usage, leftResult.usage, rightResult.usage, truncatedUsage];
   return {
     ...merged,
     usage: {
@@ -854,6 +860,7 @@ async function tryRecursiveSegment(abstracts, tract, contextNotes, preamble, sys
         reason: 'max_tokens',
         truncationDepth: truncationDepth + 1,
         recombineRecovery,
+        priorUsage: err.usage || {},
       });
     }
     if (abstracts.length > 1 && (type === 'payload_too_large' || type === 'upstream_timeout')) {
@@ -913,6 +920,29 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
     if (!updated) return { status: 'stale', segmentId: segment.id };
     return { status: 'failed', segmentId: segment.id, failure };
   }
+  // Each renewal must outlive the call it precedes: one call may take the full upstream timeout, and a
+  // truncation chain is up to five sequential calls, far longer than a single claim lease.
+  const callLeaseMs = Math.max(leaseMs, activeConfig.upstreamTimeoutMs + 60_000);
+  const segmentOptions = store.renewSynthesisSegmentLease
+    ? {
+      ...options,
+      async segmentLeaseGuard() {
+        let renewed;
+        try {
+          renewed = await store.renewSynthesisSegmentLease(jobId, segment.id, { workerId, leaseMs: callLeaseMs });
+        } catch (err) {
+          // Best effort: failing here would split or re-bill already-paid calls over a DB blip, and the final completeSynthesisSegment worker check still rejects a stale write.
+          logSynthesisMetrics({ event: 'synthesis_segment_lease_renew_failed', jobId, segmentId: segment.id, errorMessage: sanitizeErrorMessage(err) });
+          return;
+        }
+        if (!renewed) {
+          const lost = new Error('Synthesis segment lease was taken by another worker.');
+          lost.code = 'lease_lost';
+          throw lost;
+        }
+      },
+    }
+    : options;
 
   const byDocumentId = new Map(
     abstracts
@@ -971,7 +1001,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       const recombineRecovery = isSinglePass
         ? { mode: 'retry_larger', maxTokens: finalMergeMaxTokens() }
         : { mode: 'keep_halves' };
-      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, options, 0, recombineRecovery);
+      const result = await tryRecursiveSegment(segmentAbstracts, tract, contextNotes, preamble, systemPrompt, activeConfig, segmentOptions, 0, recombineRecovery);
       const validation = isSinglePass ? validateFinalOpinion(result.text) : validateSegmentSummary(result.text);
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
@@ -986,7 +1016,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
           preamble: repairPreamble,
           systemPrompt,
           config: activeConfig,
-          options,
+          options: segmentOptions,
         });
         const repairValidation = isSinglePass ? validateFinalOpinion(retry.text) : validateSegmentSummary(retry.text);
         if (repairValidation.ok) {
@@ -1039,6 +1069,8 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       if (!updated) return { status: 'stale', segmentId: segment.id };
       return { status: 'complete', segmentId: segment.id };
     } catch (err) {
+      // Another worker owns the row now; leave it untouched rather than failing or re-queuing their claim.
+      if (classifyError(err) === 'lease_lost') return { status: 'stale', segmentId: segment.id };
       lastError = err;
       const errorType = classifyError(err);
       const isRetryable = ['rate_limit', 'upstream_timeout', 'provider_error'].includes(errorType);
@@ -1511,7 +1543,7 @@ export async function processSynthesisJob(jobId, options = {}) {
     } else if (singlePass) {
       const onlySummary = completedSegments[0];
       const validation = validateFinalOpinion(onlySummary.summaryText || '');
-      const opinionWarnings = [];
+      const opinionWarnings = segmentResultWarnings(onlySummary);
       if (!validation.ok) opinionWarnings.push(`final_validation_failed: ${validation.reason}`);
       const failedDocs = await failedDocumentsForMerge();
       if (failedDocs.length) opinionWarnings.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
@@ -1538,7 +1570,7 @@ export async function processSynthesisJob(jobId, options = {}) {
       completedSegments.forEach(segment => {
         tokensAccum.inputTokens += segment.inputTokens || 0;
         tokensAccum.outputTokens += segment.outputTokens || 0;
-        (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
+        warningsAccum.push(...segmentResultWarnings(segment));
       });
       try {
         const merged = await runOrRecoverMerge({
@@ -1608,7 +1640,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         completedSegments.forEach(segment => {
           tokensAccum.inputTokens += segment.inputTokens || 0;
           tokensAccum.outputTokens += segment.outputTokens || 0;
-          (segment.warnings || []).forEach(w => warningsAccum.push(`segment_${segment.segmentIndex + 1}:${w}`));
+          warningsAccum.push(...segmentResultWarnings(segment));
         });
         try {
           const merged = await runOrRecoverMerge({
@@ -1757,6 +1789,10 @@ async function collectFailedDocuments(store, jobId) {
     errorType: chunk.abstractionErrorType,
     errorMessage: chunk.abstractionErrorMessage,
   }));
+}
+
+function segmentResultWarnings(segment) {
+  return (segment.warnings || []).map(w => `segment_${segment.segmentIndex + 1}:${w}`);
 }
 
 async function collectSplitDegradationWarnings(store, jobId) {
