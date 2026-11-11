@@ -257,7 +257,7 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5-5`. Used when a low-confidence abstract is re-read. |
 | `GEMINI_THINKING_LEVEL` | Omitted. Accepted values are `minimal`, `low`, `medium`, and `high`, and only for a `gemini-3` model. Any other value is ignored. |
 | `GEMINI_THINKING_BUDGET` | `0` for a Gemini model that is not a `gemini-3` model. Gemini 3 uses the level above instead. |
-| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` asks Gemini 3 for thought summaries. |
+| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for a Gemini 3 model that also has an accepted `GEMINI_THINKING_LEVEL`. Any other call ignores the flag. |
 
 ### Abstraction settings
 
@@ -279,9 +279,9 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `ABSTRACTION_BATCH_LARGE_BYTES` | `2000000`, range 100000 to 8000000. |
 | `ABSTRACTION_BATCH_FETCH_MULTIPLIER` | `4`, range 1 to 16. |
 | `ABSTRACTION_MAX_ATTEMPTS` | `5`, capped at 12. |
-| `ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES` | `25000000`, range 1000000 to 100000000. |
+| `ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES` | `25000000`, range 1000000 to 100000000. Floor for a PDF chunk that spans more than one page, or that has no page range. The fetch cap is the larger of this value and 70% of (`REQUEST_ENVELOPE_SAFE_BYTES` minus a fixed 350000). |
 | `GEMINI_FILE_API_ENABLED` | On, unless the value is `false`. |
-| `GEMINI_FILE_API_MIN_BYTES` | `1500000`, range 100000 to 50000000. |
+| `GEMINI_FILE_API_MIN_BYTES` | `1500000`. The Files API clamps a set value from 100000 to 50000000. The abstraction size estimate uses the raw number, or 1500000 when the value is missing or 0. |
 | `GEMINI_FILE_API_MAX_BYTES` | `48000000`, range 1000000 to 50000000. |
 | `GEMINI_FILE_API_POLL_MS` | `500`, range 100 to 5000. |
 | `GEMINI_FILE_API_POLL_MAX_MS` | `60000`, range 1000 to 120000. |
@@ -291,9 +291,9 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 
 | Name | If unset |
 |---|---|
-| `SYNTHESIS_MAX_TOKENS` | `8000`, range 256 to 32000. Caps the final merge. |
+| `SYNTHESIS_MAX_TOKENS` | `8000`, range 256 to 32000. Caps a single-pass opinion and a follow-up. A multi-segment merge uses `SYNTHESIS_MERGE_MAX_TOKENS`. |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | `5000`, range 512 to 32000. Caps one partial segment. |
-| `SYNTHESIS_MERGE_MAX_TOKENS` | `16000`, range 1024 to 32000. |
+| `SYNTHESIS_MERGE_MAX_TOKENS` | `16000`, range 1024 to 32000. Caps the multi-segment merge, and the larger retry after a truncated single-pass opinion. |
 | `SYNTHESIS_CHUNK_SIZE` | The planner does not use 120 unless this variable is set. With it unset, `effectiveSynthesisChunkSize` uses `floor(SYNTHESIS_MAX_TOKENS / 1000)`. At the 8000 token default, that is 8. A job with at least `BULK_JOB_MIN_ABSTRACTS` abstracts then uses at least `BULK_SYNTHESIS_CHUNK_SIZE`. When this variable is set, the value is clamped from 1 to 250, and a bulk job still raises it to the bulk size when that size is larger. |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | `200`, range 10 to 250. |
 | `BULK_JOB_MIN_ABSTRACTS` | `100`, range 2 to 400. |
@@ -309,9 +309,9 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `SYNTHESIS_LARGE_JOB_MULTI_SEGMENT` | Off. `true` forces multi-segment Gemini synthesis at or above `BULK_JOB_MIN_ABSTRACTS`. |
 | `SYNTHESIS_FORCE_SINGLE_PASS` | Off. `true` turns that forcing off. |
 | `SYNTHESIS_REPAIR_ENABLED` | On, unless the value is `false`. |
-| `SYNTHESIS_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` is the fallback. |
-| `SYNTHESIS_MERGE_LEASE_MS` | Falls back to `WORKFLOW_LEASE_MS` when that is set. Otherwise the synthesis upstream timeout plus 60 seconds, clamped from 5000 to 600000. |
-| `SYNTHESIS_STALE_LEASE_MS` | Falls back to `WORKFLOW_STALE_LEASE_MS` when that is set. Otherwise the merge lease plus 60 seconds, clamped from 5000 to 600000. |
+| `SYNTHESIS_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` is the fallback. A segment lease renewal uses the greater of the claim lease and this timeout plus 60 seconds. |
+| `SYNTHESIS_MERGE_LEASE_MS` | Read only when `processSynthesisJob` is called without `mergeLeaseMs`. The worker and the API kick pass the workflow lease instead. The fallback is `WORKFLOW_LEASE_MS` when that is set, otherwise the synthesis upstream timeout plus 60 seconds, clamped from 5000 to 600000. |
+| `SYNTHESIS_STALE_LEASE_MS` | Read only when the caller omits `staleLeaseMs`. The worker and the API kick pass `WORKFLOW_STALE_LEASE_MS`. The fallback is that workflow value when set, otherwise the merge-lease default plus 60 seconds, clamped from 5000 to 600000. |
 | `ANTHROPIC_PROMPT_CACHE` | On, unless the value is `false`. |
 | `SYNTHESIS_MERGE_CACHE_MIN_TOKENS` | `1024`, and at least 256. |
 
@@ -321,7 +321,7 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 |---|---|
 | `PORT` | `8080` for `server.js` and for `worker.js`. |
 | `WORKER_DISABLED` | Off. Worker only. `true`, `1`, and `yes` leave the health server up and skip the queue loop. The release workflow sets `true`. |
-| `WORKER_POLL_IDLE_MS` | `2000`, range 100 to 60000. If this is unset, `WORKER_POLL_INTERVAL_MS` is the idle wait. |
+| `WORKER_POLL_IDLE_MS` | `2000`, range 100 to 60000. When this is unset, a set `WORKER_POLL_INTERVAL_MS` is the idle wait, clamped from 100 to 60000. When both are unset, the idle wait is 2000. |
 | `WORKER_POLL_ACTIVE_MS` | `0`, range 0 to 5000. |
 | `WORKER_DRAIN_BUDGET_MS` | `1500000`, range 10000 to 3300000. |
 | `WORKER_STAGE_LOGS` | Off. `true` logs abstraction stages. |
@@ -340,7 +340,7 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `GCS_SIGNED_URL_TTL_MS` | `900000`, range 60000 to 3600000. |
 | `ANALYZE_RATE_LIMIT_MAX` | `300` requests each minute for `POST /api/analyze`, then forced into 10 to 600. `0` is treated as unset. |
 | `REQUEST_ENVELOPE_SAFE_BYTES` | Abstraction and abstraction batching use `18000000`. Synthesis uses `12000000`. Both clamp from 100000 to 20000000. |
-| `REQUEST_OVERHEAD_BYTES` | `350000` for synthesis, range 0 to 1000000. |
+| `REQUEST_OVERHEAD_BYTES` | `350000`, range 0 to 1000000. Copied onto the synthesis config and never read. Abstraction subtracts a fixed 350000 and ignores this variable. |
 | `VERIFY_GCS_OBJECTS` | Off. `true` makes chunk finalization check that the object exists. |
 | `OCR_COMPARE_ENABLED` | Off. `POST /api/ocr-compare` returns 404 unless this is `true`. It also returns 503 when `APP_PASSWORD` is unset. |
 | `OCR_COMPARE_MAX_TOKENS` | `16000` unless the value is an integer from 512 to 32000. |
@@ -364,7 +364,7 @@ These are `--update-env-vars` on the API deploy, except `WORKER_DISABLED`. That 
 | `BULK_JOB_MIN_ABSTRACTS` | `50` on the API. |
 | `SYNTHESIS_CHUNK_SIZE` | `50` on the API. |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | `50` on the API. |
-| `SYNTHESIS_MAX_TOKENS` | `5000` on the API. |
+| `SYNTHESIS_MAX_TOKENS` | `5000` on the API. That caps a single-pass opinion and a follow-up. The workflow does not set `SYNTHESIS_MERGE_MAX_TOKENS`, so the multi-segment merge stays at 16000. |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | `4000` on the API. |
 | `SYNTHESIS_STREAM_ENABLED` | `true` on the API. |
 | `SYNTHESIS_COMPACTION_ENABLED` | `true` on the API. |
@@ -400,7 +400,7 @@ These settings cut calls or output tokens.
 - Leave `ABSTRACTION_PDF_TEXT_FIRST` unset so text PDFs can skip visual input.
 - Leave `ABSTRACTION_BATCH_ENABLED` unset so small chunks share a call.
 - Leave `GEMINI_FILE_API_ENABLED` unset so a large visual file is uploaded through the Files API instead of inline base64.
-- `ABSTRACT_MAX_TOKENS` and `SYNTHESIS_MAX_TOKENS` cap output.
+- `ABSTRACT_MAX_TOKENS` caps an abstract. `SYNTHESIS_PARTIAL_MAX_TOKENS` caps a partial segment. `SYNTHESIS_MAX_TOKENS` caps a single-pass opinion and a follow-up. `SYNTHESIS_MERGE_MAX_TOKENS` caps the final merge.
 - `ABSTRACTION_ESCALATION_ENABLED=false` skips the Sonnet re-read. The release workflow sets that on the API.
 
 The server code does not call the Anthropic message-batches endpoint or a Gemini batch-job endpoint. Queue progress is the worker and the Neon rows.
