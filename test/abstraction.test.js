@@ -1459,6 +1459,95 @@ test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', a
   assert(saved.modelUsed === 'gemini-2.5-flash', `Expected Gemini Flash saved, got ${saved.modelUsed}`);
 });
 
+test('processChunkAbstraction fails a max_tokens abstract instead of saving it as completed', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_truncated' })]);
+  const models = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_truncated'), {
+    store,
+    workerId: 'wkr_truncated',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => {
+      models.push(request.model);
+      return {
+        text: 'DOC TYPE: Mineral Deed\nGRANTOR: A\nINTEREST CONVEYED: an undivided 1/',
+        model: request.model,
+        usage: { input_tokens: 10, output_tokens: request.maxTokens },
+        stopReason: 'max_tokens',
+      };
+    },
+  });
+
+  assert(result.status === 'failed', `Expected failed, got ${result.status}`);
+  assert(result.failure.errorType === 'output_truncated', `Expected output_truncated, got ${result.failure.errorType}`);
+  assert(!store.abstracts.has('chk_truncated'), 'A truncated abstract must not be saved');
+  assert(store.chunks.get('chk_truncated').abstractionStatus === 'failed', 'Chunk must be failed, not completed');
+  assert(models.join(',') === 'gemini-3.1-flash-lite,claude-sonnet-5-5', `Expected one escalation attempt, got ${models.join(',')}`);
+});
+
+test('processChunkAbstraction fails a truncated abstract when the escalation call errors', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_truncated_escalation_error' })]);
+  const result = await processChunkAbstraction(store.chunks.get('chk_truncated_escalation_error'), {
+    store,
+    workerId: 'wkr_truncated',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => {
+      if (request.model === 'claude-sonnet-5-5') throw new Error('escalation provider down');
+      return { text: 'DOC TYPE: Mineral Deed\nINTEREST CONVEYED: an undivided 1/', model: request.model, usage: { output_tokens: request.maxTokens }, stopReason: 'max_tokens' };
+    },
+  });
+
+  assert(result.status === 'failed' && result.failure.errorType === 'output_truncated', `Expected output_truncated failure, got ${result.status}/${result.failure?.errorType}`);
+  assert(!store.abstracts.has('chk_truncated_escalation_error'), 'A truncated abstract must not be saved');
+});
+
+test('processChunkAbstraction keeps a finished escalation after a truncated first abstract', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_truncated_recovered' })]);
+  const result = await processChunkAbstraction(store.chunks.get('chk_truncated_recovered'), {
+    store,
+    workerId: 'wkr_truncated',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => (request.model === 'claude-sonnet-5-5'
+      ? { text: 'DOC TYPE: Mineral Deed\nINTEREST CONVEYED: an undivided 1/2 mineral interest', model: request.model, usage: { output_tokens: 40 }, stopReason: 'end_turn' }
+      : { text: 'DOC TYPE: Mineral Deed\nINTEREST CONVEYED: an undivided 1/', model: request.model, usage: { output_tokens: request.maxTokens }, stopReason: 'max_tokens' }),
+  });
+
+  assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+  assert(store.abstracts.get('chk_truncated_recovered').abstractText.endsWith('1/2 mineral interest'), 'Expected the finished escalated abstract');
+});
+
+test('processChunkAbstraction splits a truncated multi-page PDF instead of failing it', async () => {
+  const chunk = makeChunk({ id: 'chk_truncated_pdf', pageStart: 1, pageEnd: 4 });
+  const store = createMemoryPhase3Store([chunk]);
+  let splitCalls = 0;
+  store.createSplitChunk = async (jobId, documentId, input) => {
+    splitCalls += 1;
+    const child = { ...makeChunk({ id: `chk_truncated_pdf_${splitCalls}`, chunkOrder: input.chunkOrder, pageStart: input.pageStart, pageEnd: input.pageEnd }), splitParentChunkId: input.splitParentChunkId };
+    store.chunks.set(child.id, child);
+    return child;
+  };
+  store.markChunkAbstractionSplitSuperseded = async (jobId, chunkId, reason) => {
+    store.chunks.set(chunkId, { ...store.chunks.get(chunkId), abstractionStatus: 'split_superseded', abstractionErrorType: reason });
+    return store.chunks.get(chunkId);
+  };
+  const { PDFDocument } = await import('pdf-lib');
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf.addPage([200, 200]);
+  const pdfBytes = Buffer.from(await pdf.save());
+
+  const result = await processChunkAbstraction(chunk, {
+    store,
+    escalationEnabled: false,
+    blobLoader: async () => ({ bytes: pdfBytes, mediaType: 'application/pdf' }),
+    blobWriter: async (parent, name) => ({ blobKey: `jobs/${parent.jobId}/chunks/${parent.id}/${name}`, blobUrl: `gs://titlework-test/jobs/${parent.jobId}/chunks/${parent.id}/${name}` }),
+    modelClient: async request => ({ text: 'DOC TYPE: Mineral Deed\nINTEREST CONVEYED: an undivided 1/', model: request.model, usage: {}, stopReason: 'max_tokens' }),
+  });
+
+  assert(result.status === 'split_superseded', `Expected split_superseded, got ${result.status}`);
+  assert(splitCalls === 2, `Expected two page-range children, got ${splitCalls}`);
+  assert(store.chunks.get('chk_truncated_pdf').abstractionErrorType === 'output_truncated', 'Expected the split reason to record truncation');
+  assert(!store.abstracts.has('chk_truncated_pdf'), 'A truncated abstract must not be saved');
+});
+
 test('Phase 4: setup error when queue env not configured returns 503 with fallback hint', async () => {
   const previousBucket = process.env.GCS_BUCKET;
   const previousApi = process.env.ANTHROPIC_API_KEY;
