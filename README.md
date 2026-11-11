@@ -147,7 +147,7 @@ The workflow signs in with Workload Identity Federation. It does not store a lon
 2. Create a Workload Identity pool and a provider scoped to this GitHub repository.
 3. Bind the deploy service account to that repository's principal.
 
-Google documents the pool setup in [google-github-actions/auth](https://github.com/google-github-actions/auth#setting-up-workload-identity-federation).
+Google documents the service-account setup in [google-github-actions/auth](https://github.com/google-github-actions/auth#indirect-wif).
 
 ### Set repository variables
 
