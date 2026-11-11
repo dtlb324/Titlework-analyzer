@@ -299,9 +299,10 @@ export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
     parsed = JSON.parse(trimmed);
   } catch (_) {
   }
+  const positional = Array.isArray(parsed) && parsed.length === items.length;
   return items.map((item, index) => ({
     chunk: item.chunk,
-    abstractText: Array.isArray(parsed) ? String(parsed[index] ?? '').trim() : '',
+    abstractText: positional ? String(parsed[index] ?? '').trim() : '',
     sequenceIndex: globalStartIdx + index,
   }));
 }
