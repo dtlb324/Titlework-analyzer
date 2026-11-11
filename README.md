@@ -411,7 +411,7 @@ The server code does not call the Anthropic message-batches endpoint or a Gemini
 - Accepted types are PDF, CSV, JPEG, PNG, GIF, and WEBP.
 - The browser uploads with a signed PUT. The signature always sets `Content-Type` and `Content-Length`. A missing size returns 400, `sizeBytes is required for signed uploads.`
 - The worker abstracts with `gemini-3.1-flash-lite` and can batch up to `ABSTRACTION_BATCH_MAX_DOCS` small chunks.
-- If server abstraction is unavailable, the page groups up to 24 files per call and splits an oversized single PDF.
+- If server abstraction is unavailable, the page groups up to 24 small documents per call and splits an oversized single PDF.
 - The final opinion and follow-up answers use `claude-sonnet-5-5`.
 - A job reopens at `#/job/<id>`. Recent jobs are `#/jobs`.
 - The page can cancel a job, retry one chunk, and retry failed chunks.
