@@ -1945,6 +1945,12 @@ export async function answerFollowupQuestion(jobId, question, options = {}) {
     wrapped.errorType = classifyError(err);
     throw wrapped;
   }
+  if (response.stopReason === 'max_tokens') {
+    const err = new Error('Model output was truncated at the token limit (max_tokens).');
+    err.code = 'output_truncated';
+    err.statusCode = 502;
+    throw err;
+  }
   const usage = extractUsage(response.usage);
   const answer = response.text || '';
   const saved = await store.appendFollowupMessage(jobId, {
