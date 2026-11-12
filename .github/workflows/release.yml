@@ -15,10 +15,15 @@ env:
   API_SERVICE: ${{ vars.API_SERVICE }}
   WORKER_SERVICE: ${{ vars.WORKER_SERVICE }}
   GCP_RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+  # Cloud Run deployment is opt-in. Set the repository variable
+  # DEPLOY_TO_CLOUD_RUN to `true` (plus the GCP_* variables in README "Deploy")
+  # to build, deploy, and verify. Without it, a tag validates the version, runs
+  # the tests, and publishes the GitHub Release only.
+  DEPLOY_TO_CLOUD_RUN: ${{ vars.DEPLOY_TO_CLOUD_RUN }}
 
 jobs:
   release:
-    name: Build, deploy, and verify release
+    name: Test, then build, deploy, and verify release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -54,18 +59,22 @@ jobs:
         run: npm test
 
       - name: Authenticate to Google Cloud
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up Google Cloud SDK
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Configure Artifact Registry Docker auth
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Build and push release image
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         id: image
         run: |
           set -euo pipefail
@@ -91,6 +100,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Deploy worker from immutable image
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         env:
           IMAGE_DIGEST_REF: ${{ steps.image.outputs.image-digest-ref }}
           IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}
@@ -118,6 +128,7 @@ jobs:
             "${SERVICE_ACCOUNT_FLAGS[@]}"
 
       - name: Deploy API from immutable image
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         env:
           IMAGE_DIGEST_REF: ${{ steps.image.outputs.image-digest-ref }}
           IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}
@@ -140,6 +151,7 @@ jobs:
             "${SERVICE_ACCOUNT_FLAGS[@]}"
 
       - name: Verify production release
+        if: env.DEPLOY_TO_CLOUD_RUN == 'true'
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.image-digest }}
         run: |

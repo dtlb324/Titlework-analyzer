@@ -42,14 +42,14 @@ Set on **both API and worker** services unless noted.
 | `ABSTRACTION_BATCH_ENABLED` | `true` | Default |
 | `GEMINI_FILE_API_ENABLED` | `true` | Default |
 
-Releases from `main` apply the speed-related API env vars via `.github/workflows/release.yml`. Adjust in Cloud Run console if a trial value needs rollback.
+When `DEPLOY_TO_CLOUD_RUN=true`, release tags apply the speed-related API env vars via `.github/workflows/release.yml`. Adjust in Cloud Run console if a trial value needs rollback.
 
 ### Example: manual API env update
 
 ```bash
-gcloud run services update titlework-analyzer-api \
+gcloud run services update YOUR_API_SERVICE \
   --project YOUR_PROJECT \
-  --region us-south1 \
+  --region YOUR_REGION \
   --update-env-vars "OPUS_AUDIT_ENABLED=false,SYNTHESIS_CONCURRENCY=8,SYNTHESIS_MAX_TOKENS=5000,SYNTHESIS_PARTIAL_MAX_TOKENS=4000,ABSTRACTION_ESCALATION_ENABLED=false"
 ```
 

@@ -561,6 +561,37 @@ test('release workflow deploys and verifies the resolved platform digest', () =>
   assert(releaseWorkflow.includes('--expected-digest "${IMAGE_DIGEST}"'), 'Expected verification to compare against the resolved digest');
 });
 
+test('release workflow publishes without Cloud Run unless deployment is opted in', () => {
+  const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+  assert(releaseWorkflow.includes('DEPLOY_TO_CLOUD_RUN: ${{ vars.DEPLOY_TO_CLOUD_RUN }}'), 'Expected deployment to be driven by the DEPLOY_TO_CLOUD_RUN repository variable');
+  const gate = "        if: env.DEPLOY_TO_CLOUD_RUN == 'true'";
+  const cloudSteps = [
+    'Authenticate to Google Cloud',
+    'Set up Google Cloud SDK',
+    'Configure Artifact Registry Docker auth',
+    'Build and push release image',
+    'Deploy worker from immutable image',
+    'Deploy API from immutable image',
+    'Verify production release',
+  ];
+  for (const step of cloudSteps) {
+    const at = releaseWorkflow.indexOf(`      - name: ${step}\n`);
+    assert(at !== -1, `Expected step ${step}`);
+    const next = releaseWorkflow.indexOf('\n', at + 1);
+    assert(releaseWorkflow.slice(next + 1).startsWith(gate), `Expected ${step} to run only when DEPLOY_TO_CLOUD_RUN is true`);
+  }
+  for (const step of ['Validate release tag', 'Run tests']) {
+    const at = releaseWorkflow.indexOf(`      - name: ${step}\n`);
+    const next = releaseWorkflow.indexOf('\n', at + 1);
+    assert(at !== -1 && !releaseWorkflow.slice(next + 1).startsWith('        if:'), `Expected ${step} to run on every release tag`);
+  }
+  const testsAt = releaseWorkflow.indexOf('      - name: Run tests\n');
+  const authAt = releaseWorkflow.indexOf('      - name: Authenticate to Google Cloud\n');
+  assert(testsAt < authAt, 'Expected tests to run before any Cloud Run step');
+  const publishJob = releaseWorkflow.slice(releaseWorkflow.indexOf('  github-release:'));
+  assert(publishJob.includes('needs: release') && !publishJob.includes('  if:'), 'Expected the GitHub Release to depend on the release job succeeding, with or without deployment');
+});
+
 let passed = 0;
 let failed = 0;
 

@@ -119,9 +119,11 @@ Bump `package.json` and both root version fields in `package-lock.json`
 `docs/releases/vX.Y.Z.md`. Push `main`, then push a lowercase `vX.Y.Z` tag
 that matches `package.json`. Follow README "Cut a release".
 
-`.github/workflows/release.yml` runs the tests, deploys the worker and then
-the API from the same image digest, runs `scripts/verify-release.mjs`, and
-creates the GitHub Release. A normal release does not use `gcloud run deploy`.
+`.github/workflows/release.yml` validates the tag, runs the tests, and
+creates the GitHub Release. Only when the repository variable
+`DEPLOY_TO_CLOUD_RUN` is `true` does it also deploy the worker and then the
+API from the same image digest and run `scripts/verify-release.mjs` before
+the release; a failed deploy blocks the release. A normal release does not use `gcloud run deploy`.
 Leave Cloud Build and Cloud Run source-deploy triggers off `main`.
 
 `node test/release.test.js` checks tag shape, the release workflow, and
