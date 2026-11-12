@@ -5,11 +5,12 @@ browser tab has closed. Run **after** a release that includes the worker
 `POST /internal/drain` endpoint.
 
 ```bash
-PROJECT=titlework-analyzer
-REGION=us-south1            # worker's Cloud Run region
-SCHED_LOCATION=us-central1  # Cloud Scheduler region (us-south1 is NOT a scheduler region)
-WORKER=titlework-analyzer-worker
-WORKER_URL=https://titlework-analyzer-worker-rqpu63u5tq-vp.a.run.app
+# Replace these with your own project's values.
+PROJECT=YOUR_PROJECT
+REGION=YOUR_REGION          # worker's Cloud Run region
+SCHED_LOCATION=us-central1  # a Cloud Scheduler region (`gcloud scheduler locations list`)
+WORKER=YOUR_WORKER_SERVICE
+WORKER_URL="$(gcloud run services describe "$WORKER" --project "$PROJECT" --region "$REGION" --format='value(status.url)')"
 SA=synthesis-scheduler@${PROJECT}.iam.gserviceaccount.com
 
 # 0. Enable the Cloud Scheduler API (was not enabled on this project)
@@ -40,8 +41,8 @@ gcloud run services update "$WORKER" \
 #    plus the in-app secret. Do not put the secret in Authorization — that
 #    header is the OIDC bearer token Cloud Run IAM checks.
 #    --location must be a Cloud Scheduler region (`gcloud scheduler locations list`);
-#    us-south1 is not one, so us-central1 is used (region is functionally irrelevant —
-#    the job just makes an HTTPS call to the worker URL).
+#    not every Cloud Run region is one, and the scheduler region is functionally
+#    irrelevant — the job just makes an HTTPS call to the worker URL.
 #    --attempt-deadline 1800s lets the scheduler wait for a real (long) merge instead
 #    of cutting the connection at the default 180s and aborting the drain mid-merge.
 gcloud scheduler jobs create http synthesis-drain \
@@ -76,7 +77,7 @@ current job working. Deploying the check first makes `/internal/drain` return
 
 ```bash
 # (a) No churn: abstraction-incomplete jobs should NOT enter the drain.
-gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="titlework-analyzer-worker" AND jsonPayload.event="worker_synthesis_error" AND jsonPayload.reason:"abstraction chunks"' \
+gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${WORKER}\" AND jsonPayload.event=\"worker_synthesis_error\" AND jsonPayload.reason:\"abstraction chunks\"" \
   --project "$PROJECT" --freshness=5m --limit 5
 # Expect: empty.
 

@@ -4,6 +4,8 @@ Titlework Analyzer is a web app for oil and gas landmen. It reads courthouse PDF
 
 `gemini-3.1-flash-lite` abstracts each document. On a large job it also writes the partial segment summaries. `claude-sonnet-5-5` writes the final opinion and answers follow-up questions.
 
+There is no public hosted instance. Run it locally or deploy your own copy; the Google Cloud setup below is for your own project.
+
 The page calls the result an analytical aid, not a formal title opinion. Check it against the source documents before a drilling, leasing, or division order decision.
 
 `package.json` accepts Node.js 26.x. There is no `.nvmrc`. CI and `Dockerfile` pin Node.js 26.13.0.
@@ -135,7 +137,9 @@ If the API keys live in Secret Manager, also grant this account `roles/secretman
 
 ## Deploy
 
-A normal release is a git tag. `.github/workflows/release.yml` builds one image and deploys it. You do not run `gcloud run deploy` yourself for that release.
+Deployment is optional and off by default. A pushed `vX.Y.Z` tag always runs `.github/workflows/release.yml`: it validates the tag, runs the tests, and creates the GitHub Release. The Cloud Run build, deploy, and verify steps run only when the repository variable `DEPLOY_TO_CLOUD_RUN` is `true`. A fork or clone without that variable never touches Google Cloud.
+
+To deploy your own copy, finish the Google Cloud setup above, then the steps below, then set `DEPLOY_TO_CLOUD_RUN=true`. From then on a release tag builds one image and deploys it. You do not run `gcloud run deploy` yourself for that release.
 
 Do not attach Cloud Build or Cloud Run source-deploy triggers to `Main` or `main`. They can deploy a different image than the tag workflow. This repo's default branch is `Main`. CI also listens on `main`.
 
@@ -171,6 +175,7 @@ Add these under **Settings**, **Secrets and variables**, **Actions**, **Variable
 | `GAR_REPOSITORY` | Artifact Registry repository name. |
 | `API_SERVICE` | Cloud Run service name for the API. |
 | `WORKER_SERVICE` | Cloud Run service name for the worker. |
+| `DEPLOY_TO_CLOUD_RUN` | `true` turns on the build, deploy, and verify steps. Any other value, or none, skips it and publishes the GitHub Release only. |
 
 Set `DATABASE_URL`, `GCS_BUCKET`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `APP_PASSWORD` on both Cloud Run services before you tag a release. The workflow does not write those values. `scripts/verify-release.mjs` reads the deployed service env names after deploy and fails the release if any of those five groups is missing or blank. Accepted aliases are in the required settings table. The workflow never copies the secret values into GitHub.
 
@@ -188,9 +193,11 @@ git tag "$VERSION"
 git push origin "$VERSION"
 ```
 
-The workflow runs the tests on Node.js 26.13.0, builds one Docker image, and pushes it to Artifact Registry. `scripts/resolve-image-digest.mjs` selects the linux/amd64 image from the pushed manifest. The worker deploy and the API deploy use that same immutable image digest. The worker command is `npm run start:worker`. That deploy also passes `--no-allow-unauthenticated`, `--min-instances 0`, 2Gi of memory, and a 3600 second timeout. The API allows unauthenticated HTTP, uses 1Gi of memory, and has a 1800 second timeout. `scripts/verify-release.mjs` then checks both services. The last job creates or updates the GitHub Release and requires it to be Latest.
+Without `DEPLOY_TO_CLOUD_RUN=true`, the workflow validates the tag, runs the tests on Node.js 26.13.0, and creates the GitHub Release. A failed test blocks the release.
 
-After a release, check these points.
+With `DEPLOY_TO_CLOUD_RUN=true`, the workflow also builds one Docker image and pushes it to Artifact Registry. `scripts/resolve-image-digest.mjs` selects the linux/amd64 image from the pushed manifest. The worker deploy and the API deploy use that same immutable image digest. The worker command is `npm run start:worker`. That deploy also passes `--no-allow-unauthenticated`, `--min-instances 0`, 2Gi of memory, and a 3600 second timeout. The API allows unauthenticated HTTP, uses 1Gi of memory, and has a 1800 second timeout. `scripts/verify-release.mjs` then checks both services. The last job creates or updates the GitHub Release and requires it to be Latest. A failed deploy or verification blocks the release.
+
+After a deployed release, check these points.
 
 - `GET /api/healthz` and `GET /healthz` return `release.version`. The worker's `GET /healthz` returns it too.
 - The latest ready revisions of the API and the worker use the same image digest.
