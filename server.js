@@ -133,12 +133,14 @@ export function createServer({ ocrCompareModelClient } = {}) {
       }
       return await serveStatic(req, res, url);
     } catch (err) {
-      console.error(JSON.stringify({
-        event: 'cloud_run_server_error',
-        path: url.pathname,
-        reason: err?.message || String(err),
-      }));
       const statusCode = err?.statusCode || 500;
+      if (statusCode >= 500) {
+        console.error(JSON.stringify({
+          event: 'cloud_run_server_error',
+          path: url.pathname,
+          reason: err?.message || String(err),
+        }));
+      }
       return sendJson(res, statusCode, { error: statusCode < 500 ? err.message : 'Internal server error.' });
     }
   });

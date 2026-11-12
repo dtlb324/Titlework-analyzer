@@ -2987,6 +2987,11 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
     throw new Error('API error: ' + (errMsg || 'HTTP ' + response.status));
   }
 
+  if (data.stop_reason === 'max_tokens') {
+    const err = new Error(`Output truncated: ${options.label || 'The model request'} hit its output limit before finishing, so the partial answer was not used.`);
+    err.code = 'output_truncated';
+    throw err;
+  }
   return data.content?.map(b => b.text || '').join('') || '';
 }
 
@@ -3530,7 +3535,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
     recordBatchLatency(batchFiles, Date.now() - startedAt);
     return result;
   } catch (e) {
-    const splittable = allowSplit && (e.message.includes('413') || e.message.includes('too large') || e.message.includes('Payload') || isTimeoutError(e));
+    const splittable = allowSplit && (e.message.includes('413') || e.message.includes('too large') || e.message.includes('Payload') || isTimeoutError(e) || e.code === 'output_truncated');
     if (splittable && batchFiles.length > 1) {
       const mid = Math.ceil(batchFiles.length / 2);
       const part1 = await abstractBatch(batchFiles.slice(0, mid), globalStartIdx, true);

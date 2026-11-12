@@ -51,6 +51,46 @@ test('Gemini cleanup ignores text metadata and invalid resource names but delete
   assert.deepEqual(JSON.parse(result.stdout.split('RESULT ')[1]), [{ method: 'DELETE', path: '/v1beta/files/valid-upload' }]);
 });
 
+test('a malformed percent-escape in a job path returns 400 without a server error', () => {
+  const result = child(`
+    import { createServer } from './server.js';
+    const server = createServer();
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const logged = [];
+    console.error = line => logged.push(String(line));
+    const base = 'http://127.0.0.1:' + server.address().port;
+    const bad = await fetch(base + '/api/jobs/%E0%A4%A');
+    const body = await bad.json();
+    const health = await fetch(base + '/healthz');
+    await new Promise(resolve => server.close(resolve));
+    console.log('RESULT ' + JSON.stringify({ bad: bad.status, error: body.error, health: health.status, logged }));
+  `);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.split('RESULT ')[1]), { bad: 400, error: 'Malformed URL path.', health: 200, logged: [] });
+});
+
+test('a request that fails inside the server (aborted body) is still logged as a server error', () => {
+  const result = child(`
+    import net from 'node:net';
+    process.env.APP_PASSWORD = 'fixture-password';
+    const { createServer } = await import('./server.js');
+    const server = createServer();
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const logged = [];
+    console.error = line => logged.push(String(line));
+    const socket = net.connect(server.address().port, '127.0.0.1');
+    await new Promise(resolve => socket.on('connect', resolve));
+    socket.write('POST /api/jobs HTTP/1.1\\r\\nHost: localhost\\r\\nx-app-password: fixture-password\\r\\ncontent-type: application/json\\r\\ncontent-length: 1000\\r\\n\\r\\n{"subje');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    socket.destroy();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(resolve => server.close(resolve));
+    console.log('RESULT ' + JSON.stringify(logged.map(line => JSON.parse(line).event)));
+  `);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.split('RESULT ')[1]), ['cloud_run_server_error']);
+});
+
 for (const [target, host] of [['/healthz', 'a b'], ['//', 'localhost']]) {
   test(`invalid HTTP URL ${JSON.stringify([target, host])} returns 400 without terminating the server`, () => {
     const result = child(`

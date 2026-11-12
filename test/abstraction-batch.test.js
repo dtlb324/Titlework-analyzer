@@ -73,6 +73,15 @@ test('parseBatchAbstracts splits multi-doc model output', () => {
   assert(parsed[1].abstractText.includes('DOC TYPE: Lease'), 'Expected second abstract body');
 });
 
+test('parseBatchAbstracts assigns nothing when the array length does not match the batch', () => {
+  const items = [{ chunk: makeChunk('a') }, { chunk: makeChunk('b') }, { chunk: makeChunk('c') }];
+  for (const text of ['["DOC TYPE: Lease","DOC TYPE: Assignment"]', '["A","B","C","D"]']) {
+    const parsed = parseBatchAbstracts(text, items, 0);
+    assert(parsed.length === 3, 'Expected one entry per batch item');
+    assert(parsed.every(item => item.abstractText === ''), `A ${JSON.parse(text).length}-element answer for 3 files must not be mapped by position`);
+  }
+});
+
 test('buildAbstractMessagesForChunks packs multiple text-first PDFs in one text block', () => {
   const items = [
     {

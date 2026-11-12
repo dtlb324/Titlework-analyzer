@@ -299,9 +299,10 @@ export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
     parsed = JSON.parse(trimmed);
   } catch (_) {
   }
+  const positional = Array.isArray(parsed) && parsed.length === items.length;
   return items.map((item, index) => ({
     chunk: item.chunk,
-    abstractText: Array.isArray(parsed) ? String(parsed[index] ?? '').trim() : '',
+    abstractText: positional ? String(parsed[index] ?? '').trim() : '',
     sequenceIndex: globalStartIdx + index,
   }));
 }
@@ -343,6 +344,7 @@ function createTimeoutSignal(ms) {
 function classifyError(err) {
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
+  if (err?.code === 'output_truncated') return 'output_truncated';
   if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
   if (status === 429 || /rate limit|overloaded/i.test(message)) return 'rate_limit';
   if ([504, 524].includes(status) || /timeout|aborted|FUNCTION_INVOCATION_TIMEOUT/i.test(message)) return 'upstream_timeout';
@@ -557,6 +559,11 @@ export async function runModelAbstraction({
       escalated = true;
     } catch (_) {
     }
+  }
+  if (response.stopReason === 'max_tokens') {
+    const err = new Error('Model output was truncated at the token limit (max_tokens).');
+    err.code = 'output_truncated';
+    throw err;
   }
   return {
     text: response.text || '',
@@ -927,7 +934,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       errorMessage: sanitizeErrorMessage(err),
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
-    if (loadedPayload && ['payload_too_large', 'upstream_timeout'].includes(errorType)) {
+    if (loadedPayload && ['payload_too_large', 'upstream_timeout', 'output_truncated'].includes(errorType)) {
       const split = await splitPdfChunk(processingChunk, loadedPayload.bytes, errorType, { ...options, workerId }).catch(() => false);
       if (split) {
         return { status: 'split_superseded', chunkId: processingChunk.id };

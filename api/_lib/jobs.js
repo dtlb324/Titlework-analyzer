@@ -1709,7 +1709,7 @@ function createPostgresJobStore() {
         SELECT DISTINCT dc.job_id
         FROM document_chunks dc
         INNER JOIN analysis_jobs j ON j.id = dc.job_id
-        WHERE j.status <> 'canceled'
+        WHERE j.status NOT IN ('canceled', 'created', 'uploading')
           AND dc.upload_status = 'uploaded'
           AND (
             dc.abstraction_status = 'pending'

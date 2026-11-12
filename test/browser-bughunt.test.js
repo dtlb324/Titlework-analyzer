@@ -256,6 +256,89 @@ test('finding 2 control: an uncanceled run still synthesizes and saves once', as
   assert.equal(server.state.resultSaves.length, 1);
 });
 
+// Truncated model output: a max_tokens reply is not a finished answer.
+
+function truncatingAnalyze(truncate) {
+  const calls = [];
+  const synthesisInputs = [];
+  const hook = async (server, options) => {
+    const body = JSON.parse(options.body);
+    if (body.ping) return undefined;
+    calls.push(body.model);
+    if (body.model.startsWith('claude')) synthesisInputs.push(body.messages[0].content);
+    const geminiCall = calls.filter(model => model.startsWith('gemini')).length;
+    const text = body.model.startsWith('gemini')
+      ? `DOCUMENT #${Math.max(1, geminiCall - 1)}:\nDOC TYPE: Deed\nGRANTOR: Grantor ${geminiCall}\n`
+      : '## FINAL OWNERSHIP DETERMINATION\nBob owns an undivided 1/';
+    return jsonResponse(200, { content: [{ type: 'text', text }], stop_reason: truncate(body.model, geminiCall) ? 'max_tokens' : 'end_turn' });
+  };
+  return { calls, synthesisInputs, hooks: { ...browserOnlyStorage, 'POST /api/analyze': hook } };
+}
+
+test('truncation: a max_tokens browser synthesis is not saved as a complete opinion', async () => {
+  const { calls, hooks } = truncatingAnalyze(model => model.startsWith('claude'));
+  const server = makeJobServer({ hooks });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed.png', 'x'.repeat(50))]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.equal(calls.filter(model => model.startsWith('claude')).length, 1, 'no same-limit synthesis retry');
+  assert.deepEqual(server.state.resultSaves, [], 'a truncated opinion must not be saved');
+  assert.ok(server.state.patches.some(p => p.status === 'failed'), 'job must be marked failed');
+  assert.match(errorText(app), /Output truncated/);
+});
+
+test('truncation: a max_tokens multi-file abstraction batch is split and each file abstracted on its own', async () => {
+  const { calls, synthesisInputs, hooks } = truncatingAnalyze((model, geminiCall) => model.startsWith('gemini') && geminiCall === 1);
+  const server = makeJobServer({ hooks });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed-1.png', 'a'.repeat(40)), pngFile('deed-2.png', 'b'.repeat(40))]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.equal(calls.filter(model => model.startsWith('gemini')).length, 3, 'one truncated batch call, then one call per file');
+  assert.match(synthesisInputs[0], /### Document 1: deed-1\.png\n\nDOC TYPE: Deed\nGRANTOR: Grantor 2/);
+  assert.match(synthesisInputs[0], /### Document 2: deed-2\.png\n\nDOC TYPE: Deed\nGRANTOR: Grantor 3/);
+  assert.equal(server.state.resultSaves.length, 1);
+  assert.equal(server.state.resultSaves[0].status, 'complete');
+});
+
+test('truncation control: a non-truncation API error on a multi-file batch is not split into more paid calls', async () => {
+  const geminiCalls = [];
+  const server = makeJobServer({
+    hooks: {
+      ...browserOnlyStorage,
+      'POST /api/analyze': async (_server, options) => {
+        const body = JSON.parse(options.body);
+        if (body.ping) return undefined;
+        geminiCalls.push(body.model);
+        return jsonResponse(400, { error: 'Unsupported document content.' });
+      },
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed-1.png', 'a'.repeat(40)), pngFile('deed-2.png', 'b'.repeat(40))]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.equal(geminiCalls.length, 1, 'a rejected batch is not re-sent as halves');
+  assert.deepEqual(server.state.resultSaves, []);
+  assert.match(errorText(app), /Unsupported document content/);
+});
+
+test('truncation control: an end_turn browser synthesis is saved complete', async () => {
+  const { hooks } = truncatingAnalyze(() => false);
+  const server = makeJobServer({ hooks });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed.png', 'x'.repeat(50))]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.equal(server.state.resultSaves.length, 1);
+  assert.equal(server.state.resultSaves[0].status, 'complete');
+});
+
 // Finding 3: a failed status read is not proof that durable work stopped.
 
 const serverOpinion = app => [...app.run("conversationHistory.map(m => m.kind + ':' + m.content + ':' + m.sourceJobId)")];

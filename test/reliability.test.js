@@ -496,6 +496,19 @@ function postgresMethod(name, bindings = {}) {
   return vm.runInNewContext(`({ ${source.slice(start, end)} })`, bindings)[name];
 }
 
+test('worker job discovery skips jobs whose uploads are not finalized', async () => {
+  let text = '';
+  const list = postgresMethod('listRunnableAbstractionJobIds', {
+    ensureSchema: async () => {},
+    sql: async strings => { text = strings.join('?'); return []; },
+  });
+  await list(5);
+  assert(
+    /WHERE j\.status NOT IN \('canceled', 'created', 'uploading'\)/.test(text),
+    'listRunnableAbstractionJobIds must not list canceled jobs or jobs still uploading (finalize-uploads would then 409)',
+  );
+});
+
 test('saveJobResult does not overwrite a concurrently completed or canceled job', async () => {
   const { assertValidStatusTransition, isInvalidJobStatusTransition } = await import('../api/_lib/jobs.js');
   for (const concurrentStatus of ['complete', 'canceled']) {

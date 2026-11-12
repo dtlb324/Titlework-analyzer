@@ -38,10 +38,20 @@ export async function readNodeRequestBody(req, maxBodyBytes = configuredMaxBodyB
   return raw;
 }
 
+function decodePathSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    const error = new Error('Malformed URL path.');
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
 export function createApiRequest(req, url, body) {
   const query = Object.fromEntries(url.searchParams.entries());
   if (url.pathname.startsWith('/api/jobs/') && !query.path) {
-    query.path = url.pathname.slice('/api/jobs/'.length).split('/').filter(Boolean).map(decodeURIComponent);
+    query.path = url.pathname.slice('/api/jobs/'.length).split('/').filter(Boolean).map(decodePathSegment);
   }
   return {
     method: req.method,

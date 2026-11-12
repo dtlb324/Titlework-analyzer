@@ -1624,6 +1624,38 @@ test('Follow-up uses stored title opinion only — no raw analysis-input payload
   assert(!/Document\s+\d+:\s+chk_/i.test(followupContent), 'Expected no raw analysis-input bundle in follow-up');
 });
 
+test('Follow-up rejects a max_tokens answer instead of storing it', async () => {
+  const abstracts = manyAbstracts(4);
+  const store = createMemoryPhase5Store({ abstracts });
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  let callCount = 0;
+  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async () => {
+    callCount += 1;
+    if (callCount === 1) {
+      return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {}, stopReason: 'end_turn' };
+    }
+    return {
+      text: 'Bob owns an undivided 1/',
+      model: 'claude-sonnet-5',
+      usage: { input_tokens: 20, output_tokens: 8000 },
+      stopReason: 'max_tokens',
+    };
+  };
+  await processSynthesisJob('job_test_1', { store });
+
+  const res = mockRes();
+  await jobsRouteHandler(
+    mockReq('POST', { question: 'Who owns the minerals?' }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/followup'),
+    res,
+  );
+  assert(res.statusCode === 502, `Expected 502, got ${res.statusCode}: ${JSON.stringify(res.body)}`);
+  assert(/truncated/i.test(res.body.error || ''), `Expected truncation error, got ${res.body.error}`);
+  const saved = store.listFollowupMessages
+    ? await store.listFollowupMessages('job_test_1', 10)
+    : store.followups || [];
+  assert(saved.length === 0, `A truncated follow-up must not be stored, got ${saved.length}`);
+});
+
 test('Follow-up endpoint rejects raw payload fields', async () => {
   const abstracts = manyAbstracts(2);
   const store = createMemoryPhase5Store({ abstracts });
