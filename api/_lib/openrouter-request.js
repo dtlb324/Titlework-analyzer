@@ -23,9 +23,16 @@ export function shouldUseOpenRouter(model) {
   return false;
 }
 
+// OpenRouter slugs that are not the internal id with a vendor prefix (dotted version numbers).
+const OPENROUTER_SLUGS = new Map([
+  ['claude-sonnet-5-5', 'anthropic/claude-sonnet-5.5'],
+  ['claude-haiku-5-5', 'anthropic/claude-haiku-5.5'],
+]);
+
 /**
  * Auto-map internal model names to OpenRouter slash-names when MODEL_PROVIDER=openrouter.
  * - claude-sonnet-5-5 → anthropic/claude-sonnet-5.5 (OpenRouter slug uses a dot)
+ * - claude-haiku-5-5 → anthropic/claude-haiku-5.5
  * - other claude-* → anthropic/claude-*
  * - gemini-* → google/gemini-*
  * - already contains '/' → pass through unchanged
@@ -33,7 +40,7 @@ export function shouldUseOpenRouter(model) {
 function mapModelName(model) {
   const modelName = String(model || '').trim();
   if (modelName.includes('/')) return modelName;
-  if (modelName === 'claude-sonnet-5-5') return 'anthropic/claude-sonnet-5.5';
+  if (OPENROUTER_SLUGS.has(modelName)) return OPENROUTER_SLUGS.get(modelName);
   if (/^claude-/i.test(modelName)) return `anthropic/${modelName}`;
   if (/^gemini-/i.test(modelName)) return `google/${modelName}`;
   return modelName;
@@ -47,8 +54,9 @@ export const NON_STREAMING_MAX_TOKENS = 8192;
  * Canonical input shape:
  *   { model, maxTokens, system: string|[{ text }], messages: [{ role, content }] }
  * where content is string or [{ type:'text', text }|{ type:'image'|'document', source:{ type:'base64'|'file_uri', ... } }].
+ * Optional `reasoningEffort` adds OpenRouter's unified `reasoning: { effort }`; callers that omit it get the same body as before.
  */
-export function buildOpenRouterRequestBody({ model, maxTokens, system, messages }) {
+export function buildOpenRouterRequestBody({ model, maxTokens, system, messages, reasoningEffort }) {
   const openaiMessages = [];
 
   if (system != null) {
@@ -149,6 +157,7 @@ export function buildOpenRouterRequestBody({ model, maxTokens, system, messages 
     model: target,
     max_tokens: maxTokens,
     messages: sanitizedMessages,
+    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
   };
 }
 
@@ -203,7 +212,20 @@ export function normalizeOpenRouterResponse(data = {}, requestedModel) {
   };
 }
 
-export async function invokeOpenRouterModel(request, options = {}) {
+/**
+ * Readable text for an OpenRouter `error` value: its message, else a bare string, else its code/status.
+ * Returns '' when there is nothing usable, so callers can fall back to their own wording.
+ */
+export function openRouterErrorText(error) {
+  if (typeof error === 'string') return error.trim();
+  if (!error || typeof error !== 'object') return '';
+  if (typeof error.message === 'string' && error.message.trim()) return error.message;
+  const code = error.code ?? error.status;
+  return typeof code === 'string' || typeof code === 'number' ? `OpenRouter error ${code}` : '';
+}
+
+/** POST one non-streaming chat completion and return OpenRouter's parsed JSON (usage, cost and routed model intact). */
+export async function postOpenRouterChat(request, options = {}) {
   const keyError = openRouterApiKeyError();
   if (keyError) {
     const error = new Error(keyError);
@@ -216,6 +238,7 @@ export async function invokeOpenRouterModel(request, options = {}) {
     maxTokens: request.maxTokens,
     system: request.system,
     messages: request.messages,
+    reasoningEffort: request.reasoningEffort,
   });
 
   const headers = buildOpenRouterHeaders();
@@ -237,14 +260,18 @@ export async function invokeOpenRouterModel(request, options = {}) {
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      const message = data?.error?.message || data?.error || `OpenRouter request failed (HTTP ${response.status}).`;
+      const message = openRouterErrorText(data?.error) || `OpenRouter request failed (HTTP ${response.status}).`;
       const error = new Error(message);
       error.status = response.status;
       throw error;
     }
 
-    return normalizeOpenRouterResponse(data, request.model);
+    return data;
   } finally {
     timeout?.cleanup?.();
   }
+}
+
+export async function invokeOpenRouterModel(request, options = {}) {
+  return normalizeOpenRouterResponse(await postOpenRouterChat(request, options), request.model);
 }

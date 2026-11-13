@@ -115,7 +115,7 @@ export function createCompareUI(deps = {}) {
   const prepare = deps.prepareDocument || (file => prepareDocument(file));
   const urls = deps.URL || URL;
   const delay = deps.setTimeout || setTimeout;
-  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'baseline-title', 'candidate-title', 'challenger-title', 'differences-baseline', 'differences-candidate', 'differences-challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
+  const el = Object.fromEntries(['password', 'password-field', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'baseline-title', 'candidate-title', 'challenger-title', 'differences-baseline', 'differences-candidate', 'differences-challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
   const effortBars = [el['baseline-effort'], el['candidate-effort'], el['challenger-effort']];
   const columnTitles = [el['baseline-title'], el['candidate-title'], el['challenger-title']];
   const differenceHeaders = [el['differences-baseline'], el['differences-candidate'], el['differences-challenger']];
@@ -125,6 +125,8 @@ export function createCompareUI(deps = {}) {
   const canCompare = entry => entry.pages?.length > 0 && !['preparing', 'error', 'running'].includes(entry.status);
   let modelSlots = [];
   let metadataState = { status: 'idle', generation: 0, error: '' };
+  // False only after the server confirms (GET without a password) that it runs locally with no APP_PASSWORD.
+  let passwordRequired = true;
   const updateControls = () => {
     el.compare.disabled = busy || preparing;
     el.document.disabled = busy;
@@ -138,7 +140,7 @@ export function createCompareUI(deps = {}) {
     return item;
   };
   const waiting = () => node('p', 'Waiting for comparison.', 'muted');
-  const modelSettings = model => `${model.label}: ${model.id} · thinking ${model.thinkingLevel} · max output ${model.maxTokens} tokens`;
+  const modelSettings = model => `${model.label}: ${model.id}${model.provider === 'openrouter' ? ' (via OpenRouter)' : ''} · thinking ${model.thinkingLevel} · max output ${model.maxTokens} tokens`;
   const accuracyText = accuracy => {
     if (accuracy.status === 'scored') return `Document accuracy: ${accuracy.percent}% (${accuracy.matched} of ${accuracy.scored} fields found in the document).`;
     if (accuracy.reason === 'no-document-text') return 'Document accuracy: no embedded text in this document.';
@@ -147,7 +149,7 @@ export function createCompareUI(deps = {}) {
   };
   const displayModel = (target, model, documentText) => {
     target.replaceChildren(node('p', modelSettings(model), 'metrics'));
-    target.append(node('p', `Version ${model.modelVersion ?? 'not reported'} · stop ${model.stopReason ?? 'not reported'}`, 'metrics'));
+    target.append(node('p', `Version ${model.modelVersion ?? 'not reported'} · stop reason: ${model.stopReason ?? 'not reported'}`, 'metrics'));
     const usage = model.usage || {};
     target.append(node('p', `${model.latencyMs ?? '—'} ms · input ${usage.input_tokens ?? '—'} · output ${usage.output_tokens ?? '—'} · thinking ${usage.thinking_tokens ?? '—'} tokens`, 'metrics'));
     target.append(node('p', `Estimated cost: ${typeof model.costUsd === 'number' ? '$' + model.costUsd.toFixed(6) : 'unavailable'}`, 'metrics'));
@@ -165,7 +167,9 @@ export function createCompareUI(deps = {}) {
     return value;
   };
   const httpError = async response => {
-    const messages = { 401: 'Application password rejected. Check the password.', 403: 'Application password rejected. Check the password.', 404: 'OCR comparison is disabled or unavailable on this server.', 503: 'OCR comparison is not configured on this server (password or provider key missing).' };
+    const messages = passwordRequired
+      ? { 401: 'Application password rejected. Check the password.', 403: 'Application password rejected. Check the password.', 404: 'OCR comparison is disabled or unavailable on this server.', 503: 'OCR comparison is not configured on this server (password or provider key missing).' }
+      : { 401: 'This server now requires an application password. Reload the page.', 403: 'This server now requires an application password. Reload the page.', 404: 'OCR comparison is disabled or unavailable on this server.', 503: 'OCR comparison is not configured on this server (provider key missing).' };
     if (messages[response.status]) return new Error(messages[response.status]);
     let detail;
     try { detail = (await response.json()).error; } catch {}
@@ -290,7 +294,7 @@ export function createCompareUI(deps = {}) {
   const showsEfforts = () => metadataState.status === 'ready' || (modelSlots.length === MODEL_COUNT && Boolean(el.password.value) && metadataState.status !== 'error');
   const renderEfforts = () => {
     if (metadataState.error) return showEffortMessage(metadataState.error, 'error');
-    if (!showsEfforts()) return showEffortMessage(metadataState.status === 'loading' ? 'Loading models and effort levels…' : 'Enter the application password to load models and effort levels.', 'muted');
+    if (!showsEfforts()) return showEffortMessage(metadataState.status === 'loading' ? 'Loading models and effort levels…' : passwordRequired ? 'Enter the application password to load models and effort levels.' : 'Effort levels load from the server.', 'muted');
     effortBars.forEach((bar, index) => {
       const slot = modelSlots[index];
       if (!bar || !slot) return;
@@ -305,7 +309,7 @@ export function createCompareUI(deps = {}) {
   };
   const showModelNames = models => {
     models.forEach((model, index) => {
-      columnTitles[index]?.replaceChildren(node('span', `${model.label} `), node('small', model.id, 'model-id'));
+      columnTitles[index]?.replaceChildren(node('span', `${model.label} `), node('small', model.provider === 'openrouter' ? `${model.id} via OpenRouter` : model.id, 'model-id'));
       effortBars[index]?.setAttribute('aria-label', `${model.label} effort level`);
       if (differenceHeaders[index]) differenceHeaders[index].textContent = model.label;
     });
@@ -424,13 +428,13 @@ export function createCompareUI(deps = {}) {
   el['compare-form'].addEventListener('submit', async event => {
     event.preventDefault();
     if (busy || preparing) return;
-    if (!entries.some(canCompare) || !el.password.value) { el.status.textContent = 'Choose a valid document and enter the application password.'; return; }
+    if (!entries.some(canCompare) || (passwordRequired && !el.password.value)) { el.status.textContent = passwordRequired ? 'Choose a valid document and enter the application password.' : 'Choose a valid document.'; return; }
     const runnable = entries.filter(canCompare);
     const current = generation;
     busy = true;
     updateControls();
     el.status.textContent = 'Loading server model settings…';
-    const headers = { 'x-app-password': el.password.value };
+    const headers = passwordRequired ? { 'x-app-password': el.password.value } : {};
     try {
       const metadata = await loadMetadata(headers);
       if (!metadata || current !== generation) return;
@@ -441,7 +445,7 @@ export function createCompareUI(deps = {}) {
       }
       clearResults();
       const chosen = modelSlots.map(slot => slot.effort);
-      el.settings.textContent = metadata.models.map((model, index) => `${model.label}: ${model.id} · effort ${chosen[index]} · max output ${model.maxTokens} tokens`).join('\n');
+      el.settings.textContent = metadata.models.map((model, index) => `${model.label}: ${model.id}${model.provider === 'openrouter' ? ' (via OpenRouter)' : ''} · effort ${chosen[index]} · max output ${model.maxTokens} tokens`).join('\n');
       let halted = null;
       for (const entry of runnable) {
         if (halted) { entry.status = 'skipped'; continue; }
@@ -475,7 +479,7 @@ export function createCompareUI(deps = {}) {
       if (current !== generation) return;
       const done = entries.filter(entry => entry.status === 'done');
       const modelRecord = (model, documentText) => {
-        const record = Object.fromEntries(['id', 'label', 'effort', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
+        const record = Object.fromEntries(['id', 'label', 'provider', 'effort', 'thinkingLevel', 'maxTokens', 'text', 'fields', 'usage', 'latencyMs', 'stopReason', 'modelVersion', 'costUsd', 'costRates', 'error'].filter(key => model[key] !== undefined).map(key => [key, model[key]]));
         const accuracy = scoreModel(documentText, model);
         if (accuracy.status === 'scored') record.accuracy = { matched: accuracy.matched, scored: accuracy.scored, percent: accuracy.percent };
         return record;
@@ -510,6 +514,36 @@ export function createCompareUI(deps = {}) {
     link.click();
     delay(() => urls.revokeObjectURL(url), 1000);
   });
+
+  // Local mode: ask the server for its settings without a password. Only an explicit passwordRequired:false
+  // hides the password field. A 401, any other failure, or an unexpected body keeps the password flow.
+  const probeLocalAccess = async () => {
+    const initialStatus = el.status.textContent;
+    const current = metadataState.generation + 1;
+    metadataState = { ...metadataState, status: 'loading', generation: current };
+    renderEfforts();
+    try {
+      const response = await request('/api/ocr-compare', { method: 'GET', headers: {} });
+      if (response.ok) {
+        const metadata = await response.json();
+        if (current !== metadataState.generation) return;
+        if (metadata.passwordRequired === false && validMetadata(metadata)) {
+          passwordRequired = false;
+          if (el['password-field']) el['password-field'].hidden = true;
+          el.password.required = false;
+          el.password.value = '';
+          if (el.status.textContent === initialStatus) el.status.textContent = 'Choose one or more documents. Model names and effort levels load from the server.';
+          applyEffortMetadata(metadata.models);
+          return;
+        }
+      }
+    } catch {}
+    if (current !== metadataState.generation) return;
+    metadataState = { ...metadataState, status: 'idle' };
+    if (el.status.textContent === initialStatus) el.status.textContent = 'Choose one or more documents and enter the application password. Model names and effort levels load from the server once you enter the password.';
+    renderEfforts();
+  };
+  probeLocalAccess();
 }
 
 if (typeof document !== 'undefined') createCompareUI();

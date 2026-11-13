@@ -349,8 +349,9 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `REQUEST_ENVELOPE_SAFE_BYTES` | Abstraction and abstraction batching use `18000000`. Synthesis uses `12000000`. Both clamp from 100000 to 20000000. |
 | `REQUEST_OVERHEAD_BYTES` | `350000`, range 0 to 1000000. Copied onto the synthesis config and never read. Abstraction subtracts a fixed 350000 and ignores this variable. |
 | `VERIFY_GCS_OBJECTS` | Off. `true` makes chunk finalization check that the object exists. |
-| `OCR_COMPARE_ENABLED` | Off. `POST /api/ocr-compare` returns 404 unless this is `true`. It also returns 503 when `APP_PASSWORD` is unset. |
+| `OCR_COMPARE_ENABLED` | Off. `POST /api/ocr-compare` returns 404 unless this is `true`. In production it also returns 503 when `APP_PASSWORD` is unset; locally with `APP_PASSWORD` unset the lab needs no password. |
 | `OCR_COMPARE_MAX_TOKENS` | `16000` unless the value is an integer from 512 to 32000. |
+| `OCR_COMPARE_PROVIDER` | Unset or `direct`: the lab calls Gemini and Anthropic directly. `openrouter`: all three lab models go through OpenRouter with `OPENROUTER_API_KEY` (local testing; see `docs/ocr-comparison-lab.md`). Any other value returns 503. |
 | `GEMINI_API_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta`. |
 | `GEMINI_UPLOAD_BASE_URL` | `https://generativelanguage.googleapis.com/upload`. |
 

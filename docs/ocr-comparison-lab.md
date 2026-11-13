@@ -11,7 +11,10 @@ Use Node **26** (the 26.x series), then `npm ci`.
 In your git-ignored `.env.local`, configure:
 
 - `OCR_COMPARE_ENABLED=true`
-- `APP_PASSWORD` — your application's access password (required even locally)
+- `APP_PASSWORD` — optional locally. With it unset (and not running as production),
+  the lab needs no password and the page hides the password field. Set it to
+  require a password locally. Production (`NODE_ENV=production` or `K_SERVICE` set)
+  always requires it: the lab returns 503 there when it is unset
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) — a key with access to both Gemini models
 - `ANTHROPIC_API_KEY` — for Claude Haiku 5.5. If it is missing, only the Haiku
   column reports an error; the Gemini results are still returned
@@ -25,18 +28,84 @@ restriction does not change production `ABSTRACT_MODEL` behavior.
 
 Do not paste API keys into the browser or commit `.env.local`.
 Run `npm run dev` and open `http://localhost:8080/ocr-compare.html`.
-Enter the application password on this page. It is not persisted, and obsolete
-remembered credentials are not reused. Reloading requires re-entry.
+If `APP_PASSWORD` is set, enter the application password on this page. It is not
+persisted, and obsolete remembered credentials are not reused. Reloading requires
+re-entry. If it is unset locally, the page loads the models and effort levels
+straight away and sends no password.
+
+To test without Google Cloud or a separate Anthropic key, see
+[Running locally with OpenRouter](#running-locally-with-openrouter).
 
 The lab API is **disabled unless `OCR_COMPARE_ENABLED` is exactly `true`**.
 Enabling it on Cloud Run is a separate deployment/configuration decision;
 adding this code alone does not enable production testing. A server running
 inside a hosted Hermes container is not publicly reachable on its own port.
 
+## Running locally with OpenRouter
+
+One OpenRouter key can run all three columns. This is opt-in and meant for
+local testing; production keeps direct Gemini and direct Anthropic.
+
+1. In your git-ignored `.env.local`, set:
+
+   ```sh
+   OPENROUTER_API_KEY=your-openrouter-key
+   OCR_COMPARE_ENABLED=true
+   OCR_COMPARE_PROVIDER=openrouter
+   ```
+
+   No `APP_PASSWORD` is needed locally: leave it unset and the lab works without
+   a password (the page hides the password field). If you do set it, the page asks
+   for it as usual. Production still requires `APP_PASSWORD`; with it unset
+   there, the lab returns 503. "Production" means `NODE_ENV=production` or a
+   non-empty `K_SERVICE`.
+
+   `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` are not needed in this mode.
+2. Run `npm run dev` and open `http://localhost:8080/ocr-compare.html`
+   (the page is `ocr-compare.html`; `/ocr-compare` without the extension serves the main app).
+3. Compare as usual. Enter the app password only if you set `APP_PASSWORD`.
+
+Behavior with `OCR_COMPARE_PROVIDER=openrouter`:
+
+- All three columns call `https://openrouter.ai/api/v1/chat/completions`
+  (non-streaming, 290 s timeout per call, same shared output limit):
+
+  | Column | OpenRouter slug |
+  | --- | --- |
+  | Current Gemini (`ABSTRACT_MODEL`, default `gemini-3.1-flash-lite`) | `google/gemini-3.1-flash-lite` (`google/<ABSTRACT_MODEL>` for an override) |
+  | Gemini 4 Hydrogen | `google/gemini-4-hydrogen` |
+  | Claude Haiku 5.5 | `anthropic/claude-haiku-5.5` (dot, not `-5-5`) |
+
+- The effort you pick is sent as OpenRouter's unified `reasoning: { effort }`.
+  Current Gemini at `default` sends no `reasoning` field, so the model's own
+  default applies. The effort buttons offer the same levels as in direct mode.
+- Rendered pages go out as `image_url` data URLs. The server does not persist them.
+- A missing `OPENROUTER_API_KEY` returns 503 naming that variable. Any value of
+  `OCR_COMPARE_PROVIDER` other than `openrouter`, `direct`, or unset returns 503.
+- Each column shows "via OpenRouter" and the report has `provider: "openrouter"`.
+  Version is the model id OpenRouter reports having served.
+- Usage: OpenRouter's `completion_tokens` include reasoning tokens. For the two
+  Gemini columns the lab shows output without reasoning plus the reasoning count
+  as thinking, as it does for direct Gemini. For Haiku, output keeps the
+  reasoning, as in direct mode, and the thinking count is display only. Nothing
+  is billed twice.
+- Cost: OpenRouter's reported `usage.cost` is used when present. With a BYOK key
+  (`is_byok: true`) `usage.cost` is only OpenRouter's own fee, often 0, so the lab
+  uses `usage.cost_details.upstream_inference_cost` instead. If that is missing,
+  or `usage.cost` is absent or invalid, the cost is computed from the list rates
+  in the table below. The source line says which.
+- The Hydrogen and Haiku effort labels say what the lab asked for. How
+  OpenRouter maps `reasoning.effort` onto each upstream model is OpenRouter's choice.
+- **Privacy:** your document images go to OpenRouter and then to the upstream
+  provider it routes to (Google or Anthropic). Check OpenRouter's data policy and
+  your account's privacy settings before using sensitive title documents.
+- Results can differ slightly from direct mode because routing, defaults and
+  reasoning mapping differ. Compare models against each other within one mode.
+
 ## Compare
 
-1. Enter the app password, then select up to 10 PDF, PNG, JPEG, or WebP files at once.
-   Once the password is entered, each model column shows a row of effort buttons.
+1. Select up to 10 PDF, PNG, JPEG, or WebP files at once (enter the app password first if the page shows the field).
+   Once the models load (after the password is entered, or immediately in no-password local mode), each model column shows a row of effort buttons.
    Click one to change that model's effort for the next comparison (see Effort levels).
 2. Review the file list and the rendered source-page previews, and read the stated number of billable calls (three per file).
 3. Click **Compare OCR** once. Files are compared one at a time in the order selected; within a file, the three models run in parallel.
@@ -120,6 +189,7 @@ Accuracy is scored in the browser against the document's embedded text. Images a
   batching, fallback, and escalation are intentionally excluded).
 - The lab calls the **direct Gemini API** and the **direct Anthropic API**, even
   if `MODEL_PROVIDER=openrouter` is set for production. Provider routing can therefore differ from production.
+  The one exception is the opt-in `OCR_COMPARE_PROVIDER=openrouter` (next section), which is for local testing.
 - Field differences are review cues, **not accuracy scores**. Agreement is not
   proof. When a PDF has embedded text, the page scores transcribed fields against
   that text. A scan with no text layer still needs a manual check.
@@ -156,7 +226,8 @@ differently from Gemini's, so input-token counts are not comparable across
 providers. An unknown model's pricing or
 missing token counts produces no estimate rather than a made-up zero.
 
-Document images are sent to Google and to Anthropic for inference. The lab does not persist
+Document images are sent to Google and to Anthropic for inference (or, with
+`OCR_COMPARE_PROVIDER=openrouter`, to OpenRouter and its upstream provider). The lab does not persist
 source images or outputs to the job database or document bucket; downloaded
 reports remain on your device. Existing application authentication may use
 its shared rate-limiter store for auth bookkeeping, but no lab document or
