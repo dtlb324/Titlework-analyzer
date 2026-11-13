@@ -115,8 +115,11 @@ export function createCompareUI(deps = {}) {
   const prepare = deps.prepareDocument || (file => prepareDocument(file));
   const urls = deps.URL || URL;
   const delay = deps.setTimeout || setTimeout;
-  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
+  const el = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'baseline-title', 'candidate-title', 'challenger-title', 'differences-baseline', 'differences-candidate', 'differences-challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, doc.getElementById(id)]));
   const effortBars = [el['baseline-effort'], el['candidate-effort'], el['challenger-effort']];
+  const columnTitles = [el['baseline-title'], el['candidate-title'], el['challenger-title']];
+  const differenceHeaders = [el['differences-baseline'], el['differences-candidate'], el['differences-challenger']];
+  const effortViews = [];
   let entries = [], selected = 0, report, previewUrls = [];
   let generation = 0, busy = false, preparing = false;
   const canCompare = entry => entry.pages?.length > 0 && !['preparing', 'error', 'running'].includes(entry.status);
@@ -143,7 +146,7 @@ export function createCompareUI(deps = {}) {
     return 'Document accuracy: no transcribed fields to score.';
   };
   const displayModel = (target, model, documentText) => {
-    target.replaceChildren(node('h3', model.label), node('p', modelSettings(model), 'metrics'));
+    target.replaceChildren(node('p', modelSettings(model), 'metrics'));
     target.append(node('p', `Version ${model.modelVersion ?? 'not reported'} · stop ${model.stopReason ?? 'not reported'}`, 'metrics'));
     const usage = model.usage || {};
     target.append(node('p', `${model.latencyMs ?? '—'} ms · input ${usage.input_tokens ?? '—'} · output ${usage.output_tokens ?? '—'} · thinking ${usage.thinking_tokens ?? '—'} tokens`, 'metrics'));
@@ -258,35 +261,53 @@ export function createCompareUI(deps = {}) {
     renderPreviews();
     renderResult();
   }
+  const showEffortMessage = (text, className) => {
+    effortBars.forEach((bar, index) => { bar?.replaceChildren(node('p', text, className)); effortViews[index] = null; });
+  };
+  const pickEffort = (index, level) => {
+    const slot = modelSlots[index];
+    if (busy || !slot || !slot.model.effortLevels.includes(level)) return;
+    slot.effort = level;
+    slot.picked = true;
+    slot.note = '';
+    renderEfforts();
+  };
+  const effortView = (bar, index, model) => {
+    const key = JSON.stringify([model.id, model.effortLevels]);
+    if (effortViews[index]?.key === key) return effortViews[index];
+    const buttons = model.effortLevels.map(level => {
+      const button = node('button', level);
+      button.setAttribute('type', 'button');
+      button.addEventListener('click', () => pickEffort(index, level));
+      return { level, button };
+    });
+    const note = node('p', '', 'muted');
+    note.hidden = true;
+    bar.replaceChildren(...buttons.map(item => item.button), note);
+    effortViews[index] = { key, buttons, note };
+    return effortViews[index];
+  };
+  const showsEfforts = () => metadataState.status === 'ready' || (modelSlots.length === MODEL_COUNT && Boolean(el.password.value) && metadataState.status !== 'error');
   const renderEfforts = () => {
-    if (metadataState.error) {
-      effortBars.forEach(bar => bar?.replaceChildren(node('p', metadataState.error, 'error')));
-      return;
-    }
-    if (metadataState.status !== 'ready') {
-      effortBars.forEach(bar => bar?.replaceChildren(node('p', metadataState.status === 'loading' ? 'Loading effort levels…' : 'Enter the application password to load effort levels.', 'muted')));
-      return;
-    }
+    if (metadataState.error) return showEffortMessage(metadataState.error, 'error');
+    if (!showsEfforts()) return showEffortMessage(metadataState.status === 'loading' ? 'Loading models and effort levels…' : 'Enter the application password to load models and effort levels.', 'muted');
     effortBars.forEach((bar, index) => {
       const slot = modelSlots[index];
       if (!bar || !slot) return;
-      const { model } = slot;
-      bar.replaceChildren();
-      for (const level of model.effortLevels) {
-        const button = node('button', level);
-        button.setAttribute('type', 'button');
+      const view = effortView(bar, index, slot.model);
+      for (const { level, button } of view.buttons) {
         button.setAttribute('aria-pressed', String(level === slot.effort));
         button.disabled = busy;
-        button.addEventListener('click', () => {
-          if (busy || metadataState.status !== 'ready') return;
-          slot.effort = level;
-          slot.picked = true;
-          slot.note = '';
-          renderEfforts();
-        });
-        bar.append(button);
       }
-      if (slot.note) bar.append(node('p', slot.note, 'muted'));
+      view.note.textContent = slot.note;
+      view.note.hidden = !slot.note;
+    });
+  };
+  const showModelNames = models => {
+    models.forEach((model, index) => {
+      columnTitles[index]?.replaceChildren(node('span', `${model.label} `), node('small', model.id, 'model-id'));
+      effortBars[index]?.setAttribute('aria-label', `${model.label} effort level`);
+      if (differenceHeaders[index]) differenceHeaders[index].textContent = model.label;
     });
   };
   const showEffortError = message => {
@@ -302,6 +323,7 @@ export function createCompareUI(deps = {}) {
       return { model, effort: picked ? previous.effort : model.effort, picked, note };
     });
     metadataState = { ...metadataState, status: 'ready', error: '' };
+    showModelNames(models);
     renderEfforts();
   };
   const validMetadata = metadata => Array.isArray(metadata.models) && metadata.models.length === MODEL_COUNT && metadata.renderScale === LIMITS.renderScale && Number.isInteger(metadata.maxPages) && metadata.maxPages >= 1 && Number.isInteger(metadata.maxBytes) && metadata.maxBytes >= 1 && metadata.models.every(model => model.maxTokens === metadata.models[0].maxTokens && Array.isArray(model.effortLevels) && model.effortLevels.length && model.effortLevels.every(level => typeof level === 'string') && model.effortLevels.includes(model.effort));

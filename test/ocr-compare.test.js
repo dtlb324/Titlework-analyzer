@@ -25,13 +25,13 @@ async function request(base, options = {}) {
   });
 }
 
-test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without starting model calls', async () => {
+test('OCR lab metadata reports current Gemini, Gemini 4 Hydrogen and Haiku 5.5 without starting model calls', async () => {
   await withServer(async base => {
     const response = await request(base);
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /application\/json/);
     const config = await response.json();
-    assert.deepEqual(config.models.map(model => model.id), ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'claude-haiku-5-5']);
+    assert.deepEqual(config.models.map(model => model.id), ['gemini-3.1-flash-lite', 'gemini-4-hydrogen', 'claude-haiku-5-5']);
     assert.equal(config.models[1].thinkingLevel, 'medium');
     assert.equal(config.models[2].label, 'Claude Haiku 5.5');
     assert.equal(config.models[2].effort, 'medium');
@@ -39,7 +39,7 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
     assert.deepEqual(config.models.map(model => model.maxTokens), [16000, 16000, 16000], 'lab limit is shared and larger than production\'s 2,000');
     assert.equal(config.maxPages, 60);
     assert.equal(config.maxBytes, 12_000_000);
-    assert.deepEqual(config.models.map(model => model.effortLevels), [['default', 'minimal', 'low', 'medium', 'high'], ['low', 'medium', 'high'], ['low', 'medium', 'high', 'xhigh', 'max']], 'unset baseline keeps a provider-default option; 3.8 Flash rejects minimal; Haiku 5.5 takes five levels');
+    assert.deepEqual(config.models.map(model => model.effortLevels), [['default', 'minimal', 'low', 'medium', 'high'], ['low', 'medium', 'high', 'xhigh'], ['low', 'medium', 'high', 'xhigh', 'max']], 'unset baseline keeps a provider-default option; Hydrogen has xhigh and no minimal; Haiku 5.5 takes five levels');
     assert.deepEqual(config.models.map(model => model.effort), ['default', 'medium', 'medium']);
   });
 });
@@ -47,15 +47,15 @@ test('OCR lab metadata reports current Gemini, 3.8 and Haiku 5.5 without startin
 test('per-model efforts from the browser reach each provider call and the report', async () => {
   const calls = [];
   await withServer(async base => {
-    const response = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['low', 'high', 'max'] }) });
+    const response = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['low', 'xhigh', 'max'] }) });
     assert.equal(response.status, 200);
     const report = await response.json();
     assert.equal(calls.find(call => call.model === 'gemini-3.1-flash-lite').thinkingLevel, 'low');
-    assert.equal(calls.find(call => call.model === 'gemini-3.8-flash').thinkingLevel, 'high');
+    assert.equal(calls.find(call => call.model === 'gemini-4-hydrogen').thinkingLevel, 'xhigh');
     const haiku = calls.find(call => call.model === 'claude-haiku-5-5');
     assert.equal(haiku.effort, 'max');
     assert.equal(haiku.thinkingLevel, undefined);
-    assert.deepEqual(report.models.map(model => model.effort), ['low', 'high', 'max']);
+    assert.deepEqual(report.models.map(model => model.effort), ['low', 'xhigh', 'max']);
     assert.equal(report.models[2].thinkingLevel, 'adaptive, effort max');
   }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
 });
@@ -195,7 +195,7 @@ test('Flash-Lite Image supported efforts reach direct wire builders and accurate
     const [baseline, candidate, haiku] = calls.slice(index * 3, index * 3 + 3);
     assert.match(baseline.url, /gemini-3\.1-flash-lite-image:generateContent$/);
     assert.deepEqual(baseline.body.generationConfig.thinkingConfig, effort === 'default' ? undefined : { thinkingLevel: effort });
-    assert.match(candidate.url, /gemini-3\.8-flash:generateContent$/);
+    assert.match(candidate.url, /gemini-4-hydrogen:generateContent$/);
     assert.deepEqual(candidate.body.generationConfig.thinkingConfig, { thinkingLevel: 'high' });
     assert.equal(haiku.url, 'https://api.anthropic.com/v1/messages');
     assert.equal(haiku.body.model, 'claude-haiku-5-5');
@@ -227,7 +227,7 @@ test('valid configured defaults and omitted efforts preserve old clients and fix
     assert.equal(metadata.calls, 0);
     assert.equal(metadata.body.models[0].effort, expected);
     assert.equal(metadata.body.models[0].effortLevels.includes('default'), expected === 'default');
-    assert.deepEqual(metadata.body.models[1].effortLevels, ['low', 'medium', 'high']);
+    assert.deepEqual(metadata.body.models[1].effortLevels, ['low', 'medium', 'high', 'xhigh']);
     assert.deepEqual(metadata.body.models[2].effortLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
     assert.equal(report.code, 200);
     assert.equal(calls.length, 3);
@@ -265,7 +265,7 @@ test('one upload starts all models concurrently with identical visual input and 
     for (let i = 0; i < 50 && calls.length < 3; i++) await new Promise(resolve => setTimeout(resolve, 5));
     try {
       assert.equal(calls.length, 3, 'All providers must start before any completes');
-      assert.deepEqual(calls.map(call => call.model), ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'claude-haiku-5-5']);
+      assert.deepEqual(calls.map(call => call.model), ['gemini-3.1-flash-lite', 'gemini-4-hydrogen', 'claude-haiku-5-5']);
       assert.deepEqual(calls[0].messages, calls[1].messages);
       assert.deepEqual(calls[0].messages, calls[2].messages);
       assert.equal(calls[0].system, calls[2].system);
@@ -367,7 +367,7 @@ test('a failed model is sanitized and does not discard the other output or retry
     assert.equal(report.models[2].costUsd, null, 'Missing Claude usage must not become a zero cost estimate');
   }, { ocrCompareModelClient: async ({ model }) => {
     calls++;
-    if (model === 'gemini-3.8-flash') throw new Error('provider error key=AIzaABCDEFGHIJKLMNOPQRSTUV');
+    if (model === 'gemini-4-hydrogen') throw new Error('provider error key=AIzaABCDEFGHIJKLMNOPQRSTUV');
     return { text: 'GRANTOR: Verified Fixture' };
   } });
 });
@@ -428,7 +428,7 @@ test('the lab uses direct Gemini and direct Anthropic even when production provi
       assert.equal(response.status, 200);
       const report = await response.json();
       assert.equal(providerCalls.length, 2, 'two Gemini calls; Haiku goes to Anthropic');
-      assert.match(providerCalls[1].url, /gemini-3\.8-flash:generateContent$/);
+      assert.match(providerCalls[1].url, /gemini-4-hydrogen:generateContent$/);
       assert.equal(providerCalls[0].body.generationConfig.thinkingConfig.thinkingLevel, 'minimal');
       assert.equal(providerCalls[1].body.generationConfig.thinkingConfig.thinkingLevel, 'medium');
       assert.deepEqual(providerCalls[0].body.contents, providerCalls[1].body.contents);
@@ -573,4 +573,89 @@ test('Haiku thinking tokens are shown from output_tokens_details without being b
   }, { ocrCompareModelClient: async call => ({ text: 'GRANTOR: X', usage: call.model.startsWith('claude-')
     ? { input_tokens: 25199, cache_creation_input_tokens: 728, cache_read_input_tokens: 0, output_tokens: 2853, output_tokens_details: { thinking_tokens: 1700 } }
     : { input_tokens: 10, output_tokens: 5 } }) });
+});
+
+test('Gemini 4 Hydrogen gets thinkingLevel on the wire, including xhigh, never thinkingBudget or sampling', () => {
+  const { responses, calls } = baselineWireScenario('gemini-3.1-flash-lite', '', [
+    { method: 'POST', efforts: ['default', 'high', 'medium'] },
+    { method: 'POST', efforts: ['default', 'xhigh', 'medium'] },
+    { method: 'POST', efforts: ['default', 'low', 'medium'] },
+    { method: 'POST' },
+  ]);
+  assert.deepEqual(responses.map(response => response.code), [200, 200, 200, 200]);
+  const hydrogen = calls.filter(call => /gemini-4-hydrogen:generateContent$/.test(call.url));
+  assert.deepEqual(hydrogen.map(call => call.body.generationConfig.thinkingConfig), [{ thinkingLevel: 'high' }, { thinkingLevel: 'xhigh' }, { thinkingLevel: 'low' }, { thinkingLevel: 'medium' }], 'an omitted efforts list uses the medium default');
+  for (const call of hydrogen) {
+    assert.equal(call.body.generationConfig.maxOutputTokens, 8000);
+    assert.ok(!('thinkingBudget' in call.body.generationConfig.thinkingConfig));
+    for (const key of ['temperature', 'topP', 'topK', 'top_p', 'top_k']) assert.ok(!(key in call.body.generationConfig), key);
+  }
+  assert.deepEqual(responses.map(response => response.body.models[1].thinkingLevel), ['high', 'xhigh', 'low', 'medium']);
+  assert.deepEqual(responses[1].body.models[1].effortLevels, ['low', 'medium', 'high', 'xhigh']);
+});
+
+test('Hydrogen metadata offers low, medium, high, xhigh with medium preselected', async () => {
+  await withServer(async base => {
+    const { models } = await (await request(base)).json();
+    const hydrogen = models.find(model => model.id === 'gemini-4-hydrogen');
+    assert.equal(hydrogen.label, 'Gemini 4 Hydrogen');
+    assert.deepEqual(hydrogen.effortLevels, ['low', 'medium', 'high', 'xhigh']);
+    assert.equal(hydrogen.effort, 'medium');
+    assert.equal(hydrogen.thinkingLevel, 'medium');
+  });
+});
+
+test('a POST selecting low or medium for Hydrogen sends that thinkingLevel to the model client and the Gemini wire', async () => {
+  for (const level of ['low', 'medium']) {
+    const calls = [];
+    await withServer(async base => {
+      const response = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['default', level, 'medium'] }) });
+      assert.equal(response.status, 200);
+      const report = await response.json();
+      assert.equal(calls.length, 3);
+      const hydrogen = calls.find(call => call.model === 'gemini-4-hydrogen');
+      assert.equal(hydrogen.thinkingLevel, level);
+      assert.equal(report.models[1].effort, level);
+      assert.equal(report.models[1].thinkingLevel, level);
+    }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
+    const wire = baselineWireScenario('gemini-3.1-flash-lite', '', [{ method: 'POST', efforts: ['default', level, 'medium'] }]);
+    assert.equal(wire.responses[0].code, 200);
+    const [hydrogenCall] = wire.calls.filter(call => /gemini-4-hydrogen:generateContent$/.test(call.url));
+    assert.deepEqual(hydrogenCall.body.generationConfig.thinkingConfig, { thinkingLevel: level });
+  }
+});
+
+test('Gemini 4 Hydrogen rejects minimal and max before any provider call, and xhigh stays Hydrogen-only', async () => {
+  let calls = 0;
+  await withServer(async base => {
+    for (const efforts of [['default', 'minimal', 'medium'], ['default', 'max', 'medium'], ['default', 'default', 'medium']]) {
+      const response = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts }) });
+      assert.equal(response.status, 400, JSON.stringify(efforts));
+      assert.match((await response.json()).error, /Gemini 4 Hydrogen does not support effort/);
+    }
+    assert.equal(calls, 0);
+    assert.equal((await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['default', 'xhigh', 'medium'] }) })).status, 200);
+    assert.equal(calls, 3);
+    // The current-Gemini column is a gemini-3 model, which has no xhigh.
+    const baselineXhigh = await request(base, { method: 'POST', body: JSON.stringify({ ...document, efforts: ['xhigh', 'high', 'medium'] }) });
+    assert.equal(baselineXhigh.status, 400);
+    assert.equal(calls, 3);
+  }, { ocrCompareModelClient: async () => { calls++; return { text: 'GRANTOR: Test' }; } });
+});
+
+test('Gemini 4 Hydrogen cost uses $1.50 input and $7.50 output, with thinking billed as output', async () => {
+  await withServer(async base => {
+    const report = await (await request(base, { method: 'POST', body: JSON.stringify(document) })).json();
+    const hydrogen = report.models[1];
+    assert.equal(hydrogen.id, 'gemini-4-hydrogen');
+    assert.equal(hydrogen.costUsd, (1000 * 1.5 + (500 + 200) * 7.5) / 1_000_000);
+    assert.deepEqual({ input: hydrogen.costRates.input, output: hydrogen.costRates.output }, { input: 1.5, output: 7.5 });
+    assert.equal(hydrogen.costRates.source, 'https://ai.google.dev/gemini-api/docs/pricing');
+    assert.equal(report.models[0].costUsd, (1000 * 0.25 + 700 * 1.5) / 1_000_000, 'Flash-Lite pricing is unchanged');
+  }, { ocrCompareModelClient: async call => ({ text: 'GRANTOR: X', usage: call.model.startsWith('claude-') ? { input_tokens: 1, output_tokens: 1 } : { input_tokens: 1000, output_tokens: 500, thinking_tokens: 200 } }) });
+  await withServer(async base => {
+    const report = await (await request(base, { method: 'POST', body: JSON.stringify(document) })).json();
+    assert.equal(report.models[1].costUsd, (1000 * 1.5 + 500 * 7.5) / 1_000_000, 'absent thinking tokens count as zero');
+    assert.equal(report.models[1].costUsd, 0.00525);
+  }, { ocrCompareModelClient: async call => ({ text: 'GRANTOR: X', usage: call.model.startsWith('claude-') ? { input_tokens: 1, output_tokens: 1 } : { input_tokens: 1000, output_tokens: 500 } }) });
 });

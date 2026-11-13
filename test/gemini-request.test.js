@@ -4,6 +4,8 @@ import {
   extractGeminiText,
   extractGeminiThoughtSummaries,
   isGemini3SeriesModel,
+  isGemini4HydrogenModel,
+  isGemini4SeriesModel,
   isGeminiModel,
   normalizeGeminiUsage,
   resolveGeminiThinkingConfig,
@@ -101,6 +103,117 @@ test('resolveGeminiThinkingConfig uses thinkingLevel for Gemini 3.5', () => {
 test('isGemini3SeriesModel distinguishes 2.5 and 3.5', () => {
   assert(isGemini3SeriesModel('gemini-3.5-flash'), 'Expected 3.5');
   assert(!isGemini3SeriesModel('gemini-2.5-flash'), 'Expected 2.5 false');
+  assert(!isGemini3SeriesModel('gemini-4-hydrogen'), 'Gemini 4 is not the 3 series');
+});
+
+test('Gemini 4 Hydrogen uses thinkingLevel, not the 2.5 thinkingBudget branch', () => {
+  const prev = { level: process.env.GEMINI_THINKING_LEVEL, budget: process.env.GEMINI_THINKING_BUDGET };
+  delete process.env.GEMINI_THINKING_LEVEL;
+  process.env.GEMINI_THINKING_BUDGET = '1024';
+  try {
+    assert(isGemini4SeriesModel('gemini-4-hydrogen'), 'Expected Hydrogen to be Gemini 4');
+    assert(!isGemini4SeriesModel('gemini-3.5-flash') && !isGemini4SeriesModel('gemini-2.5-flash'), 'Only gemini-4 ids match');
+    for (const level of ['low', 'medium', 'high', 'xhigh']) {
+      const config = resolveGeminiThinkingConfig('gemini-4-hydrogen', { thinkingLevel: level });
+      assert(JSON.stringify(config) === JSON.stringify({ thinkingLevel: level }), `Expected only thinkingLevel ${level}, got ${JSON.stringify(config)}`);
+    }
+    assert(resolveGeminiThinkingConfig('gemini-4-hydrogen', { thinkingLevel: ' XHigh ' }).thinkingLevel === 'xhigh', 'Expected normalized xhigh');
+    assert(resolveGeminiThinkingConfig('gemini-4-hydrogen') === null, 'No level set: send no thinkingConfig so the model default (high) applies');
+    assert(resolveGeminiThinkingConfig('gemini-4-hydrogen', { thinkingBudget: 0 }) === null, 'A budget must never be sent to Gemini 4');
+    assert(resolveGeminiThinkingConfig('gemini-4-hydrogen', { thinkingLevel: 'minimal' }) === null, 'Hydrogen has no minimal level');
+    const body = buildGeminiGenerateContentBody({
+      model: 'gemini-4-hydrogen',
+      maxTokens: 2000,
+      system: 'Test',
+      messages: [{ role: 'user', content: 'Hi' }],
+      thinkingLevel: 'xhigh',
+    });
+    assert(JSON.stringify(body.generationConfig.thinkingConfig) === '{"thinkingLevel":"xhigh"}', `Unexpected body ${JSON.stringify(body.generationConfig)}`);
+    process.env.GEMINI_THINKING_LEVEL = 'xhigh';
+    assert(resolveGeminiThinkingConfig('gemini-4-hydrogen').thinkingLevel === 'xhigh', 'Expected env level');
+    process.env.GEMINI_THINKING_LEVEL = 'minimal';
+    assert(resolveGeminiThinkingConfig('gemini-4-hydrogen') === null, 'Env minimal is ignored for Hydrogen');
+  } finally {
+    for (const [key, value] of [['GEMINI_THINKING_LEVEL', prev.level], ['GEMINI_THINKING_BUDGET', prev.budget]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
+test('Gemini 3 and 2.5 thinking config are unchanged by Gemini 4 support', () => {
+  const prev = { level: process.env.GEMINI_THINKING_LEVEL, budget: process.env.GEMINI_THINKING_BUDGET };
+  delete process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_BUDGET;
+  try {
+    for (const level of ['minimal', 'low', 'medium', 'high']) {
+      assert(JSON.stringify(resolveGeminiThinkingConfig('gemini-3.1-flash-lite', { thinkingLevel: level })) === JSON.stringify({ thinkingLevel: level }), `gemini-3 ${level}`);
+    }
+    assert(resolveGeminiThinkingConfig('gemini-3.8-flash', { thinkingLevel: 'xhigh' }) === null, 'xhigh is not a gemini-3 level');
+    assert(resolveGeminiThinkingConfig('gemini-3.1-flash-lite', { thinkingLevel: 'xhigh' }) === null, 'xhigh is not a gemini-3 level');
+    assert(resolveGeminiThinkingConfig('gemini-3.1-flash-lite') === null, 'gemini-3 with no level sends nothing');
+    assert(JSON.stringify(resolveGeminiThinkingConfig('gemini-2.5-flash')) === '{"thinkingBudget":0}', '2.5 default budget');
+    assert(JSON.stringify(resolveGeminiThinkingConfig('gemini-2.5-flash', { thinkingBudget: 1024 })) === '{"thinkingBudget":1024}', '2.5 explicit budget');
+    assert(resolveGeminiThinkingConfig('gemini-2.5-flash', { thinkingLevel: 'xhigh' }).thinkingLevel === undefined, '2.5 ignores levels');
+    assert(resolveGeminiThinkingConfig('claude-haiku-5-5', { thinkingLevel: 'high' }) === null, 'non-Gemini model');
+  } finally {
+    for (const [key, value] of [['GEMINI_THINKING_LEVEL', prev.level], ['GEMINI_THINKING_BUDGET', prev.budget]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
+test('xhigh is accepted only by Hydrogen ids; Carbon and Argon stop at high', () => {
+  const prev = process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  try {
+    for (const id of ['gemini-4-hydrogen', 'Gemini-4-Hydrogen', ' gemini-4-hydrogen ', 'gemini-4-hydrogen-preview', 'gemini-4-hydrogen-preview-11-2026']) {
+      assert(isGemini4HydrogenModel(id), `Expected ${id} to be Hydrogen`);
+      assert(resolveGeminiThinkingConfig(id, { thinkingLevel: 'xhigh' })?.thinkingLevel === 'xhigh', `${id} accepts xhigh`);
+      assert(resolveGeminiThinkingConfig(id, { thinkingLevel: 'minimal' }) === null, `${id} rejects minimal`);
+    }
+    for (const id of ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4', 'gemini-4-carbon-cyber-permissive', 'gemini-4-hydrogenx']) {
+      assert(!isGemini4HydrogenModel(id), `Expected ${id} not to be Hydrogen`);
+      assert(resolveGeminiThinkingConfig(id, { thinkingLevel: 'xhigh' }) === null, `${id} rejects xhigh`);
+      assert(resolveGeminiThinkingConfig(id, { thinkingLevel: 'minimal' }) === null, `${id} rejects minimal`);
+      for (const level of ['low', 'medium', 'high']) {
+        assert(JSON.stringify(resolveGeminiThinkingConfig(id, { thinkingLevel: level })) === JSON.stringify({ thinkingLevel: level }), `${id} accepts ${level}`);
+      }
+      process.env.GEMINI_THINKING_LEVEL = 'xhigh';
+      assert(resolveGeminiThinkingConfig(id) === null, `${id} ignores env xhigh`);
+      delete process.env.GEMINI_THINKING_LEVEL;
+      const body = buildGeminiGenerateContentBody({ model: id, maxTokens: 100, system: 'S', messages: [{ role: 'user', content: 'Hi' }], thinkingLevel: 'xhigh' });
+      assert(!('thinkingConfig' in body.generationConfig), `${id} xhigh sends no thinkingConfig, got ${JSON.stringify(body.generationConfig)}`);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.GEMINI_THINKING_LEVEL; else process.env.GEMINI_THINKING_LEVEL = prev;
+  }
+});
+
+test('buildGeminiGenerateContentBody never sends thinkingBudget to Gemini 4', () => {
+  const prev = { level: process.env.GEMINI_THINKING_LEVEL, budget: process.env.GEMINI_THINKING_BUDGET };
+  delete process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_BUDGET;
+  try {
+    const build = (model, extra) => buildGeminiGenerateContentBody({ model, maxTokens: 100, system: 'S', messages: [{ role: 'user', content: 'Hi' }], ...extra });
+    for (const id of ['gemini-4-hydrogen', 'gemini-4-carbon', 'gemini-4-argon', 'Gemini-4-Hydrogen']) {
+      for (const thinkingBudget of [-1, 0, 1024, null, '512']) {
+        const body = build(id, { thinkingBudget });
+        assert(!('thinkingConfig' in body.generationConfig), `${id} budget ${JSON.stringify(thinkingBudget)} leaked: ${JSON.stringify(body.generationConfig)}`);
+      }
+      const both = build(id, { thinkingBudget: 1024, thinkingLevel: 'low' });
+      assert(JSON.stringify(both.generationConfig.thinkingConfig) === '{"thinkingLevel":"low"}', `${id} level wins and budget is dropped`);
+    }
+    // Non-Gemini-4 bodies keep their exact shape.
+    assert(JSON.stringify(build('gemini-3.5-flash', { thinkingBudget: 1024 }).generationConfig) === '{"maxOutputTokens":100,"thinkingConfig":{"thinkingBudget":1024}}', 'gemini-3 fallback budget unchanged');
+    assert(JSON.stringify(build('gemini-3.5-flash', { thinkingLevel: 'low', thinkingBudget: 1024 }).generationConfig.thinkingConfig) === '{"thinkingLevel":"low"}', 'gemini-3 level unchanged');
+    assert(JSON.stringify(build('gemini-2.5-flash', { thinkingBudget: -1 }).generationConfig.thinkingConfig) === '{"thinkingBudget":-1}', '2.5 dynamic budget unchanged');
+    assert(JSON.stringify(build('gemini-2.5-flash', { thinkingBudget: 0 }).generationConfig.thinkingConfig) === '{"thinkingBudget":0}', '2.5 zero budget unchanged');
+    assert(JSON.stringify(build('gemini-2.5-flash').generationConfig.thinkingConfig) === '{"thinkingBudget":0}', '2.5 default budget unchanged');
+  } finally {
+    for (const [key, value] of [['GEMINI_THINKING_LEVEL', prev.level], ['GEMINI_THINKING_BUDGET', prev.budget]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test('extractGeminiText omits thought summary parts', () => {

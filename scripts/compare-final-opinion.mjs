@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { buildMergeUserMessageContent } from '../api/_lib/anthropic-request.js';
 import { getJobStore } from '../api/_lib/jobs.js';
 import { invokeModel } from '../api/_lib/model-client.js';
-import { isGemini3SeriesModel } from '../api/_lib/gemini-request.js';
+import { isGemini3SeriesModel, isGemini4SeriesModel, resolveGeminiThinkingConfig } from '../api/_lib/gemini-request.js';
 import {
   SYNTHESIS_PROMPT,
   buildAbstractInput,
@@ -39,7 +39,10 @@ Options:
   --out-dir <path>              Output directory (default: eval/compare/<jobId>-<ts>)
   --gemini-model <id>           Default: gemini-2.5-pro
   --sonnet-model <id>           Default: claude-sonnet-5-5
-  --gemini-thinking-level <lvl> minimal|low|medium|high (or GEMINI_THINKING_LEVEL)
+  --gemini-thinking-level <lvl> Gemini 3: minimal|low|medium|high (default minimal).
+                                Gemini 4: low|medium|high, plus xhigh on gemini-4-hydrogen only
+                                (default: model default, high on Hydrogen, medium on Carbon/Argon).
+                                Or set GEMINI_THINKING_LEVEL.
 `);
 }
 
@@ -107,16 +110,27 @@ function resolveMode(ctx) {
   );
 }
 
-async function generateFinalOpinion({ mode, ctx, model, thinkingLevel }) {
+// Per-model thinking params for one arm. Gemini 3 defaults to minimal, Gemini 2.5 to a dynamic budget (-1).
+// Gemini 4 takes no budget and no minimal: send a level only if the model supports it, otherwise
+// send none so the model default applies (high on Hydrogen, medium on Carbon and Argon).
+export function resolveFinalOpinionThinking(model, thinkingLevel) {
+  const isGemini = /^gemini-/i.test(String(model || ''));
+  if (isGemini4SeriesModel(model)) {
+    return { thinkingLevel: resolveGeminiThinkingConfig(model, { thinkingLevel })?.thinkingLevel, thinkingBudget: undefined };
+  }
+  if (isGemini3SeriesModel(model) && !thinkingLevel) {
+    return { thinkingLevel: 'minimal', thinkingBudget: undefined };
+  }
+  if (isGemini && !isGemini3SeriesModel(model) && process.env.GEMINI_THINKING_BUDGET == null) {
+    return { thinkingLevel: thinkingLevel || undefined, thinkingBudget: -1 };
+  }
+  return { thinkingLevel: thinkingLevel || undefined, thinkingBudget: undefined };
+}
+
+async function generateFinalOpinion({ mode, ctx, model, thinkingLevel: requestedLevel }) {
   const config = getSynthesisConfig({ model });
   const started = Date.now();
-  let thinkingBudget;
-  const isGemini = /^gemini-/i.test(String(model || ''));
-  if (isGemini3SeriesModel(model) && !thinkingLevel) {
-    thinkingLevel = 'minimal';
-  } else if (isGemini && !isGemini3SeriesModel(model) && process.env.GEMINI_THINKING_BUDGET == null) {
-    thinkingBudget = -1;
-  }
+  const { thinkingLevel, thinkingBudget } = resolveFinalOpinionThinking(model, requestedLevel);
   let messages;
 
   if (mode === 'single-pass') {
@@ -371,6 +385,11 @@ async function main() {
   }
 
   const thinkingLevel = args.geminiThinkingLevel || process.env.GEMINI_THINKING_LEVEL || null;
+  if (thinkingLevel && isGemini4SeriesModel(args.geminiModel)
+    && !resolveGeminiThinkingConfig(args.geminiModel, { thinkingLevel })) {
+    console.error(`Thinking level "${thinkingLevel}" is not supported by ${args.geminiModel}. Gemini 4 takes low|medium|high, plus xhigh on gemini-4-hydrogen only.`);
+    process.exit(1);
+  }
   if (thinkingLevel) process.env.GEMINI_THINKING_LEVEL = thinkingLevel;
 
   const store = getJobStore();
