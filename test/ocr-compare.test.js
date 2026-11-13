@@ -342,15 +342,72 @@ test('accepts 60 rendered pages and rejects 61 without calling providers', async
   }, { ocrCompareModelClient: async call => { calls.push(call); return { text: 'GRANTOR: Test' }; } });
 });
 
-test('handler itself fails closed without APP_PASSWORD even outside production', async () => {
-  const handler = createOcrCompareHandler();
-  const response = { setHeader() {}, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
-  delete process.env.APP_PASSWORD;
+// Direct handler call with a stub model client: no network, no provider keys.
+// Each call gets its own client address so the failed-password lockout never carries between calls.
+let labClient = 0;
+async function callLab(method, { env = {}, headers = {}, body } = {}) {
+  const saved = { ...process.env };
+  const calls = [];
+  const res = { setHeader() {}, status(code) { this.code = code; return this; }, json(payload) { this.body = payload; return this; } };
+  for (const [key, value] of Object.entries({ NODE_ENV: 'test', K_SERVICE: undefined, ...env })) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
   try {
-    await handler({ method: 'GET', headers: {} }, response);
-    assert.equal(response.code, 503);
-    assert.match(response.body.error, /APP_PASSWORD/);
-  } finally { process.env.APP_PASSWORD = 'ocr-test-password'; }
+    await createOcrCompareHandler({ modelClient: async call => { calls.push(call); return { text: 'GRANTOR: Local Owner', usage: { input_tokens: 1, output_tokens: 1 }, stopReason: 'STOP', model: call.model }; } })({ method, headers, socket: { remoteAddress: `203.0.113.${++labClient % 250}` }, body }, res);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    for (const key of ['NODE_ENV', 'K_SERVICE']) if (!(key in saved)) delete process.env[key];
+  }
+  return { code: res.code, body: res.body, calls };
+}
+
+test('local use without APP_PASSWORD needs no password for GET and POST, and says so in the metadata', async () => {
+  for (const env of [{ APP_PASSWORD: undefined }, { APP_PASSWORD: undefined, NODE_ENV: undefined }]) {
+    const metadata = await callLab('GET', { env });
+    assert.equal(metadata.code, 200);
+    assert.equal(metadata.body.passwordRequired, false);
+    assert.equal(metadata.body.models.length, 3);
+    const run = await callLab('POST', { env, body: document });
+    assert.equal(run.code, 200);
+    assert.equal(run.calls.length, 3, 'the stub client ran all three columns');
+    assert.equal(run.body.models[0].fields.GRANTOR, 'Local Owner');
+  }
+});
+
+test('production without APP_PASSWORD stays closed for NODE_ENV=production and for K_SERVICE', async () => {
+  for (const env of [{ APP_PASSWORD: undefined, NODE_ENV: 'production' }, { APP_PASSWORD: undefined, K_SERVICE: 'titlework' }, { APP_PASSWORD: '', K_SERVICE: 'titlework' }]) {
+    for (const method of ['GET', 'POST']) {
+      const response = await callLab(method, { env, body: document });
+      assert.equal(response.code, 503, `${JSON.stringify(env)} ${method}`);
+      assert.match(response.body.error, /APP_PASSWORD/);
+      assert.equal(response.calls.length, 0);
+    }
+  }
+});
+
+test('with APP_PASSWORD set the password is still required, locally and in production', async () => {
+  for (const extra of [{}, { NODE_ENV: 'production' }, { K_SERVICE: 'titlework' }]) {
+    const env = { APP_PASSWORD: 'ocr-test-password', ...extra };
+    for (const method of ['GET', 'POST']) {
+      const missing = await callLab(method, { env, body: document });
+      assert.equal(missing.code, 401, `${JSON.stringify(extra)} ${method} without header`);
+      assert.equal(missing.calls.length, 0);
+      const wrong = await callLab(method, { env, headers: { 'x-app-password': 'wrong' }, body: document });
+      assert.equal(wrong.code, 401);
+    }
+    const metadata = await callLab('GET', { env, headers: { 'x-app-password': 'ocr-test-password' } });
+    assert.equal(metadata.code, 200);
+    assert.equal(metadata.body.passwordRequired, true);
+    const run = await callLab('POST', { env, headers: { 'x-app-password': 'ocr-test-password' }, body: document });
+    assert.equal(run.code, 200);
+    assert.equal(run.calls.length, 3);
+  }
+});
+
+test('a disabled lab is still 404 with no password in local mode', async () => {
+  const response = await callLab('GET', { env: { APP_PASSWORD: undefined, OCR_COMPARE_ENABLED: 'false' } });
+  assert.equal(response.code, 404);
 });
 
 test('a failed model is sanitized and does not discard the other output or retry', async () => {

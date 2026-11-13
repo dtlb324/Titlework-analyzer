@@ -13,9 +13,9 @@ class Element {
   click() { this.clicked = true; }
 }
 const allText = el => [el.textContent, ...el.children.map(allText)].join(' ');
-function harness(overrides = {}) {
-  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'baseline-title', 'candidate-title', 'challenger-title', 'differences-baseline', 'differences-candidate', 'differences-challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
-  const calls = [], blobs = [], revoked = [];
+function harness({ local = false, ...overrides } = {}) {
+  const elements = Object.fromEntries(['password', 'password-field', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'baseline-title', 'candidate-title', 'challenger-title', 'differences-baseline', 'differences-candidate', 'differences-challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
+  const calls = [], probes = [], blobs = [], revoked = [];
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const models = [
     { id: 'gemini-3.1-flash-lite', label: 'Baseline', effort: 'default', effortLevels: ['default', 'minimal', 'low', 'medium', 'high'], thinkingLevel: 'default', maxTokens: 8000, text: '<script>unsafe</script>', fields: { grantor: '<img src=x onerror=bad()>', onlyBaseline: 0 }, usage: { input_tokens: 10, output_tokens: 20, thinking_tokens: 3 }, latencyMs: 120, stopReason: 'MAX_TOKENS', modelVersion: 'v1', costUsd: .001, costRates: { input: .25, output: 1.5, source: 'fixture' } },
@@ -25,14 +25,27 @@ function harness(overrides = {}) {
   const result = { filename: 'deed.png', pageCount: 1, inputMode: 'rendered_images', models };
   const deps = {
     document,
-    fetch: async (url, options) => { calls.push({ url, ...options }); return { ok: true, json: async () => options.method === 'POST' ? result : { models, maxPages: 10, maxBytes: 12000000, renderScale: 2 } }; },
+    // A header-less GET is the page-load probe. A password-protected server answers it 401 (not logged in `calls`);
+    // with `local: true` the server runs without APP_PASSWORD and answers it like any other metadata GET.
+    fetch: async (url, options) => {
+      const probe = options.method === 'GET' && !options.headers?.['x-app-password'];
+      if (probe && !local) { probes.push({ url, ...options }); return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }; }
+      calls.push({ url, ...options });
+      return { ok: true, json: async () => options.method === 'POST' ? result : { models, passwordRequired: !local, maxPages: 10, maxBytes: 12000000, renderScale: 2 } };
+    },
     prepareDocument: async () => [{ mediaType: 'image/png', data: 'YWJj', blob: new Blob(['abc']), width: 10, height: 10 }],
     URL: { createObjectURL: blob => { blobs.push(blob); return `blob:${blobs.length}`; }, revokeObjectURL: url => revoked.push(url) },
     setTimeout: fn => fn(),
     ...overrides
   };
-  return { elements, calls, models, result, blobs, revoked, deps };
+  return { elements, calls, probes, models, result, blobs, revoked, deps };
 }
+
+// Wraps a custom fake fetch so a header-less GET (the page-load probe) is answered 401 and kept out of h.calls.
+const behindPassword = (h, fetchImpl) => (url, options) => {
+  if (options.method === 'GET' && !options.headers?.['x-app-password']) { h.probes.push({ url, ...options }); return Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }); }
+  return fetchImpl(url, options);
+};
 
 async function selected(h, file = { name: 'deed.png', type: 'image/png', size: 3 }) {
   h.elements.password.value = 'private-password';
@@ -280,7 +293,7 @@ test('older preparation cannot overwrite a newer selected document', async () =>
 
 test('metadata failures are actionable and never submit or retry the document', async () => {
   for (const [status, message] of [[401, /password/i], [404, /disabled|unavailable/i], [503, /not configured/i]]) {
-    const h = harness({ fetch: async (url, options) => { h.calls.push({ url, ...options }); return { ok: false, status, json: async () => ({ error: 'server unavailable' }) }; } });
+    const h = harness({ fetch: behindPassword({ probes: [] }, async (url, options) => { h.calls.push({ url, ...options }); return { ok: false, status, json: async () => ({ error: 'server unavailable' }) }; }) });
     ui.createCompareUI(h.deps);
     await selected(h);
     await h.elements['compare-form'].fire('submit');
@@ -340,7 +353,7 @@ test('field comparison ignores object key order while preserving array order and
 
 test('malformed model configuration prevents a billable POST', async () => {
   const h = harness();
-  h.deps.fetch = async (url, options) => { h.calls.push({ url, ...options }); return { ok: true, json: async () => ({ models: h.models, maxPages: 10, maxBytes: 12000000, renderScale: 3 }) }; };
+  h.deps.fetch = behindPassword(h, async (url, options) => { h.calls.push({ url, ...options }); return { ok: true, json: async () => ({ models: h.models, maxPages: 10, maxBytes: 12000000, renderScale: 3 }) }; });
   ui.createCompareUI(h.deps);
   await selected(h);
   await h.elements['compare-form'].fire('submit');
@@ -363,6 +376,9 @@ test('one upload compares server-selected models, renders safe union differences
   assert.match(allText(h.elements.baseline), /<script>unsafe<\/script>/);
   assert.match(allText(h.elements.baseline), /thinking 3/);
   assert.match(allText(h.elements.baseline), /truncated/i);
+  assert.match(allText(h.elements.baseline), /Version v1 · stop reason: MAX_TOKENS/);
+  assert.match(allText(h.elements.challenger), /Version v3 · stop reason: end_turn/);
+  assert.doesNotMatch(allText(h.elements.baseline), /· stop MAX_TOKENS/);
   assert.match(allText(h.elements.candidate), /empty/i);
   assert.equal(h.elements.differences.children.length, 3);
   assert.match(allText(h.elements.challenger), /Third/);
@@ -537,10 +553,10 @@ test('clearing the password invalidates a pending metadata response immediately'
   for (const event of ['input', 'change']) {
     const h = harness();
     let release;
-    h.deps.fetch = async (url, options) => {
+    h.deps.fetch = behindPassword(h, async (url, options) => {
       h.calls.push({ url, ...options });
       return new Promise(resolve => { release = resolve; });
-    };
+    });
     ui.createCompareUI(h.deps);
     h.elements.password.value = 'private-password';
     const loading = h.elements.password.fire('change');
@@ -560,14 +576,14 @@ test('pre-compare metadata failure supersedes pending loads and remains visible 
   const h = harness();
   let requests = 0, release;
   const fetch = h.deps.fetch;
-  h.deps.fetch = async (url, options) => {
+  h.deps.fetch = behindPassword(h, async (url, options) => {
     if (options.method === 'GET') {
       requests++;
       if (requests === 2) return new Promise(resolve => { release = resolve; });
       if (requests === 3) return { ok: false, status: 401, json: async () => ({}) };
     }
     return fetch(url, options);
-  };
+  });
   ui.createCompareUI(h.deps);
   await selected(h);
   await h.elements.password.fire('change');
@@ -657,13 +673,13 @@ async function selectMany(h, files) {
 }
 function multiHarness(overrides = {}) {
   const h = harness(overrides);
-  h.deps.fetch = async (url, options) => {
+  h.deps.fetch = behindPassword(h, async (url, options) => {
     h.calls.push({ url, ...options });
     if (options.method !== 'POST') return { ok: true, json: async () => ({ models: h.models, maxPages: 10, maxBytes: 12000000, renderScale: 2 }) };
     const { filename } = JSON.parse(options.body);
     if (h.failOn === filename) return { ok: false, status: 429, json: async () => ({ error: 'A comparison is already running' }) };
     return { ok: true, json: async () => ({ ...h.result, filename, models: h.models.map(model => ({ ...model, text: `${filename}:${model.id}`, stopReason: 'STOP' })) }) };
-  };
+  });
   return h;
 }
 
@@ -975,4 +991,116 @@ test('a non-first file that finishes preparing while selected shows its page pre
   assert.equal(h.elements.previews.children.length, 2, 'finishing an unselected file leaves the selected pane alone');
   await view(0).fire('click');
   assert.equal(h.elements.previews.children.length, 2);
+});
+
+const passwordWords = /password/i;
+const effortTexts = h => ['baseline', 'candidate', 'challenger'].map(slot => allText(h.elements[`${slot}-effort`]));
+
+test('local server without APP_PASSWORD: the field is hidden, effort buttons load at once, and POST sends no password header', async () => {
+  const h = harness({ local: true });
+  ui.createCompareUI(h.deps);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.calls.length, 1, 'one metadata GET on page load, no input needed');
+  assert.equal(h.calls[0].method, 'GET');
+  assert.equal(h.calls[0].headers?.['x-app-password'], undefined, 'the probe carries no password');
+  assert.equal(h.elements['password-field'].hidden, true);
+  assert.equal(h.elements.password.required, false, 'a hidden required field would block form submission');
+  assert.equal(h.elements.password.value, '');
+  assert.deepEqual(effortButtons(h.elements['candidate-effort']).map(button => button.textContent), ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(effortButtons(h.elements['baseline-effort']).map(button => button.textContent), ['default', 'minimal', 'low', 'medium', 'high']);
+  assert.doesNotMatch(h.elements.status.textContent, passwordWords);
+  for (const text of effortTexts(h)) assert.doesNotMatch(text, passwordWords);
+  h.elements.document.files = [{ name: 'deed.png', type: 'image/png', size: 3 }];
+  await h.elements.document.fire('change');
+  assert.doesNotMatch(h.elements.status.textContent, passwordWords);
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  await h.elements['compare-form'].fire('submit');
+  const post = h.calls.find(call => call.method === 'POST');
+  assert.ok(post, 'compare runs with no password typed');
+  assert.deepEqual(JSON.parse(post.body).efforts, ['default', 'high', 'medium']);
+  assert.ok(h.calls.every(call => !('x-app-password' in (call.headers || {}))), 'no request carries x-app-password');
+  assert.equal(h.elements.status.textContent, 'Comparison complete. Review differences against the original page images.');
+});
+
+test('local mode with a failing request never tells the user to enter a password', async () => {
+  const h = harness({ local: true });
+  const base = h.deps.fetch;
+  h.deps.fetch = (url, options) => options.method === 'POST' ? Promise.resolve({ ok: false, status: 503, json: async () => ({}) }) : base(url, options);
+  ui.createCompareUI(h.deps);
+  await new Promise(resolve => setImmediate(resolve));
+  h.elements.document.files = [{ name: 'deed.png', type: 'image/png', size: 3 }];
+  await h.elements.document.fire('change');
+  await h.elements['compare-form'].fire('submit');
+  assert.match(h.elements.status.textContent, /provider key missing/);
+  assert.doesNotMatch(h.elements.status.textContent, passwordWords);
+});
+
+test('password-protected server: the probe gets 401, the field stays, and the password flow is unchanged', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.probes.length, 1, 'the page-load probe was sent');
+  assert.equal(h.probes[0].headers?.['x-app-password'], undefined);
+  assert.notEqual(h.elements['password-field'].hidden, true);
+  assert.notEqual(h.elements.password.required, false);
+  for (const text of effortTexts(h)) assert.match(text, /Enter the application password to load models and effort levels\./);
+  assert.match(h.elements.status.textContent, /enter the application password/i);
+  assert.equal(effortButtons(h.elements['candidate-effort']).length, 0);
+  h.elements.document.files = [{ name: 'deed.png', type: 'image/png', size: 3 }];
+  await h.elements.document.fire('change');
+  await h.elements['compare-form'].fire('submit');
+  assert.match(h.elements.status.textContent, /enter the application password/i, 'submitting without a password is refused');
+  assert.equal(h.calls.length, 0);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  assert.equal(h.calls[0].headers['x-app-password'], 'private-password');
+  assert.equal(effortButtons(h.elements['candidate-effort']).length, 4);
+  await h.elements['compare-form'].fire('submit');
+  assert.ok(h.calls.filter(call => call.method === 'POST').every(call => call.headers['x-app-password'] === 'private-password'));
+  assert.ok(h.calls.some(call => call.method === 'POST'));
+});
+
+test('only an explicit passwordRequired:false hides the field; a failed or odd probe keeps it', async () => {
+  const responses = {
+    'passwordRequired true': () => ({ ok: true, json: async () => ({ models: harness().models, passwordRequired: true, maxPages: 10, maxBytes: 12000000, renderScale: 2 }) }),
+    'passwordRequired missing (older server)': () => ({ ok: true, json: async () => ({ models: harness().models, maxPages: 10, maxBytes: 12000000, renderScale: 2 }) }),
+    'invalid metadata': () => ({ ok: true, json: async () => ({ models: [], passwordRequired: false }) }),
+    '503': () => ({ ok: false, status: 503, json: async () => ({}) }),
+    'network error': () => { throw new Error('offline'); },
+  };
+  for (const [label, respond] of Object.entries(responses)) {
+    const h = harness({ fetch: async () => respond() });
+    ui.createCompareUI(h.deps);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.notEqual(h.elements['password-field'].hidden, true, label);
+    assert.equal(effortButtons(h.elements['candidate-effort']).length, 0, label);
+    assert.match(allText(h.elements['candidate-effort']), /Enter the application password/, label);
+  }
+});
+
+test('typing a password before a slow local probe answers keeps the password flow', async () => {
+  const h = harness({ local: true });
+  const base = h.deps.fetch;
+  let release;
+  h.deps.fetch = (url, options) => release === undefined && options.method === 'GET' && !options.headers?.['x-app-password'] ? new Promise(resolve => { release = () => resolve(base(url, options)); }) : base(url, options);
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'typed';
+  await h.elements.password.fire('input');
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual(h.elements['password-field'].hidden, true, 'a late probe answer cannot hide a field the user is typing in');
+});
+
+test('the page ships the password wrapper and neutral placeholders; the script avoids innerHTML and localStorage', () => {
+  const html = read('public/ocr-compare.html');
+  assert.match(html, /<div id="password-field"><label for="password">/);
+  assert.match(html, /<input id="password" type="password"/);
+  const before = html.replace(/<div id="password-field">[\s\S]*?<\/div>/, '');
+  assert.doesNotMatch(before, /enter the application password/i, 'static text outside the password field never asks for a password');
+  assert.doesNotMatch(read('public/ocr-compare.js'), /innerHTML|localStorage/);
+});
+
+test('the main app page is unaffected by the lab password change', () => {
+  const index = read('public/index.html');
+  assert.doesNotMatch(index, /ocr-compare|passwordRequired|password-field/);
 });
