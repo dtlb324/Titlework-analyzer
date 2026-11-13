@@ -2,7 +2,7 @@
 
 An opt-in browser page at `/ocr-compare.html` compares the configured current
 Gemini abstraction model (default `gemini-3.1-flash-lite`) with
-`gemini-3.8-flash` and Anthropic's `claude-haiku-5-5`. It does not change the production abstraction model,
+`gemini-4-hydrogen` and Anthropic's `claude-haiku-5-5`. It does not change the production abstraction model,
 create durable jobs, save abstracts, or run title-opinion synthesis.
 
 ## Enable locally
@@ -80,7 +80,7 @@ Supported picks for the same model survive a successful refresh.
 | Column | Levels | Starts at | Sent as |
 | --- | --- | --- | --- |
 | Current Gemini | `minimal`, `low`, `medium`, `high` (only `minimal`/`high` for `gemini-3.1-flash-lite-image`; no `minimal` for 3.7/3.8 Flash or Pro baselines; plus `default` when `GEMINI_THINKING_LEVEL` is unset) | the configured level, or `default` | `thinkingLevel`; `default` sends none |
-| Gemini 3.8 Flash | `low`, `medium`, `high` (3.8 Flash rejects `minimal`) | `medium` | `thinkingLevel` |
+| Gemini 4 Hydrogen | `low`, `medium`, `high`, `xhigh` (Hydrogen has no `minimal`, `default`, or `max`) | `medium` | `thinkingLevel` |
 | Claude Haiku 5.5 | `low`, `medium`, `high`, `xhigh`, `max` | `medium` | `output_config.effort` |
 
 Higher levels spend more thinking tokens, which count against the shared output
@@ -105,12 +105,12 @@ Accuracy is scored in the browser against the document's embedded text. Images a
   with the shared `ABSTRACTION_PROMPT` and the same output-token limit. The lab
   limit is 16,000 by default (set `OCR_COMPARE_MAX_TOKENS`, 512–32000, to change
   it) rather than production's roughly 2,000: a multi-page upload can contain
-  several instruments, and medium-effort thinking tokens (Gemini 3.8 Flash and
+  several instruments, and medium-effort thinking tokens (Gemini 4 Hydrogen and
   Haiku 5.5) count against the same limit. Above 8,192 Anthropic requires
   streaming, so the lab streams Haiku calls automatically. Output cut off by the limit is flagged in the UI as truncated.
 - Each model runs at the effort selected on the page (see Effort levels). By
   default the baseline uses the configured production Gemini thinking level, or
-  the provider default if none is set; 3.8 Flash and Haiku 5.5 start at `medium`.
+  the provider default if none is set; Gemini 4 Hydrogen and Haiku 5.5 start at `medium`.
   Haiku 5.5 always runs with adaptive thinking. Sampling parameters are not sent
   (Haiku 5.5 rejects non-default values). Its
   `output_tokens` already include any thinking tokens; the thinking count shown
@@ -140,14 +140,15 @@ input or output counts gets no estimate:
 | Model | Input | Output + thinking |
 | --- | ---: | ---: |
 | `gemini-3.1-flash-lite` | $0.25 | $1.50 |
-| `gemini-3.8-flash`, through 2026-12-31 UTC | $0.75 | $3.75 |
-| `gemini-3.8-flash`, from 2027-01-01 UTC | $1.50 | $7.50 |
+| `gemini-4-hydrogen` | $1.50 | $7.50 |
+| `gemini-3.8-flash` (only as the Current Gemini baseline), through 2026-12-31 UTC | $0.75 | $3.75 |
+| `gemini-3.8-flash` (only as the Current Gemini baseline), from 2027-01-01 UTC | $1.50 | $7.50 |
 | `claude-haiku-5-5`, prompts up to 100K tokens | $0.10 | $0.50 |
 | `claude-haiku-5-5`, prompts over 100K tokens | $0.50 | $2.50 |
 
 Sources: https://ai.google.dev/gemini-api/docs/pricing and
 https://platform.claude.com/docs/en/about-claude/pricing . Rates were checked on
-2026-10-07. Haiku's prompt-length tier uses input plus cache tokens; cache
+2026-10-07 (Hydrogen: 2026-11-13). Haiku's prompt-length tier uses input plus cache tokens; cache
 writes ($0.125 / $0.625) and reads ($0.01 / $0.05) are priced when reported.
 Estimates do not represent actual invoices, free-tier eligibility,
 batch discounts, or other service tiers. Claude image inputs are tokenized

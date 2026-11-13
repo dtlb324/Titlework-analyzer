@@ -262,9 +262,9 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `SYNTHESIS_PARTIAL_MODEL` | `gemini-3.1-flash-lite`. Any id that does not start with `gemini-` is ignored, including Claude and Haiku. |
 | `ABSTRACT_MODEL` | `gemini-3.1-flash-lite`. A Haiku id is replaced with that default. Other ids are kept. |
 | `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5-5`. Used when a low-confidence abstract is re-read. |
-| `GEMINI_THINKING_LEVEL` | Omitted. Accepted values are `minimal`, `low`, `medium`, and `high`, and only for a `gemini-3` model. Any other value is ignored. |
-| `GEMINI_THINKING_BUDGET` | `0` for a Gemini model that is not a `gemini-3` model. Gemini 3 uses the level above instead. |
-| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for a Gemini 3 model that also has an accepted `GEMINI_THINKING_LEVEL`. Any other call ignores the flag. |
+| `GEMINI_THINKING_LEVEL` | Omitted. Accepted values are `minimal`, `low`, `medium`, and `high` for a `gemini-3` model, and `low`, `medium`, `high`, and `xhigh` for a `gemini-4` model. Any other value is ignored. |
+| `GEMINI_THINKING_BUDGET` | `0` for a Gemini model that is not a `gemini-3` or `gemini-4` model. Those models use the level above instead. |
+| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for a Gemini 3 or Gemini 4 model that also has an accepted `GEMINI_THINKING_LEVEL`. Any other call ignores the flag. |
 
 ### Abstraction settings
 

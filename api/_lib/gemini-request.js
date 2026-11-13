@@ -11,22 +11,38 @@ export function isGeminiModel(model) {
   return /^gemini-/i.test(String(model || '').trim());
 }
 
-const GEMINI_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
+// Gemini 3 takes minimal/low/medium/high. Gemini 4 has no minimal and no thinkingBudget (HTTP 400).
+// Carbon and Argon take low/medium/high; xhigh is Hydrogen only (https://aistudio.google.com/docs/thinking).
+const GEMINI_3_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
+const GEMINI_4_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
+const GEMINI_4_HYDROGEN_THINKING_LEVELS = new Set([...GEMINI_4_THINKING_LEVELS, 'xhigh']);
 
 export function isGemini3SeriesModel(model) {
   return /^gemini-3/i.test(String(model || '').trim());
 }
 
-function normalizeThinkingLevel(raw) {
+export function isGemini4SeriesModel(model) {
+  return /^gemini-4/i.test(String(model || '').trim());
+}
+
+export function isGemini4HydrogenModel(model) {
+  return /^gemini-4-hydrogen(?:-|$)/i.test(String(model || '').trim());
+}
+
+function normalizeThinkingLevel(model, raw) {
   const level = String(raw || '').trim().toLowerCase();
-  return GEMINI_THINKING_LEVELS.has(level) ? level : null;
+  const allowed = isGemini4HydrogenModel(model)
+    ? GEMINI_4_HYDROGEN_THINKING_LEVELS
+    : isGemini4SeriesModel(model) ? GEMINI_4_THINKING_LEVELS : GEMINI_3_THINKING_LEVELS;
+  return allowed.has(level) ? level : null;
 }
 
 export function resolveGeminiThinkingConfig(model, overrides = {}) {
   if (!isGeminiModel(model)) return null;
 
-  if (isGemini3SeriesModel(model)) {
+  if (isGemini3SeriesModel(model) || isGemini4SeriesModel(model)) {
     const level = normalizeThinkingLevel(
+      model,
       overrides.thinkingLevel ?? process.env.GEMINI_THINKING_LEVEL,
     );
     if (!level) return null;
@@ -112,7 +128,7 @@ export function buildGeminiGenerateContentBody({
     ?? resolveGeminiThinkingConfig(model, { thinkingBudget, thinkingLevel });
   if (resolvedThinking && Object.keys(resolvedThinking).length) {
     body.generationConfig.thinkingConfig = resolvedThinking;
-  } else if (Number.isFinite(Number(thinkingBudget))) {
+  } else if (!isGemini4SeriesModel(model) && Number.isFinite(Number(thinkingBudget))) {
     body.generationConfig.thinkingConfig = { thinkingBudget: Number(thinkingBudget) };
   }
   if (responseSchema) {

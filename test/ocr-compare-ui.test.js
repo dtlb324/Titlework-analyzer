@@ -14,12 +14,12 @@ class Element {
 }
 const allText = el => [el.textContent, ...el.children.map(allText)].join(' ');
 function harness(overrides = {}) {
-  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['password', 'document', 'compare-form', 'compare', 'status', 'settings', 'previews', 'baseline', 'candidate', 'challenger', 'baseline-effort', 'candidate-effort', 'challenger-effort', 'baseline-title', 'candidate-title', 'challenger-title', 'differences-baseline', 'differences-candidate', 'differences-challenger', 'differences', 'download', 'batch', 'accuracy-rank', 'accuracy-note'].map(id => [id, new Element()]));
   const calls = [], blobs = [], revoked = [];
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const models = [
     { id: 'gemini-3.1-flash-lite', label: 'Baseline', effort: 'default', effortLevels: ['default', 'minimal', 'low', 'medium', 'high'], thinkingLevel: 'default', maxTokens: 8000, text: '<script>unsafe</script>', fields: { grantor: '<img src=x onerror=bad()>', onlyBaseline: 0 }, usage: { input_tokens: 10, output_tokens: 20, thinking_tokens: 3 }, latencyMs: 120, stopReason: 'MAX_TOKENS', modelVersion: 'v1', costUsd: .001, costRates: { input: .25, output: 1.5, source: 'fixture' } },
-    { id: 'gemini-3.8-flash', label: 'Candidate', effort: 'medium', effortLevels: ['low', 'medium', 'high'], thinkingLevel: 'medium', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } },
+    { id: 'gemini-4-hydrogen', label: 'Candidate', effort: 'medium', effortLevels: ['low', 'medium', 'high', 'xhigh'], thinkingLevel: 'medium', maxTokens: 8000, text: '', fields: { grantor: 'Other', onlyCandidate: false }, usage: { input_tokens: 11, output_tokens: 0, thinking_tokens: 4 }, latencyMs: 130, stopReason: 'STOP', modelVersion: 'v2', costUsd: .002, costRates: { input: .5, output: 3, source: 'fixture' } },
     { id: 'claude-haiku-5-5', label: 'Challenger', effort: 'medium', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], thinkingLevel: 'adaptive, effort medium', maxTokens: 8000, text: 'GRANTOR: Third', fields: { grantor: 'Third', onlyCandidate: false }, usage: { input_tokens: 12, output_tokens: 5 }, latencyMs: 90, stopReason: 'end_turn', modelVersion: 'v3', costUsd: .0003, costRates: { input: .1, output: .5, source: 'fixture' } }
   ];
   const result = { filename: 'deed.png', pageCount: 1, inputMode: 'rendered_images', models };
@@ -396,19 +396,78 @@ test('effort buttons load from server metadata once a password is entered and dr
   h.elements.password.value = 'private-password';
   await h.elements.password.fire('change');
   assert.deepEqual(h.calls.map(call => call.method), ['GET'], 'loading levels makes no billable call');
-  assert.deepEqual(effortButtons(h.elements['candidate-effort']).map(button => button.textContent), ['low', 'medium', 'high']);
+  assert.deepEqual(effortButtons(h.elements['candidate-effort']).map(button => button.textContent), ['low', 'medium', 'high', 'xhigh'], 'Hydrogen has an xhigh button and no minimal');
   assert.deepEqual(effortButtons(h.elements['challenger-effort']).map(button => button.textContent), ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.deepEqual([h.elements['baseline-effort'], h.elements['candidate-effort'], h.elements['challenger-effort']].map(pressed), [['default'], ['medium'], ['medium']]);
-  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'xhigh').fire('click');
   await effortButtons(h.elements['challenger-effort']).find(button => button.textContent === 'low').fire('click');
-  assert.deepEqual(pressed(h.elements['candidate-effort']), ['high']);
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['xhigh']);
   assert.deepEqual(pressed(h.elements['challenger-effort']), ['low']);
   await selected(h);
   await h.elements['compare-form'].fire('submit');
   const post = h.calls.find(call => call.method === 'POST');
-  assert.deepEqual(JSON.parse(post.body).efforts, ['default', 'high', 'low'], 'clicked levels survive the pre-compare metadata refresh');
-  assert.match(allText(h.elements.settings), /gemini-3.8-flash · effort high/);
+  assert.deepEqual(JSON.parse(post.body).efforts, ['default', 'xhigh', 'low'], 'clicked levels survive the pre-compare metadata refresh');
+  assert.match(allText(h.elements.settings), /gemini-4-hydrogen · effort xhigh/);
   assert.match(allText(h.elements.settings), /claude-haiku-5-5 · effort low/);
+});
+
+test('column headings, effort groups and difference headers name each server model before any comparison', async () => {
+  const h = harness();
+  h.models[1].label = 'Gemini 4 <b>Hydrogen</b>';
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  assert.deepEqual(h.calls.map(call => call.method), ['GET'], 'names come from metadata, not a billable run');
+  const title = h.elements['candidate-title'];
+  assert.deepEqual(title.children.map(child => [child.tagName, child.textContent]), [['span', 'Gemini 4 <b>Hydrogen</b> '], ['small', 'gemini-4-hydrogen']], 'label and id are plain text');
+  assert.equal(h.elements['candidate-effort']['aria-label'], 'Gemini 4 <b>Hydrogen</b> effort level');
+  assert.deepEqual(['baseline', 'candidate', 'challenger'].map(slot => h.elements[`differences-${slot}`].textContent), ['Baseline', 'Gemini 4 <b>Hydrogen</b>', 'Challenger']);
+  assert.equal(allText(h.elements['challenger-title']).trim().replace(/\s+/g, ' '), 'Challenger claude-haiku-5-5');
+});
+
+test('choosing an effort keeps the same button elements so keyboard focus is not lost', async () => {
+  const h = harness();
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  const bar = h.elements['candidate-effort'];
+  const before = effortButtons(bar);
+  const low = before.find(button => button.textContent === 'low');
+  await low.fire('click');
+  assert.deepEqual(effortButtons(bar), before, 'buttons are updated in place, not rebuilt');
+  assert.equal(low['aria-pressed'], 'true');
+  assert.deepEqual(pressed(bar), ['low']);
+  await h.elements.password.fire('change');
+  assert.deepEqual(effortButtons(bar), before, 'a same-config metadata reload keeps the buttons');
+  assert.deepEqual(pressed(bar), ['low'], 'and keeps the pick');
+  h.models[1].effortLevels = ['low', 'medium'];
+  await h.elements.password.fire('change');
+  assert.notEqual(effortButtons(bar)[0], before[0], 'a changed level list rebuilds');
+  assert.deepEqual(effortButtons(bar).map(button => button.textContent), ['low', 'medium']);
+  assert.deepEqual(pressed(bar), ['low']);
+});
+
+test('a click that lands while a password blur reloads metadata is kept', async () => {
+  const h = harness();
+  let release, hold = false;
+  const base = h.deps.fetch;
+  h.deps.fetch = async (url, options) => { if (hold) await new Promise(resolve => { release = resolve; }); return base(url, options); };
+  ui.createCompareUI(h.deps);
+  h.elements.password.value = 'private-password';
+  await h.elements.password.fire('change');
+  const bar = h.elements['candidate-effort'];
+  const before = effortButtons(bar);
+  hold = true;
+  h.elements.password.value = 'private-password2';
+  await h.elements.password.fire('input');
+  assert.deepEqual(effortButtons(bar), before, 'typing a new password does not remove the buttons');
+  const reload = h.elements.password.fire('change');
+  assert.deepEqual(effortButtons(bar), before, 'buttons stay clickable while metadata reloads');
+  await before.find(button => button.textContent === 'high').fire('click');
+  release();
+  await reload;
+  assert.deepEqual(effortButtons(bar), before);
+  assert.deepEqual(pressed(bar), ['high'], 'the in-flight click survives the reload');
 });
 
 test('effort buttons are locked while a comparison runs', async () => {
@@ -455,7 +514,7 @@ test('metadata error survives file selection and control updates until current c
   ui.createCompareUI(h.deps);
   h.elements.password.value = 'private-password';
   await h.elements.password.fire('change');
-  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'xhigh').fire('click');
   h.elements.password.value = 'wrong';
   await h.elements.password.fire('change');
   assert.match(allText(h.elements['candidate-effort']), /Could not load effort levels: Application password rejected/);
@@ -471,7 +530,7 @@ test('metadata error survives file selection and control updates until current c
   h.elements.password.value = 'private-password';
   await h.elements.password.fire('change');
   assert.doesNotMatch(allText(h.elements['candidate-effort']), /Could not load/);
-  assert.deepEqual(pressed(h.elements['candidate-effort']), ['high'], 'supported picks survive a valid refresh of the same model');
+  assert.deepEqual(pressed(h.elements['candidate-effort']), ['xhigh'], 'supported picks survive a valid refresh of the same model');
 });
 
 test('clearing the password invalidates a pending metadata response immediately', async () => {
@@ -512,7 +571,7 @@ test('pre-compare metadata failure supersedes pending loads and remains visible 
   ui.createCompareUI(h.deps);
   await selected(h);
   await h.elements.password.fire('change');
-  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'xhigh').fire('click');
   h.elements.password.value = 'wrong';
   const obsolete = h.elements.password.fire('change');
   await h.elements['compare-form'].fire('submit');
@@ -529,7 +588,7 @@ test('pre-compare metadata failure supersedes pending loads and remains visible 
   await h.elements.password.fire('input');
   await h.elements['compare-form'].fire('submit');
   assert.doesNotMatch(allText(h.elements['candidate-effort']), /Could not load/);
-  assert.deepEqual(JSON.parse(h.calls.find(call => call.method === 'POST').body).efforts, ['default', 'high', 'medium']);
+  assert.deepEqual(JSON.parse(h.calls.find(call => call.method === 'POST').body).efforts, ['default', 'xhigh', 'medium']);
 });
 
 test('untouched columns follow a server level change while picked columns keep their level', async () => {
@@ -697,7 +756,7 @@ test('explicit rerun reuses prepared done, failed and skipped files with newly s
   await h.elements['compare-form'].fire('submit');
   assert.deepEqual(h.calls.map(call => call.method), ['GET', 'POST', 'POST']);
   assert.deepEqual(h.elements.batch.children.map(row => row.children[2].textContent), ['Done', 'Failed: HTTP 429: A comparison is already running', 'Not run']);
-  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'high').fire('click');
+  await effortButtons(h.elements['candidate-effort']).find(button => button.textContent === 'xhigh').fire('click');
   assert.equal(h.calls.length, 3, 'effort selection never starts an automatic comparison');
   h.failOn = null;
   hold = true;
@@ -711,7 +770,7 @@ test('explicit rerun reuses prepared done, failed and skipped files with newly s
   assert.equal(preparations, 3, 'rerun never prepares the files a second time');
   const posts = h.calls.filter(call => call.method === 'POST').map(call => JSON.parse(call.body));
   assert.deepEqual(posts.map(post => post.filename), ['a.png', 'b.png', 'a.png', 'b.png', 'c.png']);
-  assert.deepEqual(posts.slice(2).map(post => post.efforts), Array.from({ length: 3 }, () => ['default', 'high', 'medium']));
+  assert.deepEqual(posts.slice(2).map(post => post.efforts), Array.from({ length: 3 }, () => ['default', 'xhigh', 'medium']));
   assert.deepEqual(posts.map(post => post.pages), Array.from({ length: 5 }, () => [{ mediaType: 'image/png', data: 'YWJj' }]));
   assert.deepEqual(h.elements.batch.children.map(row => row.children[2].textContent), ['Done', 'Done', 'Done']);
   assert.match(h.elements.status.textContent, /Comparison complete for 3 files/);

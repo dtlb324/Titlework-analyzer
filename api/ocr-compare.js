@@ -20,7 +20,8 @@ function labMaxTokens() {
 }
 
 // Exact-model exception from https://ai.google.dev/gemini-api/docs/generate-content/thinking.
-const GEMINI_EFFORTS = new Map([['gemini-3.1-flash-lite-image', ['minimal', 'high']]]);
+const HYDROGEN_ID = 'gemini-4-hydrogen';
+const GEMINI_EFFORTS = new Map([['gemini-3.1-flash-lite-image', ['minimal', 'high']], [HYDROGEN_ID, ['low', 'medium', 'high', 'xhigh']]]);
 const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*-pro(?:-|$))/i;
 const HAIKU_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -51,7 +52,7 @@ function models() {
   }
   return [
     withEffort({ id: config.model, label: 'Current Gemini', effortLevels: configured === 'default' ? ['default', ...baselineLevels] : baselineLevels, maxTokens }, configured),
-    withEffort({ id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', effortLevels: geminiEfforts('gemini-3.8-flash'), maxTokens }, 'medium'),
+    withEffort({ id: HYDROGEN_ID, label: 'Gemini 4 Hydrogen', effortLevels: geminiEfforts(HYDROGEN_ID), maxTokens }, 'medium'),
     withEffort({ id: HAIKU_ID, label: 'Claude Haiku 5.5', effortLevels: HAIKU_EFFORTS, maxTokens }, 'medium'),
   ];
 }
@@ -135,9 +136,11 @@ function estimateCost(id, usage) {
   if (id === HAIKU_ID) return estimateHaikuCost(usage);
   const rates = id === 'gemini-3.1-flash-lite'
     ? { input: 0.25, output: 1.5 }
-    : id === 'gemini-3.8-flash'
-      ? (new Date().toISOString() < '2027-01-01' ? { input: 0.75, output: 3.75 } : { input: 1.5, output: 7.5 })
-      : null;
+    : id === HYDROGEN_ID
+      ? { input: 1.5, output: 7.5 }
+      : id === 'gemini-3.8-flash'
+        ? (new Date().toISOString() < '2027-01-01' ? { input: 0.75, output: 3.75 } : { input: 1.5, output: 7.5 })
+        : null;
   const input = usage?.input_tokens;
   const output = usage?.output_tokens;
   // Gemini omits thoughtsTokenCount when the model did not think, so absent means zero.
