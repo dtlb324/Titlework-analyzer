@@ -102,6 +102,40 @@ Behavior with `OCR_COMPARE_PROVIDER=openrouter`:
 - Results can differ slightly from direct mode because routing, defaults and
   reasoning mapping differ. Compare models against each other within one mode.
 
+### Choosing the three OpenRouter models
+
+To compare other models, for example Mistral, list exactly three OpenRouter
+slugs in `.env.local`. This works only with `OCR_COMPARE_PROVIDER=openrouter`:
+
+```sh
+OCR_COMPARE_OPENROUTER_MODELS=mistralai/mistral-large-4-0,mistralai/mistral-small-3.2-24b-instruct,mistralai/mistral-small-2603
+```
+
+- The three slugs become the three columns, in order. Unset (or blank) keeps the
+  default Gemini, Gemini 4 Hydrogen and Haiku columns unchanged.
+- Anything other than three different `vendor/model` slugs returns 503 naming
+  the variable. Setting it in direct mode also returns 503 rather than being ignored.
+- Known slugs get a friendly label, the effort levels OpenRouter lists for them
+  (`GET /api/v1/models`, `reasoning.supported_efforts`, checked 2026-11-13) and list rates:
+
+  | Slug | Label | Effort buttons (first load) | Rates per 1M tokens (in / out) |
+  | --- | --- | --- | --- |
+  | `mistralai/mistral-large-4-0` | Mistral Large 4 | `high` (selected), `none` | $0.70 / $2.10 |
+  | `mistralai/mistral-small-3.2-24b-instruct` | Mistral Small 3.2 24B | `default` | $0.10 / $0.30 |
+  | `mistralai/mistral-small-2603` | Mistral Small 4 | `high`, `none` (selected) | $0.15 / $0.60 |
+
+  Small 4 does not reason unless you pick `high`. Small 3.2 has no reasoning
+  control, so it sends no `reasoning` field. `none` sends `reasoning: { effort: "none" }`,
+  which OpenRouter documents as disabling reasoning. Any other slug shows the slug
+  as its label, a single `default` effort (no `reasoning` field) and no computed
+  cost unless OpenRouter reports `usage.cost`. The Haiku and Hydrogen slugs above
+  keep their usual menus and rates.
+- The Gemini-style split of reasoning out of `output_tokens` applies only to
+  `google/gemini-*`. For Mistral and every other family, output keeps the
+  reasoning and the thinking count is display only, so nothing is billed twice.
+- The page and the shared output limit are unchanged: three panels, 16000 tokens
+  unless `OCR_COMPARE_MAX_TOKENS` is set.
+
 ## Compare
 
 1. Select up to 10 PDF, PNG, JPEG, or WebP files at once (enter the app password first if the page shows the field).

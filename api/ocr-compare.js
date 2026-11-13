@@ -51,10 +51,52 @@ function withEffort(model, effort) {
   return { ...model, effort, thinkingLevel };
 }
 
+// Known OpenRouter slugs for the OCR_COMPARE_OPENROUTER_MODELS override. Efforts come from each model's
+// `reasoning` object in https://openrouter.ai/api/v1/models (checked 2026-11-13): Large 4 reasons by default,
+// Small 4 does not (so it starts at "none"), Small 3.2 has no reasoning control (only "default", no field sent).
+// rates are USD per million tokens (prompt/completion); output_tokens already include reasoning for these.
+// costId points a slug at the direct-mode rate table. Any slug not listed keeps ['default'] and its own name.
+const OPENROUTER_MODELS = new Map([
+  ['mistralai/mistral-large-4-0', { label: 'Mistral Large 4', effortLevels: ['high', 'none'], effort: 'high', rates: { input: 0.7, output: 2.1 } }],
+  ['mistralai/mistral-small-2603', { label: 'Mistral Small 4', effortLevels: ['high', 'none'], effort: 'none', rates: { input: 0.15, output: 0.6 } }],
+  ['mistralai/mistral-small-3.2-24b-instruct', { label: 'Mistral Small 3.2 24B', effortLevels: ['default'], effort: 'default', rates: { input: 0.1, output: 0.3 } }],
+  ['anthropic/claude-haiku-5.5', { label: 'Claude Haiku 5.5', effortLevels: HAIKU_EFFORTS, effort: 'medium', costId: HAIKU_ID }],
+  ['google/gemini-4-hydrogen', { label: 'Gemini 4 Hydrogen', effortLevels: geminiEfforts(HYDROGEN_ID), effort: 'medium', costId: HYDROGEN_ID }],
+]);
+const OPENROUTER_SLUG = /^[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._:~-]*$/i;
+const OPENROUTER_MODEL_COUNT = 3;
+
+function configError(message) {
+  const error = new Error(message);
+  error.statusCode = 503;
+  return error;
+}
+
+// OCR_COMPARE_OPENROUTER_MODELS=slug1,slug2,slug3 replaces the three columns, in OpenRouter mode only.
+// Returns null when unset. Anything but three distinct slugs fails closed (the page has three panels, and
+// the accuracy ranking is keyed by label, so a repeated model would be ambiguous).
+function openRouterOverride(viaOpenRouter) {
+  const raw = String(process.env.OCR_COMPARE_OPENROUTER_MODELS || '').trim();
+  if (!raw) return null;
+  if (!viaOpenRouter) throw configError('OCR_COMPARE_OPENROUTER_MODELS needs OCR_COMPARE_PROVIDER=openrouter.');
+  const slugs = raw.split(',').map(slug => slug.trim());
+  if (slugs.length !== OPENROUTER_MODEL_COUNT || !slugs.every(slug => OPENROUTER_SLUG.test(slug)) || new Set(slugs).size !== OPENROUTER_MODEL_COUNT) {
+    throw configError(`OCR_COMPARE_OPENROUTER_MODELS must list exactly ${OPENROUTER_MODEL_COUNT} different OpenRouter slugs separated by commas, like vendor/model-name.`);
+  }
+  return slugs;
+}
+
 function models() {
   const viaOpenRouter = usesOpenRouter();
-  const config = getAbstractionConfig();
+  const override = openRouterOverride(viaOpenRouter);
   const maxTokens = labMaxTokens();
+  if (override) {
+    return override.map(slug => {
+      const known = OPENROUTER_MODELS.get(slug);
+      return { ...withEffort({ id: slug, label: known?.label || slug, effortLevels: known?.effortLevels || ['default'], maxTokens }, known?.effort || 'default'), provider: 'openrouter' };
+    });
+  }
+  const config = getAbstractionConfig();
   if (!/^gemini-3[.-][a-z0-9.-]+$/i.test(config.model)) {
     const error = new Error('OCR comparison requires a Gemini 3-series ABSTRACT_MODEL.');
     error.statusCode = 503;
@@ -88,13 +130,16 @@ function applyEfforts(pair, efforts) {
 // Shape the usage like each direct provider's so estimateCost and the report need no special case:
 // Claude keeps output_tokens inclusive of thinking (thinking_tokens is display only);
 // Gemini's cost adds thinking_tokens on top of output_tokens, so output_tokens excludes it.
+// Every other family (Mistral, anthropic/* slugs, ...) is billed on completion_tokens as a whole, like Claude.
+const isGeminiModel = model => /^(?:google\/)?gemini-/i.test(String(model || '').trim());
+
 function openRouterUsage(model, raw) {
   const num = value => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null);
   const completion = num(raw?.completion_tokens);
   const thinking = num(raw?.completion_tokens_details?.reasoning_tokens);
   const usage = { input_tokens: num(raw?.prompt_tokens), output_tokens: completion };
   if (thinking !== null) usage.thinking_tokens = thinking;
-  if (thinking !== null && !isAnthropicModel(model)) usage.output_tokens = completion !== null && completion >= thinking ? completion - thinking : null;
+  if (thinking !== null && isGeminiModel(model)) usage.output_tokens = completion !== null && completion >= thinking ? completion - thinking : null;
   return usage;
 }
 
@@ -206,10 +251,20 @@ function estimateCost(id, usage) {
   return { costUsd: (input * rates.input + (output + thinking) * rates.output) / 1_000_000, costRates: { ...rates, source: PRICING_SOURCE } };
 }
 
+// Mistral and other slugs with listed OpenRouter rates: completion_tokens already include reasoning, so no thinking add-on.
+function estimateOpenRouterListCost(rates, usage) {
+  const input = usage?.input_tokens;
+  const output = usage?.output_tokens;
+  const costRates = { ...rates, source: OPENROUTER_PRICING_SOURCE };
+  if (![input, output].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) return { costUsd: null, costRates };
+  return { costUsd: (input * rates.input + output * rates.output) / 1_000_000, costRates };
+}
+
 // Prefer the cost OpenRouter reported (usage.cost, or the upstream cost under BYOK); otherwise compute
 // from the same list rates, which OpenRouter passes through. The rates are shown either way; only the source label differs.
 function estimateOpenRouterCost(id, usage, reportedCostUsd, costSource) {
-  const estimate = estimateCost(id, usage);
+  const known = OPENROUTER_MODELS.get(id);
+  const estimate = known?.rates ? estimateOpenRouterListCost(known.rates, usage) : estimateCost(known?.costId || id, usage);
   const reported = typeof reportedCostUsd === 'number' && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0;
   const ratesNote = `rates are list prices, ${OPENROUTER_PRICING_SOURCE}`;
   const source = !reported ? `computed from list rates, ${OPENROUTER_PRICING_SOURCE}`
