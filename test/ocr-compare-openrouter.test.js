@@ -379,3 +379,181 @@ test('non-ok OpenRouter responses give readable messages in the lab path and in 
     });
   }
 });
+
+const LARGE = 'mistralai/mistral-large-4-0';
+const SMALL_4 = 'mistralai/mistral-small-2603';
+const SMALL_32 = 'mistralai/mistral-small-3.2-24b-instruct';
+const MISTRAL_SLUGS = [LARGE, SMALL_32, SMALL_4].join(',');
+const MISTRAL_ANSWERS = {
+  [LARGE]: () => completion(`${LARGE}-20260301`, { prompt_tokens: 1000, completion_tokens: 700, completion_tokens_details: { reasoning_tokens: 200 }, cost: 0.0016 }),
+  [SMALL_32]: () => completion(SMALL_32, { prompt_tokens: 1000, completion_tokens: 400 }),
+  [SMALL_4]: () => completion(SMALL_4, { prompt_tokens: 1000, completion_tokens: 600, completion_tokens_details: { reasoning_tokens: 0 } }),
+};
+
+test('OCR_COMPARE_OPENROUTER_MODELS replaces the three columns: slugs, labels, effort menus, defaults', async () => {
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: ` ${MISTRAL_SLUGS} ` }, recordingFetch([], MISTRAL_ANSWERS), async () => {
+    const res = await call('GET');
+    assert.equal(res.code, 200);
+    assert.deepEqual(res.body.models, [
+      { id: LARGE, label: 'Mistral Large 4', effortLevels: ['high', 'none'], maxTokens: 16000, effort: 'high', thinkingLevel: 'high', provider: 'openrouter' },
+      { id: SMALL_32, label: 'Mistral Small 3.2 24B', effortLevels: ['default'], maxTokens: 16000, effort: 'default', thinkingLevel: 'default', provider: 'openrouter' },
+      { id: SMALL_4, label: 'Mistral Small 4', effortLevels: ['high', 'none'], maxTokens: 16000, effort: 'none', thinkingLevel: 'none', provider: 'openrouter' },
+    ]);
+  });
+});
+
+test('override columns send the right slug and reasoning body; "none" is OpenRouter\'s explicit off switch', async () => {
+  const runs = [
+    { efforts: undefined, reasoning: { [LARGE]: { effort: 'high' }, [SMALL_32]: undefined, [SMALL_4]: { effort: 'none' } } },
+    { efforts: ['none', 'default', 'high'], reasoning: { [LARGE]: { effort: 'none' }, [SMALL_32]: undefined, [SMALL_4]: { effort: 'high' } } },
+  ];
+  for (const { efforts, reasoning } of runs) {
+    const calls = [];
+    await withLab({ OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS }, recordingFetch(calls, MISTRAL_ANSWERS), async () => {
+      const res = await call('POST', { ...upload, ...(efforts ? { efforts } : {}) });
+      assert.equal(res.code, 200, JSON.stringify(res.body));
+      assert.equal(calls.length, 3);
+      assert.deepEqual(calls.map(c => c.body.model).sort(), [LARGE, SMALL_32, SMALL_4].sort());
+      for (const c of calls) {
+        assert.equal(c.body.max_tokens, 16000);
+        assert.equal(c.headers.Authorization, 'Bearer synthetic-openrouter-key');
+        if (reasoning[c.body.model] === undefined) assert.ok(!('reasoning' in c.body), `${c.body.model} sends no reasoning field`);
+        else assert.deepEqual(c.body.reasoning, reasoning[c.body.model], c.body.model);
+      }
+      assert.deepEqual(res.body.models.map(m => m.label), ['Mistral Large 4', 'Mistral Small 3.2 24B', 'Mistral Small 4']);
+      assert.deepEqual(res.body.models.map(m => m.provider), ['openrouter', 'openrouter', 'openrouter']);
+      assert.ok(res.body.models.every(m => m.error === undefined && m.text === 'GRANTOR: Router Fixture'));
+    });
+  }
+});
+
+test('override effort picks are checked against each model\'s own menu', async () => {
+  const calls = [];
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS }, recordingFetch(calls, MISTRAL_ANSWERS), async () => {
+    for (const efforts of [['medium', 'default', 'none'], ['high', 'high', 'none'], ['default', 'default', 'none'], ['high', 'default']]) {
+      const res = await call('POST', { ...upload, efforts });
+      assert.equal(res.code, 400, JSON.stringify(efforts));
+    }
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('an unknown slug in the override keeps its own name, a default-only menu and no reasoning field', async () => {
+  const calls = [];
+  const slug = 'qwen/qwen3-vl-235b-a22b-instruct';
+  const answers = { ...MISTRAL_ANSWERS, [slug]: () => completion(slug, { prompt_tokens: 10, completion_tokens: 5 }) };
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: `${LARGE},${SMALL_4},${slug}` }, recordingFetch(calls, answers), async () => {
+    const meta = (await call('GET')).body.models[2];
+    assert.deepEqual([meta.id, meta.label, meta.effortLevels, meta.effort], [slug, slug, ['default'], 'default']);
+    const res = await call('POST', upload);
+    assert.equal(res.code, 200);
+    assert.ok(!('reasoning' in calls.find(c => c.body.model === slug).body));
+    const unknown = res.body.models[2];
+    assert.equal(unknown.costUsd, null, 'no listed rates and no reported cost: never a made-up cost');
+    assert.equal(unknown.costRates, undefined);
+  });
+});
+
+test('a bad override fails closed with a 503 naming the variable, before any call', async () => {
+  const bad = ['a/b', `${LARGE},${SMALL_4}`, `${MISTRAL_SLUGS},mistralai/extra`, `${LARGE},${LARGE},${SMALL_4}`, `${LARGE},,${SMALL_4}`, `${LARGE},${SMALL_4},mistral-large`, `${LARGE},${SMALL_4},a/b c`, `${LARGE},${SMALL_4},/x`];
+  for (const value of bad) {
+    const calls = [];
+    await withLab({ OCR_COMPARE_OPENROUTER_MODELS: value }, recordingFetch(calls, MISTRAL_ANSWERS), async () => {
+      for (const [method, body] of [['GET'], ['POST', upload]]) {
+        const res = await call(method, body);
+        assert.equal(res.code, 503, `${method} ${value}`);
+        assert.match(res.body.error, /OCR_COMPARE_OPENROUTER_MODELS/);
+        assert.equal(res.body.models, undefined);
+      }
+      assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test('the override is refused in direct mode instead of being ignored', async () => {
+  for (const provider of [undefined, 'direct']) {
+    const calls = [];
+    await withLab({ OCR_COMPARE_PROVIDER: provider, OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS, GEMINI_API_KEY: 'synthetic-gemini-key', ANTHROPIC_API_KEY: 'synthetic-anthropic-key' }, recordingFetch(calls, MISTRAL_ANSWERS), async () => {
+      for (const [method, body] of [['GET'], ['POST', upload]]) {
+        const res = await call(method, body);
+        assert.equal(res.code, 503, `${method} ${provider}`);
+        assert.match(res.body.error, /OCR_COMPARE_OPENROUTER_MODELS needs OCR_COMPARE_PROVIDER=openrouter/);
+      }
+      assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test('unset, empty or blank override leaves the default three columns and request bodies unchanged', async () => {
+  const seen = [];
+  for (const value of [undefined, '', '   ']) {
+    const calls = [];
+    await withLab({ OCR_COMPARE_OPENROUTER_MODELS: value }, recordingFetch(calls), async () => {
+      const meta = JSON.stringify((await call('GET')).body);
+      const res = await call('POST', { ...upload, efforts: ['default', 'low', 'medium'] });
+      assert.equal(res.code, 200);
+      seen.push({ meta, bodies: calls.map(c => c.body).sort((a, b) => a.model.localeCompare(b.model)) });
+    });
+  }
+  assert.ok(seen.every(run => run.meta === seen[0].meta && JSON.stringify(run.bodies) === JSON.stringify(seen[0].bodies)));
+  const models = JSON.parse(seen[0].meta).models;
+  assert.deepEqual(models.map(m => m.id), ['gemini-3.1-flash-lite', 'gemini-4-hydrogen', 'claude-haiku-5-5']);
+  assert.deepEqual(models.map(m => m.label), ['Current Gemini', 'Gemini 4 Hydrogen', 'Claude Haiku 5.5']);
+  assert.deepEqual(seen[0].bodies.map(b => b.model), ['anthropic/claude-haiku-5.5', 'google/gemini-3.1-flash-lite', 'google/gemini-4-hydrogen']);
+});
+
+test('the override does not depend on the Gemini baseline settings (GEMINI_THINKING_LEVEL)', async () => {
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS, GEMINI_THINKING_LEVEL: 'xhigh' }, recordingFetch([], MISTRAL_ANSWERS), async () => {
+    assert.equal((await call('GET')).code, 200);
+  });
+  await withLab({ GEMINI_THINKING_LEVEL: 'xhigh' }, recordingFetch([]), async () => assert.equal((await call('GET')).code, 503));
+});
+
+test('Mistral columns: completion_tokens already include reasoning, the reported cost wins, else list rates', async () => {
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS }, recordingFetch([], MISTRAL_ANSWERS), async () => {
+    const [large, small32, small4] = (await call('POST', upload)).body.models;
+    // Not Gemini: output stays inclusive (700), thinking is display only.
+    assert.deepEqual(large.usage, { input_tokens: 1000, output_tokens: 700, thinking_tokens: 200 });
+    assert.equal(large.costUsd, 0.0016);
+    assert.match(large.costRates.source, /^OpenRouter reported cost/);
+    assert.deepEqual({ input: large.costRates.input, output: large.costRates.output }, { input: 0.7, output: 2.1 });
+    assert.deepEqual(small32.usage, { input_tokens: 1000, output_tokens: 400 });
+    assert.equal(small32.costUsd, (1000 * 0.1 + 400 * 0.3) / 1_000_000);
+    assert.deepEqual({ input: small32.costRates.input, output: small32.costRates.output }, { input: 0.1, output: 0.3 });
+    assert.match(small32.costRates.source, /^computed from list rates, https:\/\/openrouter\.ai\//);
+    assert.deepEqual(small4.usage, { input_tokens: 1000, output_tokens: 600, thinking_tokens: 0 });
+    assert.equal(small4.costUsd, (1000 * 0.15 + 600 * 0.6) / 1_000_000);
+    assert.deepEqual({ input: small4.costRates.input, output: small4.costRates.output }, { input: 0.15, output: 0.6 });
+  });
+  const noCost = { ...MISTRAL_ANSWERS, [LARGE]: () => completion(LARGE, { prompt_tokens: 1000, completion_tokens: 700, completion_tokens_details: { reasoning_tokens: 200 } }) };
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS }, recordingFetch([], noCost), async () => {
+    const large = (await call('POST', upload)).body.models[0];
+    assert.equal(large.costUsd, (1000 * 0.7 + 700 * 2.1) / 1_000_000, 'reasoning is billed once, inside completion_tokens');
+  });
+  const noUsage = { ...MISTRAL_ANSWERS, [SMALL_32]: () => completion(SMALL_32, {}) };
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: MISTRAL_SLUGS }, recordingFetch([], noUsage), async () => {
+    assert.equal((await call('POST', upload)).body.models[1].costUsd, null, 'missing usage never becomes a zero cost');
+  });
+});
+
+test('the Gemini-style thinking split applies only to Gemini: anthropic/ and mistralai/ slugs stay inclusive, google/ slugs split', async () => {
+  const haikuSlug = 'anthropic/claude-haiku-5.5';
+  const hydrogenSlug = 'google/gemini-4-hydrogen';
+  const answers = {
+    ...MISTRAL_ANSWERS,
+    [haikuSlug]: () => completion(haikuSlug, { prompt_tokens: 2000, completion_tokens: 300, completion_tokens_details: { reasoning_tokens: 100 } }),
+    [hydrogenSlug]: () => completion(hydrogenSlug, { prompt_tokens: 1000, completion_tokens: 700, completion_tokens_details: { reasoning_tokens: 200 } }),
+  };
+  const calls = [];
+  await withLab({ OCR_COMPARE_OPENROUTER_MODELS: `${haikuSlug},${hydrogenSlug},${SMALL_4}` }, recordingFetch(calls, answers), async () => {
+    const meta = (await call('GET')).body.models;
+    assert.deepEqual(meta.map(m => [m.label, m.effort]), [['Claude Haiku 5.5', 'medium'], ['Gemini 4 Hydrogen', 'medium'], ['Mistral Small 4', 'none']]);
+    assert.deepEqual(meta[0].effortLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
+    const [haiku, hydrogen, small4] = (await call('POST', upload)).body.models;
+    assert.deepEqual(haiku.usage, { input_tokens: 2000, output_tokens: 300, thinking_tokens: 100 });
+    assert.equal(haiku.costUsd, (2000 * 0.1 + 300 * 0.5) / 1_000_000);
+    assert.deepEqual(hydrogen.usage, { input_tokens: 1000, output_tokens: 500, thinking_tokens: 200 });
+    assert.equal(hydrogen.costUsd, (1000 * 1.5 + 700 * 7.5) / 1_000_000);
+    assert.deepEqual(small4.usage, { input_tokens: 1000, output_tokens: 600, thinking_tokens: 0 });
+  });
+});
