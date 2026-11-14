@@ -319,8 +319,8 @@ test('F1: a computed 100% with open defects is never green', () => {
   assert.match(card, /data-rd-kpi="computed"/);
   assert.match(card, /class="val "/);
   assert.match(plain(card), /All listed interest reconciled · 1 defect open/);
-  const clean = kpiCard(render(OPINION({ owners: '| A | 1/1 | none | none |' })));
-  assert.match(clean, /class="val teal"/, 'no defects: 100% may be green');
+  const clean = kpiCard(render(OPINION({ defects: `${DH}\n| none | none | none | none |`, owners: '| A | 1/1 | none | none |' })));
+  assert.match(clean, /class="val teal"/, 'an explicit none row: 100% may be green');
 });
 
 test('F6: decimal commas read as 0.5, never as 5; ambiguous commas are unreadable', () => {
@@ -370,7 +370,7 @@ test('F10: "Doc 2" is not linked to chain row #2; only an unambiguous reference 
   });
   const cites = [...render(md).matchAll(/<(span|button)[^>]*class="rd-cite"[^>]*>(.*?)<\/\1>/g)].map(m => [m[1], plain(m[2]).trim(), (m[0].match(/data-rd-goto="[^"]*-chain-(\d+)"/) || [])[1]]);
   assert.deepEqual(cites[0], ['span', 'Doc 2', undefined], 'bare upload number: text only, no ref, no link');
-  assert.deepEqual(cites[1], ['button', 'Doc 2 · V9 p9', '1'], 'year + instrument type names the mortgage row');
+  assert.deepEqual(cites[1], ['span', 'Doc 2', undefined], 'year + instrument type alone is not a pointer: text only, no ref, no link');
   assert.deepEqual(cites[2], ['button', 'V1 p2', '0'], 'source cites the recording ref itself');
   assert.doesNotMatch(cites[0][1], /V1 p2/);
 });

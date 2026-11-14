@@ -43,7 +43,7 @@
   .nav-pill.active { background: #f1efe9; color: var(--ink); font-weight: 600; }
   .nav-count { font-variant-numeric: tabular-nums; }
   .recent-jobs-toolbar { position: relative; display: flex; align-items: center; }
-  .recent-jobs-toolbar-button--disabled { color: #94a3b8; cursor: not-allowed; pointer-events: none; }
+  .recent-jobs-toolbar-button--disabled { color: #94a3b8; cursor: not-allowed; }
   .recent-jobs-hint { position: absolute; top: calc(100% + 8px); right: 0; width: 230px; padding: 8px 10px; border-radius: 7px; background: var(--ink); color: #f8fafc; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(15,23,42,.18); opacity: 0; transform: translateY(-3px); pointer-events: none; transition: opacity .16s ease, transform .16s ease; z-index: 30; }
   .recent-jobs-toolbar:hover .recent-jobs-hint, .recent-jobs-toolbar:focus-within .recent-jobs-hint { opacity: 1; transform: none; }
 
@@ -53,7 +53,7 @@
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 12px; }
   .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 12px; }
   .page-head h2 { font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -.015em; line-height: 1.3; }
-  .page-head p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .page-head p { font-size: 12.5px; color: var(--text-2); margin-top: 2px; }
   .head-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
   #analyzeBtnCount:not(:empty) { margin-left: .3em; }
   .pill { font-size: 11.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
@@ -433,6 +433,7 @@
     #fileList .file-remove { grid-area: remove; min-height: 44px; padding: 0 8px; margin: 0 -8px 0 0; }
     .staged-foot { padding: 10px 14px; }
     .card { padding: 16px; }
+    .queue-box { padding: 0; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -440,6 +441,9 @@
     .progress-fill::after, .job-stepper .step-progress::after { display: none; }
     .spinner, .job-stepper .step-spinner { animation-duration: 1.2s !important; animation-iteration-count: infinite !important; }
   }
+
+  html:has(#jobFollowup:not([style*="none"])), html:has(#followupSection:not([style*="none"])) { scroll-padding-bottom: 96px; }
+  @media (max-width: 760px) { html:has(#jobFollowup:not([style*="none"])), html:has(#followupSection:not([style*="none"])) { scroll-padding-bottom: 148px; } }
 </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha384-weMABwrltA6jWR8DDe9Jp5blk+tZQh7ugpCsF3JwSA53WZM9/14PjS5LAJNHNjAI" crossorigin="anonymous"></script>
@@ -460,7 +464,7 @@
   <nav class="nav" aria-label="Primary">
     <a class="nav-pill active" id="navNewAnalysis" href="#/">New Analysis</a>
     <div class="recent-jobs-toolbar" id="recentJobsToolbar">
-      <a id="recentJobsButton" class="recent-jobs-toolbar-button recent-jobs-toolbar-button--disabled" aria-disabled="true" tabindex="-1" aria-describedby="recentJobsToolbarHint">Recent Jobs <span class="nav-count" id="recentJobsCount"></span></a>
+      <a id="recentJobsButton" class="recent-jobs-toolbar-button recent-jobs-toolbar-button--disabled" role="link" aria-disabled="true" tabindex="0" aria-describedby="recentJobsToolbarHint">Recent Jobs <span class="nav-count" id="recentJobsCount"></span></a>
       <span id="recentJobsToolbarHint" class="recent-jobs-hint" role="tooltip">Recent jobs available after your first completed analysis.</span>
     </div>
   </nav>
@@ -505,16 +509,16 @@
         </div>
       </section>
 
-      <div class="upload-zone reveal" style="--d:2" id="uploadZone" role="button" tabindex="0" aria-label="Add documents. Drop files here or press Enter to choose files." onclick="document.getElementById('fileInput').click()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+      <div class="upload-zone reveal" style="--d:2" id="uploadZone" role="button" tabindex="0" aria-labelledby="uploadBrowse" aria-describedby="uploadText" onclick="document.getElementById('fileInput').click()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
         <div class="drop-left">
           <div class="drop-icon" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
           <div class="drop-copy">
-            <span class="upload-text"><span class="when-empty">Drop recorded instruments here, up to 400 files at once</span><span class="when-staged">Drop more files here or click to add</span></span>
+            <span class="upload-text" id="uploadText"><span class="when-empty">Drop recorded instruments here, up to 400 files at once</span><span class="when-staged">Drop more files here or click to add</span></span>
             <span class="upload-hint"><span class="when-empty">Drag in a whole title package or click to choose files. One recorded instrument per PDF works best.</span><span class="when-staged">PDF, CSV, JPG, PNG, GIF, WEBP · <b><span id="dropSlots">0</span> of 400 slots filled</b><span class="when-full"> (remove files below to swap in replacements)</span></span></span>
             <span class="drop-chips when-empty"><span class="chip strong">Up to 400 documents per run</span><span class="chip">PDF</span><span class="chip">CSV</span><span class="chip">JPG / PNG / GIF / WEBP</span></span>
           </div>
         </div>
-        <span class="btn-browse" aria-hidden="true"><span class="when-empty">+ Select Files</span><span class="when-staged">+ Add More Files</span></span>
+        <span class="btn-browse" id="uploadBrowse"><span class="when-empty">+ Select Files</span><span class="when-staged">+ Add More Files</span></span>
       </div>
       <input type="file" id="fileInput" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
 
@@ -1902,7 +1906,7 @@ function rdSectionKey(text) {
 }
 
 // Known section names a standalone **bold** line may stand for. Anything else stays body text.
-const RD_BOLD_SECTION = /^(executive summary|summary|chain of title|run ?sheet|title defects?|title defects? (&|and) curative( requirements?)?|curative requirements?|defects (&|and) curative( requirements?)?|final ownership( determination)?|ownership determination|opinion qualifications|qualifications)$/i;
+const RD_BOLD_SECTION = /^(executive summary|summary|chain of title|run ?sheet|title defects?|title defects? (&|and) curative( requirements?)?|curative requirements?|defects (&|and) curative( requirements?)?|final ownership( determination)?|ownership determination|(opinion )?qualifications?( (&|and) limitations?)?|limitations?( (&|and) qualifications?)?)$/i;
 const RD_NONE_PHRASE = /^(none|n\/a|na|nil|null|—|–|-|--|none (identified|found|noted|listed)|no (title |known |material )?(defects?|issues?|curative)( (identified|found|noted|listed|required))?)\.?$/i;
 const RD_MAX_HEADING = 400;
 
@@ -1936,13 +1940,23 @@ function rdHashHeading(line) {
   return { level, text };
 }
 
+// A heading that names one of the opinion's own sections exactly ('1. Chain of Title (runsheet)').
+const rdIsSectionName = text => RD_BOLD_SECTION.test(String(text).replace(/^\d+[.)]\s*/, '').replace(/\s*\([^)]*\)$/, '').replace(/\s+/g, ' ').trim());
+
+// A deeper heading that is just the plain name of the defects or chain section ('### Defects',
+// '## Chain of Title Analysis') starts that section. Anything with more words stays body text.
+const RD_LOOSE_SECTION = /^(?:(?:title )?defects?(?: table| list| summary| analysis)?|curative(?: requirements?)?|chain of title(?: analysis| table| summary| detail)?|chain)$/i;
+const rdIsLooseSection = text => RD_LOOSE_SECTION.test(String(text).replace(/^\d+[.)]\s*/, '').replace(/\s+/g, ' ').trim());
+// Words that only label a section. A heading made of nothing else adds no text of its own.
+const RD_LABEL_WORDS = /\b(?:title|defects?|curative|requirements?|table|list|summary|analysis|and|of|chain|ownership|owners?|final|determination|qualifications?|opinion|executive)\b|[&:\s]/gi;
+const rdIsLabelOnly = text => !String(text).replace(RD_LABEL_WORDS, '');
+
 function rdBoldHeading(line) {
   if (line.length > 90 || !line.startsWith('**')) return null;
   const m = line.match(/^\*\*([^*]{3,80})\*\*:?$/);
   if (!m) return null;
   const text = m[1].replace(/:$/, '').trim();
-  const bare = text.replace(/^\d+[.)]\s*/, '').replace(/\s*\([^)]*\)$/, '').replace(/\s+/g, ' ').trim();
-  return RD_BOLD_SECTION.test(bare) ? { level: 0, text } : null;
+  return rdIsSectionName(text) ? { level: 0, text } : null;
 }
 
 const rdNormHeader = cells => cells.map(c => String(c).replace(/[*_`]/g, '').trim().toLowerCase()).join('|');
@@ -1979,7 +1993,7 @@ function rdReadTable(lines) {
 // D-1, D1., D1:, **D01** -> D1. Anything else is returned trimmed.
 function rdNormId(text) {
   const t = String(text || '').replace(/[*_`]/g, '').trim();
-  const m = t.match(/^([A-Za-z]{1,3})\s*[-–]?\s*0*(\d{1,3})[.:)]?$/);
+  const m = t.match(/^([A-Za-z]{1,3})\s{0,3}[-–]?\s{0,3}0*(\d{1,3})[.:)]?$/);
   return m ? `${m[1].toUpperCase()}${m[2]}` : t.replace(/[.:]$/, '');
 }
 
@@ -2052,6 +2066,22 @@ function rdTrimNum(n) {
   return String(Math.round(n * 1e8) / 1e8);
 }
 
+// The share one owner row claims. The decimal is the primary reading and the interest fraction the
+// fallback, but when both are readable they must agree to the decimal's own rounding. A negative
+// decimal or a disagreement makes the row unreadable (value null + issue) instead of picking a side.
+function rdOwnerShare(decimal, interest) {
+  const dec = rdParseNumber(decimal);
+  const frac = rdParseFraction(interest);
+  if (dec != null && dec < 0) return { value: null, issue: 'negative' };
+  if (dec != null && frac != null) {
+    const places = Math.min(8, Math.max(1, ((String(decimal).replace(',', '.').match(/\.(\d+)/) || [])[1] || '').length));
+    // A one-place decimal sitting exactly halfway ('0.7' for 3/4) is not accepted as a rounding.
+    const slack = places === 1 ? -1e-9 : 1e-9;
+    if (Math.abs(dec - frac) > 0.5 * 10 ** -places + slack) return { value: null, issue: 'conflict' };
+  }
+  return { value: dec ?? frac, issue: '' };
+}
+
 // Small stable string hash (FNV-1a) for animation keys, so the seen-set stays small.
 function rdHash(text) {
   const s = String(text ?? '');
@@ -2063,11 +2093,21 @@ function rdHash(text) {
   return (h >>> 0).toString(36);
 }
 
-function rdDefectIds(text) {
+// 'D1; unreleased 1937 mortgage' -> ids ['D1'], other 'unreleased 1937 mortgage'. A token is an id only
+// when it is a defect the opinion lists or follows the prompt's own D# numbering; 'Doc3', 'p3' and
+// 'V1' stay in the text. Whatever is not an id is kept, never dropped.
+function rdDefectIds(text, known = new Set()) {
   const t = String(text || '').trim();
   if (RD_EMPTY_CELL.test(t)) return { ids: [], other: '' };
-  const ids = [...new Set((t.match(/\b[A-Za-z]{1,3}-?\d{1,3}\b/g) || []).map(rdNormId))];
-  return { ids, other: ids.length ? '' : t };
+  const ids = [];
+  const rest = t.replace(/(?<![\w.-])\*{0,2}([A-Za-z]{1,3})\s{0,3}-?\s{0,3}0*(\d{1,3})\*{0,2}(?!\w|\.\d)/g, (all, letters, num) => {
+    const id = `${letters.toUpperCase()}${num}`;
+    if (!known.has(id) && !/^D\d+$/.test(id)) return all;
+    if (!ids.includes(id)) ids.push(id);
+    return ' ';
+  });
+  const other = rest.replace(/\s+/g, ' ').replace(/^(?:[\s,;&/:.()\-–—]|\band\b)+|(?:[\s,;&/:.()\-–—]|\band\b)+$/gi, '').trim();
+  return { ids, other: RD_EMPTY_CELL.test(other) ? '' : other };
 }
 
 function rdDefectSeverity(d) {
@@ -2083,7 +2123,7 @@ function rdYear(text) {
 }
 
 function parseTitleOpinion(markdown) {
-  const out = { ok: false, reason: '', title: '', summary: [], chain: [], defects: [], owners: [], qualifications: [], notes: {}, sections: [], stats: null };
+  const out = { ok: false, reason: '', title: '', summary: [], chain: [], defects: [], defectProse: [], defectNone: false, owners: [], qualifications: [], notes: {}, sections: [], stats: null };
   if (typeof markdown !== 'string' || !markdown.trim()) { out.reason = 'empty'; return out; }
   const sections = {};
   let current = null;
@@ -2100,8 +2140,14 @@ function parseTitleOpinion(markdown) {
         current = null;
         continue;
       }
+      // A deeper heading that is not a section name ('### Missing records' under a section) belongs
+      // to the open section. It must neither close it nor switch to a section its words resemble.
+      if (hashHeading && current && hashHeading.level > current.level && !rdIsSectionName(text) && !rdIsLooseSection(text)) {
+        if (!(key === current.key && rdIsLabelOnly(text))) current.lines.push(`**${text}**`);
+        continue;
+      }
       if (key) {
-        sections[key] = sections[key] || { heading: text, lines: [] };
+        sections[key] = sections[key] || { key, heading: text, level: hashHeading ? hashHeading.level : 2, lines: [] };
         current = sections[key];
         continue;
       }
@@ -2158,6 +2204,9 @@ function parseTitleOpinion(markdown) {
   if (sections.defects) {
     const t = rdReadTable(sections.defects.lines);
     out.notes.defects = t.notes;
+    const noteItems = rdBullets(t.notes).filter(x => !/^[-_*=\s]{3,}$/.test(x));
+    out.defectProse = noteItems.filter(x => !rdIsNoneCell(x));
+    out.defectNone = noteItems.some(x => rdIsNoneCell(x));
     t.tables.forEach(tbl => {
       const c = rdColumns(tbl.header, [
         ['id', /^(#|id|no\.?|item|ref)$/], ['curative', /curative|cure|remed|requirement|action|fix/],
@@ -2171,8 +2220,12 @@ function parseTitleOpinion(markdown) {
           curative: rdCell(row, c.curative),
           source: rdCell(row, c.source),
         };
-        // 'None' / 'No title defects identified' placeholder rows are not defects.
-        if (rdIsNoneCell(d.defect) && rdIsNoneCell(d.curative)) return;
+        // 'None' / 'No title defects identified' placeholder rows are not defects. Only a written
+        // placeholder says there are none; a row of empty cells says nothing.
+        if (rdIsNoneCell(d.defect) && rdIsNoneCell(d.curative)) {
+          if (d.defect || d.curative) out.defectNone = true;
+          return;
+        }
         if (!d.id || rdIsNoneCell(d.id)) d.id = `D${out.defects.length + 1}`;
         const doc = d.source.match(/doc(?:ument)?\.?\s*#?\s*(\d{1,4})/i) || d.source.match(/^#?(\d{1,4})$/);
         d.sourceDoc = doc ? doc[1] : '';
@@ -2203,15 +2256,14 @@ function parseTitleOpinion(markdown) {
         if (rdIsNoneCell(name) && rdIsNoneCell(interest) && rdIsNoneCell(decimal)) return;
         const royaltyRaw = rdCell(row, c.royalty);
         const royalty = RD_EMPTY_CELL.test(royaltyRaw) ? '' : royaltyRaw;
-        const subject = rdDefectIds(rdCell(row, c.subject));
-        let value = rdParseNumber(decimal);
-        if (value == null) value = rdParseFraction(interest);
+        const subject = rdDefectIds(rdCell(row, c.subject), defectById);
+        const { value, issue } = rdOwnerShare(decimal, interest);
         // Royalty-only means no mineral interest at all, not an unreadable one.
         const royaltyOnly = Boolean(royalty) && (value === 0 || (value == null && RD_EMPTY_CELL.test(interest) && RD_EMPTY_CELL.test(decimal)));
         const unreconciled = /^(the\s+)?(unknown|heirs|estate of|unidentified)\b/i.test(name)
           || /unreconciled|unknown|undetermined|tbd/i.test(`${interest} ${decimal}`)
           || subject.ids.some(id => defectById.get(id.toUpperCase())?.unreconciled);
-        out.owners.push({ name, interest, decimal, value, royalty, royaltyOnly, subjectTo: subject.ids, subjectOther: subject.other, note: rdCell(row, c.note), unreconciled });
+        out.owners.push({ name, interest, decimal, value, issue, royalty, royaltyOnly, subjectTo: subject.ids, subjectOther: subject.other, note: rdCell(row, c.note), unreconciled });
       });
     });
   }
@@ -2224,6 +2276,92 @@ function parseTitleOpinion(markdown) {
   return out;
 }
 
+// The reconciled figure the executive summary states, read clause by clause so negation and
+// bounds are never mistaken for the figure itself. kinds: reconciled ('87.5% reconciled'),
+// open ('12.5% cannot be reconciled', '50% unreconciled'), bounded ('not 100%', 'less than 100%',
+// 'about 90%'). Only a lone, unqualified 'reconciled' figure becomes the stated percent; anything
+// else is carried as a quoted claim so the KPI can show the opinion's own words.
+const RD_PCT_LEAD = /\b(?:not|never|no longer|none of|far from|close to|essentially|virtually|practically|mostly|largely|partly|partially|short of|less than|fewer than|under|below|at most|no more than|up to|more than|over|above|at least|exceeds?|about|approximately|approx\.?|roughly|nearly|almost)\b|n['’]t\b/i;
+const RD_PCT_TRAIL = /\b(?:except(?:ing)?|excluding|exclusive of|other than|apart from|aside from|save for|but not|subject to|provided|unless|however|although|though|contingent|pending|until|with the exception)\b/i;
+const RD_PCT_HEDGE = /(?:\bnot(?:\s+(?:yet|fully|quite|completely|entirely|even))?|\bnever|\bno longer|n['’]t(?:\s+yet)?|\bless than|\bfewer than|\bunder|\bbelow|\bat most|\bno more than|\bup to|\bmore than|\bover|\babove|\bat least|\bexceeds?|\babout|\bapproximately|\bapprox\.?|\broughly|\bnearly|\balmost|\bshort of)\s+$/i;
+const RD_RECONCILED_AFTER = /^([^.;:%]{0,80}?)\b(un)?reconciled\b/i;
+const RD_NEGATOR = /\b(?:not|never|no longer|cannot|unable|fails? to|failed to|without|to be|yet to|must|needs?|requires?|pending|awaits?|awaiting)\b|n['’]t\b/i;
+const RD_TEXT_OPEN = /\b(?:(?:not|never|cannot|\w*n['’]t|unable to|fails? to|failed to|needs? to be|yet to be|requires?|awaits?|pending)\s+(?:\w+\s+){0,3}?reconcil(?:e|ed|iation)|unreconciled|reconcil\w*[^.;]{0,60}?\b(?:remains?|remaining|is|are|still)\s+(?:open|outstanding|incomplete|unresolved|unfinished))\b/i;
+const RD_TEXT_NO_OPEN = /\b(?:no|zero|without|nothing)\s+(?:\w+\s+){0,2}unreconciled\b/i;
+
+const RD_PCT_LEAD_G = new RegExp(RD_PCT_LEAD.source, 'gi');
+const RD_PCT_TRAIL_G = new RegExp(RD_PCT_TRAIL.source, 'gi');
+const RD_PCT_BREAK = /[,;:()]|\s[—–]\s|\b(?:and|but|while|whereas|because|so|which|although|though)\b/i;
+const RD_PCT_WINDOW = 200;
+
+function rdLastMatchStart(re, text) {
+  let last = -1;
+  for (const m of text.matchAll(re)) last = m.index;
+  return last;
+}
+
+// A hedge word qualifies the figure only inside its own clause: 'not 100%' does, 'Although not all
+// instruments were recorded, title is 100%' does not. A comma or conjunction between the hedge and
+// the figure ends its reach, unless only a short aside sits between ('not, however, 100%').
+// Only a bounded window before the figure is read, so a long sentence of figures stays linear.
+function rdPctHedged(text, index) {
+  const before = text.slice(Math.max(0, index - RD_PCT_WINDOW), index);
+  if (RD_PCT_HEDGE.test(before.slice(-30))) return true;
+  for (const m of before.matchAll(RD_PCT_LEAD_G)) {
+    const between = before.slice(m.index + m[0].length);
+    if (!RD_PCT_BREAK.test(between) || between.split(/[^A-Za-z0-9']+/).filter(Boolean).length <= 2) return true;
+  }
+  return false;
+}
+
+function rdSummaryClaim(items) {
+  const claims = [];
+  for (const item of items || []) {
+    const whole = String(item).replace(/\*\*/g, '').trim();
+    for (const raw of whole.split(/(?<=[.;!?])\s+|\s[—–]\s/)) {
+      const text = raw.trim();
+      if (!text) continue;
+      let withPct = false;
+      let lastTrail = -2;
+      for (const m of text.matchAll(/(?<![\d.,/])(\d{1,3}(?:\.\d+)?)\s*%/g)) {
+        const pct = Number(m[1]);
+        const end = m.index + m[0].length;
+        const after = pct <= 100 ? text.slice(end, end + 120).match(RD_RECONCILED_AFTER) : null;
+        if (!after) continue;
+        withPct = true;
+        const negated = RD_NEGATOR.test(after[1]);
+        const lead = rdPctHedged(text, m.index);
+        if (lastTrail === -2) lastTrail = rdLastMatchStart(RD_PCT_TRAIL_G, text);
+        const trail = !after[2] && lastTrail >= end;
+        const kind = lead || (after[2] && negated) ? 'bounded' : after[2] || negated ? 'open' : trail ? 'bounded' : 'reconciled';
+        claims.push({ kind, pct, text: whole });
+      }
+      if (!withPct && RD_TEXT_OPEN.test(text) && !RD_TEXT_NO_OPEN.test(text)) claims.push({ kind: 'open', pct: null, text: whole });
+    }
+  }
+  const quote = c => (c.text.length > 200 ? `${c.text.slice(0, 197)}...` : c.text);
+  const stated = [...new Set(claims.filter(c => c.kind === 'reconciled').map(c => c.pct))];
+  const open = claims.filter(c => c.kind === 'open');
+  const bounded = claims.filter(c => c.kind === 'bounded');
+  if (stated.length > 1) return { state: 'conflict', pct: null, openPct: null, figures: stated, quote: quote(claims.find(c => c.kind === 'reconciled')) };
+  if (stated.length === 1) {
+    const clash = open.find(c => c.pct != null && Math.abs(c.pct + stated[0] - 100) > 0.05) || bounded.find(c => c.pct === stated[0]);
+    if (clash) return { state: 'conflict', pct: null, openPct: null, figures: [stated[0], clash.pct], quote: quote(clash) };
+    // An open claim with no figure ('Title cannot be reconciled') is never a clean stated figure.
+    // Beside 100% it contradicts it; beside a smaller figure it qualifies it ('the remainder cannot be...').
+    const unquantified = open.find(c => c.pct == null);
+    if (unquantified) {
+      return { state: stated[0] === 100 ? 'conflict' : 'qualified', pct: null, openPct: null, figures: stated[0] === 100 ? [100] : [], quote: quote(unquantified) };
+    }
+    return { state: 'stated', pct: stated[0], openPct: null, figures: [], quote: '' };
+  }
+  const first = open[0] || bounded[0];
+  if (!first) return { state: 'none', pct: null, openPct: null, figures: [], quote: '' };
+  const openPcts = [...new Set(open.map(c => c.pct))];
+  const openPct = !bounded.length && openPcts.length === 1 && openPcts[0] != null ? openPcts[0] : null;
+  return { state: 'qualified', pct: null, openPct, figures: [], quote: quote(first) };
+}
+
 function rdOpinionStats(p) {
   const owners = p.owners || [];
   const unreadable = owners.filter(o => o.value == null && !o.royaltyOnly);
@@ -2232,13 +2370,14 @@ function rdOpinionStats(p) {
   let reconciledPct = null;
   let reconciledWhy = '';
   if (!owners.length) reconciledWhy = 'No owners listed';
+  else if (unreadable.some(o => o.issue)) reconciledWhy = `${rdPlural(unreadable.length, 'owner row')} with a negative share or an interest that disagrees with its decimal`;
   else if (unreadable.length) reconciledWhy = `${unreadable.length} decimal${unreadable.length === 1 ? '' : 's'} not numeric`;
   else if (total <= 0) reconciledWhy = 'No mineral decimals';
   // Over-allocated shares have no honest percentage: dividing by the inflated total invents one.
   else if (total > 1 + 1e-6) reconciledWhy = `Shares total ${rdTrimNum(total)}, more than the whole`;
   else reconciledPct = Math.round((total - unrec) * 1000) / 10;
-  const summaryMatch = (p.summary || []).join(' ').match(/(?<![\d.,])(\d{1,3}(?:\.\d+)?)\s*%\s*(?:of [^.;%]{1,60}?\s)?(?:(?:is|are)\s+)?reconciled/i);
-  const summaryPct = summaryMatch && Number(summaryMatch[1]) <= 100 ? Number(summaryMatch[1]) : null;
+  const summaryClaim = rdSummaryClaim(p.summary);
+  const summaryPct = summaryClaim.state === 'stated' ? summaryClaim.pct : null;
   const years = (p.chain || []).map(r => rdYear(r.date)).filter(Boolean);
   const sev = { material: 0, curative: 0, clarify: 0 };
   (p.defects || []).forEach(d => { sev[d.severity] = (sev[d.severity] || 0) + 1; });
@@ -2246,6 +2385,7 @@ function rdOpinionStats(p) {
     reconciledPct,
     reconciledWhy,
     summaryPct,
+    summaryClaim,
     // Unnormalised reconciled share when the table is over-allocated (shown next to the warning).
     overReconciled: total > 1 + 1e-6 && !unreadable.length ? Math.round((total - unrec) * 1e8) / 1e8 : null,
     decimalTotal: Math.round(total * 1e8) / 1e8,
@@ -2256,6 +2396,9 @@ function rdOpinionStats(p) {
     royaltyOwners: owners.filter(o => o.royalty).length,
     divestedOwners: owners.filter(o => o.value === 0 && !o.royalty).length,
     defectCount: (p.defects || []).length,
+    // listed: table rows. prose: the section has text but no rows, so the count is unknown, not zero.
+    // none: the section says so in words. unknown: the section is present but empty, which says nothing.
+    defectsState: !(p.sections || []).includes('defects') ? 'missing' : (p.defects || []).length ? 'listed' : (p.defectProse || []).length ? 'prose' : p.defectNone ? 'none' : 'unknown',
     severity: sev,
     chainCount: (p.chain || []).length,
     flaggedCount: (p.chain || []).filter(r => r.flags.length).length,
@@ -2332,6 +2475,9 @@ function rdDonut(p, pid, kpi) {
 let rdInstanceSeq = 0;
 const rdAnimatedKeys = new Set();
 let rdLastJobRender = { el: null, sig: '', jobId: null };
+// The job and result most recently handed to renderJobResults. A follow-up that finishes later redraws
+// from this, never from the result its click handler closed over.
+let rdLatestJob = { jobId: null, job: null, result: null };
 
 function rdShouldAnimate(key) {
   if (rdAnimatedKeys.has(key)) return false;
@@ -2347,8 +2493,10 @@ function rdReconciledKpi(p) {
   const stated = st.summaryPct;
   const computed = st.reconciledPct;
   const over = st.sumState === 'over';
-  const defects = st.defectCount;
-  const openDefects = defects ? rdPlural(defects, 'defect') + ' open' : '';
+  const claim = st.summaryClaim || { state: 'none' };
+  const prose = st.defectsState === 'prose';
+  const defects = st.defectCount || (prose || st.defectsState === 'unknown' ? 1 : 0);
+  const openDefects = st.defectCount ? rdPlural(st.defectCount, 'defect') + ' open' : prose ? 'defects listed as text' : st.defectsState === 'unknown' ? 'defects section is empty' : '';
   const openParts = pct => {
     const open = Math.max(0, Math.round((100 - pct) * 10) / 10);
     if (open > 0) return [`${rdFmtPct(open)} open`, ...st.unreconciledOwners.slice(0, 2).map(o => `${esc(o.name)} ${esc(o.interest || o.decimal)}`)];
@@ -2357,6 +2505,17 @@ function rdReconciledKpi(p) {
   const tone = pct => (pct === 100 && defects ? '' : 'teal');
   const overFacts = `shares total ${esc(rdTrimNum(st.decimalTotal))} of the whole${st.overReconciled != null ? `, ${esc(rdTrimNum(st.overReconciled))} reconciled` : ''}`;
   const overWarn = `Ownership table is over-allocated: ${overFacts}`;
+  // The opinion's own words contradict or qualify the figure ('not 100% reconciled', two different
+  // percentages): show them, never a clean number. An 'N% cannot be reconciled' that the table
+  // complements is consistent and falls through to the table figure.
+  const complements = claim.state === 'qualified' && claim.openPct != null && computed != null && Math.abs(claim.openPct + computed - 100) <= 0.05;
+  if ((claim.state === 'conflict' || claim.state === 'qualified') && !complements) {
+    const said = claim.state === 'conflict'
+      ? (claim.figures.length > 1 ? `The opinion gives conflicting figures (${claim.figures.map(rdFmtPct).join(' and ')})` : `The opinion states ${claim.figures.map(rdFmtPct).join('')} reconciled and also an unresolved claim`)
+      : 'The opinion qualifies its reconciled figure';
+    const table = computed != null ? `Table computes ${rdFmtPct(computed)}` : st.reconciledWhy ? `Table not computed (${st.reconciledWhy.toLowerCase()})` : '';
+    return { state: claim.state, value: null, text: claim.state === 'conflict' ? 'Conflicting' : 'Qualified', tone: 'amber sm', sub: table ? [esc(table)] : [], warn: `${esc(said)}: “${esc(claim.quote)}”`, center: null, centerLabel: 'CHECK TEXT' };
+  }
   if (stated != null) {
     const sub = ['As stated in the opinion'];
     let warn = '';
@@ -2375,21 +2534,23 @@ function rdReconciledKpi(p) {
 
 // ' Vol. 9, Pg 9 ' -> ' vol 9 pg 9 ' (padded so includes() matches whole tokens only).
 function rdRefKey(text) {
-  const t = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const t = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    .split(' ').map(w => (/^(?:pages?|pgs?|pp)$/.test(w) ? 'p' : w === 'volume' ? 'vol' : w)).join(' ');
   return t ? ` ${t} ` : '';
 }
 
 // Chain row index a defect cites, or -1. 'Doc 2' is the upload order and the chain '#' is
-// chronological, so a bare number is never enough. Link only when the defect names one row's
-// recording reference, or names the instrument (its year plus a word of its type, '1981 lease'),
-// or the chain has its own source-doc column with exactly one match.
+// chronological, so a bare number is never enough. Link only on an explicit pointer: the defect
+// gives one row's full recording reference, or the chain has its own source-doc column and the
+// defect's source doc matches exactly one row. Year and instrument wording is never a pointer.
 function rdChainIndex(chain) {
-  return chain.map(r => ({
-    ref: /\d/.test(r.ref || '') ? rdRefKey(r.ref) : '',
-    year: rdYear(r.date),
-    words: [...new Set(String(r.type || '').toLowerCase().match(/[a-z]{4,}/g) || [])],
-    doc: r.doc || '',
-  }));
+  return chain.map(r => {
+    const nums = String(r.ref || '').match(/\d+/g) || [];
+    return {
+      ref: nums.length >= 2 || nums.some(n => n.length >= 5) ? rdRefKey(r.ref) : '',
+      doc: r.doc || '',
+    };
+  });
 }
 
 function rdMatchChainRow(d, index) {
@@ -2402,16 +2563,13 @@ function rdMatchChainRow(d, index) {
     }
     return hit;
   };
-  const hay = rdRefKey(`${d.source} ${d.defect}`);
+  const hay = rdRefKey(d.source) + rdRefKey(d.defect);
   const byRef = only(r => r.ref && hay.includes(r.ref));
-  if (byRef !== -1) return Math.max(byRef, -1);
-  const text = String(d.defect || '').toLowerCase();
-  const years = new Set((text.match(/\b(1[6-9]\d\d|20\d\d)\b/g) || []).map(Number));
-  if (years.size) {
-    const byName = only(r => r.year && years.has(r.year) && r.words.some(w => text.includes(w)));
-    if (byName !== -1) return Math.max(byName, -1);
-  }
-  return d.sourceDoc ? Math.max(only(r => r.doc === d.sourceDoc), -1) : -1;
+  const byDoc = d.sourceDoc ? only(r => r.doc === d.sourceDoc) : -1;
+  if (byRef === -2) return -1;
+  // Two explicit pointers that name different rows are a disagreement, not a link.
+  if (byRef >= 0) return byDoc >= 0 && byDoc !== byRef ? -1 : byRef;
+  return Math.max(byDoc, -1);
 }
 
 function renderResultsDashboard(p, rawMarkdown, opts = {}) {
@@ -2428,7 +2586,7 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
   // The headline figure takes the KPI's colour, so the two never disagree.
   const headline = lead
     ? rdInline(lead)
-      .replace(/\d{1,3}(?:\.\d+)?%\s*reconciled/i, m => `<span class="${/teal/.test(kpi.tone) ? 'ok' : 'warn'}">${m}</span>`)
+      .replace(kpi.value == null ? /(?!)/ : /\d{1,3}(?:\.\d+)?%\s*reconciled/i, m => `<span class="${/teal/.test(kpi.tone) ? 'ok' : 'warn'}">${m}</span>`)
       .replace(/(\b\d+\s+material\s+defects?\b)/i, '<span class="bad">$1</span>')
     : '';
   const ownerSub = [
@@ -2438,7 +2596,7 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
   ].filter(Boolean).join(' · ') || 'None listed';
   const defectSub = st.defectCount
     ? ['material', 'curative', 'clarify'].filter(k => st.severity[k]).map(k => `${st.severity[k]} ${k}`).join(' · ')
-    : (p.sections.includes('defects') ? 'None listed' : 'Section not in opinion');
+    : st.defectsState === 'prose' ? 'Written as text, not counted' : st.defectsState === 'unknown' ? 'Defects section is empty' : (p.sections.includes('defects') ? 'None listed' : 'Section not in opinion');
   const span = st.firstYear ? (st.firstYear === st.lastYear ? `${st.firstYear}` : `${st.firstYear}–${st.lastYear}`) : '';
   const docs = Number(opts.totalDocuments) > 0 ? `from ${opts.totalDocuments} documents` : '';
   const chainSub = [span, docs].filter(Boolean).join(' · ') || (p.sections.includes('chain') ? 'Instruments listed' : 'Section not in opinion');
@@ -2449,7 +2607,7 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
   const kpis = `<div class="rd-kpis">
       <div class="rd-kpi" data-rd-kpi="${kpi.state}"><div class="lbl">Reconciled</div><div class="val ${kpi.tone}">${kpiVal}</div>${kpi.value == null ? '' : `<div class="bar" aria-hidden="true"><span class="rd-grow" style="width:${Math.min(100, Math.max(0, kpi.value))}%"></span></div>`}${kpi.sub.length ? `<div class="sub">${kpi.sub.join(' · ')}</div>` : ''}${kpi.warn ? `<div class="sub warn" role="note">${RD_ICON.alert}<span>${kpi.warn}</span></div>` : ''}</div>
       <div class="rd-kpi"><div class="lbl">Owners of record</div><div class="val">${count(st.ownerCount, String(st.ownerCount))}</div><div class="sub">${esc(ownerSub)}</div></div>
-      <div class="rd-kpi"><div class="lbl">Defects open</div><div class="val ${st.defectCount ? 'red' : ''}">${count(st.defectCount, String(st.defectCount))}</div><div class="sub">${esc(defectSub)}</div></div>
+      <div class="rd-kpi"><div class="lbl">Defects open</div>${st.defectsState === 'prose' ? '<div class="val amber sm">See text</div>' : st.defectsState === 'unknown' ? '<div class="val amber sm">Unknown</div>' : `<div class="val ${st.defectCount ? 'red' : ''}">${count(st.defectCount, String(st.defectCount))}</div>`}<div class="sub">${esc(defectSub)}</div></div>
       <div class="rd-kpi"><div class="lbl">Instruments in chain</div><div class="val">${count(st.chainCount, String(st.chainCount))}</div><div class="sub">${esc(chainSub)}</div></div>
     </div>`;
   const hero = `<section class="card rd-hero ${enter()}" aria-labelledby="${pid}-exec">
@@ -2471,11 +2629,12 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
     return `<span class="rd-swatch" style="background:${o.royalty ? '#94a3b8' : '#e2e8f0'}"></span>`;
   };
   const subjectChips = o => {
-    if (o.subjectTo.length) return `<span class="rd-chips">${o.subjectTo.map(id => `<span class="rd-chip d ${rdSevClass[defectSev.get(id.toUpperCase())] || 'slate'}">${esc(id)}</span>`).join('')}</span>`;
-    if (o.subjectOther) return rdInline(o.subjectOther);
-    return '<span class="rd-none">none</span>';
+    const chips = o.subjectTo.length ? `<span class="rd-chips">${o.subjectTo.map(id => `<span class="rd-chip d ${rdSevClass[defectSev.get(id.toUpperCase())] || 'slate'}">${esc(id)}</span>`).join('')}</span>` : '';
+    const other = o.subjectOther ? rdInline(o.subjectOther) : '';
+    return chips || other ? [chips, other].filter(Boolean).join(' ') : '<span class="rd-none">none</span>';
   };
-  const ownerNote = o => o.note ? `<small>${rdInline(o.note)}</small>` : (o.unreconciled && o.value > 0 ? '<small>Unreconciled</small>' : (o.royaltyOnly ? '<small>Royalty only</small>' : ''));
+  const issueNote = { conflict: 'Interest and decimal disagree', negative: 'Negative share' };
+  const ownerNote = o => o.issue ? `<small>${issueNote[o.issue]}</small>` : o.note ? `<small>${rdInline(o.note)}</small>` : (o.unreconciled && o.value > 0 ? '<small>Unreconciled</small>' : (o.royaltyOnly ? '<small>Royalty only</small>' : ''));
   const sumCell = st.sumState === 'whole'
     ? `<span class="rd-sum">${RD_ICON.check} Sums to whole</span>`
     : st.sumState === 'under'
@@ -2529,9 +2688,13 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
       </article>`;
     }).join('');
     defectsCard = `<section class="card ${enter()}" aria-labelledby="${pid}-def">
-      <div class="rd-card-head"><h3 id="${pid}-def">Title defects &amp; curative requirements</h3><span class="aside">${esc(`${st.defectCount} open`)}</span></div>
-      ${p.defects.length ? `<div class="rd-defects">${cards}</div>` : '<p class="rd-empty">No title defects are listed in the opinion.</p>'}
-      ${(p.notes.defects || []).length ? `<p class="rd-note">${p.notes.defects.map(rdInline).join('<br>')}</p>` : ''}
+      <div class="rd-card-head"><h3 id="${pid}-def">Title defects &amp; curative requirements</h3><span class="aside">${esc(st.defectsState === 'prose' ? 'as text' : st.defectsState === 'unknown' ? 'unknown' : `${st.defectCount} open`)}</span></div>
+      ${p.defects.length ? `<div class="rd-defects">${cards}</div>` : st.defectsState === 'prose'
+        ? `<p class="rd-note">The opinion lists defects as text, not as a table. They are shown as written and are not counted or linked.</p><ul class="rd-sumlist">${p.defectProse.map(t => `<li>${rdInline(t)}</li>`).join('')}</ul>`
+        : st.defectsState === 'unknown'
+          ? '<p class="rd-empty">The defects section is empty. The opinion neither lists defects nor says there are none.</p>'
+          : '<p class="rd-empty">No title defects are listed in the opinion.</p>'}
+      ${st.defectsState !== 'prose' && (p.notes.defects || []).length ? `<p class="rd-note">${p.notes.defects.map(rdInline).join('<br>')}</p>` : ''}
     </section>`;
   }
 
@@ -2639,7 +2802,10 @@ function rdHandleClick(e) {
 
 function rdBarStatus(parsed) {
   if (!parsed || !parsed.ok) return 'AI draft';
-  const n = parsed.stats.defectCount;
+  const { defectCount: n, defectsState } = parsed.stats;
+  if (defectsState === 'prose') return 'Draft · defects listed as text';
+  if (defectsState === 'missing') return 'Draft · no defects section';
+  if (defectsState === 'unknown') return 'Draft · defects section empty';
   return `Draft · ${n ? rdPlural(n, 'open defect') : 'no open defects'}`;
 }
 
@@ -2653,6 +2819,7 @@ function renderJobResults(job, result) {
   if (!result || !result.finalTitleOpinion) {
     el.innerHTML = '';
     rdLastJobRender = { el: null, sig: '', jobId: null };
+    rdLatestJob = { jobId: null, job: null, result: null };
     if (followupWrap) followupWrap.style.display = 'none';
     const staleHistory = document.getElementById('jobFollowupHistory');
     if (staleHistory) staleHistory.innerHTML = '';
@@ -2666,6 +2833,7 @@ function renderJobResults(job, result) {
     ? `<div class="error-msg"><strong>Browser synthesis fallback.</strong> This opinion was generated in the browser because server-side synthesis was unavailable. Re-run on a durable job or investigate server synthesis errors before relying on this result for large runs.</div>`
     : '';
   const opinionText = String(result.finalTitleOpinion);
+  rdLatestJob = { jobId: job.id, job, result };
   // The poller applies a finished job twice (onUpdate + onTerminal). Re-writing identical markup
   // would cut the entrance animation short, so keep the DOM when nothing visible changed. The key
   // holds the full opinion text and every job field the render reads.
@@ -2713,7 +2881,7 @@ function renderJobResults(job, result) {
       const list = jobFollowupHistoryByJob.get(job.id) || [];
       historyEl.innerHTML = list.map(pair => `
         <div class="analysis-card" style="margin-top:.7rem">
-          <div class="ac"><strong>Q:</strong> ${esc(pair.question)}<br><br><strong>A:</strong> ${md(String(pair.answer || ''))}</div>
+          <div class="ac"><strong>Q:</strong> ${esc(pair.question)}${pair.opinionHash && pair.opinionHash !== rdHash(opinionText) ? ' <em>(asked about an earlier draft of this opinion)</em>' : ''}<br><br><strong>A:</strong> ${md(String(pair.answer || ''))}</div>
         </div>`).join('');
     }
     const submit = async () => {
@@ -2748,13 +2916,13 @@ function renderJobResults(job, result) {
           throw new Error(data.error || `HTTP ${res.status}`);
         }
         const list = jobFollowupHistoryByJob.get(job.id) || [];
-        list.push({ question: q, answer });
+        list.push({ question: q, answer, opinionHash: rdHash(result.finalTitleOpinion) });
         jobFollowupHistoryByJob.set(job.id, list);
         // The answer is stored either way; only redraw if this job is still the one on screen,
         // so a late answer never paints job A over job B.
         if (rdJobIsShown(job.id)) {
-          if (input) input.value = '';
-          renderJobResults(job, result);
+          if (input && input.value.trim() === q) input.value = '';
+          renderJobResults(rdLatestJob.job, rdLatestJob.result);
         }
       } catch (err) {
         alert(err.message || 'Follow-up failed.');
@@ -2958,7 +3126,7 @@ function renderRecentJobsToolbar() {
     if (hint) hint.textContent = 'Resume or review a completed run.';
   } else {
     button.removeAttribute('href');
-    button.setAttribute('tabindex', '-1');
+    button.setAttribute('tabindex', '0');
     if (hint) hint.textContent = 'Recent jobs available after your first completed analysis.';
   }
 }
@@ -4001,15 +4169,24 @@ function stagedFileTag(f) {
   return { kind: 'other', label: ext ? ext.toUpperCase().slice(0, 4) : 'FILE' };
 }
 
+function renderHomeSubtitle() {
+  const el = document.getElementById('homeSubtitle');
+  if (!el) return;
+  const count = files.length;
+  el.textContent = conversationHistory.some((m, i) => m.role === 'assistant' && (m.kind === 'title-opinion' || i === 1))
+    ? 'Analysis complete. Review the draft opinion below, ask a follow-up, or add documents.'
+    : count
+      ? `${count} document${count === 1 ? '' : 's'} staged and ready for adaptive batching and synthesis.`
+      : 'Add optional tract context, then stage up to 400 files for one chain-of-title run.';
+}
+
 function updateStagedSummary() {
   const count = files.length;
   if (!count) renderedFileCount = 0;
   const setText = (id, text) => { const node = document.getElementById(id); if (node) node.textContent = text; };
   setText('analyzeBtnCount', count ? `(${count})` : '');
   setText('dropSlots', String(count));
-  setText('homeSubtitle', count
-    ? `${count} document${count === 1 ? '' : 's'} staged and ready for adaptive batching and synthesis.`
-    : 'Add optional tract context, then stage up to 400 files for one chain-of-title run.');
+  renderHomeSubtitle();
   let badge = `${count} / ${MAX_FILES} files staged`;
   if (count) {
     const totalBytes = files.reduce((sum, f) => sum + (Number(f?.size) || 0), 0);
@@ -5185,6 +5362,7 @@ function renderResults() {
   }).join('');
   resultsEl.onclick = rdHandleClick;
   if (animateRoot) rdAnimateCounts(resultsEl);
+  renderHomeSubtitle();
 }
 
 function md(text) {
