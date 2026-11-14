@@ -8,99 +8,226 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mineral Title Analyzer</title>
 <style>
+  :root {
+    --bg:#f4f3ef; --surface:#fff; --line:#dfdcd4; --line-soft:#eeece6; --nav-line:#e5e2da; --tint:#fafaf8;
+    --ink:#0f172a; --ink-2:#1e293b; --text:#334155; --text-2:#475569; --muted:#64748b;
+    --input-line:#cbd5e1;
+    --accent:#b45309; --accent-hover:#9a4507; --accent-ink:#78350f; --accent-text:#92400e;
+    --accent-soft:#fef3c7; --accent-line:#fcd34d; --accent-wash:#fffbeb;
+    --ok:#0f766e;
+    --sans:-apple-system,BlinkMacSystemFont,'Inter','SF Pro Text','Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+    --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+    --ease-out:cubic-bezier(.22,.61,.36,1);
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Georgia','Times New Roman',serif; background: #f5efe4; background-image: radial-gradient(ellipse at 15% 10%,#f9f1de 0%,transparent 55%),radial-gradient(ellipse at 85% 90%,#ede2cc 0%,transparent 55%); min-height: 100vh; color: #4a3c28; padding-bottom: 3rem; }
-  .header { border-bottom: 2px solid #c8a96e; background: linear-gradient(180deg,#fff 0%,#faf3e3 100%); padding: 2.2rem 1.5rem 1.7rem; text-align: center; }
-  .eyebrow { font-size: .7rem; letter-spacing: .3em; color: #b8915e; text-transform: uppercase; margin-bottom: .5rem; font-weight: bold; }
-  h1 { font-size: 2.2rem; font-weight: normal; color: #6b3410; margin-bottom: .3rem; }
-  .tagline { color: #8a6f4a; font-size: .9rem; font-style: italic; }
-  .app-version { color: #a08a6a; font-size: .78rem; margin-top: .4rem; letter-spacing: .04em; font-style: normal; }
-  .disclaimer { background: #fff8eb; border: 1px solid #c8a96e; border-left: 4px solid #b8631e; color: #6b3410; padding: .85rem 1.1rem; margin: 1rem auto 0; max-width: 860px; border-radius: 4px; font-size: .85rem; line-height: 1.5; }
-  .container { max-width: 860px; margin: 0 auto; padding: 1.8rem 1.5rem; }
-  .card { background: #fff; border: 1px solid #d9c9a8; border-radius: 6px; padding: 1.8rem; margin-bottom: 1.5rem; box-shadow: 0 2px 8px rgba(74,60,40,.06); }
-  .field { margin-bottom: 1.2rem; }
-  .field-label { display: block; font-size: .72rem; letter-spacing: .15em; text-transform: uppercase; color: #8a6f4a; margin-bottom: .5rem; font-weight: bold; }
-  input[type=text], input[type=password], textarea { width: 100%; background: #faf6ee; border: 1px solid #d9c9a8; border-radius: 4px; color: #4a3c28; padding: .7rem .9rem; font-size: .95rem; font-family: Georgia,serif; outline: none; }
-  input:focus, textarea:focus { border-color: #b8631e; background: #fff; }
-  textarea { resize: vertical; min-height: 60px; }
-  .upload-zone { border: 2px dashed #c8a96e; border-radius: 6px; background: #faf6ee; cursor: pointer; transition: all .2s; display: block; width: 100%; padding: 1.5rem; text-align: center; }
-  .upload-zone:hover, .upload-zone.drag { border-color: #b8631e; background: #fff8eb; }
-  .upload-text { color: #b8631e; font-size: 1rem; display: block; margin-bottom: .4rem; text-align: center; }
-  .upload-hint { color: #a08a6a; font-size: .8rem; display: block; line-height: 1.8; margin-top: .3rem; }
+  [hidden] { display: none !important; }
+  body { font: 14px/1.45 var(--sans); background: var(--bg); min-height: 100vh; color: var(--ink-2); padding-bottom: 3rem; -webkit-font-smoothing: antialiased; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  a, button, [role=button] { -webkit-tap-highlight-color: transparent; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Top bar */
+  .header { height: 54px; background: var(--surface); border-bottom: 1px solid var(--nav-line); padding: 0 28px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+  .brand-mark { width: 30px; height: 30px; border-radius: 7px; background: var(--ink-2); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 12px; letter-spacing: .02em; flex-shrink: 0; }
+  .brand-text { min-width: 0; }
+  h1 { font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; color: var(--ink); line-height: 1.25; white-space: nowrap; }
+  .brand-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .tagline { font-size: 11px; color: var(--muted); font-weight: 500; line-height: 1.3; white-space: nowrap; }
+  .app-version { font: 500 10.5px/1.3 var(--mono); color: var(--muted); white-space: nowrap; }
+  .app-version::before { content: '·'; margin-right: 6px; font-family: var(--sans); }
+  .nav { display: flex; align-items: center; gap: 6px; }
+  body:not(.app-ready) .nav { visibility: hidden; }
+  .nav-pill, .recent-jobs-toolbar-button { display: inline-flex; align-items: center; gap: 4px; padding: 7px 13px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--text-2); text-decoration: none; background: transparent; cursor: pointer; white-space: nowrap; transition: background-color .16s ease, color .16s ease; }
+  .nav-pill:hover, .recent-jobs-toolbar-button:hover { background: #f6f5f1; color: var(--ink); }
+  .nav-pill.active { background: #f1efe9; color: var(--ink); font-weight: 600; }
+  .nav-count { font-variant-numeric: tabular-nums; }
+  .recent-jobs-toolbar { position: relative; display: flex; align-items: center; }
+  .recent-jobs-toolbar-button--disabled { color: #94a3b8; cursor: not-allowed; pointer-events: none; }
+  .recent-jobs-hint { position: absolute; top: calc(100% + 8px); right: 0; width: 230px; padding: 8px 10px; border-radius: 7px; background: var(--ink); color: #f8fafc; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(15,23,42,.18); opacity: 0; transform: translateY(-3px); pointer-events: none; transition: opacity .16s ease, transform .16s ease; z-index: 30; }
+  .recent-jobs-toolbar:hover .recent-jobs-hint, .recent-jobs-toolbar:focus-within .recent-jobs-hint { opacity: 1; transform: none; }
+
+  /* Layout */
+  .container { max-width: 1180px; margin: 0 auto; padding: 18px 20px 0; }
+  #view-job, #view-history { max-width: 980px; margin: 0 auto; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 12px; }
+  .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 12px; }
+  .page-head h2 { font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: -.015em; line-height: 1.3; }
+  .page-head p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .head-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  #analyzeBtnCount:not(:empty) { margin-left: .3em; }
+  .pill { font-size: 11.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
+  #view-home:has(#uploadSection[style*="none"]) .btn-cta { display: none; }
+
+  /* Fields */
+  .field { margin-bottom: 1rem; }
+  .field-label { display: block; font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .label { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; font-weight: 600; color: var(--text); margin-bottom: 5px; }
+  .label .opt { font-weight: 400; color: var(--muted); }
+  input[type=text], input[type=password], textarea { width: 100%; background: var(--tint); border: 1px solid var(--input-line); border-radius: 7px; color: var(--ink); padding: 8px 11px; font: 13px/1.4 var(--sans); outline: none; transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease; }
+  input::placeholder, textarea::placeholder { color: var(--muted); }
+  input:focus, textarea:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(180,83,9,.14); }
+  textarea { resize: vertical; min-height: 36px; field-sizing: content; max-height: 140px; }
+  .ctx-bar { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.35fr); gap: 14px; padding: 12px 18px; }
+
+  /* Dropzone */
+  .upload-zone { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 20px; width: 100%; padding: 34px 32px; margin-bottom: 12px; background: var(--accent-wash) linear-gradient(180deg,#fffdf7 0%,#fffbeb 100%); border: 2px dashed var(--accent); border-radius: 12px; box-shadow: 0 2px 10px rgba(180,83,9,.06); cursor: pointer; text-align: left; transition: border-color .18s ease, box-shadow .18s ease, padding .2s var(--ease-out); }
+  .upload-zone::before { content: ''; position: absolute; inset: 0; border-radius: 10px; background: #fef3c7; opacity: 0; pointer-events: none; transition: opacity .18s ease; }
+  .upload-zone > * { position: relative; }
+  .upload-zone:hover { border-color: #d97706; box-shadow: 0 4px 16px rgba(180,83,9,.10); }
+  .upload-zone:hover::before { opacity: .35; }
+  .upload-zone.drag { border-color: #d97706; border-style: solid; box-shadow: 0 0 0 4px rgba(217,119,6,.16), 0 6px 20px rgba(180,83,9,.12); }
+  .upload-zone.drag::before { opacity: .7; }
+  .upload-zone:focus-visible { outline: none; box-shadow: 0 0 0 3px #fff, 0 0 0 5px var(--accent); }
+  .has-files .upload-zone { padding: 22px 26px; }
+  .drop-left { display: flex; align-items: center; gap: 18px; min-width: 0; }
+  .drop-icon { width: 52px; height: 52px; border-radius: 12px; background: var(--accent-soft); border: 1px solid var(--accent-line); display: grid; place-items: center; flex-shrink: 0; color: var(--accent); transition: transform .2s var(--ease-out), box-shadow .2s ease; }
+  .drop-icon svg { transition: transform .2s var(--ease-out); }
+  .upload-zone:hover .drop-icon, .upload-zone.drag .drop-icon { transform: translateY(-2px); box-shadow: 0 4px 10px rgba(180,83,9,.16); }
+  .upload-zone.drag .drop-icon svg { transform: translateY(-1px); }
+  .drop-copy { min-width: 0; }
+  .upload-text { display: block; font-size: 16px; font-weight: 700; color: var(--accent-ink); letter-spacing: -.01em; margin-bottom: 3px; }
+  .upload-hint { display: block; font-size: 12.5px; color: var(--accent-text); line-height: 1.5; }
+  .upload-hint b { color: var(--accent-ink); }
+  .drop-chips { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .chip { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: #fff; border: 1px solid #fde68a; color: var(--accent-ink); }
+  .chip.strong { background: var(--accent-soft); border-color: #f59e0b; }
+  .btn-browse { background: var(--accent); color: #fff; padding: 10px 18px; border-radius: 8px; font-weight: 600; font-size: 13px; white-space: nowrap; flex-shrink: 0; box-shadow: 0 1px 2px rgba(180,83,9,.22); transition: background-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+  .upload-zone:hover .btn-browse { background: var(--accent-hover); box-shadow: 0 4px 12px rgba(180,83,9,.22); transform: translateY(-1px); }
+  .when-staged, .when-full { display: none; }
+  .has-files .when-staged { display: inline; }
+  .has-files .when-empty { display: none; }
+  .is-full .when-full { display: inline; }
+  .upload-zone--stack { display: block; text-align: center; padding: 22px; }
+  .upload-zone--stack .upload-text { font-size: 15px; }
+
+  /* Staged documents */
+  .queue-box { padding: 0; overflow: hidden; border-radius: 11px; }
+  .q-toolbar { padding: 11px 18px; border-bottom: 1px solid var(--line-soft); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .q-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+  .q-left h3 { font-size: 14px; font-weight: 700; color: var(--ink); }
+  .q-stats { font-size: 12px; color: var(--text); background: #f8fafc; border: 1px solid #e2e8f0; padding: 3px 10px; border-radius: 999px; font-weight: 600; transition: background-color .2s ease, border-color .2s ease, color .2s ease; }
+  .q-stats.full { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-ink); }
+  .q-empty { padding: 36px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+  .q-empty strong { display: block; color: var(--text); font-size: 13.5px; margin-bottom: 3px; }
+  #fileList:not(:empty) + .q-empty { display: none; }
+  .staged-head, #fileList .file-item { display: grid; grid-template-columns: 58px minmax(0,1fr) 140px 92px 72px; align-items: center; padding: 0 18px; }
+  .staged-head { padding-top: 8px; padding-bottom: 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); background: var(--tint); border-bottom: 1px solid var(--line-soft); }
+  .staged-head span:nth-child(n+3) { text-align: right; }
+  #fileList .file-item { min-height: 36px; margin: 0; padding-top: 6px; padding-bottom: 6px; font-size: 13px; background: transparent; border: 0; border-bottom: 1px solid #f1f5f9; border-radius: 0; transition: background-color .15s ease; }
+  #fileList .file-item:hover { background: #fcfbf8; }
+  #fileList .file-item.is-new { animation: row-in .28s var(--ease-out) both; animation-delay: calc(var(--row, 0) * 30ms); }
+  .file-type { text-align: center; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: .02em; width: 42px; background: #f1f5f9; color: var(--text-2); }
+  .file-type--pdf { background: #fee2e2; color: #991b1b; }
+  .file-type--csv { background: #dcfce7; color: #166534; }
+  .file-type--img { background: #e0f2fe; color: #075985; }
+  #fileList .file-name { font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 12px; }
+  #fileList .file-size { color: var(--muted); text-align: right; font: 11.5px/1.4 var(--mono); margin: 0; }
+  .file-status { color: var(--ok); font-weight: 600; text-align: right; font-size: 11.5px; }
+  #fileList .file-remove { justify-self: end; background: none; border: 0; border-radius: 5px; color: var(--muted); font: 500 11.5px/1 var(--sans); padding: 6px 4px; margin: 0 -4px 0 0; cursor: pointer; transition: color .15s ease, background-color .15s ease; }
+  #fileList .file-remove:hover { color: #b91c1c; background: #fef2f2; }
+  .file-more { padding: 9px 18px; font-size: 12px; color: var(--muted); text-align: center; border-bottom: 1px solid #f1f5f9; }
+  .staged-foot { padding: 10px 18px; background: var(--tint); border-top: 1px solid var(--line-soft); margin-top: -1px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #fileList > .file-count { padding: 14px 18px; font-size: 12.5px; color: var(--text-2); }
+  .staged-foot .file-count { font-size: 12px; color: var(--muted); }
   .file-list { margin-top: .8rem; text-align: left; }
-  .file-count { font-size: .72rem; letter-spacing: .15em; text-transform: uppercase; color: #8a6f4a; font-weight: bold; margin-bottom: .5rem; }
-  .file-item { display: flex; justify-content: space-between; align-items: center; padding: .55rem .85rem; background: #fff; border: 1px solid #d9c9a8; border-radius: 4px; margin-bottom: .3rem; font-size: .88rem; }
-  .file-name { color: #4a3c28; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-  .file-size { color: #a08a6a; font-size: .78rem; margin-left: .5rem; white-space: nowrap; }
-  .file-remove { background: none; border: none; color: #b8915e; cursor: pointer; font-size: 1.2rem; padding: 0 .3rem; margin-left: .5rem; }
-  .file-remove:hover { color: #b8631e; }
-  .btn-primary { width: 100%; background: linear-gradient(135deg,#b8631e,#8a4510); border: none; color: #fff; padding: .95rem; font-size: .95rem; letter-spacing: .06em; border-radius: 4px; font-family: Georgia,serif; cursor: pointer; margin-top: 1rem; transition: all .15s; }
-  .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg,#d07628,#9a4f12); }
-  .btn-primary:disabled { background: #d9c9a8; cursor: not-allowed; }
-  .btn-secondary { background: transparent; border: 1px solid #c8a96e; color: #8a6f4a; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; }
-  .btn-add-docs { background: #4a7c4e; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; transition: background .15s; }
-  .btn-add-docs:hover { background: #5a9c5e; }
-  .btn-download { background: #2a5f8f; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; transition: background .15s; }
-  .btn-download:hover { background: #3a7abf; }
-  .btn-secondary:hover { background: #faf3e3; color: #b8631e; }
-  .btn-ask { background: #b8631e; border: none; color: #fff; padding: .7rem 1.4rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .9rem; white-space: nowrap; }
-  .btn-download { background: #2a5c2a; border: none; color: #fff; padding: .6rem 1.3rem; cursor: pointer; border-radius: 4px; font-family: Georgia,serif; font-size: .85rem; white-space: nowrap; transition: background .15s; }
-  .btn-download:hover { background: #3a7c3a; }
-  .btn-ask:hover { background: #d07628; }
-  .progress-card { background: #fff; border: 1px solid #d9c9a8; border-radius: 6px; padding: 1.5rem; margin-bottom: 1.5rem; }
-  .progress-status { color: #6b3410; font-size: .95rem; margin-bottom: .8rem; font-style: italic; }
-  .progress-bar { width: 100%; height: 8px; background: #f0e3c8; border-radius: 4px; overflow: hidden; }
-  .progress-fill { height: 100%; background: linear-gradient(90deg,#b8631e,#d07628); transition: width .4s ease; }
-  .progress-list { margin-top: 1rem; font-size: .85rem; }
-  .synthesis-preview-card { margin-top: 1rem; background: #fff; border: 1px solid #d9c9a8; border-left: 4px solid #2f6b3a; border-radius: 6px; padding: 1rem 1.2rem; max-height: 320px; overflow: auto; }
-  .synthesis-preview-label { font-size: .78rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: #2f6b3a; margin-bottom: .6rem; }
-  .synthesis-preview-body { font-size: .92rem; line-height: 1.55; color: #3a2f22; white-space: pre-wrap; }
-  .pi { padding: .3rem 0; color: #6b5840; display: flex; align-items: center; gap: .5rem; }
-  .pi.done { color: #4a7c4e; }
-  .pi.active { color: #b8631e; font-weight: bold; }
-  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #f0e3c8; border-top: 2px solid #b8631e; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 4px; vertical-align: middle; }
+  .file-count { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: .5rem; }
+  .file-item { display: flex; justify-content: space-between; align-items: center; padding: .5rem .8rem; background: #fff; border: 1px solid var(--line); border-radius: 7px; margin-bottom: .3rem; font-size: 13px; }
+  .file-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .file-size { color: var(--muted); font-size: 12px; margin-left: .5rem; white-space: nowrap; }
+  .file-remove { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; padding: 0 .3rem; margin-left: .5rem; }
+  .file-remove:hover { color: #b91c1c; }
+
+  /* Buttons */
+  .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0; background: var(--accent); border: 1px solid transparent; color: #fff; padding: 10px 20px; font: 600 13.5px/1.2 var(--sans); border-radius: 8px; cursor: pointer; white-space: nowrap; box-shadow: 0 1px 2px rgba(180,83,9,.22); transition: background-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 4px 12px rgba(180,83,9,.24); transform: translateY(-1px); }
+  .btn-primary:active:not(:disabled) { transform: translateY(0); box-shadow: 0 1px 2px rgba(180,83,9,.22); }
+  .btn-primary:disabled { background: #cbd5e1; color: #64748b; box-shadow: none; cursor: not-allowed; }
+  .btn-secondary, .btn-add-docs, .btn-download, .btn-ask { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 16px; border-radius: 8px; font: 600 13px/1.2 var(--sans); cursor: pointer; white-space: nowrap; transition: background-color .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease; }
+  .btn-secondary { background: #fff; border: 1px solid var(--input-line); color: var(--text); }
+  .btn-secondary:hover { background: #f8fafc; border-color: #94a3b8; color: var(--ink); }
+  .btn-add-docs { background: var(--accent-wash); border: 1px solid #fde68a; color: var(--accent-text); }
+  .btn-add-docs:hover { background: var(--accent-soft); border-color: var(--accent-line); }
+  .btn-download { background: var(--ink-2); border: 1px solid var(--ink-2); color: #fff; }
+  .btn-download:hover { background: var(--ink); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,.18); }
+  .btn-ask { background: var(--accent); border: 1px solid transparent; color: #fff; }
+  .btn-ask:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(180,83,9,.22); }
+  .btn-ask:active, .btn-download:active { transform: none; }
+
+  /* Progress */
+  .progress-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 12px; }
+  .progress-status { color: var(--ink); font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .progress-eta { color: var(--muted); font-size: 12.5px; margin-bottom: 4px; }
+  .progress-eta:empty { display: none; }
+  .progress-bar { width: 100%; height: 6px; margin-top: 8px; background: #efece4; border-radius: 999px; overflow: hidden; }
+  .progress-fill { position: relative; height: 100%; overflow: hidden; border-radius: 999px; background: linear-gradient(90deg,#b45309,#d97706); transition: width .4s ease; }
+  .progress-fill::after, .job-stepper .step-progress::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg,transparent 0%,rgba(255,255,255,.45) 50%,transparent 100%); transform: translateX(-100%); animation: shimmer 1.6s ease-in-out infinite; }
+  .progress-fill[style*="100%"]::after { animation: none; opacity: 0; }
+  .progress-list { margin-top: 12px; font-size: 13px; }
+  .synthesis-preview-card { margin-top: 12px; background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--ok); border-radius: 8px; padding: 12px 16px; max-height: 320px; overflow: auto; }
+  .synthesis-preview-label { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ok); margin-bottom: 6px; }
+  .synthesis-preview-body { font-size: 13.5px; line-height: 1.55; color: var(--text); white-space: pre-wrap; }
+  .pi { padding: 3px 0; color: var(--text-2); display: flex; align-items: center; gap: .5rem; }
+  .pi.done { color: var(--ok); }
+  .pi.active { color: var(--accent-ink); font-weight: 600; }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #fde68a; border-top: 2px solid var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 4px; vertical-align: middle; }
   @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-  .analysis-card { background: #fff; border: 1px solid #d9c9a8; border-left: 4px solid #b8631e; border-radius: 6px; padding: 1.8rem; margin-bottom: 1.3rem; box-shadow: 0 2px 8px rgba(74,60,40,.06); }
-  .analysis-label { font-size: .7rem; letter-spacing: .25em; color: #b8915e; text-transform: uppercase; margin-bottom: 1rem; font-weight: bold; }
-  .verify-note { background: #fff3e0; border: 1px solid #d97755; color: #6b3410; padding: .7rem 1rem; margin-bottom: 1.2rem; border-radius: 4px; font-size: .85rem; line-height: 1.5; }
-  .ac h2 { color: #6b3410; font-size: 1.1rem; margin: 1.2rem 0 .4rem; font-weight: normal; }
-  .ac h3 { color: #b8631e; margin: 1.4rem 0 .5rem; font-size: .93rem; letter-spacing: .08em; text-transform: uppercase; border-bottom: 2px solid #f0e3c8; padding-bottom: .35rem; font-weight: bold; }
-  .ac p { color: #4a3c28; margin-bottom: .45rem; line-height: 1.65; }
-  .ac strong { color: #6b3410; }
+
+  /* Results */
+  .analysis-card { background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; padding: 22px; margin-bottom: 12px; }
+  .analysis-label { font-size: 11px; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; margin-bottom: 12px; font-weight: 700; }
+  .verify-note { background: var(--accent-wash); border: 1px solid #fde68a; color: var(--accent-ink); padding: 10px 14px; margin-bottom: 16px; border-radius: 8px; font-size: 13px; line-height: 1.5; }
+  .ac { color: var(--text); font-size: 14px; overflow-wrap: break-word; }
+  /* Wide markdown tables scroll inside the card instead of widening the page on phones. */
+  .analysis-card { overflow-x: auto; }
+  .ac h2 { color: var(--ink); font-size: 16px; margin: 18px 0 6px; font-weight: 700; letter-spacing: -.01em; }
+  .ac h3 { color: var(--accent-ink); margin: 20px 0 8px; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; border-bottom: 1px solid var(--line-soft); padding-bottom: 6px; font-weight: 700; }
+  .ac p { color: var(--text); margin-bottom: .45rem; line-height: 1.65; }
+  .ac strong { color: var(--ink); }
   .ac ul { padding-left: 1.4rem; margin-bottom: .5rem; }
-  .ac li { color: #4a3c28; margin-bottom: .2rem; line-height: 1.6; list-style: none; position: relative; }
-  .ac li::before { content:"›"; color: #b8631e; position: absolute; left: -1rem; font-weight: bold; }
-  .ac table { border-collapse: collapse; width: 100%; margin: 1.1rem 0; font-size: .9rem; }
-  .ac th, .ac td { border: 1px solid #e8d8b8; padding: .55rem .75rem; text-align: left; }
-  .ac th { background: #b8631e; color: #fff; font-weight: normal; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
-  .ac tr:nth-child(even) td { background: #faf6ee; }
-  .ac td { color: #4a3c28; }
-  .q-card { background: #faf3e3; border-left: 3px solid #c8a96e; border-radius: 4px; padding: .8rem 1rem; margin-bottom: 1.2rem; font-size: .9rem; color: #6b5840; font-style: italic; }
+  .ac li { color: var(--text); margin-bottom: .2rem; line-height: 1.6; list-style: none; position: relative; }
+  .ac li::before { content:"›"; color: var(--accent); position: absolute; left: -1rem; font-weight: bold; }
+  .ac table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13px; }
+  .ac th, .ac td { border: 1px solid var(--line-soft); padding: 8px 10px; text-align: left; }
+  .ac th { background: var(--tint); color: var(--text-2); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .ac tr:nth-child(even) td { background: #fcfbf8; }
+  .ac td { color: var(--text); }
+  .q-card { background: var(--tint); border-left: 3px solid var(--input-line); border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: 13.5px; color: var(--text-2); }
   .followup-row { display: flex; gap: .6rem; flex-wrap: wrap; }
   .followup-row input { flex: 1; min-width: 200px; }
-  .error-msg { background: #fce8e0; border: 1px solid #d97755; border-left: 4px solid #b8631e; color: #6b3410; padding: .85rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: .9rem; }
-  .info-msg { background: #e8f4fc; border: 1px solid #6ba3c7; border-left: 4px solid #3d7ea6; color: #1e4a63; padding: .85rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: .9rem; }
-  .password-gate { max-width: 420px; margin: 4rem auto; padding: 2.2rem; background: #fff; border: 1px solid #d9c9a8; border-top: 4px solid #b8631e; border-radius: 6px; text-align: center; box-shadow: 0 4px 12px rgba(74,60,40,.1); }
-  .password-gate h2 { color: #6b3410; margin-bottom: .8rem; font-weight: normal; font-size: 1.4rem; }
-  .password-gate p { color: #8a6f4a; font-size: .9rem; margin-bottom: 1.5rem; line-height: 1.5; }
-  .password-gate .remember-password { display: flex; align-items: center; justify-content: center; gap: .5rem; margin: 1rem 0 1.2rem; font-size: .88rem; color: #6b5840; cursor: pointer; user-select: none; }
+
+  /* Messages */
+  .error-msg { background: #fef2f2; border: 1px solid #fecaca; border-left: 3px solid #dc2626; color: #7f1d1d; padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; line-height: 1.5; animation: rise-in .24s var(--ease-out) both; }
+  .info-msg { background: #eff6ff; border: 1px solid #bfdbfe; border-left: 3px solid #2563eb; color: #1e3a8a; padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; line-height: 1.5; }
+  .disclaimer { background: var(--surface); border: 1px solid var(--line); color: var(--text-2); padding: 12px 16px; margin: 20px 0 0; border-radius: 10px; font-size: 12px; line-height: 1.55; }
+  .disclaimer strong { color: var(--accent-ink); }
+
+  /* Password gate */
+  .password-gate { max-width: 400px; margin: 3.5rem auto; padding: 28px; background: #fff; border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 12px; text-align: center; box-shadow: 0 8px 24px rgba(15,23,42,.06); animation: rise-in .32s var(--ease-out) both; }
+  .password-gate h2 { color: var(--ink); margin-bottom: 6px; font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
+  .password-gate p { color: var(--muted); font-size: 13px; margin-bottom: 18px; line-height: 1.5; }
+  .password-gate .btn-primary { width: 100%; margin-top: 4px; }
+  .password-gate .remember-password { display: flex; align-items: center; justify-content: center; gap: .5rem; margin: 1rem 0 1.2rem; font-size: 13px; color: var(--text-2); cursor: pointer; user-select: none; }
   .password-gate .remember-password input { width: auto; margin: 0; cursor: pointer; }
+  .password-gate .error-msg { margin: 12px 0 0; text-align: left; }
+
+  /* Job view */
   .status-badge { display:inline-block; padding:.18rem .65rem; border-radius:999px;
-    font-size:.78rem; font-weight:600; background:#f3e7d8; color:#6b3410; }
-  .status-badge--active { background:#fce8d4; color:#b8631e; }
-  .status-badge--complete { background:#dfeadb; color:#4a7c4e; }
-  .status-badge--failed { background:#fce8e0; color:#d97755; }
-  .status-badge--partial { background:#fff1d6; color:#a06b13; }
-  .status-badge--canceled { background:#ece3d4; color:#8a6f4a; }
+    font-size:.78rem; font-weight:600; background:#f1f5f9; color:#334155; }
+  .status-badge--active { background:#fef3c7; color:#92400e; }
+  .status-badge--complete { background:#dcfce7; color:#166534; }
+  .status-badge--failed { background:#fee2e2; color:#991b1b; }
+  .status-badge--partial { background:#ffedd5; color:#9a3412; }
+  .status-badge--canceled { background:#f1f5f9; color:#475569; }
   #jobHeader { margin-bottom:.45rem; }
-  .job-stepper { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.55rem; align-items:stretch; margin:0 0 1rem; font-size:.85rem; color:#6b5840; }
-  .job-stepper .step-card { border:1px solid #d7c7a8; border-radius:9px; background:#fffaf0; padding:.65rem .75rem; min-width:0; }
-  .job-stepper .step-card.done { background:#eef3e7; border-color:#c9dcc2; color:#4a7c4e; }
-  .job-stepper .step-card.active { background:#fff6e8; border-color:#b8631e; color:#6b3410; }
-  .job-stepper .step-meta { display:block; margin-bottom:.18rem; color:#8a6f4a; font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+  .job-stepper { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.55rem; align-items:stretch; margin:0 0 1rem; font-size:.85rem; color:#475569; }
+  .job-stepper .step-card { border:1px solid #dfdcd4; border-radius:10px; background:#fff; padding:.65rem .75rem; min-width:0; transition:border-color .2s ease, background-color .2s ease; }
+  .job-stepper .step-card.done { background:#f0fdf4; border-color:#bbf7d0; color:#166534; }
+  .job-stepper .step-card.active { background:#fffbeb; border-color:#b45309; color:#78350f; animation:step-pulse 2.4s ease-in-out infinite; }
+  .job-stepper .step-meta { display:block; margin-bottom:.18rem; color:#64748b; font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
   .job-stepper .step-name { display:block; color:inherit; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .job-stepper .step-spinner { display:inline-block; width:.7rem; height:.7rem; margin-left:.35rem; border:2px solid rgba(184,99,30,.22); border-top-color:#b8631e; border-radius:50%; vertical-align:-.08rem; animation:step-spin .75s linear infinite; }
-  .job-stepper .step-progress { display:block; height:.24rem; margin-top:.5rem; border-radius:999px; background:#b8631e; }
+  .job-stepper .step-spinner { display:inline-block; width:.7rem; height:.7rem; margin-left:.35rem; border:2px solid rgba(180,83,9,.22); border-top-color:#b45309; border-radius:50%; vertical-align:-.08rem; animation:step-spin .75s linear infinite; }
+  .job-stepper .step-progress { position:relative; overflow:hidden; display:block; height:.24rem; margin-top:.5rem; border-radius:999px; background:#b45309; }
   @keyframes step-spin { to { transform: rotate(360deg); } }
   @media (max-width: 620px) { .job-stepper { grid-template-columns:1fr; } }
   .job-actions { display:flex; flex-wrap:wrap; gap:.55rem; margin-top:.8rem; }
@@ -111,43 +238,241 @@
   #jobTitleBlock .btn-secondary {
     width:auto; margin-top:0; padding:.55rem 1.1rem; font-size:.85rem; letter-spacing:0;
   }
-  .recent-jobs-toolbar { display:flex; justify-content:flex-end; align-items:center;
-    gap:.65rem; margin-bottom:.75rem; color:#8a6f4a; font-size:.84rem; }
-  .recent-jobs-toolbar-button { text-decoration:none; display:inline-block; padding:.42rem .85rem;
-    border-radius:8px; border:1px solid #d7c2a2; background:#fbf2dc; color:#6b3410;
-    font-weight:600; cursor:pointer; }
-  .recent-jobs-toolbar-button:hover { background:#f5e7c4; }
-  .recent-jobs-toolbar-button--disabled { background:#eee8dc; border-color:#d8cbb6;
-    color:#9a8c7a; cursor:not-allowed; pointer-events:none; }
-  .recent-jobs-row { display:flex; justify-content:space-between; padding:.7rem .9rem;
-    border:1px solid #e5d6b8; border-radius:8px; margin-bottom:.55rem; cursor:pointer;
-    background:#fbf2dc; }
-  .recent-jobs-row:hover { background:#f5e7c4; }
-  .recent-jobs-empty { color:#8a6f4a; font-style:italic; padding:.6rem 0; }
+  .recent-jobs-row { display:flex; justify-content:space-between; gap:12px; padding:.7rem .9rem;
+    border:1px solid #dfdcd4; border-radius:8px; margin-bottom:.5rem; cursor:pointer;
+    background:#fff; transition:background-color .15s ease, border-color .15s ease; }
+  .recent-jobs-row:hover { background:#fafaf8; border-color:#cbd5e1; }
+  .recent-jobs-empty { color:#64748b; padding:.6rem 0; }
+  #view-history h2 { font-size:17px; font-weight:700; color:#0f172a; margin-bottom:12px; }
+
+  /* Results dashboard (R1). Built from the parsed opinion; falls back to .analysis-card markdown. */
+  .rd { --rd-red:#b91c1c; --rd-base:40ms; }
+  .rd .card { margin-bottom: 14px; }
+  .rd-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  .rd-hero { display:grid; grid-template-columns:minmax(0,1fr); gap:14px; }
+  .rd-hero-top { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
+  .rd-eyebrow { font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  .rd-subject { font-size:12.5px; color:var(--muted); margin-top:2px; overflow-wrap:anywhere; }
+  .rd-ai-pill { display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:600; color:var(--accent-ink); background:var(--accent-soft); border:1px solid var(--accent-line); padding:5px 11px; border-radius:999px; white-space:nowrap; flex-shrink:0; }
+  .rd-ai-pill svg { color:var(--accent); }
+  .rd-headline { font-size:17px; font-weight:700; color:var(--ink); letter-spacing:-.01em; line-height:1.35; max-width:820px; overflow-wrap:anywhere; }
+  .rd-headline .ok { color:var(--ok); }
+  .rd-headline .bad { color:var(--rd-red); }
+  .rd-headline .warn { color:#b45309; }
+  .rd-headline strong { color:inherit; }
+  .rd-sumlist { list-style:none; display:grid; gap:4px; font-size:13px; color:var(--text); margin-top:-4px; }
+  .rd-sumlist li { position:relative; padding-left:14px; overflow-wrap:anywhere; }
+  .rd-sumlist li::before { content:''; position:absolute; left:2px; top:.62em; width:5px; height:5px; border-radius:50%; background:#cbd5e1; }
+  .rd-sumlist strong { color:var(--ink); }
+  .rd-kpis { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+  .rd-kpi { border:1px solid var(--line-soft); background:#fcfbf8; border-radius:9px; padding:12px 14px; min-width:0; }
+  .rd-kpi .lbl { font-size:11.5px; font-weight:600; color:var(--text-2); }
+  .rd-kpi .val { font:700 26px/1.15 var(--mono); color:var(--ink); margin-top:4px; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .rd-kpi .val.teal { color:var(--ok); }
+  .rd-kpi .val.red { color:var(--rd-red); }
+  .rd-kpi .val.amber { color:#b45309; }
+  .rd-kpi .val.sm { font:700 19px/1.25 var(--sans); letter-spacing:-.01em; padding:5px 0 1px; overflow-wrap:anywhere; }
+  .rd-kpi .sub { font-size:11.5px; color:var(--muted); margin-top:3px; overflow-wrap:anywhere; }
+  .rd-kpi .sub.warn { display:flex; align-items:flex-start; gap:5px; color:#92400e; font-weight:600; margin-top:6px; }
+  .rd-kpi .sub.warn svg { flex-shrink:0; margin-top:1px; }
+  .rd-kpi .bar { height:6px; border-radius:999px; background:#fee2e2; margin-top:8px; overflow:hidden; }
+  .rd-kpi .bar span { display:block; height:100%; background:var(--ok); border-radius:999px; }
+  .rd-card-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  .rd-card-head h3 { font-size:14.5px; font-weight:700; color:var(--ink); letter-spacing:-.005em; }
+  .rd-card-head .aside { font-size:12px; color:var(--muted); }
+  .rd-note { font-size:12.5px; color:var(--text-2); margin-top:10px; overflow-wrap:anywhere; }
+  .rd-empty { font-size:13px; color:var(--muted); padding:6px 0; }
+  .rd-own { display:grid; grid-template-columns:220px minmax(0,1fr); gap:22px; align-items:start; }
+  .rd-own-viz { display:flex; flex-direction:column; align-items:center; gap:10px; padding-top:4px; }
+  .rd-own-viz .legend { font-size:11.5px; color:var(--muted); text-align:center; display:flex; align-items:center; gap:6px; }
+  .rd-frac, .rd-mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .rd-frac { font-weight:600; color:var(--ink); }
+  .rd-none { color:var(--muted); }
+  .rd-swatch { width:10px; height:10px; border-radius:3px; flex-shrink:0; display:inline-block; }
+  .rd-swatch.hatch { background:repeating-linear-gradient(135deg,#b91c1c 0 2px,#fecaca 2px 4px) !important; }
+  .rd-tbl-wrap { border:1px solid var(--line-soft); border-radius:8px; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .rd-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+  .rd-tbl th { text-align:left; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); padding:8px 10px; background:var(--tint); border-bottom:1px solid var(--line-soft); white-space:nowrap; }
+  .rd-tbl td { padding:9px 10px; border-bottom:1px solid #f1efe9; vertical-align:top; color:var(--text); overflow-wrap:anywhere; }
+  .rd-tbl tbody tr:last-child td { border-bottom:none; }
+  .rd-tbl .num { text-align:right; white-space:nowrap; }
+  .rd-tbl tbody tr:hover td { background:#fcfbf8; }
+  .rd-tbl tfoot td { border-top:1px solid var(--nav-line); background:var(--tint); font-weight:600; color:var(--ink); }
+  .rd-tbl .muted-row td { color:var(--muted); }
+  .rd-owners { min-width:600px; }
+  .rd-owner { display:flex; align-items:flex-start; gap:8px; min-width:150px; }
+  .rd-owner .rd-swatch { margin-top:4px; }
+  .rd-owner b { display:block; color:var(--ink); font-weight:600; }
+  .rd-owner small { display:block; color:var(--muted); font-size:11.5px; }
+  .rd-sum { display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; color:var(--ok); }
+  .rd-sum.warn { color:var(--rd-red); }
+  .rd-chip { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:600; padding:2px 7px; border-radius:999px; border:1px solid #e2e8f0; background:#f8fafc; color:#334155; white-space:nowrap; line-height:1.5; }
+  .rd-chip.red { background:#fef2f2; border-color:#fecaca; color:#b91c1c; }
+  .rd-chip.amber { background:#fef3c7; border-color:#fcd34d; color:#78350f; }
+  .rd-chip.slate { background:#f1f5f9; border-color:#cbd5e1; color:#334155; }
+  .rd-chip.d { font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:5px; }
+  .rd-dtop .rd-chip.d { white-space:normal; overflow-wrap:anywhere; max-width:100%; }
+  .rd-chips { display:flex; flex-wrap:wrap; gap:4px; }
+  .rd-defects { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+  .rd-dcard { border:1px solid #e5e2da; border-left:3px solid #94a3b8; border-radius:9px; padding:14px 15px; background:#fff; display:flex; flex-direction:column; gap:8px; min-width:0; }
+  .rd-dcard.material { border-left-color:#b91c1c; }
+  .rd-dcard.curative { border-left-color:#d97706; }
+  .rd-dtop { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .rd-dtop .rd-cite { margin-left:auto; }
+  .rd-sev { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; padding:2px 7px; border-radius:5px; }
+  .rd-sev.material { background:#fef2f2; color:#b91c1c; }
+  .rd-sev.curative { background:#fef3c7; color:#78350f; }
+  .rd-sev.clarify { background:#f1f5f9; color:#334155; }
+  .rd-dcard h4 { font-size:13.5px; font-weight:650; color:var(--ink); line-height:1.4; overflow-wrap:anywhere; }
+  .rd-dgrid { display:grid; grid-template-columns:74px minmax(0,1fr); gap:4px 10px; font-size:12.5px; padding-top:8px; border-top:1px dashed #e5e2da; }
+  .rd-dgrid dt { color:var(--muted); font-weight:600; font-size:11.5px; padding-top:1px; }
+  .rd-dgrid dd { color:var(--text); overflow-wrap:anywhere; }
+  .rd-dgrid dd.cure { font-weight:700; color:var(--accent-ink); }
+  .rd-dfoot { display:flex; justify-content:flex-end; margin-top:auto; padding-top:2px; }
+  .rd-cite { display:inline-flex; align-items:center; gap:5px; font:600 11px/1.4 var(--mono); color:var(--text-2); background:#faf9f6; border:1px solid #e5e2da; border-radius:6px; padding:2px 7px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:default; }
+  button.rd-cite { cursor:pointer; }
+  button.rd-cite:hover { border-color:var(--accent); color:var(--accent); }
+  .rd-link { display:inline-flex; align-items:center; gap:4px; color:var(--accent); font:600 12.5px/1.3 var(--sans); background:none; border:0; padding:4px 0; cursor:pointer; }
+  .rd-link:hover { text-decoration:underline; }
+  .rd-chain { min-width:860px; }
+  .rd-chain td.date, .rd-chain td.ref, .rd-chain td:first-child { white-space:nowrap; }
+  .rd-chain td.ref small { display:block; color:var(--muted); font-size:11.5px; margin-top:1px; }
+  .rd-chain .parties { min-width:170px; }
+  .rd-chain .parties b { color:var(--ink); font-weight:600; display:block; }
+  .rd-chain .parties .arr { color:#94a3b8; margin:0 3px; }
+  .rd-chain .conv small { display:block; color:#b91c1c; font-size:11px; font-weight:600; }
+  .rd-chain .bal { font-size:12px; min-width:140px; }
+  .rd-chain tr.flagged td:first-child { box-shadow:inset 3px 0 0 #fca5a5; }
+  .rd-chain tr.rd-hit td { background:var(--accent-wash) !important; transition:background-color .3s ease; }
+  .rd-quals { display:grid; grid-template-columns:110px minmax(0,1fr); gap:6px 12px; font-size:12.5px; }
+  .rd-quals dt { font-weight:700; color:var(--text-2); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; padding-top:1px; overflow-wrap:anywhere; }
+  .rd-quals dd { color:var(--text); overflow-wrap:anywhere; }
+  .rd-raw { margin:0 0 14px; }
+  .rd-raw > summary { cursor:pointer; font-size:12.5px; font-weight:600; color:var(--text-2); padding:6px 2px; width:max-content; max-width:100%; }
+  .rd-raw > summary:hover { color:var(--accent); }
+  .rd-raw[open] > summary { margin-bottom:8px; }
+  /* Sticky action bar: follow-up + document actions (both job view and in-tab results) */
+  #jobFollowup { display:contents; }
+  #followupSection { position:sticky; bottom:12px; z-index:20; }
+  .rd-actionbar { position:sticky; bottom:12px; z-index:20; margin:4px 0 12px; background:rgba(255,255,255,.96); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px); border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 24px rgba(15,23,42,.10),0 1px 2px rgba(15,23,42,.06); padding:10px; display:flex; gap:8px; align-items:center; }
+  #followupSection .rd-actionbar { position:static; margin:4px 0 12px; }
+  .rd-ask { flex:1; display:flex; align-items:center; gap:8px; border:1px solid var(--input-line); border-radius:8px; padding:0 6px 0 12px; background:var(--tint); min-width:0; transition:border-color .15s ease, box-shadow .15s ease; }
+  .rd-ask > svg { color:var(--accent); flex-shrink:0; }
+  .rd-ask input[type=text] { flex:1; min-width:0; border:0; background:transparent; box-shadow:none; padding:9px 0; border-radius:0; }
+  .rd-ask input[type=text]:focus { box-shadow:none; background:transparent; }
+  .rd-ask:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px rgba(180,83,9,.15); }
+  .rd-ask .btn-ask { padding:6px 12px; font-size:12px; border-radius:7px; }
+  .rd-ab-status { font-size:12px; color:var(--muted); padding:0 6px; white-space:nowrap; }
+  .rd-actionbar .btn-secondary, .rd-actionbar .btn-primary { padding:9px 15px; font-size:13px; }
+  #view-job:has(#jobFollowup:not([style*="none"])) #jobDownloadPdfBtn { display:none; }
+  #jobProgress.rd-leaving { opacity:0; transform:translateY(-6px); transition:opacity 260ms ease-in, transform 260ms ease-in; }
+  @keyframes rd-enter { from { opacity:0; transform:translateY(8px); } }
+  @keyframes rd-draw { from { stroke-dasharray:0 400; } }
+  @keyframes rd-grow { from { transform:scaleX(0); } }
+  @keyframes rd-slide-up { from { opacity:0; transform:translateY(16px); } }
+  @media (prefers-reduced-motion: no-preference) {
+    .rd.rd-animate .rd-enter { animation:rd-enter 460ms cubic-bezier(.2,.7,.2,1) both; animation-delay:calc(var(--i,0) * 70ms + var(--rd-base)); }
+    .rd.rd-animate .rd-grow { transform-origin:left center; animation:rd-grow 700ms cubic-bezier(.65,0,.35,1) both; animation-delay:calc(var(--i,0) * 80ms + 300ms); }
+    .rd.rd-animate .rd-seg { animation:rd-draw 800ms cubic-bezier(.65,0,.35,1) both; animation-delay:calc(var(--i,0) * 90ms + 260ms); }
+    .rd.rd-from-processing { --rd-base:160ms; }
+    .rd-actionbar.rd-animate { animation:rd-slide-up 380ms cubic-bezier(.2,.7,.2,1) 520ms both; }
+  }
+  @media (max-width: 760px) {
+    .rd-hero-top { flex-direction:column; gap:8px; }
+    .rd-ai-pill { white-space:normal; }
+    .rd-headline { font-size:15.5px; }
+    .rd-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .rd-kpi .val { font-size:22px; }
+    .rd-own { grid-template-columns:minmax(0,1fr); }
+    .rd-defects { grid-template-columns:minmax(0,1fr); }
+    .rd-quals { grid-template-columns:minmax(0,1fr); gap:2px; }
+    .rd-quals dd { margin-bottom:8px; }
+    .rd-actionbar { flex-wrap:wrap; bottom:8px; }
+    .rd-ask { flex-basis:100%; }
+    .rd-ask input[type=text] { padding:12px 0; }
+    .rd-ask .btn-ask { min-height:36px; }
+    .rd-actionbar > button { flex:1; min-height:44px; }
+    .rd-ab-status { display:none; }
+    .rd-link { min-height:44px; }
+    .rd-raw > summary { padding:13px 2px; }
+    button.rd-cite { position:relative; overflow:visible; white-space:normal; text-align:left; }
+    button.rd-cite::after { content:''; position:absolute; inset:-8px -4px; }
+  }
+
+  /* Motion */
+  @keyframes rise-in { from { opacity: 0; transform: translateY(6px); } }
+  @keyframes row-in { from { opacity: 0; transform: translateY(4px); } }
+  @keyframes view-in { from { opacity: 0; } }
+  @keyframes shimmer { to { transform: translateX(100%); } }
+  @keyframes step-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(180,83,9,0); } 50% { box-shadow: 0 0 0 4px rgba(180,83,9,.12); } }
+  #mainApp > [data-view] { animation: view-in .22s var(--ease-out) both; }
+  .reveal { animation: rise-in .38s var(--ease-out) both; animation-delay: calc(var(--d, 0) * 50ms); }
+
+  /* Small screens */
+  @media (max-width: 760px) {
+    .header { height: auto; flex-wrap: wrap; padding: 10px 16px; gap: 6px 12px; }
+    .nav { width: 100%; margin: 0 -4px; }
+    .nav-pill, .recent-jobs-toolbar-button { min-height: 40px; padding: 8px 11px; }
+    .recent-jobs-hint { left: 0; right: auto; }
+    .container { padding: 14px 14px 0; }
+    .page-head { flex-direction: column; align-items: stretch; gap: 10px; }
+    .head-actions { flex-wrap: wrap; }
+    .head-actions .btn-cta { flex: 1 1 auto; min-height: 44px; }
+    .ctx-bar { grid-template-columns: minmax(0,1fr); gap: 12px; padding: 14px; }
+    .upload-zone, .has-files .upload-zone { flex-direction: column; align-items: stretch; padding: 20px 18px; gap: 14px; }
+    .drop-left { align-items: flex-start; gap: 14px; }
+    .drop-icon { width: 44px; height: 44px; }
+    .btn-browse { text-align: center; padding: 12px 18px; }
+    .q-toolbar { padding: 11px 14px; }
+    .staged-head { display: none; }
+    #fileList .file-item { grid-template-columns: 50px minmax(0,1fr) auto; grid-template-areas: "type name remove" "type size remove"; row-gap: 1px; padding: 8px 14px; }
+    #fileList .file-type { grid-area: type; }
+    #fileList .file-name { grid-area: name; }
+    #fileList .file-size { grid-area: size; text-align: left; }
+    #fileList .file-status { display: none; }
+    #fileList .file-remove { grid-area: remove; min-height: 44px; padding: 0 8px; margin: 0 -8px 0 0; }
+    .staged-foot { padding: 10px 14px; }
+    .card { padding: 16px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+    .progress-fill::after, .job-stepper .step-progress::after { display: none; }
+    .spinner, .job-stepper .step-spinner { animation-duration: 1.2s !important; animation-iteration-count: infinite !important; }
+  }
 </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha384-weMABwrltA6jWR8DDe9Jp5blk+tZQh7ugpCsF3JwSA53WZM9/14PjS5LAJNHNjAI" crossorigin="anonymous"></script>
 </head>
 <body>
 
-<div class="header">
-  <h1>Mineral Ownership Builder</h1>
-  <div class="tagline">Title Research Tool</div>
-  <div class="app-version" id="appVersion" hidden></div>
+<header class="header">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">MO</div>
+    <div class="brand-text">
+      <h1>Mineral Ownership Builder</h1>
+      <div class="brand-sub">
+        <div class="tagline">Title Research Tool</div>
+        <div class="app-version" id="appVersion" hidden></div>
+      </div>
+    </div>
+  </div>
+  <nav class="nav" aria-label="Primary">
+    <a class="nav-pill active" id="navNewAnalysis" href="#/">New Analysis</a>
+    <div class="recent-jobs-toolbar" id="recentJobsToolbar">
+      <a id="recentJobsButton" class="recent-jobs-toolbar-button recent-jobs-toolbar-button--disabled" aria-disabled="true" tabindex="-1" aria-describedby="recentJobsToolbarHint">Recent Jobs <span class="nav-count" id="recentJobsCount"></span></a>
+      <span id="recentJobsToolbarHint" class="recent-jobs-hint" role="tooltip">Recent jobs available after your first completed analysis.</span>
+    </div>
+  </nav>
+</header>
 
-</div>
-
-<div class="disclaimer" id="disclaimer" style="display:none">
-  <strong>⚠ AI-Assisted Analysis Tool:</strong> This is a first-pass research assistant, not a legal opinion. Always verify the output against source documents and consult a licensed attorney before any drilling, leasing, or division order action.
-</div>
-
-<div class="container">
+<main class="container">
 
   <div id="passwordGate" class="password-gate" style="display:none">
     <h2>Access Required</h2>
     <p>Enter the access password provided by your administrator.</p>
     <div class="field">
-      <input type="password" id="passwordInput" placeholder="Password..." />
+      <input type="password" id="passwordInput" placeholder="Password..." aria-label="Password" />
     </div>
     <button class="btn-primary" onclick="checkPassword()">Enter</button>
     <div id="passwordError"></div>
@@ -157,35 +482,49 @@
 
     <div id="view-home" data-view="home">
 
-    <div class="recent-jobs-toolbar" id="recentJobsToolbar">
-      <span id="recentJobsToolbarHint">Recent jobs available after your first completed analysis.</span>
-      <a id="recentJobsButton" class="recent-jobs-toolbar-button recent-jobs-toolbar-button--disabled" aria-disabled="true" tabindex="-1">Recent jobs</a>
+    <div class="page-head reveal" style="--d:0">
+      <div>
+        <h2>New Title Chain Analysis</h2>
+        <p id="homeSubtitle">Add optional tract context, then stage up to 400 files for one chain-of-title run.</p>
+      </div>
+      <div class="head-actions">
+        <span class="pill">AI draft · verify against instruments</span>
+        <button class="btn-primary btn-cta" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title <span id="analyzeBtnCount"></span></button>
+      </div>
     </div>
 
-    <div class="card" id="uploadSection">
-      <div class="field">
-        <label class="field-label">Subject Tract Description (optional)</label>
-        <input type="text" id="tractDescription" placeholder="e.g. SE/4 of Section 14, T-3-N, R-5-W, Reeves County, TX" />
-      </div>
-      <div class="field">
-        <label class="field-label">Additional Context (optional)</label>
-        <textarea id="contextNotes" placeholder="Time period, known issues, specific questions, original patent date, etc." rows="2"></textarea>
-      </div>
-      <div class="field">
-        <label class="field-label">Upload Documents</label>
-        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
-          <span class="upload-text">Click anywhere here or drag &amp; drop files</span>
-          <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
-          </span>
-          <div id="fileList"></div>
+    <div id="uploadSection">
+      <section class="card ctx-bar reveal" style="--d:1" aria-label="Tract context">
+        <div>
+          <label class="label" for="tractDescription">Subject Tract Description <span class="opt">Optional</span></label>
+          <input type="text" id="tractDescription" placeholder="e.g. SE/4 of Section 14, T-3-N, R-5-W, Reeves County, TX" />
         </div>
-        <p style="color:#8a6f4a;font-size:.83rem;margin-top:.6rem;line-height:1.5">
-          <strong style="color:#6b3410">Tip:</strong> One recorded instrument per PDF when possible.
-        </p>
-        <input type="file" id="fileInput" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
+        <div>
+          <label class="label" for="contextNotes">Additional Context <span class="opt">Optional</span></label>
+          <textarea id="contextNotes" placeholder="Time period, known issues, specific questions, original patent date, etc." rows="1"></textarea>
+        </div>
+      </section>
+
+      <div class="upload-zone reveal" style="--d:2" id="uploadZone" role="button" tabindex="0" aria-label="Add documents. Drop files here or press Enter to choose files." onclick="document.getElementById('fileInput').click()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+        <div class="drop-left">
+          <div class="drop-icon" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
+          <div class="drop-copy">
+            <span class="upload-text"><span class="when-empty">Drop recorded instruments here, up to 400 files at once</span><span class="when-staged">Drop more files here or click to add</span></span>
+            <span class="upload-hint"><span class="when-empty">Drag in a whole title package or click to choose files. One recorded instrument per PDF works best.</span><span class="when-staged">PDF, CSV, JPG, PNG, GIF, WEBP · <b><span id="dropSlots">0</span> of 400 slots filled</b><span class="when-full"> (remove files below to swap in replacements)</span></span></span>
+            <span class="drop-chips when-empty"><span class="chip strong">Up to 400 documents per run</span><span class="chip">PDF</span><span class="chip">CSV</span><span class="chip">JPG / PNG / GIF / WEBP</span></span>
+          </div>
+        </div>
+        <span class="btn-browse" aria-hidden="true"><span class="when-empty">+ Select Files</span><span class="when-staged">+ Add More Files</span></span>
       </div>
-      <button class="btn-primary" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title</button>
+      <input type="file" id="fileInput" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
+
+      <section class="card queue-box reveal" style="--d:3" aria-labelledby="stagedTitle">
+        <div class="q-toolbar">
+          <div class="q-left"><h3 id="stagedTitle">Staged Documents</h3><span class="q-stats mono" id="stagedBadge">0 / 400 files staged</span></div>
+        </div>
+        <div id="fileList"></div>
+        <div class="q-empty"><strong>No documents staged yet</strong>Drop files into the zone above to stage and check them before you start.</div>
+      </section>
     </div>
 
     <div id="errorBox"></div>
@@ -210,34 +549,30 @@
     <div id="results"></div>
 
     <div id="followupSection" style="display:none">
-      <div class="card">
-        <label class="field-label">Follow-up Question</label>
-        <div class="followup-row">
-          <input type="text" id="followupInput" placeholder="Ask about specific owners, fractions, gaps, curative items..." />
-          <button class="btn-ask" onclick="askFollowup()">Ask</button>
+      <div class="rd-actionbar" role="toolbar" aria-label="Analysis actions">
+        <div class="rd-ask">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+          <label class="rd-sr" for="followupInput">Ask a follow-up</label>
+          <input type="text" id="followupInput" placeholder="Ask a follow-up about owners, fractions, gaps, curative items…" />
+          <button class="btn-ask" type="button" onclick="askFollowup()">Ask</button>
         </div>
-        <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
-          <button class="btn-add-docs" onclick="showAddDocs()">+ Add More Documents</button>
-          <button class="btn-download" onclick="downloadPDF()">Download PDF</button>
-        </div>
-        <p style="color:#8a6f4a;font-size:.83rem;margin-top:.85rem;line-height:1.5;margin-bottom:0">
-          <strong style="color:#6b3410">Tip:</strong> Use Follow-up or + Add More Documents to refine ownership without starting over.
-        </p>
+        <button class="btn-secondary" type="button" onclick="showAddDocs()">+ Add Documents</button>
+        <button class="btn-primary" type="button" onclick="downloadPDF()">Download PDF</button>
       </div>
     </div>
 
     <div id="addDocsSection" style="display:none">
       <div class="card">
         <label class="field-label">Add More Documents to This Analysis</label>
-        <p style="color:#8a6f4a;font-size:.88rem;margin-bottom:1rem;line-height:1.5">
+        <p style="color:#64748b;font-size:13px;margin-bottom:1rem;line-height:1.5">
           Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined. You can repeat this as many times as needed — up to 400 files per upload.
         </p>
-        <div class="upload-zone" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
+        <div class="upload-zone upload-zone--stack" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
           <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
           <span class="upload-hint">
-            <strong style="color:#6b3410">Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
+            <strong>Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
           </span>
-          <div id="fileList2"></div>
+          <div id="fileList2" class="file-list"></div>
         </div>
         <input type="file" id="fileInput2" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
         <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
@@ -265,20 +600,27 @@
       <div id="jobActions" class="job-actions"></div>
       <div id="jobResults"></div>
       <div id="jobFollowup" style="display:none">
-        <div class="card">
-          <label class="field-label">Follow-up Question</label>
-          <div class="followup-row">
-            <input type="text" id="jobFollowupInput" placeholder="Ask about specific owners, fractions, gaps, curative items..." />
-            <button class="btn-ask" id="jobFollowupBtn">Ask</button>
+        <div id="jobFollowupHistory"></div>
+        <div class="rd-actionbar" id="jobActionBar" role="toolbar" aria-label="Job actions">
+          <div class="rd-ask">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+            <label class="rd-sr" for="jobFollowupInput">Ask a follow-up</label>
+            <input type="text" id="jobFollowupInput" placeholder="Ask a follow-up about owners, fractions, gaps, curative items…" />
+            <button class="btn-ask" id="jobFollowupBtn" type="button">Ask</button>
           </div>
-          <div id="jobFollowupHistory" style="margin-top:1rem"></div>
+          <span class="rd-ab-status" id="jobBarStatus"></span>
+          <button class="btn-primary" id="jobBarDownloadBtn" type="button">Download PDF</button>
         </div>
       </div>
     </div>
     <div id="view-history" data-view="history" style="display:none"></div>
 
   </div>
-</div>
+
+  <div class="disclaimer" id="disclaimer" style="display:none">
+    <strong>AI-assisted analysis:</strong> This is a first-pass research assistant, not a legal opinion. Always verify the output against source documents and consult a licensed attorney before any drilling, leasing, or division order action.
+  </div>
+</main>
 
 <script>
 const MAX_FILES = 400;
@@ -712,6 +1054,7 @@ async function checkPasswordRequired() {
 function showMain() {
   document.getElementById('mainApp').style.display = 'block';
   document.getElementById('disclaimer').style.display = 'block';
+  if (document.body && document.body.classList) document.body.classList.add('app-ready');
   renderRecentJobsToolbar();
   if (parseRoute().name === 'home') resumeLastAnalysisJob();
 }
@@ -1092,6 +1435,8 @@ function applyRoute(route) {
   home.style.display = route.name === 'home' ? '' : 'none';
   job.style.display = route.name === 'job' ? '' : 'none';
   history.style.display = route.name === 'history' ? '' : 'none';
+  const navNew = document.getElementById('navNewAnalysis');
+  if (navNew && navNew.classList) navNew.classList[route.name === 'home' ? 'add' : 'remove']('active');
   if (route.name === 'job') {
     loadJobView(route.jobId).catch(err => console.warn('Job view load failed', err));
   } else if (route.name === 'history') {
@@ -1165,14 +1510,14 @@ function renderJobHeader(job) {
             <h2 id="jobTitleText" style="margin:0">${esc(title)}</h2>
             <button class="btn-secondary" id="jobRenameBtn" type="button" style="padding:.25rem .55rem;font-size:.78rem">Rename</button>
           </div>
-          <div style="color:#8a6f4a;font-size:.85rem;margin-top:.3rem">
+          <div style="color:#64748b;font-size:.85rem;margin-top:.3rem">
             Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
             updated ${esc(formatRelative(job.updatedAt))}
           </div>
         </div>
         <span class="status-badge ${info.badge}">${esc(info.label)}</span>
       </div>
-      <div id="jobHeaderActionsFooter" style="display:flex;justify-content:flex-end;gap:.6rem;align-items:center;flex-wrap:wrap;border-top:1px solid #eadcc0;margin-top:1rem;padding-top:.85rem">
+      <div id="jobHeaderActionsFooter" style="display:flex;justify-content:flex-end;gap:.6rem;align-items:center;flex-wrap:wrap;border-top:1px solid #eeece6;margin-top:1rem;padding-top:.85rem">
         ${hasDownloadableResult ? '<button class="btn-primary" id="jobDownloadPdfBtn" type="button">Download PDF</button>' : ''}
         <button class="btn-secondary" id="jobStartNewBtn" type="button">Start New Job</button>
       </div>
@@ -1201,11 +1546,11 @@ function renderJobNameEditor(job, currentTitle) {
   if (!block || !job) return;
   block.innerHTML = `
     <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
-      <input id="jobNameInput" type="text" value="${esc(currentTitle)}" maxlength="500" style="font-size:1.25rem;font-weight:700;padding:.42rem .55rem;border:1px solid #d7c2a2;border-radius:8px;min-width:min(420px, 80vw)" />
+      <input id="jobNameInput" type="text" value="${esc(currentTitle)}" maxlength="500" style="font-size:1.25rem;font-weight:700;padding:.42rem .55rem;border:1px solid #cbd5e1;border-radius:8px;min-width:min(420px, 80vw)" />
       <button class="btn-primary" id="jobNameSaveBtn" type="button" style="padding:.35rem .75rem;font-size:.82rem">Save</button>
       <button class="btn-secondary" id="jobNameCancelBtn" type="button" style="padding:.35rem .75rem;font-size:.82rem">Cancel</button>
     </div>
-    <div style="color:#8a6f4a;font-size:.85rem;margin-top:.3rem">
+    <div style="color:#64748b;font-size:.85rem;margin-top:.3rem">
       Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
       updated ${esc(formatRelative(job.updatedAt))}
     </div>`;
@@ -1324,6 +1669,7 @@ function resetHomeForNewJob() {
   if (followup) followup.style.display = 'none';
   if (addDocs) addDocs.style.display = 'none';
   if (analyzeBtn) analyzeBtn.disabled = true;
+  updateStagedSummary();
 }
 
 function handleJobCanceled() {
@@ -1354,15 +1700,31 @@ function derivedProgressPercent(job) {
 
 let lastJobProgressId = null;
 let lastJobProgressPct = 0;
+let rdProgressLeave = { jobId: null, at: 0, token: 0 };
 function renderJobProgressView(job) {
   const wrap = document.getElementById('jobProgress');
   if (!wrap || !job) return;
   if (TERMINAL_STATUSES.has(job.status)) {
-    wrap.style.display = 'none';
+    const wasShowingThisJob = lastJobProgressId === job.id && wrap.style.display !== 'none';
     lastJobProgressId = null;
     lastJobProgressPct = 0;
+    if (wasShowingThisJob && rdMotionAllowed() && wrap.classList) {
+      // Processing -> results cross-fade: fade the progress card out, then drop it.
+      const token = ++rdProgressLeave.token;
+      rdProgressLeave = { jobId: job.id, at: Date.now(), token };
+      wrap.classList.add('rd-leaving');
+      setTimeout(() => {
+        if (rdProgressLeave.token !== token) return;
+        wrap.style.display = 'none';
+        wrap.classList.remove('rd-leaving');
+      }, 260);
+      return;
+    }
+    wrap.style.display = 'none';
     return;
   }
+  rdProgressLeave.token++;
+  if (wrap.classList) wrap.classList.remove('rd-leaving');
   wrap.style.display = '';
   const info = statusInfo(job.status);
   const rawPct = derivedProgressPercent(job);
@@ -1389,6 +1751,11 @@ function renderJobProgressView(job) {
 function renderJobStepper(job) {
   const el = document.getElementById('jobStepper');
   if (!el || !job) return;
+  // Finished jobs show results; an all-"Done" stepper adds nothing there.
+  if (job.status === 'complete' || job.status === 'partial_failed') {
+    el.style.display = 'none';
+    return;
+  }
   el.style.display = '';
   const phases = ['Upload', 'Abstract', 'Synthesize'];
   const order = { uploading: 0, ready: 1, queued: 1, planning: 1, abstracting: 1, synthesizing: 2 };
@@ -1510,6 +1877,772 @@ function renderJobActions(job) {
   });
 }
 
+// ---- Results dashboard (R1 executive layout) ----
+// parseTitleOpinion() is pure: markdown in, plain data out. renderResultsDashboard() escapes every
+// model-derived string. When the parse is not usable, callers fall back to the md() card.
+const RD_SECTION_RULES = [
+  ['owners', /final ownership|ownership determination|^(current |mineral |record )?owner(ship|s)?( of record| schedule| table)?$/i],
+  ['defects', /defect|curative/i],
+  ['owners', /\bowner(ship|s)?\b/i],
+  ['chain', /chain of title|\bchain\b|run ?sheet/i],
+  ['summary', /\bsummary\b/i],
+  ['quals', /qualification|assumption|limitation|caveat/i],
+];
+const RD_EMPTY_CELL = /^(none|n\/a|na|nil|null|clear|—|–|-|--|0|\.)?$/i;
+const RD_UNRECONCILED = /heirship|probate|intestate|administration of (the )?estate|unknown (heirs?|owners?)|missing (link|conveyance|instrument|deed)|(gap|break) in (the )?chain|chain (gap|break)/i;
+const RD_MATERIAL = /overgrant|over-?conve|habendum|conflict|discrepan|exceed|forg|\bvoid\b|title failure|adverse/i;
+const RD_CLARIFY = /ambig|unclear|uncertain|floating|fixed vs|interpret|clarif|illegib/i;
+const RD_FLAG_LABELS = { AMBIG: 'Ambiguous', OVERGRANT: 'Overgrant', UNRELEASED: 'Unreleased', GAP: 'Gap', ILLEGIBLE: 'Illegible' };
+const RD_PALETTE = ['#b45309', '#475569', '#0f766e', '#f59e0b', '#0e7490', '#a16207', '#334155', '#94a3b8'];
+
+function rdSectionKey(text) {
+  const t = String(text || '');
+  for (const [key, re] of RD_SECTION_RULES) if (re.test(t)) return key;
+  return null;
+}
+
+// Known section names a standalone **bold** line may stand for. Anything else stays body text.
+const RD_BOLD_SECTION = /^(executive summary|summary|chain of title|run ?sheet|title defects?|title defects? (&|and) curative( requirements?)?|curative requirements?|defects (&|and) curative( requirements?)?|final ownership( determination)?|ownership determination|opinion qualifications|qualifications)$/i;
+const RD_NONE_PHRASE = /^(none|n\/a|na|nil|null|—|–|-|--|none (identified|found|noted|listed)|no (title |known |material )?(defects?|issues?|curative)( (identified|found|noted|listed|required))?)\.?$/i;
+const RD_MAX_HEADING = 400;
+
+function rdIsTableLine(t) {
+  const u = t.replace(/\\\|/g, '');
+  return u.includes('|') && (u.startsWith('|') || (u.match(/\|/g) || []).length >= 2);
+}
+
+function rdSplitRow(line) {
+  let s = line.trim().replace(/\\\|/g, '\u0000');
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map(c => c.replace(/\u0000/g, '|').trim());
+}
+
+// Markdown heading without backtracking regexes: '#'..'####', a space, then text. Table rows
+// ('# | Date | ...') and the '# of owners' idiom are body text, not headings.
+function rdHashHeading(line) {
+  if (line.charCodeAt(0) !== 35) return null;
+  let level = 0;
+  while (line.charCodeAt(level) === 35) level++;
+  if (level > 4 || !/[ \t]/.test(line.charAt(level))) return null;
+  if (line.includes('|')) return null;
+  let text = line.slice(level);
+  if (text.length > RD_MAX_HEADING) text = text.replace(/\s+/g, ' ');
+  if (text.length > RD_MAX_HEADING) return null;
+  text = text.trim();
+  while (text.endsWith('#')) text = text.slice(0, -1);
+  text = text.trim();
+  if (!text || /^of\b/i.test(text)) return null;
+  return { level, text };
+}
+
+function rdBoldHeading(line) {
+  if (line.length > 90 || !line.startsWith('**')) return null;
+  const m = line.match(/^\*\*([^*]{3,80})\*\*:?$/);
+  if (!m) return null;
+  const text = m[1].replace(/:$/, '').trim();
+  const bare = text.replace(/^\d+[.)]\s*/, '').replace(/\s*\([^)]*\)$/, '').replace(/\s+/g, ' ').trim();
+  return RD_BOLD_SECTION.test(bare) ? { level: 0, text } : null;
+}
+
+const rdNormHeader = cells => cells.map(c => String(c).replace(/[*_`]/g, '').trim().toLowerCase()).join('|');
+
+// Reads every pipe table in a section. A header row that repeats, or a new header followed by a
+// separator row, starts a new table instead of becoming a data row.
+function rdReadTable(lines) {
+  const tables = [];
+  const notes = [];
+  let cur = null;
+  const list = lines.map(raw => String(raw).trim());
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    if (!t) continue;
+    if (rdIsTableLine(t)) {
+      if (/^[\s|:\-]+$/.test(t)) continue;
+      const cells = rdSplitRow(t);
+      let next = '';
+      for (let j = i + 1; j < list.length; j++) { if (list[j]) { next = list[j]; break; } }
+      const startsTable = !cur || (/^[\s|:\-]+$/.test(next) && next.includes('-'));
+      if (cur && rdNormHeader(cells) === rdNormHeader(cur.header)) continue;
+      if (startsTable) {
+        cur = { header: cells, rows: [] };
+        tables.push(cur);
+      } else if (cells.some(c => c)) cur.rows.push(cells);
+    } else {
+      notes.push(t);
+    }
+  }
+  const first = tables[0] || null;
+  return { header: first ? first.header : null, rows: first ? first.rows : [], tables, notes };
+}
+
+// D-1, D1., D1:, **D01** -> D1. Anything else is returned trimmed.
+function rdNormId(text) {
+  const t = String(text || '').replace(/[*_`]/g, '').trim();
+  const m = t.match(/^([A-Za-z]{1,3})\s*[-–]?\s*0*(\d{1,3})[.:)]?$/);
+  return m ? `${m[1].toUpperCase()}${m[2]}` : t.replace(/[.:]$/, '');
+}
+
+function rdIsNoneCell(text) {
+  const t = String(text || '').replace(/[*_`]/g, '').trim();
+  return RD_EMPTY_CELL.test(t) || RD_NONE_PHRASE.test(t);
+}
+
+function rdColumns(header, spec) {
+  const map = {};
+  const taken = new Set();
+  const norm = (header || []).map(h => String(h).replace(/[*_`]/g, '').trim().toLowerCase());
+  for (const [key, re] of spec) {
+    const idx = norm.findIndex((h, i) => !taken.has(i) && re.test(h));
+    if (idx >= 0) { map[key] = idx; taken.add(idx); }
+  }
+  map._free = norm.map((_, i) => i).filter(i => !taken.has(i));
+  return map;
+}
+
+function rdCell(row, idx) {
+  if (idx == null || idx < 0) return '';
+  return String(row[idx] ?? '').trim();
+}
+
+function rdBullets(lines) {
+  const items = [];
+  let lastWasBullet = false;
+  for (const raw of lines) {
+    const t = String(raw).trim();
+    if (!t) { lastWasBullet = false; continue; }
+    if (/^[\s|:\-]+$/.test(t)) continue;
+    const m = t.match(/^(?:[-*•+]|\d+[.)])\s+(.*)$/);
+    if (m) { items.push(m[1].trim()); lastWasBullet = true; }
+    else if (lastWasBullet && items.length && !/^\*\*[^*]+\*\*:?$/.test(t)) items[items.length - 1] += ' ' + t;
+    else { items.push(t); lastWasBullet = false; }
+  }
+  return items.filter(Boolean);
+}
+
+// Ownership decimals. Commas: '0,5' is a decimal comma only when that reading is a valid share
+// (<= 1) and the thousands reading is not; any other comma is unreadable rather than guessed.
+function rdParseNumber(text) {
+  const s = String(text ?? '').replace(/\s/g, '');
+  if (!s || s.length > 40) return null;
+  let num = s;
+  const fn = s.match(/^([^()]*)\(\d{1,3}\)$/);
+  if (fn) num = fn[1];
+  if (num.includes(',')) {
+    if (!/^\d+,\d+$/.test(num)) return null;
+    const asDecimal = Number(num.replace(',', '.'));
+    if (!(asDecimal <= 1 && Number(num.replace(',', '')) > 1)) return null;
+    num = num.replace(',', '.');
+  }
+  if (!/^-?(\d+(\.\d*)?|\.\d+)$/.test(num)) return null;
+  const n = Number(num);
+  return Number.isFinite(n) && Math.abs(n) < 1e6 ? n : null;
+}
+
+function rdParseFraction(text) {
+  const s = String(text || '').trim();
+  if (s.length > 40) return null;
+  if (/^0+(\.0+)?$/.test(s)) return 0;
+  const m = s.match(/^(\d{1,12})\s*\/\s*(\d{1,12})$/);
+  if (!m || Number(m[2]) === 0) return null;
+  return Number(m[1]) / Number(m[2]);
+}
+
+function rdTrimNum(n) {
+  return String(Math.round(n * 1e8) / 1e8);
+}
+
+// Small stable string hash (FNV-1a) for animation keys, so the seen-set stays small.
+function rdHash(text) {
+  const s = String(text ?? '');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function rdDefectIds(text) {
+  const t = String(text || '').trim();
+  if (RD_EMPTY_CELL.test(t)) return { ids: [], other: '' };
+  const ids = [...new Set((t.match(/\b[A-Za-z]{1,3}-?\d{1,3}\b/g) || []).map(rdNormId))];
+  return { ids, other: ids.length ? '' : t };
+}
+
+function rdDefectSeverity(d) {
+  const text = `${d.defect} ${d.curative}`;
+  if (RD_UNRECONCILED.test(text) || RD_MATERIAL.test(text)) return 'material';
+  if (RD_CLARIFY.test(text)) return 'clarify';
+  return 'curative';
+}
+
+function rdYear(text) {
+  const m = String(text || '').match(/\b(1[6-9]\d\d|20\d\d)\b/);
+  return m ? Number(m[1]) : null;
+}
+
+function parseTitleOpinion(markdown) {
+  const out = { ok: false, reason: '', title: '', summary: [], chain: [], defects: [], owners: [], qualifications: [], notes: {}, sections: [], stats: null };
+  if (typeof markdown !== 'string' || !markdown.trim()) { out.reason = 'empty'; return out; }
+  const sections = {};
+  let current = null;
+  for (const raw of markdown.replace(/\r\n?/g, '\n').split('\n')) {
+    const line = raw.trim();
+    const hashHeading = rdHashHeading(line);
+    const boldHeading = !hashHeading && rdBoldHeading(line);
+    if (hashHeading || boldHeading) {
+      const text = (hashHeading || boldHeading).text.replace(/\*\*/g, '').replace(/:$/, '').trim();
+      const key = rdSectionKey(text);
+      const beforeSections = !Object.keys(sections).length;
+      if (/^title opinion\b/i.test(text) || (hashHeading && hashHeading.level === 1 && !key && !out.title && beforeSections)) {
+        out.title = text.replace(/^title opinion\s*[:\-–—]?\s*/i, '').trim() || text;
+        current = null;
+        continue;
+      }
+      if (key) {
+        sections[key] = sections[key] || { heading: text, lines: [] };
+        current = sections[key];
+        continue;
+      }
+      if (hashHeading) { current = null; continue; }
+    }
+    if (current) current.lines.push(raw);
+  }
+  out.sections = Object.keys(sections);
+
+  if (sections.summary) out.summary = rdBullets(sections.summary.lines.filter(l => !rdIsTableLine(String(l).trim())));
+  if (sections.quals) {
+    out.qualifications = rdBullets(sections.quals.lines).map(text => {
+      const m = text.replace(/^\*\*([^*]+)\*\*/, '$1').match(/^([A-Za-z][A-Za-z /&-]{1,28}):\s+(.+)$/);
+      return m && m[1].trim().split(/\s+/).length <= 3 ? { label: m[1].trim(), text: m[2].trim() } : { label: '', text };
+    });
+  }
+
+  if (sections.chain) {
+    const t = rdReadTable(sections.chain.lines);
+    out.notes.chain = t.notes;
+    t.tables.forEach(tbl => {
+      const c = rdColumns(tbl.header, [
+        ['num', /^(#|no\.?|n|seq|step|item)$/], ['date', /date/],
+        ['doc', /^(source( doc(ument)?)?( #| no\.?| number)?|src|doc(ument)? ?(#|no\.?|num(ber)?|id))$/],
+        ['type', /type|instrument|^doc(ument)?$/],
+        ['ref', /record|ref|book|vol|page|clerk/], ['grantor', /grantor|^from$|lessor|assignor/],
+        ['grantee', /grantee|^to$|lessee|assignee/], ['conveyed', /convey|interest|fraction/],
+        ['balance', /balance|running|remaining/], ['flags', /flag|issue|comment/],
+      ]);
+      tbl.rows.forEach(row => {
+        const i = out.chain.length;
+        const conveyedRaw = rdCell(row, c.conveyed);
+        const note = conveyedRaw.length <= 300 && conveyedRaw.endsWith(')') ? conveyedRaw.match(/^([^(]*?)\s*\(([^()]+)\)$/) : null;
+        const flagText = rdCell(row, c.flags);
+        const docCell = rdCell(row, c.doc);
+        const docNum = (docCell.match(/\d{1,4}/) || [''])[0];
+        out.chain.push({
+          n: rdCell(row, c.num) || String(i + 1),
+          date: rdCell(row, c.date),
+          type: rdCell(row, c.type),
+          ref: rdCell(row, c.ref),
+          doc: docNum,
+          grantor: rdCell(row, c.grantor),
+          grantee: rdCell(row, c.grantee),
+          conveyed: note && note[1] ? note[1] : conveyedRaw,
+          convNote: note && note[1] ? note[2] : '',
+          balance: rdCell(row, c.balance),
+          flags: flagText.split(/[,;]+/).map(f => f.trim()).filter(f => f && !RD_EMPTY_CELL.test(f)),
+        });
+      });
+    });
+  }
+
+  if (sections.defects) {
+    const t = rdReadTable(sections.defects.lines);
+    out.notes.defects = t.notes;
+    t.tables.forEach(tbl => {
+      const c = rdColumns(tbl.header, [
+        ['id', /^(#|id|no\.?|item|ref)$/], ['curative', /curative|cure|remed|requirement|action|fix/],
+        ['source', /source|doc|instrument|reference/], ['defect', /defect|issue|problem|description|finding/],
+      ]);
+      if (c.defect == null) c.defect = c._free[0];
+      tbl.rows.forEach(row => {
+        const d = {
+          id: rdNormId(rdCell(row, c.id)),
+          defect: rdCell(row, c.defect),
+          curative: rdCell(row, c.curative),
+          source: rdCell(row, c.source),
+        };
+        // 'None' / 'No title defects identified' placeholder rows are not defects.
+        if (rdIsNoneCell(d.defect) && rdIsNoneCell(d.curative)) return;
+        if (!d.id || rdIsNoneCell(d.id)) d.id = `D${out.defects.length + 1}`;
+        const doc = d.source.match(/doc(?:ument)?\.?\s*#?\s*(\d{1,4})/i) || d.source.match(/^#?(\d{1,4})$/);
+        d.sourceDoc = doc ? doc[1] : '';
+        d.severity = rdDefectSeverity(d);
+        d.unreconciled = RD_UNRECONCILED.test(`${d.defect} ${d.curative}`);
+        out.defects.push(d);
+      });
+    });
+  }
+
+  let ownersTable = null;
+  if (sections.owners) {
+    ownersTable = rdReadTable(sections.owners.lines);
+    out.notes.owners = ownersTable.notes;
+    const defectById = new Map(out.defects.map(d => [d.id.toUpperCase(), d]));
+    ownersTable.tables.forEach(tbl => {
+      const c = rdColumns(tbl.header, [
+        ['royalty', /royalty|npri|orri|overrid/], ['subject', /subject|defect|burden|encumb|exception/],
+        ['decimal', /decimal|\bnri\b|\bdec\b/], ['interest', /interest|fraction|share|reconciled/],
+        ['owner', /owner|name|party|holder|grantee/], ['note', /note|basis|vesting|comment/],
+      ]);
+      if (c.owner == null) c.owner = c._free.length ? c._free[0] : 0;
+      tbl.rows.forEach(row => {
+        const name = rdCell(row, c.owner);
+        const interest = rdCell(row, c.interest);
+        const decimal = rdCell(row, c.decimal);
+        if (!name && !interest && !decimal) return;
+        if (rdIsNoneCell(name) && rdIsNoneCell(interest) && rdIsNoneCell(decimal)) return;
+        const royaltyRaw = rdCell(row, c.royalty);
+        const royalty = RD_EMPTY_CELL.test(royaltyRaw) ? '' : royaltyRaw;
+        const subject = rdDefectIds(rdCell(row, c.subject));
+        let value = rdParseNumber(decimal);
+        if (value == null) value = rdParseFraction(interest);
+        // Royalty-only means no mineral interest at all, not an unreadable one.
+        const royaltyOnly = Boolean(royalty) && (value === 0 || (value == null && RD_EMPTY_CELL.test(interest) && RD_EMPTY_CELL.test(decimal)));
+        const unreconciled = /^(the\s+)?(unknown|heirs|estate of|unidentified)\b/i.test(name)
+          || /unreconciled|unknown|undetermined|tbd/i.test(`${interest} ${decimal}`)
+          || subject.ids.some(id => defectById.get(id.toUpperCase())?.unreconciled);
+        out.owners.push({ name, interest, decimal, value, royalty, royaltyOnly, subjectTo: subject.ids, subjectOther: subject.other, note: rdCell(row, c.note), unreconciled });
+      });
+    });
+  }
+
+  out.stats = rdOpinionStats(out);
+  if (!sections.owners) out.reason = 'missing ownership section';
+  else if (!ownersTable || !ownersTable.header) out.reason = 'ownership section has no table';
+  else if (!sections.chain && !sections.defects && !sections.summary) out.reason = 'missing chain, defects and summary sections';
+  out.ok = !out.reason;
+  return out;
+}
+
+function rdOpinionStats(p) {
+  const owners = p.owners || [];
+  const unreadable = owners.filter(o => o.value == null && !o.royaltyOnly);
+  const total = owners.reduce((s, o) => s + (o.value > 0 ? o.value : 0), 0);
+  const unrec = owners.reduce((s, o) => s + (o.unreconciled && o.value > 0 ? o.value : 0), 0);
+  let reconciledPct = null;
+  let reconciledWhy = '';
+  if (!owners.length) reconciledWhy = 'No owners listed';
+  else if (unreadable.length) reconciledWhy = `${unreadable.length} decimal${unreadable.length === 1 ? '' : 's'} not numeric`;
+  else if (total <= 0) reconciledWhy = 'No mineral decimals';
+  // Over-allocated shares have no honest percentage: dividing by the inflated total invents one.
+  else if (total > 1 + 1e-6) reconciledWhy = `Shares total ${rdTrimNum(total)}, more than the whole`;
+  else reconciledPct = Math.round((total - unrec) * 1000) / 10;
+  const summaryMatch = (p.summary || []).join(' ').match(/(?<![\d.,])(\d{1,3}(?:\.\d+)?)\s*%\s*(?:of [^.;%]{1,60}?\s)?(?:(?:is|are)\s+)?reconciled/i);
+  const summaryPct = summaryMatch && Number(summaryMatch[1]) <= 100 ? Number(summaryMatch[1]) : null;
+  const years = (p.chain || []).map(r => rdYear(r.date)).filter(Boolean);
+  const sev = { material: 0, curative: 0, clarify: 0 };
+  (p.defects || []).forEach(d => { sev[d.severity] = (sev[d.severity] || 0) + 1; });
+  return {
+    reconciledPct,
+    reconciledWhy,
+    summaryPct,
+    // Unnormalised reconciled share when the table is over-allocated (shown next to the warning).
+    overReconciled: total > 1 + 1e-6 && !unreadable.length ? Math.round((total - unrec) * 1e8) / 1e8 : null,
+    decimalTotal: Math.round(total * 1e8) / 1e8,
+    sumState: !owners.length || unreadable.length ? 'unknown' : Math.abs(total - 1) <= 1e-6 ? 'whole' : total < 1 ? 'under' : 'over',
+    unreconciledOwners: owners.filter(o => o.unreconciled && o.value > 0),
+    ownerCount: owners.length,
+    mineralOwners: owners.filter(o => o.value > 0).length,
+    royaltyOwners: owners.filter(o => o.royalty).length,
+    divestedOwners: owners.filter(o => o.value === 0 && !o.royalty).length,
+    defectCount: (p.defects || []).length,
+    severity: sev,
+    chainCount: (p.chain || []).length,
+    flaggedCount: (p.chain || []).filter(r => r.flags.length).length,
+    firstYear: years.length ? Math.min(...years) : null,
+    lastYear: years.length ? Math.max(...years) : null,
+  };
+}
+
+// Escape, then allow **bold** only.
+function rdInline(text) {
+  return esc(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
+const RD_ICON = {
+  alert: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>',
+  doc: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  flag: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
+  arrow: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>',
+};
+
+const rdSevClass = { material: 'red', curative: 'amber', clarify: 'slate' };
+const rdSevLabel = { material: 'Material', curative: 'Curative', clarify: 'Clarify' };
+const rdPlural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const rdFmtPct = n => `${Number.isInteger(n) ? n : n.toFixed(1)}%`;
+
+function rdFlagChips(flags) {
+  if (!flags.length) return '<span class="rd-none">—</span>';
+  return `<span class="rd-chips">${flags.map(f => {
+    const key = f.toUpperCase().replace(/[^A-Z]/g, '');
+    const label = RD_FLAG_LABELS[key] || (f.length > 2 ? f.charAt(0).toUpperCase() + f.slice(1).toLowerCase() : f);
+    const cls = /AMBIG|ILLEG|CLARIF|UNCLEAR/.test(key) ? 'amber' : /OVER|UNREL|GAP|BREAK|MISSING|CONFLICT|DEFECT|CLOUD|LIEN/.test(key) ? 'red' : 'slate';
+    return `<span class="rd-chip ${cls}">${RD_ICON.flag}${esc(label)}</span>`;
+  }).join('')}</span>`;
+}
+
+function rdDonut(p, pid, kpi) {
+  const r = 54, C = 2 * Math.PI * r, gap = 1.6;
+  const st = p.stats;
+  const parts = [];
+  let colorIdx = 0;
+  p.owners.forEach(o => {
+    if (!(o.value > 0)) return;
+    parts.push({ label: o.name, frac: o.interest || o.decimal, v: o.value, hatch: o.unreconciled, color: o.unreconciled ? '#b91c1c' : RD_PALETTE[colorIdx++ % RD_PALETTE.length] });
+  });
+  const total = parts.reduce((s, x) => s + x.v, 0);
+  if (total < 1 - 1e-6 && st.sumState === 'under') parts.push({ label: 'Unaccounted', frac: (1 - total).toFixed(8), v: 1 - total, hatch: true, color: '#cbd5e1', muted: true });
+  const scale = total > 1 ? 1 / total : 1;
+  let acc = 0;
+  const segs = parts.map((x, i) => {
+    const len = Math.max(x.v * scale * C - (parts.length > 1 ? gap : 0), 0);
+    const stroke = x.hatch ? `url(#${pid}-${x.muted ? 'gap' : 'hatch'})` : x.color;
+    const s = `<circle class="rd-seg" style="--i:${i};stroke-dasharray:${len.toFixed(2)} 400;stroke-dashoffset:${(-acc).toFixed(2)}" cx="70" cy="70" r="${r}" fill="none" stroke="${stroke}" stroke-width="20"><title>${esc(x.label)}: ${esc(x.frac)}</title></circle>`;
+    acc += x.v * scale * C;
+    return s;
+  }).join('');
+  const center = kpi && kpi.center != null ? rdFmtPct(kpi.center) : '—';
+  const aria = `Mineral ownership: ${parts.map(x => `${x.label} ${x.frac}`).join(', ') || 'none listed'}`;
+  return {
+    colors: parts,
+    svg: `<svg class="rd-donut" width="196" height="196" viewBox="0 0 140 140" role="img" aria-label="${esc(aria)}">
+      <defs>
+        <pattern id="${pid}-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#fecaca"/><rect width="2.2" height="5" fill="#b91c1c"/></pattern>
+        <pattern id="${pid}-gap" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#f1f5f9"/><rect width="2.2" height="5" fill="#cbd5e1"/></pattern>
+      </defs>
+      <circle cx="70" cy="70" r="${r}" fill="none" stroke="#f1efe9" stroke-width="20"/>
+      <g transform="rotate(-90 70 70)">${segs}</g>
+      <text x="70" y="69" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace" font-size="19" font-weight="700" fill="#0f172a">${esc(center)}</text>
+      <text x="70" y="86" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="9.5" font-weight="600" fill="#64748b" letter-spacing=".04em">${esc(kpi ? kpi.centerLabel : 'RECONCILED')}</text>
+    </svg>`,
+  };
+}
+
+let rdInstanceSeq = 0;
+const rdAnimatedKeys = new Set();
+let rdLastJobRender = { el: null, sig: '', jobId: null };
+
+function rdShouldAnimate(key) {
+  if (rdAnimatedKeys.has(key)) return false;
+  rdAnimatedKeys.add(key);
+  return true;
+}
+
+// The Reconciled KPI. The opinion's own stated figure wins over the table math, and any
+// disagreement (or an over-allocated table) is shown as a warning instead of a clean number.
+// Never a green 100% while defects are open. sub/warn are escaped HTML.
+function rdReconciledKpi(p) {
+  const st = p.stats;
+  const stated = st.summaryPct;
+  const computed = st.reconciledPct;
+  const over = st.sumState === 'over';
+  const defects = st.defectCount;
+  const openDefects = defects ? rdPlural(defects, 'defect') + ' open' : '';
+  const openParts = pct => {
+    const open = Math.max(0, Math.round((100 - pct) * 10) / 10);
+    if (open > 0) return [`${rdFmtPct(open)} open`, ...st.unreconciledOwners.slice(0, 2).map(o => `${esc(o.name)} ${esc(o.interest || o.decimal)}`)];
+    return [defects ? `All listed interest reconciled · ${esc(openDefects)}` : 'All listed interest reconciled'];
+  };
+  const tone = pct => (pct === 100 && defects ? '' : 'teal');
+  const overFacts = `shares total ${esc(rdTrimNum(st.decimalTotal))} of the whole${st.overReconciled != null ? `, ${esc(rdTrimNum(st.overReconciled))} reconciled` : ''}`;
+  const overWarn = `Ownership table is over-allocated: ${overFacts}`;
+  if (stated != null) {
+    const sub = ['As stated in the opinion'];
+    let warn = '';
+    if (over) warn = overWarn;
+    else if (computed != null && Math.abs(computed - stated) > 0.05) warn = `Ownership table computes ${esc(rdFmtPct(computed))}; check before relying on either`;
+    else if (computed == null) sub.push(`table not computed (${esc(st.reconciledWhy.toLowerCase())})`);
+    else sub.push(...openParts(stated));
+    // The donut is drawn from the table, so it only repeats the stated figure when the table agrees.
+    const verified = !warn && computed != null;
+    return { state: warn ? 'mismatch' : 'stated', value: stated, text: '', tone: warn ? 'amber' : verified ? tone(stated) : '', sub, warn, center: verified ? stated : null, centerLabel: warn ? (over ? 'OVER 1/1' : 'CHECK TABLE') : 'RECONCILED' };
+  }
+  if (computed != null) return { state: 'computed', value: computed, text: '', tone: tone(computed), sub: openParts(computed), warn: '', center: computed, centerLabel: 'RECONCILED' };
+  if (over) return { state: 'over', value: null, text: 'Over-allocated', tone: 'amber sm', sub: [], warn: overFacts.charAt(0).toUpperCase() + overFacts.slice(1) + '; no percentage until the table is fixed', center: null, centerLabel: 'OVER 1/1' };
+  return { state: 'unknown', value: null, text: '—', tone: '', sub: [esc(st.reconciledWhy)], warn: '', center: null, centerLabel: 'RECONCILED' };
+}
+
+// ' Vol. 9, Pg 9 ' -> ' vol 9 pg 9 ' (padded so includes() matches whole tokens only).
+function rdRefKey(text) {
+  const t = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return t ? ` ${t} ` : '';
+}
+
+// Chain row index a defect cites, or -1. 'Doc 2' is the upload order and the chain '#' is
+// chronological, so a bare number is never enough. Link only when the defect names one row's
+// recording reference, or names the instrument (its year plus a word of its type, '1981 lease'),
+// or the chain has its own source-doc column with exactly one match.
+function rdChainIndex(chain) {
+  return chain.map(r => ({
+    ref: /\d/.test(r.ref || '') ? rdRefKey(r.ref) : '',
+    year: rdYear(r.date),
+    words: [...new Set(String(r.type || '').toLowerCase().match(/[a-z]{4,}/g) || [])],
+    doc: r.doc || '',
+  }));
+}
+
+function rdMatchChainRow(d, index) {
+  const only = test => {
+    let hit = -1;
+    for (let i = 0; i < index.length; i++) {
+      if (!test(index[i])) continue;
+      if (hit >= 0) return -2;
+      hit = i;
+    }
+    return hit;
+  };
+  const hay = rdRefKey(`${d.source} ${d.defect}`);
+  const byRef = only(r => r.ref && hay.includes(r.ref));
+  if (byRef !== -1) return Math.max(byRef, -1);
+  const text = String(d.defect || '').toLowerCase();
+  const years = new Set((text.match(/\b(1[6-9]\d\d|20\d\d)\b/g) || []).map(Number));
+  if (years.size) {
+    const byName = only(r => r.year && years.has(r.year) && r.words.some(w => text.includes(w)));
+    if (byName !== -1) return Math.max(byName, -1);
+  }
+  return d.sourceDoc ? Math.max(only(r => r.doc === d.sourceDoc), -1) : -1;
+}
+
+function renderResultsDashboard(p, rawMarkdown, opts = {}) {
+  const pid = `rd${++rdInstanceSeq}`;
+  const st = p.stats;
+  const askInput = opts.askInputId || '';
+  const defectSev = new Map(p.defects.map(d => [d.id.toUpperCase(), d.severity]));
+  let cardIdx = 0;
+  const enter = () => `rd-enter" style="--i:${cardIdx++}`;
+
+  // Hero
+  const [lead, ...restSummary] = p.summary;
+  const kpi = rdReconciledKpi(p);
+  // The headline figure takes the KPI's colour, so the two never disagree.
+  const headline = lead
+    ? rdInline(lead)
+      .replace(/\d{1,3}(?:\.\d+)?%\s*reconciled/i, m => `<span class="${/teal/.test(kpi.tone) ? 'ok' : 'warn'}">${m}</span>`)
+      .replace(/(\b\d+\s+material\s+defects?\b)/i, '<span class="bad">$1</span>')
+    : '';
+  const ownerSub = [
+    st.mineralOwners ? `${st.mineralOwners} mineral` : '',
+    st.royaltyOwners ? `${st.royaltyOwners} royalty` : '',
+    st.divestedOwners ? `${st.divestedOwners} divested` : '',
+  ].filter(Boolean).join(' · ') || 'None listed';
+  const defectSub = st.defectCount
+    ? ['material', 'curative', 'clarify'].filter(k => st.severity[k]).map(k => `${st.severity[k]} ${k}`).join(' · ')
+    : (p.sections.includes('defects') ? 'None listed' : 'Section not in opinion');
+  const span = st.firstYear ? (st.firstYear === st.lastYear ? `${st.firstYear}` : `${st.firstYear}–${st.lastYear}`) : '';
+  const docs = Number(opts.totalDocuments) > 0 ? `from ${opts.totalDocuments} documents` : '';
+  const chainSub = [span, docs].filter(Boolean).join(' · ') || (p.sections.includes('chain') ? 'Instruments listed' : 'Section not in opinion');
+  const count = (n, text, attrs = '') => `<span data-count="${n}"${attrs}>${esc(text)}</span>`;
+  const kpiVal = kpi.value == null
+    ? esc(kpi.text)
+    : count(kpi.value, rdFmtPct(kpi.value), ` data-dec="${Number.isInteger(kpi.value) ? 0 : 1}" data-suffix="%"`);
+  const kpis = `<div class="rd-kpis">
+      <div class="rd-kpi" data-rd-kpi="${kpi.state}"><div class="lbl">Reconciled</div><div class="val ${kpi.tone}">${kpiVal}</div>${kpi.value == null ? '' : `<div class="bar" aria-hidden="true"><span class="rd-grow" style="width:${Math.min(100, Math.max(0, kpi.value))}%"></span></div>`}${kpi.sub.length ? `<div class="sub">${kpi.sub.join(' · ')}</div>` : ''}${kpi.warn ? `<div class="sub warn" role="note">${RD_ICON.alert}<span>${kpi.warn}</span></div>` : ''}</div>
+      <div class="rd-kpi"><div class="lbl">Owners of record</div><div class="val">${count(st.ownerCount, String(st.ownerCount))}</div><div class="sub">${esc(ownerSub)}</div></div>
+      <div class="rd-kpi"><div class="lbl">Defects open</div><div class="val ${st.defectCount ? 'red' : ''}">${count(st.defectCount, String(st.defectCount))}</div><div class="sub">${esc(defectSub)}</div></div>
+      <div class="rd-kpi"><div class="lbl">Instruments in chain</div><div class="val">${count(st.chainCount, String(st.chainCount))}</div><div class="sub">${esc(chainSub)}</div></div>
+    </div>`;
+  const hero = `<section class="card rd-hero ${enter()}" aria-labelledby="${pid}-exec">
+    <div class="rd-hero-top">
+      <div><div class="rd-eyebrow" id="${pid}-exec">Executive summary</div>${p.title ? `<p class="rd-subject">${rdInline(p.title)}</p>` : ''}</div>
+      <span class="rd-ai-pill" role="note">${RD_ICON.alert}AI draft · verify against instruments</span>
+    </div>
+    ${headline ? `<p class="rd-headline">${headline}</p>` : ''}
+    ${restSummary.length ? `<ul class="rd-sumlist">${restSummary.map(s => `<li>${rdInline(s)}</li>`).join('')}</ul>` : ''}
+    ${kpis}
+  </section>`;
+
+  // Ownership
+  const donut = rdDonut(p, pid, kpi);
+  let colorIdx = 0;
+  const swatchFor = o => {
+    if (o.unreconciled && o.value > 0) return '<span class="rd-swatch hatch"></span>';
+    if (o.value > 0) return `<span class="rd-swatch" style="background:${RD_PALETTE[colorIdx++ % RD_PALETTE.length]}"></span>`;
+    return `<span class="rd-swatch" style="background:${o.royalty ? '#94a3b8' : '#e2e8f0'}"></span>`;
+  };
+  const subjectChips = o => {
+    if (o.subjectTo.length) return `<span class="rd-chips">${o.subjectTo.map(id => `<span class="rd-chip d ${rdSevClass[defectSev.get(id.toUpperCase())] || 'slate'}">${esc(id)}</span>`).join('')}</span>`;
+    if (o.subjectOther) return rdInline(o.subjectOther);
+    return '<span class="rd-none">none</span>';
+  };
+  const ownerNote = o => o.note ? `<small>${rdInline(o.note)}</small>` : (o.unreconciled && o.value > 0 ? '<small>Unreconciled</small>' : (o.royaltyOnly ? '<small>Royalty only</small>' : ''));
+  const sumCell = st.sumState === 'whole'
+    ? `<span class="rd-sum">${RD_ICON.check} Sums to whole</span>`
+    : st.sumState === 'under'
+      ? `<span class="rd-sum warn">${RD_ICON.alert} ${esc((1 - st.decimalTotal).toFixed(8))} unaccounted</span>`
+      : st.sumState === 'over'
+        ? `<span class="rd-sum warn">${RD_ICON.alert} Over by ${esc((st.decimalTotal - 1).toFixed(8))}</span>`
+        : '<span class="rd-none">Total not computed</span>';
+  const unrecIds = [...new Set(st.unreconciledOwners.flatMap(o => o.subjectTo.filter(id => p.defects.some(d => d.unreconciled && d.id.toUpperCase() === id.toUpperCase()))))];
+  const legendWhy = unrecIds.length ? ` (${unrecIds.join(', ')})` : '';
+  const legend = st.unreconciledOwners.length
+    ? `<div class="legend"><span class="rd-swatch hatch"></span>Hatched = unreconciled${esc(legendWhy)}</div>`
+    : st.sumState === 'under' ? '<div class="legend"><span class="rd-swatch" style="background:#cbd5e1"></span>Grey = unaccounted interest</div>' : '';
+  const places = Math.max(0, ...p.owners.map(o => ((o.decimal.split('.')[1] || '').match(/^\d+/) || [''])[0].length));
+  const ownerRows = p.owners.map(o => `<tr class="${o.value === 0 && !o.royalty ? 'muted-row' : ''}">
+      <td><div class="rd-owner">${swatchFor(o)}<div><b>${rdInline(o.name || '—')}</b>${ownerNote(o)}</div></div></td>
+      <td class="num rd-frac">${rdInline(o.interest || '—')}</td>
+      <td class="num rd-mono">${rdInline(o.decimal || '—')}</td>
+      <td>${o.royalty ? `<span class="rd-frac">${rdInline(o.royalty)}</span>` : '<span class="rd-none">none</span>'}</td>
+      <td>${subjectChips(o)}</td></tr>`).join('');
+  const ownersCard = `<section class="card ${enter()}" aria-labelledby="${pid}-own">
+    <div class="rd-card-head"><h3 id="${pid}-own">Final ownership determination</h3><span class="aside">${esc(rdPlural(st.ownerCount, 'owner'))}${places >= 4 ? ` · decimals to ${places} places` : ''}</span></div>
+    ${p.owners.length ? `<div class="rd-own">
+      <div class="rd-own-viz">${donut.svg}${legend}</div>
+      <div class="rd-tbl-wrap"><table class="rd-tbl rd-owners">
+        <thead><tr><th>Owner</th><th class="num">Interest</th><th class="num">Decimal</th><th>Royalty / NPRI</th><th>Subject to</th></tr></thead>
+        <tbody>${ownerRows}</tbody>
+        <tfoot><tr><td>Total mineral interest</td><td class="num rd-frac">${st.sumState === 'whole' ? '1/1' : ''}</td><td class="num rd-mono">${st.sumState === 'unknown' ? '—' : esc(st.decimalTotal.toFixed(8))}</td><td colspan="2">${sumCell}</td></tr></tfoot>
+      </table></div>
+    </div>` : '<p class="rd-empty">No owners are listed in the opinion’s ownership table.</p>'}
+    ${(p.notes.owners || []).length ? `<p class="rd-note">${p.notes.owners.map(rdInline).join('<br>')}</p>` : ''}
+  </section>`;
+
+  // Defects
+  let defectsCard = '';
+  if (p.sections.includes('defects')) {
+    const chainIndex = rdChainIndex(p.chain);
+    const cards = p.defects.map(d => {
+      const affected = p.owners.filter(o => o.subjectTo.some(id => id.toUpperCase() === d.id.toUpperCase()));
+      const rowIdx = rdMatchChainRow(d, chainIndex);
+      const row = rowIdx >= 0 ? p.chain[rowIdx] : null;
+      const showRef = row && row.ref && !rdRefKey(d.source).includes(rdRefKey(row.ref));
+      const citeText = `${d.source || ''}${showRef ? `${d.source ? ' · ' : ''}${row.ref}` : ''}`;
+      const cite = !citeText ? '' : row
+        ? `<button type="button" class="rd-cite" data-rd-goto="${pid}-chain-${rowIdx}" title="Show in chain of title">${RD_ICON.doc}${esc(citeText)}</button>`
+        : `<span class="rd-cite">${RD_ICON.doc}${esc(citeText)}</span>`;
+      return `<article class="rd-dcard ${d.severity}">
+        <div class="rd-dtop"><span class="rd-chip d ${rdSevClass[d.severity]}">${esc(d.id)}</span><span class="rd-sev ${d.severity}">${rdSevLabel[d.severity]}</span>${cite}</div>
+        <h4>${rdInline(d.defect || '—')}</h4>
+        <dl class="rd-dgrid"><dt>Curative</dt><dd class="cure">${rdInline(d.curative || '—')}</dd>${affected.length ? `<dt>Affects</dt><dd>${affected.map(o => `${esc(o.name)}${o.interest && o.interest !== '0' ? ` · ${esc(o.interest)}` : ''}`).join('; ')}</dd>` : ''}</dl>
+        ${askInput ? `<div class="rd-dfoot"><button type="button" class="rd-link" data-rd-ask="${esc(d.id)}" data-rd-input="${esc(askInput)}">Ask about ${esc(d.id)} ${RD_ICON.arrow}</button></div>` : ''}
+      </article>`;
+    }).join('');
+    defectsCard = `<section class="card ${enter()}" aria-labelledby="${pid}-def">
+      <div class="rd-card-head"><h3 id="${pid}-def">Title defects &amp; curative requirements</h3><span class="aside">${esc(`${st.defectCount} open`)}</span></div>
+      ${p.defects.length ? `<div class="rd-defects">${cards}</div>` : '<p class="rd-empty">No title defects are listed in the opinion.</p>'}
+      ${(p.notes.defects || []).length ? `<p class="rd-note">${p.notes.defects.map(rdInline).join('<br>')}</p>` : ''}
+    </section>`;
+  }
+
+  // Chain
+  let chainCard = '';
+  if (p.sections.includes('chain')) {
+    const rows = p.chain.map((r, idx) => `<tr id="${pid}-chain-${idx}" class="${r.flags.length ? 'flagged' : ''}">
+      <td class="rd-mono">${esc(r.n)}</td><td class="date rd-mono">${esc(r.date || '—')}</td>
+      <td class="ref">${rdInline(r.type || '—')}${r.ref ? `<small class="rd-mono">${esc(r.ref)}</small>` : ''}</td>
+      <td class="parties">${rdInline(r.grantor || '—')}<span class="arr">→</span><b>${rdInline(r.grantee || '—')}</b></td>
+      <td class="conv"><span class="rd-frac">${rdInline(r.conveyed || '—')}</span>${r.convNote ? `<small>${rdInline(r.convNote)}</small>` : ''}</td>
+      <td class="bal rd-mono">${rdInline(r.balance || '—')}</td><td>${rdFlagChips(r.flags)}</td></tr>`).join('');
+    const aside = [rdPlural(st.chainCount, 'instrument'), span, st.flaggedCount ? `${st.flaggedCount} flagged` : ''].filter(Boolean).join(' · ');
+    chainCard = `<section class="card ${enter()}" aria-labelledby="${pid}-chain">
+      <div class="rd-card-head"><h3 id="${pid}-chain">Chain of title</h3><span class="aside">${esc(aside)}</span></div>
+      ${p.chain.length ? `<div class="rd-tbl-wrap"><table class="rd-tbl rd-chain">
+        <thead><tr><th>#</th><th>Date</th><th>Instrument · Recording</th><th>Grantor → Grantee</th><th>Conveyed</th><th>Running balance</th><th>Flags</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : '<p class="rd-empty">No instruments are listed in the chain of title table.</p>'}
+      ${(p.notes.chain || []).length ? `<p class="rd-note">${p.notes.chain.map(rdInline).join('<br>')}</p>` : ''}
+    </section>`;
+  }
+
+  // Qualifications
+  const qualsCard = p.qualifications.length ? `<section class="card ${enter()}" aria-labelledby="${pid}-q">
+      <div class="rd-card-head"><h3 id="${pid}-q">Opinion qualifications</h3></div>
+      <dl class="rd-quals">${p.qualifications.map(q => `<dt>${esc(q.label || 'Note')}</dt><dd>${rdInline(q.text)}</dd>`).join('')}</dl>
+    </section>` : '';
+
+  // Full text stays in the DOM as the .analysis-card the PDF export reads.
+  const raw = `<details class="rd-raw ${enter()}"${opts.rawOpen ? ' open' : ''}><summary>Full opinion text</summary><div class="analysis-card"><div class="ac">${md(String(rawMarkdown))}</div></div></details>`;
+
+  const cls = ['rd', opts.animate ? 'rd-animate' : '', opts.fromProcessing ? 'rd-from-processing' : ''].filter(Boolean).join(' ');
+  return `<div class="${cls}" data-rd="${pid}">${hero}${ownersCard}${defectsCard}${chainCard}${qualsCard}${raw}</div>`;
+}
+
+function rdRawIsOpen(root) {
+  try {
+    const d = root && typeof root.querySelector === 'function' ? root.querySelector('details.rd-raw') : null;
+    return Boolean(d && d.open);
+  } catch {
+    return false;
+  }
+}
+
+// True while this job's results are the ones on screen (the reader has not moved to another job).
+function rdJobIsShown(jobId) {
+  return rdLastJobRender.jobId === jobId && rdLastJobRender.el === document.getElementById('jobResults');
+}
+
+function rdMotionAllowed() {
+  try {
+    return typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && typeof window.requestAnimationFrame === 'function'
+      && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+// Counts KPI values up from 0. Final text is already in the markup and is restored at the end.
+function rdAnimateCounts(root) {
+  if (!root || typeof root.querySelectorAll !== 'function' || !rdMotionAllowed()) return;
+  const ease = p => 1 - Math.pow(1 - p, 3);
+  root.querySelectorAll('.rd-animate [data-count]').forEach(el => {
+    const finalText = el.textContent;
+    const target = Number(el.getAttribute('data-count'));
+    if (!Number.isFinite(target)) return;
+    const dec = Number(el.getAttribute('data-dec') || 0);
+    const suffix = el.getAttribute('data-suffix') || '';
+    el.textContent = (0).toFixed(dec) + suffix;
+    setTimeout(() => {
+      const t0 = Date.now();
+      const step = () => {
+        const p = Math.min(1, (Date.now() - t0) / 900);
+        el.textContent = p < 1 ? (target * ease(p)).toFixed(dec) + suffix : finalText;
+        if (p < 1) window.requestAnimationFrame(step);
+      };
+      window.requestAnimationFrame(step);
+    }, 200);
+  });
+}
+
+function rdHandleClick(e) {
+  const target = e && e.target;
+  if (!target || typeof target.closest !== 'function') return;
+  const ask = target.closest('[data-rd-ask]');
+  if (ask) {
+    const input = document.getElementById(ask.getAttribute('data-rd-input'));
+    if (input) {
+      input.value = `Explain defect ${ask.getAttribute('data-rd-ask')}: what curative is needed and which owners it affects.`;
+      input.focus();
+    }
+    return;
+  }
+  const go = target.closest('[data-rd-goto]');
+  if (go) {
+    const row = document.getElementById(go.getAttribute('data-rd-goto'));
+    if (!row || typeof row.scrollIntoView !== 'function') return;
+    row.scrollIntoView({ behavior: rdMotionAllowed() ? 'smooth' : 'auto', block: 'center' });
+    row.classList.add('rd-hit');
+    setTimeout(() => row.classList.remove('rd-hit'), 1600);
+  }
+}
+
+function rdBarStatus(parsed) {
+  if (!parsed || !parsed.ok) return 'AI draft';
+  const n = parsed.stats.defectCount;
+  return `Draft · ${n ? rdPlural(n, 'open defect') : 'no open defects'}`;
+}
+
 const jobFollowupHistoryByJob = new Map();
 const jobFollowupsInFlight = new Set();
 
@@ -1519,7 +2652,10 @@ function renderJobResults(job, result) {
   if (!el || !job) return;
   if (!result || !result.finalTitleOpinion) {
     el.innerHTML = '';
+    rdLastJobRender = { el: null, sig: '', jobId: null };
     if (followupWrap) followupWrap.style.display = 'none';
+    const staleHistory = document.getElementById('jobFollowupHistory');
+    if (staleHistory) staleHistory.innerHTML = '';
     return;
   }
   const warnings = Array.isArray(result.warnings) ? result.warnings : [];
@@ -1529,16 +2665,50 @@ function renderJobResults(job, result) {
   const browserFallbackBanner = synthesisDriver === 'browser'
     ? `<div class="error-msg"><strong>Browser synthesis fallback.</strong> This opinion was generated in the browser because server-side synthesis was unavailable. Re-run on a durable job or investigate server synthesis errors before relying on this result for large runs.</div>`
     : '';
-  el.innerHTML = `
+  const opinionText = String(result.finalTitleOpinion);
+  // The poller applies a finished job twice (onUpdate + onTerminal). Re-writing identical markup
+  // would cut the entrance animation short, so keep the DOM when nothing visible changed. The key
+  // holds the full opinion text and every job field the render reads.
+  const renderSig = JSON.stringify([job.id, opinionText, warnings, failedDocs.length, synthesisDriver, job.totalDocuments ?? null]);
+  const sameJobShown = rdLastJobRender.el === el && rdLastJobRender.jobId === job.id && Boolean(el.innerHTML);
+  const sameAsShown = sameJobShown && rdLastJobRender.sig === renderSig;
+  // Keep the reader's open/closed choice on 'Full opinion text' across re-renders of the same job.
+  const rawOpen = sameJobShown && rdRawIsOpen(el);
+  const parsed = parseTitleOpinion(opinionText);
+  const animate = !sameAsShown && parsed.ok && rdShouldAnimate(`job:${job.id}:${rdHash(opinionText)}`);
+  const opinionHtml = sameAsShown ? '' : parsed.ok
+    ? renderResultsDashboard(parsed, opinionText, {
+      animate,
+      fromProcessing: animate && rdProgressLeave.jobId === job.id && Date.now() - rdProgressLeave.at < 3000,
+      askInputId: 'jobFollowupInput',
+      totalDocuments: job.totalDocuments,
+      rawOpen,
+    })
+    : `<div class="analysis-card"><div class="ac">${md(opinionText)}</div></div>`;
+  if (!sameAsShown) {
+    el.innerHTML = `
     ${browserFallbackBanner}
-    ${warnings.length ? `<div class="verify-note"><strong>Warnings:</strong><ul style="margin:.4rem 0 0 1.2rem">${warnings.map(w => `<li>${esc(typeof w === 'string' ? w : (w.message || ''))}</li>`).join('')}</ul></div>` : ''}
+    ${warnings.length ? `<div class="verify-note"><strong>Warnings:</strong><ul style="margin:.4rem 0 0 1.2rem">${warnings.map(w => `<li>${esc(typeof w === 'string' ? w : ((w && w.message) || ''))}</li>`).join('')}</ul></div>` : ''}
     ${failedDocs.length ? `<div class="verify-note"><strong>Excluded ${failedDocs.length} failed document${failedDocs.length === 1 ? '' : 's'}.</strong></div>` : ''}
-    <div class="analysis-card"><div class="ac">${md(String(result.finalTitleOpinion))}</div></div>`;
+    ${opinionHtml}`;
+    rdLastJobRender = { el, sig: renderSig, jobId: job.id };
+  }
+  el.onclick = rdHandleClick;
+  if (animate) rdAnimateCounts(el);
   if (followupWrap) {
     followupWrap.style.display = '';
     const input = document.getElementById('jobFollowupInput');
     const btn = document.getElementById('jobFollowupBtn');
     const historyEl = document.getElementById('jobFollowupHistory');
+    const statusEl = document.getElementById('jobBarStatus');
+    if (statusEl) statusEl.textContent = rdBarStatus(parsed);
+    const bar = document.getElementById('jobActionBar');
+    if (bar && animate && rdMotionAllowed()) bar.classList.add('rd-animate');
+    const barDownload = document.getElementById('jobBarDownloadBtn');
+    if (barDownload) {
+      const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
+      barDownload.onclick = () => downloadPDF({ rootElement: document.getElementById('jobResults'), tractOverride: title });
+    }
     if (historyEl) {
       const list = jobFollowupHistoryByJob.get(job.id) || [];
       historyEl.innerHTML = list.map(pair => `
@@ -1580,13 +2750,17 @@ function renderJobResults(job, result) {
         const list = jobFollowupHistoryByJob.get(job.id) || [];
         list.push({ question: q, answer });
         jobFollowupHistoryByJob.set(job.id, list);
-        if (input) input.value = '';
-        renderJobResults(job, result);
+        // The answer is stored either way; only redraw if this job is still the one on screen,
+        // so a late answer never paints job A over job B.
+        if (rdJobIsShown(job.id)) {
+          if (input) input.value = '';
+          renderJobResults(job, result);
+        }
       } catch (err) {
         alert(err.message || 'Follow-up failed.');
       } finally {
         jobFollowupsInFlight.delete(job.id);
-        if (btn) {
+        if (btn && (rdJobIsShown(job.id) || !rdLastJobRender.jobId)) {
           btn.disabled = false;
           btn.textContent = prevLabel;
         }
@@ -1594,6 +2768,10 @@ function renderJobResults(job, result) {
     };
     if (btn) {
       btn.onclick = submit;
+      // The Ask button is shared across jobs; show this job's own in-flight state.
+      const busy = jobFollowupsInFlight.has(job.id);
+      btn.disabled = busy;
+      btn.textContent = busy ? 'Asking…' : 'Ask';
     }
     if (input) {
       input.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
@@ -1618,7 +2796,9 @@ async function loadJobView(jobId) {
     return;
   }
   if (activeJobPollState && activeJobPollState.jobId !== jobId) stopJobPoller();
-  if (headerEl) headerEl.innerHTML = '<div style="color:#8a6f4a">Loading job…</div>';
+  if (headerEl) headerEl.innerHTML = '<div style="color:#64748b">Loading job…</div>';
+  // Another job's results must not sit under this job's header while it loads.
+  if (rdLastJobRender.jobId && rdLastJobRender.jobId !== jobId) renderJobResults({ id: jobId }, null);
   let res;
   try {
     res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
@@ -1677,6 +2857,7 @@ async function applyJobToView(job, isCurrent = () => true) {
   renderJobActions(job);
   if (job.status === 'complete' || job.status === 'partial_failed') {
     let result = null;
+    let fetchFailed = false;
     try {
       const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/result`, {
         method: 'GET',
@@ -1685,11 +2866,16 @@ async function applyJobToView(job, isCurrent = () => true) {
       if (r.ok) {
         const payload = await r.json();
         result = payload.result || null;
+      } else if (r.status !== 404) {
+        fetchFailed = true;
       }
     } catch (err) {
+      fetchFailed = true;
       console.warn('Could not fetch durable job result', err);
     }
     if (!isCurrent()) return;
+    // A failed re-fetch (network blip, 5xx) keeps the result already on screen for this job.
+    if (fetchFailed && rdJobIsShown(job.id)) return;
     renderJobResults(job, result);
   } else {
     if (!isCurrent()) return;
@@ -1756,6 +2942,11 @@ function renderRecentJobsToolbar() {
   const button = document.getElementById('recentJobsButton');
   const hint = document.getElementById('recentJobsToolbarHint');
   if (!button) return;
+  const countEl = document.getElementById('recentJobsCount');
+  if (countEl) {
+    const recentCount = loadRecentJobs().length;
+    countEl.textContent = recentCount ? `(${recentCount})` : '';
+  }
   const enabled = hasCompletedRecentJob();
   button.className = enabled
     ? 'recent-jobs-toolbar-button'
@@ -1797,7 +2988,7 @@ function renderRecentJobsView() {
           <a class="recent-jobs-row" href="#/job/${encodeURIComponent(entry.id)}" style="text-decoration:none;color:inherit">
             <div>
               <div style="font-weight:600">${esc(title)}</div>
-              <div style="color:#8a6f4a;font-size:.82rem">${esc(shortJobId(entry.id))}${lastViewed ? ` · ${esc(lastViewed)}` : ''} · ${documentCount} document${documentCount === 1 ? '' : 's'}</div>
+              <div style="color:#64748b;font-size:.82rem">${esc(shortJobId(entry.id))}${lastViewed ? ` · ${esc(lastViewed)}` : ''} · ${documentCount} document${documentCount === 1 ? '' : 's'}</div>
             </div>
             <span class="status-badge ${info.badge}">${esc(info.label)}</span>
           </a>`;
@@ -2796,21 +3987,74 @@ function formatBytes(b) {
   return (b/1048576).toFixed(1) + ' MB';
 }
 
+let renderedFileCount = 0;
+
+function stagedFileTag(f) {
+  const name = String(f?.name || '').toLowerCase();
+  const type = String(f?.type || '').toLowerCase();
+  const ext = (name.match(/\.([a-z0-9]+)(?:\s|$)/) || [])[1] || '';
+  if (type.includes('pdf') || ext === 'pdf') return { kind: 'pdf', label: 'PDF' };
+  if (type.includes('csv') || ext === 'csv') return { kind: 'csv', label: 'CSV' };
+  if (type.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) {
+    return { kind: 'img', label: ext === 'jpeg' ? 'JPG' : (ext ? ext.toUpperCase() : 'IMG') };
+  }
+  return { kind: 'other', label: ext ? ext.toUpperCase().slice(0, 4) : 'FILE' };
+}
+
+function updateStagedSummary() {
+  const count = files.length;
+  if (!count) renderedFileCount = 0;
+  const setText = (id, text) => { const node = document.getElementById(id); if (node) node.textContent = text; };
+  setText('analyzeBtnCount', count ? `(${count})` : '');
+  setText('dropSlots', String(count));
+  setText('homeSubtitle', count
+    ? `${count} document${count === 1 ? '' : 's'} staged and ready for adaptive batching and synthesis.`
+    : 'Add optional tract context, then stage up to 400 files for one chain-of-title run.');
+  let badge = `${count} / ${MAX_FILES} files staged`;
+  if (count) {
+    const totalBytes = files.reduce((sum, f) => sum + (Number(f?.size) || 0), 0);
+    let batchNote = '';
+    try {
+      const batchCount = buildAdaptiveBatches(files).length;
+      if (batchCount) batchNote = ` · Est. ${batchCount} batch${batchCount === 1 ? '' : 'es'}`;
+    } catch {}
+    badge = `${count} / ${MAX_FILES} files · ${formatBytes(totalBytes)}${batchNote}`;
+  }
+  setText('stagedBadge', badge);
+  const badgeEl = document.getElementById('stagedBadge');
+  if (badgeEl && badgeEl.classList) badgeEl.classList[count ? 'add' : 'remove']('full');
+  const home = document.getElementById('view-home');
+  if (home && home.classList) {
+    home.classList[count ? 'add' : 'remove']('has-files');
+    home.classList[count >= MAX_FILES ? 'add' : 'remove']('is-full');
+  }
+}
+
 function renderFileList() {
   const el = document.getElementById('fileList');
-  if (!files.length) { el.innerHTML = ''; return; }
+  if (!files.length) { el.innerHTML = ''; updateStagedSummary(); return; }
 
-  const limitNote = files.length >= MAX_FILES ? ' <span style="color:#b8631e">(limit reached)</span>' : '';
+  const limitNote = files.length >= MAX_FILES ? ' <span style="color:#b45309">(limit reached)</span>' : '';
   const displayFiles = files.length > MAX_FILE_LIST_DISPLAY ? files.slice(0, MAX_FILE_LIST_DISPLAY) : files;
   const hiddenCount = files.length - displayFiles.length;
-  el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${files.length} of ${MAX_FILES} document${files.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
-    displayFiles.map((f, i) => `
-      <div class="file-item" onclick="event.stopPropagation()">
-        <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
+  const previousCount = renderedFileCount;
+  renderedFileCount = files.length;
+  el.innerHTML = `<div class="staged-head" aria-hidden="true"><span>Type</span><span>Filename</span><span>Size</span><span>Status</span><span>Action</span></div>` +
+    displayFiles.map((f, i) => {
+      const tag = stagedFileTag(f);
+      const isNew = i >= previousCount;
+      return `
+      <div class="file-item${isNew ? ' is-new' : ''}" style="--row:${isNew ? Math.min(i - previousCount, 6) : 0}" onclick="event.stopPropagation()">
+        <span class="file-type file-type--${tag.kind}">${tag.label}</span>
+        <span class="file-name" title="${esc(f.name)}">${esc(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
-        <button class="file-remove" onclick="event.stopPropagation();removeFile(${i})">×</button>
-      </div>`).join('') +
-    (hiddenCount > 0 ? `<div class="file-item" style="justify-content:center;color:#8a6f4a;font-style:italic">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '');
+        <span class="file-status">Staged</span>
+        <button type="button" class="file-remove" aria-label="Remove ${esc(f.name)}" onclick="event.stopPropagation();removeFile(${i})">Remove</button>
+      </div>`;
+    }).join('') +
+    (hiddenCount > 0 ? `<div class="file-more">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '') +
+    `<div class="staged-foot"><span class="file-count">Showing 1–${displayFiles.length} of ${files.length} staged document${files.length !== 1 ? 's' : ''}${limitNote}</span><span class="mono">Uploads when you start · ${Math.round(REQUEST_ENVELOPE_SAFE_BYTES / 1_000_000)} MB max / batch</span></div>`;
+  updateStagedSummary();
 }
 
 function removeFile(i) {
@@ -3908,8 +5152,25 @@ async function runFollowupTurn(q, history) {
 }
 
 function renderResults() {
-  document.getElementById('results').innerHTML = conversationHistory.map((m, i) => {
+  const resultsEl = document.getElementById('results');
+  // The newest title opinion gets the dashboard; earlier ones and follow-up answers keep the markdown card.
+  let latestOpinion = -1;
+  conversationHistory.forEach((m, i) => {
+    if (m.role === 'assistant' && (m.kind === 'title-opinion' || i === 1) && typeof m.content === 'string') latestOpinion = i;
+  });
+  let animateRoot = false;
+  // A follow-up re-renders the whole list; keep the reader's 'Full opinion text' open state.
+  const rawOpen = rdRawIsOpen(resultsEl);
+  resultsEl.innerHTML = conversationHistory.map((m, i) => {
     if (m.role === 'assistant') {
+      if (i === latestOpinion) {
+        const parsed = parseTitleOpinion(m.content);
+        if (parsed.ok) {
+          const animate = rdShouldAnimate(`tab:${i}:${rdHash(m.content)}`);
+          animateRoot = animateRoot || animate;
+          return renderResultsDashboard(parsed, m.content, { animate, askInputId: 'followupInput', rawOpen });
+        }
+      }
       return `<div class="analysis-card">
         <div class="analysis-label">◈ Title Opinion Analysis</div>
         ${i === 1 ? '<div class="verify-note"><strong>⚠ Verify before relying on this:</strong> Cross-check every fact against the source documents. The AI may misread fractions or miss reservations. This is a research aid, not a legal opinion.</div>' : ''}
@@ -3922,6 +5183,8 @@ function renderResults() {
     }
     return '';
   }).join('');
+  resultsEl.onclick = rdHandleClick;
+  if (animateRoot) rdAnimateCounts(resultsEl);
 }
 
 function md(text) {
@@ -4006,7 +5269,7 @@ async function handleAdditionalFiles(newFiles) {
 function renderAdditionalFileList() {
   const el = document.getElementById('fileList2');
   if (!additionalFiles.length) { el.innerHTML = ''; return; }
-  const limitNote = additionalFiles.length >= MAX_FILES ? ' <span style="color:#b8631e">(limit reached)</span>' : '';
+  const limitNote = additionalFiles.length >= MAX_FILES ? ' <span style="color:#b45309">(limit reached)</span>' : '';
   const displayFiles = additionalFiles.length > MAX_FILE_LIST_DISPLAY ? additionalFiles.slice(0, MAX_FILE_LIST_DISPLAY) : additionalFiles;
   const hiddenCount = additionalFiles.length - displayFiles.length;
   el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${additionalFiles.length} of ${MAX_FILES} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
@@ -4016,7 +5279,7 @@ function renderAdditionalFileList() {
         <span class="file-size">${formatBytes(f.size)}</span>
         <button class="file-remove" onclick="event.stopPropagation();removeAdditionalFile(${i})">×</button>
       </div>`).join('') +
-    (hiddenCount > 0 ? `<div class="file-item" style="justify-content:center;color:#8a6f4a;font-style:italic">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '');
+    (hiddenCount > 0 ? `<div class="file-item" style="justify-content:center;color:#64748b;font-style:italic">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '');
 }
 
 function removeAdditionalFile(i) {
@@ -4275,6 +5538,10 @@ async function analyzeAdditional() {
   }
 }
 
+function rdDecodeEntities(text) {
+  return String(text).replace(/&(amp|lt|gt|quot|#39|#x27|nbsp);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#x27': "'", nbsp: ' ' })[e]);
+}
+
 function downloadPDF(options = {}) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
@@ -4317,120 +5584,125 @@ function downloadPDF(options = {}) {
     alert('No analysis to download yet.');
     return;
   }
-
-  function addText(text, fontSize, isBold, color, indent) {
-    doc.setFontSize(fontSize);
-    doc.setFont('helvetica', isBold ? 'bold' : 'normal');
-    doc.setTextColor(color[0], color[1], color[2]);
-    const lines = doc.splitTextToSize(text, maxWidth - (indent || 0));
-    lines.forEach(line => {
-      if (y + fontSize * 0.4 > pageHeight - margin) {
-        doc.addPage();
-        y = margin;
-        doc.setFillColor(184, 99, 30);
-        doc.rect(0, 0, pageWidth, 12, 'F');
-        doc.setTextColor(255, 255, 255);
-        doc.setFontSize(9);
-        doc.setFont('helvetica', 'bold');
-        doc.text('Mineral Ownership Builder — Title Research Tool', margin, 8);
-        y = 20;
-        doc.setFontSize(fontSize);
-        doc.setFont('helvetica', isBold ? 'bold' : 'normal');
-        doc.setTextColor(color[0], color[1], color[2]);
-      }
-      doc.text(line, margin + (indent || 0), y);
-      y += fontSize * 0.45;
-    });
-    y += fontSize * 0.15;
-  }
-
-  analysisCards.forEach((card, cardIdx) => {
-    const acDiv = card.querySelector('.ac');
-    if (!acDiv) return;
-
-    if (cardIdx > 0) {
-      y += 4;
-      doc.setDrawColor(200, 169, 110);
-      doc.line(margin, y, pageWidth - margin, y);
-      y += 6;
-      doc.setFontSize(8);
-      doc.setFont('helvetica', 'italic');
-      doc.setTextColor(138, 111, 74);
-      doc.text('Updated Analysis', margin, y);
-      y += 6;
+  // The results dashboard keeps the full opinion card inside a closed <details>; open it while
+  // reading so innerText (and so the PDF text) matches the rendered card exactly.
+  const closedRawOpinions = Array.from(rootElement.querySelectorAll('details.rd-raw:not([open])'));
+  closedRawOpinions.forEach(d => { d.open = true; });
+  // Restore in finally so a jsPDF error never leaves the collapsed card expanded.
+  try {
+    function addText(text, fontSize, isBold, color, indent) {
+      doc.setFontSize(fontSize);
+      doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+      doc.setTextColor(color[0], color[1], color[2]);
+      const lines = doc.splitTextToSize(text, maxWidth - (indent || 0));
+      lines.forEach(line => {
+        if (y + fontSize * 0.4 > pageHeight - margin) {
+          doc.addPage();
+          y = margin;
+          doc.setFillColor(184, 99, 30);
+          doc.rect(0, 0, pageWidth, 12, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'bold');
+          doc.text('Mineral Ownership Builder — Title Research Tool', margin, 8);
+          y = 20;
+          doc.setFontSize(fontSize);
+          doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+          doc.setTextColor(color[0], color[1], color[2]);
+        }
+        doc.text(line, margin + (indent || 0), y);
+        y += fontSize * 0.45;
+      });
+      y += fontSize * 0.15;
     }
 
-    acDiv.childNodes.forEach(node => {
-      if (node.nodeType === Node.TEXT_NODE) return;
-      const tag = node.tagName?.toLowerCase();
-      const text = node.innerText || node.textContent || '';
-      if (!text.trim()) return;
+    analysisCards.forEach((card, cardIdx) => {
+      const acDiv = card.querySelector('.ac');
+      if (!acDiv) return;
 
-      if (tag === 'h3') {
-        y += 3;
-        doc.setFillColor(240, 227, 200);
-        doc.rect(margin, y - 4, maxWidth, 8, 'F');
-        addText(text.trim().toUpperCase(), 8.5, true, [184, 99, 30], 0);
-        y += 1;
-      } else if (tag === 'h2') {
-        y += 2;
-        addText(text.trim(), 11, true, [107, 52, 16], 0);
-      } else if (tag === 'p') {
-        const parts = node.innerHTML.split(/<strong>|<\/strong>/);
-        let lineText = '';
-        parts.forEach((part, pi) => {
-          lineText += part.replace(/<[^>]+>/g, '');
-        });
-        addText(lineText.trim(), 9, false, [74, 60, 40], 0);
-      } else if (tag === 'ul') {
-        node.querySelectorAll('li').forEach(li => {
-          addText('• ' + (li.innerText || li.textContent || '').trim(), 8.5, false, [74, 60, 40], 4);
-        });
-      } else if (tag === 'table') {
-        y += 2;
-        const rows = node.querySelectorAll('tr');
-        const colCount = rows[0]?.querySelectorAll('th,td').length || 1;
-        const colWidth = maxWidth / colCount;
-        const rowHeight = 7;
-
-        rows.forEach((row, ri) => {
-          if (y + rowHeight > pageHeight - margin) {
-            doc.addPage();
-            y = margin + 8;
-          }
-          const cells = row.querySelectorAll('th, td');
-          const isHeader = row.querySelector('th') !== null;
-
-          if (isHeader) {
-            doc.setFillColor(184, 99, 30);
-            doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
-            doc.setTextColor(255, 255, 255);
-            doc.setFontSize(7.5);
-            doc.setFont('helvetica', 'bold');
-          } else {
-            if (ri % 2 === 0) {
-              doc.setFillColor(250, 246, 238);
-              doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
-            }
-            doc.setDrawColor(232, 216, 184);
-            doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'D');
-            doc.setTextColor(74, 60, 40);
-            doc.setFontSize(7.5);
-            doc.setFont('helvetica', 'normal');
-          }
-
-          cells.forEach((cell, ci) => {
-            const cellText = (cell.innerText || cell.textContent || '').trim();
-            const x = margin + ci * colWidth + 2;
-            const lines = doc.splitTextToSize(cellText, colWidth - 4);
-            doc.text(lines[0] || '', x, y);
-          });
-          y += rowHeight;
-        });
-        y += 3;
+      if (cardIdx > 0) {
+        y += 4;
+        doc.setDrawColor(200, 169, 110);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 6;
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'italic');
+        doc.setTextColor(138, 111, 74);
+        doc.text('Updated Analysis', margin, y);
+        y += 6;
       }
+
+      acDiv.childNodes.forEach(node => {
+        if (node.nodeType === Node.TEXT_NODE) return;
+        const tag = node.tagName?.toLowerCase();
+        const text = node.innerText || node.textContent || '';
+        if (!text.trim()) return;
+
+        if (tag === 'h3') {
+          y += 3;
+          doc.setFillColor(240, 227, 200);
+          doc.rect(margin, y - 4, maxWidth, 8, 'F');
+          addText(text.trim().toUpperCase(), 8.5, true, [184, 99, 30], 0);
+          y += 1;
+        } else if (tag === 'h2') {
+          y += 2;
+          addText(text.trim(), 11, true, [107, 52, 16], 0);
+        } else if (tag === 'p') {
+          // Strip tags, then decode the entities esc() wrote, so the PDF says '&' not '&amp;'.
+          const lineText = rdDecodeEntities(node.innerHTML.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, ''));
+          addText(lineText.trim(), 9, false, [74, 60, 40], 0);
+        } else if (tag === 'ul') {
+          node.querySelectorAll('li').forEach(li => {
+            addText('• ' + (li.innerText || li.textContent || '').trim(), 8.5, false, [74, 60, 40], 4);
+          });
+        } else if (tag === 'table') {
+          y += 2;
+          const rows = node.querySelectorAll('tr');
+          const colCount = rows[0]?.querySelectorAll('th,td').length || 1;
+          const colWidth = maxWidth / colCount;
+          const rowHeight = 7;
+
+          rows.forEach((row, ri) => {
+            if (y + rowHeight > pageHeight - margin) {
+              doc.addPage();
+              y = margin + 8;
+            }
+            const cells = row.querySelectorAll('th, td');
+            const isHeader = row.querySelector('th') !== null;
+
+            if (isHeader) {
+              doc.setFillColor(184, 99, 30);
+              doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
+              doc.setTextColor(255, 255, 255);
+              doc.setFontSize(7.5);
+              doc.setFont('helvetica', 'bold');
+            } else {
+              if (ri % 2 === 0) {
+                doc.setFillColor(250, 246, 238);
+                doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
+              }
+              doc.setDrawColor(232, 216, 184);
+              doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'D');
+              doc.setTextColor(74, 60, 40);
+              doc.setFontSize(7.5);
+              doc.setFont('helvetica', 'normal');
+            }
+
+            cells.forEach((cell, ci) => {
+              const cellText = (cell.innerText || cell.textContent || '').trim();
+              const x = margin + ci * colWidth + 2;
+              const lines = doc.splitTextToSize(cellText, colWidth - 4);
+              doc.text(lines[0] || '', x, y);
+            });
+            y += rowHeight;
+          });
+          y += 3;
+        }
+      });
     });
-  });
+  } finally {
+    closedRawOpinions.forEach(d => { d.open = false; });
+  }
 
   const totalPages = doc.internal.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) {
@@ -4467,6 +5739,7 @@ function resetAll() {
   document.getElementById('analyzeBtn').disabled = true;
   document.getElementById('addDocsBtn').disabled = true;
   clearError();
+  updateStagedSummary();
 }
 </script>
 </body>
