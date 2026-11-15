@@ -57,14 +57,13 @@
   .head-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
   #analyzeBtnCount:not(:empty) { margin-left: .3em; }
   .pill { font-size: 11.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
-  #view-home:has(#uploadSection[style*="none"]) .btn-cta { display: none; }
 
   /* Fields */
   .field { margin-bottom: 1rem; }
   .field-label { display: block; font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
   .label { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; font-weight: 600; color: var(--text); margin-bottom: 5px; }
   .label .opt { font-weight: 400; color: var(--muted); }
-  input[type=text], input[type=password], textarea { width: 100%; background: var(--tint); border: 1px solid var(--input-line); border-radius: 7px; color: var(--ink); padding: 8px 11px; font: 13px/1.4 var(--sans); outline: none; transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease; }
+  input[type=text], input[type=password], input[type=search], textarea { width: 100%; background: var(--tint); border: 1px solid var(--input-line); border-radius: 7px; color: var(--ink); padding: 8px 11px; font: 13px/1.4 var(--sans); outline: none; transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease; }
   input::placeholder, textarea::placeholder { color: var(--muted); }
   input:focus, textarea:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(180,83,9,.14); }
   textarea { resize: vertical; min-height: 36px; field-sizing: content; max-height: 140px; }
@@ -121,22 +120,67 @@
   .file-type--pdf { background: #fee2e2; color: #991b1b; }
   .file-type--csv { background: #dcfce7; color: #166534; }
   .file-type--img { background: #e0f2fe; color: #075985; }
-  #fileList .file-name { font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 12px; }
+  #fileList .file-name { font-weight: 500; color: var(--ink); overflow: hidden; padding-right: 12px; }
   #fileList .file-size { color: var(--muted); text-align: right; font: 11.5px/1.4 var(--mono); margin: 0; }
   .file-status { color: var(--ok); font-weight: 600; text-align: right; font-size: 11.5px; }
+  .file-status--attn { color: var(--accent-ink); font-weight: 700; }
+  #fileList .file-item.is-attn { background: #fffdf5; }
   #fileList .file-remove { justify-self: end; background: none; border: 0; border-radius: 5px; color: var(--muted); font: 500 11.5px/1 var(--sans); padding: 6px 4px; margin: 0 -4px 0 0; cursor: pointer; transition: color .15s ease, background-color .15s ease; }
   #fileList .file-remove:hover { color: #b91c1c; background: #fef2f2; }
-  .file-more { padding: 9px 18px; font-size: 12px; color: var(--muted); text-align: center; border-bottom: 1px solid #f1f5f9; }
+  /* Filenames truncate in the middle so dates, page ranges and extensions stay visible. */
+  .fn-start { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fn-end { flex-shrink: 0; white-space: pre; }
+  .q-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .q-tools input[type=search] { width: 220px; padding: 6px 10px; font-size: 12.5px; }
+  .q-tools select { background: var(--tint); border: 1px solid var(--input-line); border-radius: 7px; color: var(--ink); padding: 6px 8px; font: 12.5px/1.4 var(--sans); cursor: pointer; }
+  .q-tools select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(180,83,9,.14); }
+  .q-filter-note { display: flex; justify-content: space-between; align-items: center; gap: 4px 12px; flex-wrap: wrap; padding: 7px 18px; background: var(--accent-wash); border-bottom: 1px solid #fde68a; color: var(--accent-ink); font-size: 12.5px; }
+  .q-filter-note > span { min-width: 0; overflow-wrap: anywhere; }
+  .link-btn { background: none; border: 0; padding: 4px 2px; color: var(--accent-text); font: 600 12.5px/1.3 var(--sans); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .link-btn:hover { color: var(--accent-ink); }
+  .q-rows { max-height: 456px; overflow-y: auto; overscroll-behavior: contain; }
+  .q-rows:focus-visible { outline-offset: -2px; }
+  .q-nomatch { padding: 22px 18px; text-align: center; color: var(--muted); font-size: 13px; }
+  .q-tech summary { cursor: pointer; font-weight: 600; color: var(--text-2); }
+  .q-tech[open] summary { margin-bottom: 2px; }
+  .q-tech span { display: block; }
+  /* Intake feedback: per-selection summary, reading progress, staged-state action bar */
+  .intake-progress { display: flex; align-items: center; gap: 8px; margin: -2px 0 12px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  .intake-note { position: relative; background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--ok); border-radius: 8px; padding: 10px 84px 10px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.5; color: var(--text); }
+  .intake-note--warn { background: var(--accent-wash); border-color: #fde68a; border-left-color: var(--accent); color: var(--accent-ink); }
+  .intake-lead { display: block; color: var(--ink); }
+  .intake-note p { margin-top: 4px; }
+  .intake-note ul { margin: 4px 0 0 1.15rem; max-height: 180px; overflow-y: auto; }
+  .intake-note li { overflow-wrap: anywhere; }
+  .intake-note .why { color: var(--text-2); }
+  .intake-note summary { cursor: pointer; font-weight: 600; margin-top: 4px; }
+  .intake-dismiss { position: absolute; top: 6px; right: 8px; background: none; border: 0; border-radius: 5px; color: var(--text-2); font: 500 12px/1 var(--sans); padding: 6px 6px; min-height: 24px; cursor: pointer; }
+  .intake-dismiss:hover { color: var(--ink); background: rgba(15,23,42,.05); }
+  .stage-bar { position: sticky; bottom: 12px; z-index: 15; display: flex; justify-content: space-between; align-items: center; gap: 10px 14px; margin: 0 0 12px; padding: 10px 10px 10px 16px; background: rgba(255,255,255,.96); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(15,23,42,.10), 0 1px 2px rgba(15,23,42,.06); }
+  .stage-bar-text { min-width: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+  #errorBox:focus { outline: none; }
+  .resume-card { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--ok); border-radius: 10px; padding: 12px 14px 12px 16px; margin-bottom: 12px; font-size: 13px; color: var(--text); }
+  .resume-card--stopped { background: var(--accent-wash); border-color: #fde68a; border-left-color: var(--accent); color: var(--accent-ink); }
+  .resume-copy { min-width: 0; flex: 1 1 260px; overflow-wrap: anywhere; }
+  .resume-copy strong { display: block; color: var(--ink); font-size: 13.5px; }
+  .resume-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .resume-actions a { text-decoration: none; }
   .staged-foot { padding: 10px 18px; background: var(--tint); border-top: 1px solid var(--line-soft); margin-top: -1px; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
   #fileList > .file-count { padding: 14px 18px; font-size: 12.5px; color: var(--text-2); }
   .staged-foot .file-count { font-size: 12px; color: var(--muted); }
   .file-list { margin-top: .8rem; text-align: left; }
   .file-count { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: .5rem; }
   .file-item { display: flex; justify-content: space-between; align-items: center; padding: .5rem .8rem; background: #fff; border: 1px solid var(--line); border-radius: 7px; margin-bottom: .3rem; font-size: 13px; }
-  .file-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .file-name { display: flex; min-width: 0; color: var(--ink); overflow: hidden; flex: 1; }
   .file-size { color: var(--muted); font-size: 12px; margin-left: .5rem; white-space: nowrap; }
   .file-remove { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; padding: 0 .3rem; margin-left: .5rem; }
   .file-remove:hover { color: #b91c1c; }
+  #fileList2 .add-rows { max-height: 320px; overflow-y: auto; }
+  #fileList2 .file-item { gap: 8px; }
+  #fileList2 .file-type { flex-shrink: 0; }
+  #fileList2 .file-status { margin-left: .5rem; }
+  #fileList2 .file-remove { min-width: 24px; min-height: 28px; padding: 4px 8px; border-radius: 5px; font: 500 12px/1 var(--sans); }
+  #fileList2 .file-remove:hover { background: #fef2f2; }
 
   /* Buttons */
   .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0; background: var(--accent); border: 1px solid transparent; color: #fff; padding: 10px 20px; font: 600 13.5px/1.2 var(--sans); border-radius: 8px; cursor: pointer; white-space: nowrap; box-shadow: 0 1px 2px rgba(180,83,9,.22); transition: background-color .16s ease, box-shadow .16s ease, transform .16s ease; }
@@ -417,20 +461,33 @@
     .container { padding: 14px 14px 0; }
     .page-head { flex-direction: column; align-items: stretch; gap: 10px; }
     .head-actions { flex-wrap: wrap; }
-    .head-actions .btn-cta { flex: 1 1 auto; min-height: 44px; }
+    .stage-bar { flex-direction: column; align-items: stretch; bottom: 8px; padding: 10px; }
+    .stage-bar:not(.is-reading) .stage-bar-text { display: none; }
+    .stage-bar-text { padding: 0 4px; }
+    .stage-bar .btn-primary { min-height: 44px; }
+    /* Touch screens cannot drag files, and the headline already states the 400-file cap. */
+    .upload-hint .when-empty, .chip.strong { display: none; }
     .ctx-bar { grid-template-columns: minmax(0,1fr); gap: 12px; padding: 14px; }
     .upload-zone, .has-files .upload-zone { flex-direction: column; align-items: stretch; padding: 20px 18px; gap: 14px; }
     .drop-left { align-items: flex-start; gap: 14px; }
     .drop-icon { width: 44px; height: 44px; }
     .btn-browse { text-align: center; padding: 12px 18px; }
     .q-toolbar { padding: 11px 14px; }
+    .q-tools { width: 100%; }
+    .q-tools input[type=search] { flex: 1 1 150px; width: auto; min-width: 0; min-height: 44px; font-size: 16px; }
+    .q-tools select { min-height: 44px; font-size: 14px; }
+    .q-filter-note { padding: 7px 14px; }
+    .q-rows { max-height: 62vh; }
+    .link-btn, .intake-dismiss { min-height: 44px; }
     .staged-head { display: none; }
-    #fileList .file-item { grid-template-columns: 50px minmax(0,1fr) auto; grid-template-areas: "type name remove" "type size remove"; row-gap: 1px; padding: 8px 14px; }
+    #fileList .file-item { grid-template-columns: 50px auto minmax(0,1fr) auto; grid-template-areas: "type name name remove" "type size status remove"; column-gap: 10px; row-gap: 1px; padding: 8px 14px; }
     #fileList .file-type { grid-area: type; }
-    #fileList .file-name { grid-area: name; }
+    #fileList .file-name { grid-area: name; padding-right: 0; }
     #fileList .file-size { grid-area: size; text-align: left; }
-    #fileList .file-status { display: none; }
+    #fileList .file-status { display: none; grid-area: status; text-align: left; }
+    #fileList .file-status--attn { display: block; }
     #fileList .file-remove { grid-area: remove; min-height: 44px; padding: 0 8px; margin: 0 -8px 0 0; }
+    #fileList2 .file-remove { min-height: 44px; }
     .staged-foot { padding: 10px 14px; }
     .card { padding: 16px; }
     .queue-box { padding: 0; }
@@ -442,6 +499,19 @@
     .spinner, .job-stepper .step-spinner { animation-duration: 1.2s !important; animation-iteration-count: infinite !important; }
   }
 
+  /* The sticky Build bar must never cover a focused control: reserve its height (plus a gap) at the bottom of the
+     page scrollport, so keyboard focus and programmatic focus scroll controls clear of it. */
+  html:has(#uploadSection:not([style*="none"]) > #stageBar:not([hidden])) { scroll-padding-bottom: 96px; }
+  @media (max-width: 760px) { html:has(#uploadSection:not([style*="none"]) > #stageBar:not([hidden])) { scroll-padding-bottom: 112px; } }
+  /* Narrow phones (320 wide): drop the decorative icon so the copy runs full width, and tighten the stack a little,
+     so Select Files stays on the first screen. */
+  @media (max-width: 360px) {
+    .container { padding-top: 12px; }
+    .page-head { gap: 8px; }
+    .ctx-bar { gap: 10px; padding: 12px; }
+    .drop-icon { display: none; }
+    .upload-zone, .has-files .upload-zone { padding: 14px 16px 16px; gap: 10px; }
+  }
   html:has(#jobFollowup:not([style*="none"])), html:has(#followupSection:not([style*="none"])) { scroll-padding-bottom: 96px; }
   @media (max-width: 760px) { html:has(#jobFollowup:not([style*="none"])), html:has(#followupSection:not([style*="none"])) { scroll-padding-bottom: 148px; } }
 </style>
@@ -493,9 +563,11 @@
       </div>
       <div class="head-actions">
         <span class="pill">AI draft · verify against instruments</span>
-        <button class="btn-primary btn-cta" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title <span id="analyzeBtnCount"></span></button>
       </div>
     </div>
+
+    <div id="resumeNotice"></div>
+    <div id="homeStatus" class="rd-sr" role="status" aria-live="polite"></div>
 
     <div id="uploadSection">
       <section class="card ctx-bar reveal" style="--d:1" aria-label="Tract context">
@@ -521,17 +593,34 @@
         <span class="btn-browse" id="uploadBrowse"><span class="when-empty">+ Select Files</span><span class="when-staged">+ Add More Files</span></span>
       </div>
       <input type="file" id="fileInput" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
+      <p class="intake-progress" id="intakeProgress" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="intakeProgressText" aria-hidden="true"></span><span class="rd-sr" id="intakeProgressSay"></span></p>
+      <div id="intakeSummary"></div>
 
       <section class="card queue-box reveal" style="--d:3" aria-labelledby="stagedTitle">
         <div class="q-toolbar">
           <div class="q-left"><h3 id="stagedTitle">Staged Documents</h3><span class="q-stats mono" id="stagedBadge">0 / 400 files staged</span></div>
+          <div class="q-tools" id="queueTools" hidden>
+            <input type="search" id="queueSearch" placeholder="Search file names" aria-label="Search staged files by name" autocomplete="off" spellcheck="false" />
+            <select id="queueFilter" aria-label="Show staged files of type">
+              <option value="all">All types</option>
+              <option value="pdf">PDF</option>
+              <option value="csv">CSV</option>
+              <option value="img">Images</option>
+              <option value="attention">Needs attention</option>
+            </select>
+          </div>
         </div>
         <div id="fileList"></div>
         <div class="q-empty"><strong>No documents staged yet</strong>Drop files into the zone above to stage and check them before you start.</div>
       </section>
+
+      <div class="stage-bar" id="stageBar" hidden>
+        <p class="stage-bar-text" id="stageBarText">No documents staged yet.</p>
+        <button class="btn-primary btn-cta" id="analyzeBtn" onclick="analyze()" disabled>→ Build Chain of Title <span id="analyzeBtnCount"></span></button>
+      </div>
     </div>
 
-    <div id="errorBox"></div>
+    <div id="errorBox" role="alert" tabindex="-1"></div>
     <div id="infoBox"></div>
 
     <div id="progressSection" style="display:none">
@@ -567,18 +656,20 @@
 
     <div id="addDocsSection" style="display:none">
       <div class="card">
-        <label class="field-label">Add More Documents to This Analysis</label>
+        <h3 class="field-label" id="addDocsTitle">Add More Documents to This Analysis</h3>
         <p style="color:#64748b;font-size:13px;margin-bottom:1rem;line-height:1.5">
-          Upload additional documents and Claude will incorporate them into the existing chain of title, updating the ownership determination based on all documents combined. You can repeat this as many times as needed — up to 400 files per upload.
+          Add documents to update this chain of title. The ownership determination is rebuilt from all documents, old and new. You can repeat this as often as you need, up to 400 files per upload.
         </p>
-        <div class="upload-zone upload-zone--stack" id="uploadZone2" onclick="document.getElementById('fileInput2').click()">
-          <span class="upload-text">Click anywhere here or drag &amp; drop additional files</span>
-          <span class="upload-hint">
+        <div class="upload-zone upload-zone--stack" id="uploadZone2" role="button" tabindex="0" aria-labelledby="uploadText2" aria-describedby="uploadHint2" onclick="document.getElementById('fileInput2').click()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+          <span class="upload-text" id="uploadText2">Choose files to add, or drag and drop them here</span>
+          <span class="upload-hint" id="uploadHint2">
             <strong>Accepted files:</strong>&nbsp; PDF &nbsp;·&nbsp; CSV &nbsp;·&nbsp; JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; GIF &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; <em>up to 400 files</em>
           </span>
-          <div id="fileList2" class="file-list"></div>
         </div>
         <input type="file" id="fileInput2" multiple accept=".pdf,.csv,.jpg,.jpeg,.png,.gif,.webp" style="display:none" />
+        <p class="intake-progress" id="intakeProgress2" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="intakeProgress2Text" aria-hidden="true"></span><span class="rd-sr" id="intakeProgress2Say"></span></p>
+        <div id="intakeSummary2"></div>
+        <div id="fileList2" class="file-list"></div>
         <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
           <button class="btn-primary" id="addDocsBtn" onclick="analyzeAdditional()" disabled style="margin-top:0">→ Analyze Additional Documents</button>
           <button class="btn-secondary" onclick="hideAddDocs()">Cancel</button>
@@ -641,7 +732,6 @@ const ABSTRACT_CONCURRENCY = 2;
 const DURABLE_UPLOAD_CONCURRENCY = 4;
 const SYNTHESIS_CHUNK_SIZE = 120;
 const FOLLOWUP_HISTORY_TURNS = 4;
-const MAX_FILE_LIST_DISPLAY = 8;
 const CLIENT_MAX_REQUESTS_PER_MIN = 120;
 const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
@@ -1008,6 +1098,16 @@ let files = [];
 let conversationHistory = [];
 let documentAbstracts = [];
 let activeAnalysisRun = null;
+// Intake runs as a serialized queue per drop zone ("lane"). Build is enabled only when the home lane is idle.
+let nextStageId = 1;
+let buildStarting = false;
+// Bumped each time this tab starts a run, so a slow boot-time resume check can tell it has been overtaken.
+let buildEpoch = 0;
+const intakeLanes = {
+  home: { key: 'home', pending: 0, chain: Promise.resolve(), results: [], progressId: 'intakeProgress', summaryId: 'intakeSummary', list: () => files, render: () => renderFileList(), refresh: () => refreshBuildState() },
+  additional: { key: 'additional', pending: 0, chain: Promise.resolve(), results: [], progressId: 'intakeProgress2', summaryId: 'intakeSummary2', list: () => additionalFiles, render: () => renderAdditionalFileList(), refresh: () => refreshAddDocsState() },
+};
+const queueView = { query: '', type: 'all', announceTimer: null };
 
 async function loadAppVersion() {
   const el = document.getElementById('appVersion');
@@ -1028,9 +1128,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadAppVersion();
   const canLoadInitialRoute = await checkPasswordRequired();
   setupDragDrop();
-  document.getElementById('fileInput').addEventListener('change', async e => {
-    await handleFiles(Array.from(e.target.files));
+  document.getElementById('fileInput').addEventListener('change', e => {
+    const picked = Array.from(e.target.files || []);
     e.target.value = '';
+    handleFiles(picked);
+  });
+  document.getElementById('queueSearch').addEventListener('input', e => {
+    queueView.query = e.target.value.trim();
+    renderFileList();
+    announceQueueView(QUEUE_SEARCH_ANNOUNCE_DELAY_MS);
+  });
+  document.getElementById('queueFilter').addEventListener('change', e => {
+    queueView.type = e.target.value;
+    renderFileList();
+    announceQueueView();
   });
   document.getElementById('followupInput').addEventListener('keydown', e => { if (e.key === 'Enter') askFollowup(); });
   document.getElementById('passwordInput').addEventListener('keydown', e => { if (e.key === 'Enter') checkPassword(); });
@@ -1276,22 +1387,92 @@ async function prepareFileEntries(file, slotsAvailable) {
   }];
 }
 
-async function ingestUploadedFiles(newFiles, targetArray, statusEl) {
-  let splitParts = 0;
-  for (const file of newFiles) {
-    const remaining = MAX_FILES - targetArray.length;
-    if (remaining <= 0) break;
-    if (statusEl && newFiles.length > 2) {
-      statusEl.innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${esc(file.name)}...</div>`;
+const INTAKE_EXTENSIONS = new Set(['pdf', 'csv', 'jpg', 'jpeg', 'png', 'gif', 'webp']);
+const INTAKE_MEDIA_TYPES = new Set(['application/pdf', 'text/csv', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const SUPPORTED_TYPES_TEXT = 'Use PDF, CSV, JPG, PNG, GIF or WEBP.';
+
+function fileExtension(name) {
+  const match = /\.([a-z0-9]+)$/i.exec(String(name || ''));
+  return match ? match[1].toLowerCase() : '';
+}
+
+function intakeKey(file) {
+  return `${file?.name}|${file?.size}|${file?.lastModified || ''}`;
+}
+
+function intakeRejection(file) {
+  const ext = fileExtension(file.name);
+  const type = String(file.type || '').toLowerCase();
+  if (!INTAKE_EXTENSIONS.has(ext) && !INTAKE_MEDIA_TYPES.has(type)) {
+    return ext ? `.${ext} files are not supported. ${SUPPORTED_TYPES_TEXT}` : `No file type. ${SUPPORTED_TYPES_TEXT}`;
+  }
+  if (!file.size) return 'The file is empty (0 bytes).';
+  return '';
+}
+
+// A PDF must carry a %PDF- header. Readers tolerate a little leading junk, so look in the first 1 KB.
+async function hasPdfHeader(file) {
+  if (typeof file?.slice !== 'function') return true;
+  const bytes = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+  let head = '';
+  for (let i = 0; i < bytes.length; i++) head += String.fromCharCode(bytes[i]);
+  return head.includes('%PDF-');
+}
+
+// Shared intake core for both drop zones. Validates each file, stages what fits, and never stops on one
+// bad file. Returns one summary per selection: { offered, accepted, rejected:[{name,reason}], duplicates, overCap }.
+async function ingestUploadedFiles(newFiles, targetArray, onProgress) {
+  const result = { offered: newFiles.length, accepted: [], rejected: [], duplicates: [], overCap: [] };
+  const seen = new Set(targetArray.map(entry => intakeKey(entry.sourceFile || entry)));
+  for (let i = 0; i < newFiles.length; i++) {
+    const file = newFiles[i];
+    if (targetArray.length >= MAX_FILES) {
+      result.overCap = newFiles.slice(i).map(f => f.name);
+      break;
     }
-    const entries = await prepareFileEntries(file, remaining);
-    if (entries.length > 1) splitParts += entries.length - 1;
-    for (const entry of entries) {
-      if (targetArray.length >= MAX_FILES) break;
-      targetArray.push(entry);
+    if (onProgress) onProgress(i + 1, newFiles.length);
+    const problem = intakeRejection(file);
+    if (problem) {
+      result.rejected.push({ name: file.name, reason: problem });
+      continue;
+    }
+    try {
+      if (isPdfFile(file) && !(await hasPdfHeader(file))) {
+        result.rejected.push({ name: file.name, reason: 'Not a readable PDF. Re-export or re-scan it, then add it again.' });
+        continue;
+      }
+      const entries = await prepareFileEntries(file, MAX_FILES - targetArray.length);
+      const key = intakeKey(file);
+      const duplicate = seen.has(key);
+      seen.add(key);
+      for (const entry of entries) {
+        if (targetArray.length >= MAX_FILES) {
+          result.overCap.push(entry.name);
+          continue;
+        }
+        entry.stageId = nextStageId++;
+        entry.duplicate = duplicate;
+        targetArray.push(entry);
+        result.accepted.push(entry.name);
+      }
+      if (duplicate) result.duplicates.push(file.name);
+    } catch (err) {
+      console.warn('Could not read staged file', file.name, err);
+      result.rejected.push({ name: file.name, reason: 'Could not be read. It may have been moved, renamed or locked; add it again.' });
     }
   }
-  return splitParts;
+  return result;
+}
+
+// Duplicate is a property of the current list, not of the moment a file arrived: the first staged copy of a
+// name+size+date is the original and later copies are flagged. Recomputed after every intake and removal.
+function markDuplicates(list) {
+  const seen = new Set();
+  list.forEach(entry => {
+    const key = intakeKey(entry.sourceFile || entry);
+    entry.duplicate = seen.has(key);
+    seen.add(key);
+  });
 }
 
 async function readSourceFile(entry) {
@@ -1599,7 +1780,7 @@ async function saveJobName(job, value) {
 const liveAnalysisRuns = new Set();
 
 function beginAnalysisRun(jobId) {
-  const run = { jobId, cancelled: false };
+  const run = { jobId, cancelled: false, driver: 'browser' };
   liveAnalysisRuns.add(run);
   activeAnalysisRun = run;
   return run;
@@ -1631,6 +1812,7 @@ function resetHomeForNewJob() {
   clearProgressTimer();
   cancelAllAnalysisRuns();
   activeAnalysisRun = null;
+  buildStarting = false;
   files.forEach(freeFileMemory);
   files = [];
   additionalFiles = [];
@@ -1673,6 +1855,8 @@ function resetHomeForNewJob() {
   if (followup) followup.style.display = 'none';
   if (addDocs) addDocs.style.display = 'none';
   if (analyzeBtn) analyzeBtn.disabled = true;
+  resetIntakeView();
+  renderResumeNotice(null);
   updateStagedSummary();
 }
 
@@ -3404,24 +3588,84 @@ function getRequestedJobId() {
   }
 }
 
-function saveActiveJob(job) {
+// The saved record is { id, savedAt, driver }. driver 'browser' means the work only runs while this tab is open.
+function saveActiveJob(job, driver) {
   const storage = getStorage();
   if (!storage || !job?.id) return;
-  storage.setItem(getJobStorageKey(), JSON.stringify({ id: job.id, savedAt: Date.now() }));
+  const previous = loadSavedJobRecord();
+  const keep = driver || (previous?.id === job.id ? previous.driver : null);
+  storage.setItem(getJobStorageKey(), JSON.stringify({ id: job.id, savedAt: Date.now(), ...(keep ? { driver: keep } : {}) }));
+}
+
+function isPlausibleJobId(id) {
+  return typeof id === 'string' && /^job_[A-Za-z0-9_-]{1,128}$/.test(id);
+}
+
+function loadSavedJobRecord() {
+  const storage = getStorage();
+  if (!storage) return null;
+  let saved;
+  try {
+    saved = JSON.parse(storage.getItem(getJobStorageKey()) || 'null');
+  } catch {
+    saved = undefined;
+  }
+  if (saved === null) return null;
+  if (!saved || !isPlausibleJobId(saved.id)) {
+    try { storage.removeItem(getJobStorageKey()); } catch {}
+    return null;
+  }
+  return { id: saved.id, driver: saved.driver === 'browser' || saved.driver === 'server' ? saved.driver : null };
+}
+
+function clearSavedJob(jobId) {
+  const storage = getStorage();
+  if (!storage) return;
+  if (!jobId || loadSavedJobRecord()?.id === jobId) {
+    try { storage.removeItem(getJobStorageKey()); } catch {}
+  }
 }
 
 function loadSavedJobId() {
   const requested = getRequestedJobId();
   if (requested) return requested;
-  const storage = getStorage();
-  if (!storage) return '';
-  try {
-    const saved = JSON.parse(storage.getItem(getJobStorageKey()) || 'null');
-    return saved?.id || '';
-  } catch {
-    storage.removeItem(getJobStorageKey());
-    return '';
+  return loadSavedJobRecord()?.id || '';
+}
+
+function renderResumeNotice(kind, job) {
+  const el = document.getElementById('resumeNotice');
+  if (!el) return;
+  if (!kind || !job?.id) { el.innerHTML = ''; return; }
+  const href = `#/job/${encodeURIComponent(job.id)}`;
+  const total = Number(job.totalDocuments) || 0;
+  const details = [statusInfo(job.status).label, total ? `${total} document${total === 1 ? '' : 's'}` : '', job.name || job.subjectTract || '']
+    .filter(Boolean).map(esc).join(' · ');
+  const dismiss = `<button type="button" class="btn-secondary" onclick="dismissResumeNotice()">Dismiss</button>`;
+  if (kind === 'finished') {
+    const hasResult = job.status === 'complete' || job.status === 'partial_failed';
+    const ended = job.status === 'failed' || job.status === 'canceled' ? 'stopped' : 'finished';
+    el.innerHTML = `<div class="resume-card" role="status">
+      <div class="resume-copy"><strong>Your last run ${ended}.</strong>${details}</div>
+      <div class="resume-actions"><a class="btn-primary" href="${href}">${hasResult ? 'Open results' : 'Open run details'}</a>${dismiss}</div>
+    </div>`;
+    return;
   }
+  el.innerHTML = `<div class="resume-card resume-card--stopped" role="status">
+    <div class="resume-copy"><strong>Your last run stopped when this tab closed.</strong>It was running in this browser, so no work continued after the tab closed or reloaded. Add the documents again and build a new run.</div>
+    <div class="resume-actions"><a class="btn-secondary" href="${href}">Open run details</a>${dismiss}</div>
+  </div>`;
+}
+
+function dismissResumeNotice() {
+  clearSavedJob();
+  renderResumeNotice(null);
+  focusUploadZone('uploadZone');
+}
+
+// After a card or note the user dismissed disappears, focus lands on the drop zone instead of falling to <body>.
+function focusUploadZone(id) {
+  const zone = document.getElementById(id);
+  if (zone && typeof zone.focus === 'function') zone.focus();
 }
 
 function renderJobMeta(job) {
@@ -3441,25 +3685,45 @@ function progressPercentFromJob(job) {
   return Math.round(Math.min(85, (finished / job.totalDocuments) * 85));
 }
 
+function jobPhaseLabel(job) {
+  const phase = String(job?.currentPhase || '').trim();
+  if (phase && !JOB_STATUS_LABELS[phase] && !/^[a-z]+(_[a-z]+)*$/.test(phase)) return phase;
+  return statusInfo(JOB_STATUS_LABELS[phase] ? phase : job?.status).label;
+}
+
 function renderPolledJobStatus(job) {
   if (!job) return;
   renderJobMeta(job);
   if (activeAnalysisRun) return;
+  if (TERMINAL_STATUSES.has(job.status)) {
+    stopJobPolling();
+    if (!conversationHistory.length) {
+      document.getElementById('progressSection').style.display = 'none';
+      renderResumeNotice('finished', job);
+      return;
+    }
+  }
   document.getElementById('progressSection').style.display = 'block';
   const pct = progressPercentFromJob(job);
-  const label = job.currentPhase || job.status;
-  updateProgress(pct, `Job ${job.id}: ${label}`, null);
-  if (job.status === 'complete' || job.status === 'failed') stopJobPolling();
+  updateProgress(pct, `Job ${job.id}: ${jobPhaseLabel(job)}`, null);
 }
 
+// Job creation failures carry the HTTP status, and `unexpected` when the body was not the JSON job we need.
 async function createAnalysisJob(input) {
   const response = await fetch('/api/jobs', {
     method: 'POST',
     headers: getJobHeaders(),
     body: JSON.stringify(input),
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Could not create job metadata (HTTP ${response.status}).`);
+  let data = null;
+  try { data = await response.json(); } catch {}
+  if (!response.ok || !data?.job?.id) {
+    const serverMessage = typeof data?.error === 'string' ? data.error : '';
+    const error = new Error(serverMessage || `Could not create job metadata (HTTP ${response.status}).`);
+    error.status = response.status;
+    error.unexpected = !serverMessage;
+    throw error;
+  }
   activeJobId = data.job.id;
   activeJobCompletedDocuments = 0;
   jobPatchQueue = Promise.resolve();
@@ -4116,37 +4380,229 @@ async function pollAnalysisJobOnce(jobId) {
   return data.job;
 }
 
+let resumeCheckedJobId = null;
+
+// On boot, a saved job becomes one of: a "finished" card, a "stopped" card (browser-driven work died with the
+// tab), live progress polling (durable server job), or nothing (confirmed missing: the stored id is cleared).
 async function resumeLastAnalysisJob() {
-  const jobId = loadSavedJobId();
-  if (!jobId || activeJobId === jobId) return;
-  activeJobId = jobId;
+  const saved = loadSavedJobRecord();
+  if (!saved || activeJobId === saved.id || resumeCheckedJobId === saved.id) return;
+  resumeCheckedJobId = saved.id;
+  const epoch = buildEpoch;
+  let response;
+  let data = null;
   try {
-    const job = await pollAnalysisJobOnce(jobId);
-    if (job && job.status !== 'complete' && job.status !== 'failed') startJobPolling(jobId);
+    response = await fetch(`/api/jobs/${encodeURIComponent(saved.id)}`, { method: 'GET', headers: getJobHeaders() });
+    try { data = await response.json(); } catch {}
   } catch (err) {
     console.warn('Could not resume durable job status', err);
+    return;
   }
+  if (response.status === 404) {
+    clearSavedJob(saved.id);
+    return;
+  }
+  const job = data?.job;
+  if (!response.ok || !job?.id) {
+    console.warn(`Could not resume durable job status (HTTP ${response.status}).`);
+    return;
+  }
+  // A run started in this tab while the check was in flight owns the page now; the old job must not take over.
+  if (activeAnalysisRun || buildStarting || buildEpoch !== epoch) return;
+  if (TERMINAL_STATUSES.has(job.status)) {
+    renderResumeNotice('finished', job);
+    return;
+  }
+  if (saved.driver === 'browser') {
+    renderResumeNotice('stopped', job);
+    return;
+  }
+  activeJobId = job.id;
+  saveActiveJob(job);
+  renderPolledJobStatus(job);
+  startJobPolling(job.id);
 }
 
-async function handleFiles(newFiles) {
-  if (MAX_FILES - files.length <= 0) return;
-  document.getElementById('analyzeBtn').disabled = true;
-  const statusEl = document.getElementById('fileList');
-  if (newFiles.length > 2) {
-    statusEl.innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${newFiles.length} files...</div>`;
+function handleFiles(newFiles) {
+  return queueIntake(intakeLanes.home, newFiles);
+}
+
+// Each selection waits for the previous one, so files stage in selection order and Build stays off until
+// every queued selection has been read.
+function queueIntake(lane, newFiles) {
+  const selection = Array.from(newFiles || []);
+  if (!selection.length) return lane.chain;
+  if (activeAnalysisRun || buildStarting) {
+    announce('Files cannot be added while a run is in progress.');
+    return Promise.resolve();
   }
-  try {
-    const splitParts = await ingestUploadedFiles(Array.from(newFiles), files, statusEl);
-    if (splitParts > 0) {
-      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis groups them by source document.`);
-    } else {
-      clearError();
-    }
-  } catch (e) {
-    showError(e.message);
+  if (!lane.pending) lane.results = [];
+  lane.pending += 1;
+  const target = lane.list();
+  lane.refresh();
+  renderIntakeProgress(lane);
+  const job = lane.chain
+    .then(async () => {
+      const result = await ingestUploadedFiles(selection, target, (n, total) => renderIntakeProgress(lane, n, total));
+      if (target !== lane.list()) return;
+      markDuplicates(target);
+      result.duplicates = result.duplicates.filter(name => target.some(entry => entry.duplicate && entry.name === name));
+      lane.results.push(result);
+      lane.render();
+      renderIntakeSummary(lane);
+      announce(intakeAnnouncement(result, target.length));
+    })
+    .catch(err => console.warn('File intake failed', err))
+    .finally(() => {
+      lane.pending -= 1;
+      lane.progress = null;
+      renderIntakeProgress(lane);
+      lane.refresh();
+    });
+  lane.chain = job;
+  return job;
+}
+
+function announce(message) {
+  // Any newer message wins over a search result still waiting for typing to pause.
+  if (queueView.announceTimer) cancelQueueViewAnnouncement();
+  const el = document.getElementById('homeStatus');
+  if (el) el.textContent = message;
+}
+
+function renderIntakeProgress(lane, n, total) {
+  if (n) lane.progress = { n, total };
+  const el = document.getElementById(lane.progressId);
+  if (!el) return;
+  el.hidden = !lane.pending;
+  const visual = document.getElementById(`${lane.progressId}Text`);
+  const spoken = document.getElementById(`${lane.progressId}Say`);
+  if (!lane.pending) {
+    if (visual) visual.textContent = '';
+    if (spoken) spoken.textContent = '';
+    lane.spokenStep = null;
+    return;
   }
-  renderFileList();
-  document.getElementById('analyzeBtn').disabled = files.length === 0;
+  const waiting = lane.pending - 1;
+  const text = (lane.progress ? `Reading files… ${lane.progress.n} of ${lane.progress.total}` : 'Reading files…')
+    + (waiting ? ` · ${waiting} more selection${waiting === 1 ? '' : 's'} waiting` : '');
+  if (visual) visual.textContent = text;
+  const say = intakeProgressSpeech(lane);
+  if (say && spoken) spoken.textContent = say;
+}
+
+// The visible counter ticks per file; screen readers hear only the start and each quarter, so 400 files do not
+// produce 400 announcements. The finish is announced by the intake summary in #homeStatus.
+function intakeProgressSpeech(lane) {
+  const p = lane.progress;
+  const step = p && p.total >= 8 ? Math.min(Math.floor((p.n / p.total) * 4), 4) : (p ? 0 : -1);
+  if (step === lane.spokenStep || (step === 0 && lane.spokenStep === -1)) return '';
+  lane.spokenStep = step;
+  if (step <= 0) return 'Reading files…';
+  if (step >= 4) return '';
+  return `Read ${p.n} of ${p.total} files.`;
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function intakeAnnouncement(result, stagedCount) {
+  const parts = [`Added ${result.accepted.length} of ${plural(result.offered, 'file')}.`];
+  if (result.overCap.length) parts.push(`${result.overCap.length} not added because the queue is limited to ${MAX_FILES} files.`);
+  if (result.rejected.length) parts.push(`${result.rejected.length} not added because ${result.rejected.length === 1 ? 'it' : 'they'} could not be used.`);
+  if (result.duplicates.length) parts.push(`${plural(result.duplicates.length, 'duplicate')} marked.`);
+  parts.push(`${plural(stagedCount, 'file')} staged.`);
+  return parts.join(' ');
+}
+
+function intakeNameList(itemsHtml, label) {
+  const list = `<ul>${itemsHtml.map(item => `<li>${item}</li>`).join('')}</ul>`;
+  return itemsHtml.length <= 5 ? list : `<details><summary>Show ${itemsHtml.length} ${label}</summary>${list}</details>`;
+}
+
+function intakeNoteHtml(result, laneKey) {
+  const added = result.accepted.length;
+  const problems = result.overCap.length + result.rejected.length + result.duplicates.length;
+  const lead = !added && result.overCap.length === result.offered
+    ? `The queue is full (${MAX_FILES} of ${MAX_FILES} files).`
+    : added === result.offered ? `Added ${plural(added, 'file')}.` : `Added ${added} of ${result.offered}.`;
+  const body = [];
+  if (result.overCap.length) {
+    body.push(`<p>${result.overCap.length} not added because the queue is limited to ${MAX_FILES} files${added ? '' : '. Remove staged files to make room'}:</p>`
+      + intakeNameList(result.overCap.map(esc), 'file names'));
+  }
+  if (result.rejected.length) {
+    body.push(`<p>${result.rejected.length} not added:</p>`
+      + intakeNameList(result.rejected.map(r => `<strong>${esc(r.name)}</strong> <span class="why">${esc(r.reason)}</span>`), 'files and reasons'));
+  }
+  if (result.duplicates.length) {
+    const one = result.duplicates.length === 1;
+    const show = laneKey === 'home' ? ' <button type="button" class="link-btn" onclick="showNeedsAttention()">Show duplicates</button>' : '';
+    body.push(`<p>${result.duplicates.length} ${one ? 'has' : 'have'} the same name, size and date as another staged file. ${one ? 'It is' : 'They are'} staged and marked Duplicate; remove any you added by mistake.${show}</p>`);
+  }
+  return `<div class="intake-note${problems ? ' intake-note--warn' : ''}">
+    <strong class="intake-lead">${lead}</strong>
+    ${body.join('')}
+    <button type="button" class="intake-dismiss" onclick="dismissIntakeSummary('${laneKey}')">Dismiss<span class="rd-sr"> file summary</span></button>
+  </div>`;
+}
+
+function renderIntakeSummary(lane) {
+  const el = document.getElementById(lane.summaryId);
+  if (el) el.innerHTML = lane.results.map(result => intakeNoteHtml(result, lane.key)).join('');
+}
+
+function dismissIntakeSummary(key) {
+  if (!clearIntakeSummary(key)) return;
+  focusUploadZone(key === 'additional' ? 'uploadZone2' : 'uploadZone');
+}
+
+function clearIntakeSummary(key) {
+  const lane = intakeLanes[key];
+  if (!lane) return false;
+  lane.results = [];
+  renderIntakeSummary(lane);
+  return true;
+}
+
+function resetIntakeView() {
+  Object.values(intakeLanes).forEach(lane => { lane.results = []; renderIntakeSummary(lane); });
+  queueView.query = '';
+  queueView.type = 'all';
+  syncQueueControls();
+  announce('');
+}
+
+function refreshBuildState() {
+  const btn = document.getElementById('analyzeBtn');
+  if (btn) btn.disabled = intakeLanes.home.pending > 0 || !files.length || Boolean(activeAnalysisRun) || buildStarting;
+  updateStageBar();
+}
+
+function refreshAddDocsState() {
+  const btn = document.getElementById('addDocsBtn');
+  if (btn) btn.disabled = intakeLanes.additional.pending > 0 || !additionalFiles.length;
+}
+
+// Staged files are lost on reload. A run in progress from this tab pauses when the tab closes, whether the browser
+// does the work or a durable server job does: production runs with the worker loop off, so this tab drives it.
+function shouldWarnBeforeUnload() {
+  if (activeAnalysisRun || buildStarting || hasLiveJobInThisTab()) return true;
+  if (conversationHistory.length) return additionalFiles.length > 0 || intakeLanes.additional.pending > 0;
+  return files.length > 0 || intakeLanes.home.pending > 0;
+}
+
+// Pollers start only for non-terminal jobs and stop themselves at complete, partial, failed or canceled.
+function hasLiveJobInThisTab() {
+  const state = activeJobPollState;
+  return Boolean(state && !state.cancelled && !TERMINAL_STATUSES.has(state.lastJob?.status));
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('beforeunload', event => {
+    if (!shouldWarnBeforeUnload()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
 }
 
 function formatBytes(b) {
@@ -4155,7 +4611,8 @@ function formatBytes(b) {
   return (b/1048576).toFixed(1) + ' MB';
 }
 
-let renderedFileCount = 0;
+let lastRenderedStageId = 0;
+let lastQueueViewKey = '';
 
 function stagedFileTag(f) {
   const name = String(f?.name || '').toLowerCase();
@@ -4176,68 +4633,200 @@ function renderHomeSubtitle() {
   el.textContent = conversationHistory.some((m, i) => m.role === 'assistant' && (m.kind === 'title-opinion' || i === 1))
     ? 'Analysis complete. Review the draft opinion below, ask a follow-up, or add documents.'
     : count
-      ? `${count} document${count === 1 ? '' : 's'} staged and ready for adaptive batching and synthesis.`
+      ? `${count} document${count === 1 ? '' : 's'} ready. Review the list, then build the chain of title.`
       : 'Add optional tract context, then stage up to 400 files for one chain-of-title run.';
 }
 
 function updateStagedSummary() {
   const count = files.length;
-  if (!count) renderedFileCount = 0;
   const setText = (id, text) => { const node = document.getElementById(id); if (node) node.textContent = text; };
   setText('analyzeBtnCount', count ? `(${count})` : '');
   setText('dropSlots', String(count));
   renderHomeSubtitle();
-  let badge = `${count} / ${MAX_FILES} files staged`;
-  if (count) {
-    const totalBytes = files.reduce((sum, f) => sum + (Number(f?.size) || 0), 0);
-    let batchNote = '';
-    try {
-      const batchCount = buildAdaptiveBatches(files).length;
-      if (batchCount) batchNote = ` · Est. ${batchCount} batch${batchCount === 1 ? '' : 'es'}`;
-    } catch {}
-    badge = `${count} / ${MAX_FILES} files · ${formatBytes(totalBytes)}${batchNote}`;
-  }
-  setText('stagedBadge', badge);
+  const totalBytes = files.reduce((sum, f) => sum + (Number(f?.size) || 0), 0);
+  setText('stagedBadge', count ? `${count} / ${MAX_FILES} files · ${formatBytes(totalBytes)}` : `0 / ${MAX_FILES} files staged`);
   const badgeEl = document.getElementById('stagedBadge');
-  if (badgeEl && badgeEl.classList) badgeEl.classList[count ? 'add' : 'remove']('full');
+  if (badgeEl && badgeEl.classList) badgeEl.classList[count >= MAX_FILES ? 'add' : 'remove']('full');
   const home = document.getElementById('view-home');
   if (home && home.classList) {
     home.classList[count ? 'add' : 'remove']('has-files');
     home.classList[count >= MAX_FILES ? 'add' : 'remove']('is-full');
   }
+  updateStageBar();
 }
 
+function updateStageBar() {
+  const bar = document.getElementById('stageBar');
+  const text = document.getElementById('stageBarText');
+  const reading = intakeLanes.home.pending > 0;
+  const count = files.length;
+  const attention = files.filter(f => f.duplicate).length;
+  if (bar) bar.hidden = !count && !reading;
+  if (bar && bar.classList) bar.classList[reading ? 'add' : 'remove']('is-reading');
+  if (text) {
+    text.textContent = reading
+      ? 'Reading files… Build unlocks when every file is read.'
+      : `${plural(count, 'document')} ready${attention ? ` · ${attention} marked Duplicate` : ''}.`;
+  }
+}
+
+// Long names keep their tail (date, page range, extension) visible; CSS ellipsizes the head.
+function fileNameHtml(name) {
+  const text = String(name || '');
+  if (text.length <= 28) return `<span class="fn-start">${esc(text)}</span>`;
+  let cut = text.length - 16;
+  const before = text.slice(cut - 8, cut);
+  const sep = Math.max(before.lastIndexOf(' '), before.lastIndexOf('_'), before.lastIndexOf('-'), before.lastIndexOf('('));
+  if (sep >= 0) cut = cut - 8 + sep;
+  return `<span class="fn-start">${esc(text.slice(0, cut))}</span><span class="fn-end">${esc(text.slice(cut))}</span>`;
+}
+
+const QUEUE_TYPE_LABELS = { pdf: 'PDF', csv: 'CSV', img: 'Images', attention: 'Needs attention' };
+
+function stagedMatchesView(entry) {
+  if (queueView.type === 'attention') {
+    if (!entry.duplicate) return false;
+  } else if (queueView.type !== 'all' && stagedFileTag(entry).kind !== queueView.type) {
+    return false;
+  }
+  return !queueView.query || String(entry.name || '').toLowerCase().includes(queueView.query.toLowerCase());
+}
+
+function syncQueueControls() {
+  const search = document.getElementById('queueSearch');
+  const filter = document.getElementById('queueFilter');
+  if (search) search.value = queueView.query;
+  if (filter) filter.value = queueView.type;
+}
+
+function clearQueueFilter() {
+  queueView.query = '';
+  queueView.type = 'all';
+  syncQueueControls();
+  renderFileList();
+  announceQueueView();
+  const search = document.getElementById('queueSearch');
+  if (search && typeof search.focus === 'function') search.focus();
+}
+
+function showNeedsAttention() {
+  queueView.query = '';
+  queueView.type = 'attention';
+  syncQueueControls();
+  renderFileList();
+  announceQueueView();
+  const filter = document.getElementById('queueFilter');
+  if (filter && typeof filter.focus === 'function') filter.focus();
+}
+
+// Search results are spoken once typing pauses, so each keystroke does not queue its own announcement.
+const QUEUE_SEARCH_ANNOUNCE_DELAY_MS = 600;
+
+function announceQueueView(delayMs = 0) {
+  cancelQueueViewAnnouncement();
+  const speak = () => {
+    queueView.announceTimer = null;
+    if (!files.length) return;
+    const shown = files.filter(stagedMatchesView).length;
+    const filtered = Boolean(queueView.query) || queueView.type !== 'all';
+    announce(!filtered
+      ? `Showing all ${plural(files.length, 'staged file')}.`
+      : shown
+        ? `Showing ${shown} of ${plural(files.length, 'staged file')}.`
+        : `No staged files match this filter. ${plural(files.length, 'file')} staged.`);
+  };
+  if (delayMs > 0) queueView.announceTimer = setTimeout(speak, delayMs);
+  else speak();
+}
+
+function cancelQueueViewAnnouncement() {
+  if (queueView.announceTimer) clearTimeout(queueView.announceTimer);
+  queueView.announceTimer = null;
+}
+
+// Renders every staged file (selection order) that matches the search/type view, as one HTML string.
 function renderFileList() {
   const el = document.getElementById('fileList');
-  if (!files.length) { el.innerHTML = ''; updateStagedSummary(); return; }
-
-  const limitNote = files.length >= MAX_FILES ? ' <span style="color:#b45309">(limit reached)</span>' : '';
-  const displayFiles = files.length > MAX_FILE_LIST_DISPLAY ? files.slice(0, MAX_FILE_LIST_DISPLAY) : files;
-  const hiddenCount = files.length - displayFiles.length;
-  const previousCount = renderedFileCount;
-  renderedFileCount = files.length;
-  el.innerHTML = `<div class="staged-head" aria-hidden="true"><span>Type</span><span>Filename</span><span>Size</span><span>Status</span><span>Action</span></div>` +
-    displayFiles.map((f, i) => {
-      const tag = stagedFileTag(f);
-      const isNew = i >= previousCount;
-      return `
-      <div class="file-item${isNew ? ' is-new' : ''}" style="--row:${isNew ? Math.min(i - previousCount, 6) : 0}" onclick="event.stopPropagation()">
+  const tools = document.getElementById('queueTools');
+  if (tools) tools.hidden = !files.length;
+  if (!files.length) {
+    el.innerHTML = '';
+    lastRenderedStageId = 0;
+    updateStagedSummary();
+    return;
+  }
+  files.forEach(f => { if (!f.stageId) f.stageId = nextStageId++; });
+  const oldRows = typeof el.querySelector === 'function' ? el.querySelector('.q-rows') : null;
+  const viewKey = `${queueView.query}|${queueView.type}`;
+  const keepScroll = oldRows && viewKey === lastQueueViewKey ? oldRows.scrollTop : 0;
+  const techOpen = typeof el.querySelector === 'function' && Boolean(el.querySelector('.q-tech')?.open);
+  lastQueueViewKey = viewKey;
+  const shown = files.filter(stagedMatchesView);
+  const filtered = Boolean(queueView.query) || queueView.type !== 'all';
+  const previousMax = lastRenderedStageId;
+  lastRenderedStageId = files.reduce((max, f) => Math.max(max, f.stageId), previousMax);
+  let newRow = 0;
+  const rows = shown.map(f => {
+    const tag = stagedFileTag(f);
+    const isNew = f.stageId > previousMax;
+    return `<div class="file-item${isNew ? ' is-new' : ''}${f.duplicate ? ' is-attn' : ''}" data-stage-id="${f.stageId}" style="--row:${isNew ? Math.min(newRow++, 6) : 0}">
         <span class="file-type file-type--${tag.kind}">${tag.label}</span>
-        <span class="file-name" title="${esc(f.name)}">${esc(f.name)}</span>
+        <span class="file-name" title="${esc(f.name)}">${fileNameHtml(f.name)}</span>
         <span class="file-size">${formatBytes(f.size)}</span>
-        <span class="file-status">Staged</span>
-        <button type="button" class="file-remove" aria-label="Remove ${esc(f.name)}" onclick="event.stopPropagation();removeFile(${i})">Remove</button>
+        <span class="file-status${f.duplicate ? ' file-status--attn' : ''}">${f.duplicate ? 'Duplicate' : 'Staged'}</span>
+        <button type="button" class="file-remove" aria-label="Remove ${esc(f.name)}" onclick="removeStagedFile(${f.stageId})">Remove</button>
       </div>`;
-    }).join('') +
-    (hiddenCount > 0 ? `<div class="file-more">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '') +
-    `<div class="staged-foot"><span class="file-count">Showing 1–${displayFiles.length} of ${files.length} staged document${files.length !== 1 ? 's' : ''}${limitNote}</span><span class="mono">Uploads when you start · ${Math.round(REQUEST_ENVELOPE_SAFE_BYTES / 1_000_000)} MB max / batch</span></div>`;
+  }).join('');
+  const what = [queueView.query ? `matching “${esc(queueView.query)}”` : '', queueView.type !== 'all' ? `· ${QUEUE_TYPE_LABELS[queueView.type] || ''}` : '']
+    .filter(Boolean).join(' ');
+  const note = filtered
+    ? `<div class="q-filter-note"><span>Filtered: showing ${shown.length} of ${files.length} files ${what}</span><button type="button" class="link-btn q-clear" onclick="clearQueueFilter()">Clear filter</button></div>`
+    : '';
+  const list = shown.length
+    ? `<div class="staged-head" aria-hidden="true"><span>Type</span><span>Filename</span><span>Size</span><span>Status</span><span>Action</span></div>`
+      + `<div class="q-rows" role="region" tabindex="0" aria-label="Staged files">${rows}</div>`
+    : `<div class="q-nomatch">No staged files match this filter.</div>`;
+  const limitNote = files.length >= MAX_FILES ? ' <span style="color:#b45309">(limit reached)</span>' : '';
+  let batchNote = '';
+  try {
+    const batchCount = buildAdaptiveBatches(files).length;
+    if (batchCount) batchNote = `Est. ${batchCount} processing batch${batchCount === 1 ? '' : 'es'} · `;
+  } catch {}
+  el.innerHTML = note + list
+    + `<div class="staged-foot"><span class="file-count">Showing ${shown.length} of ${files.length} staged document${files.length === 1 ? '' : 's'}${limitNote}</span>`
+    + `<details class="q-tech"${techOpen ? ' open' : ''}><summary>Technical details</summary><span class="mono">${batchNote}${Math.round(REQUEST_ENVELOPE_SAFE_BYTES / 1_000_000)} MB max per batch · files upload when you build</span></details></div>`;
+  if (keepScroll) {
+    const newRows = el.querySelector('.q-rows');
+    if (newRows) newRows.scrollTop = keepScroll;
+  }
   updateStagedSummary();
 }
 
-function removeFile(i) {
-  files.splice(i, 1);
+function focusAfterRemoval(selector, fallbackId) {
+  const found = selector && typeof document.querySelector === 'function' ? document.querySelector(selector) : null;
+  const target = found || document.getElementById(fallbackId);
+  if (target && typeof target.focus === 'function') target.focus();
+}
+
+function removeStagedFile(stageId) {
+  const index = files.findIndex(f => f.stageId === stageId);
+  if (index < 0) return;
+  const position = files.filter(stagedMatchesView).findIndex(f => f.stageId === stageId);
+  const [removed] = files.splice(index, 1);
+  markDuplicates(files);
   renderFileList();
-  document.getElementById('analyzeBtn').disabled = files.length === 0;
+  refreshBuildState();
+  announce(`Removed ${removed.name}. ${plural(files.length, 'file')} staged.`);
+  const visible = files.filter(stagedMatchesView);
+  const neighbor = visible[position] || visible[position - 1];
+  const selector = neighbor ? `#fileList [data-stage-id="${neighbor.stageId}"] .file-remove` : (files.length ? '#fileList .q-clear' : null);
+  focusAfterRemoval(selector, 'uploadZone');
+}
+
+// Index-based entry point kept for existing callers (the audit probes); rows remove by stageId.
+function removeFile(i) {
+  const entry = files[i];
+  if (entry) removeStagedFile(entry.stageId);
 }
 
 function esc(s) {
@@ -4267,7 +4856,34 @@ function showError(msg) {
 }
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 
-const KEEP_OPEN_NOTICE = 'Keep this browser tab open until the job finishes. Production runs with the worker loop off, so the server only processes while this tab stays connected.';
+// Moves the error into view next to the Build action. Browser-only APIs are guarded for the test VM.
+function focusErrorBox() {
+  const box = document.getElementById('errorBox');
+  if (!box) return;
+  const reduceMotion = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (typeof box.scrollIntoView === 'function') box.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
+  if (typeof box.focus === 'function') box.focus({ preventScroll: true });
+}
+
+function jobSetupErrorMessage(err) {
+  const next = 'Your files are still staged; try again.';
+  if (err?.unexpected) {
+    return `Could not start the run: The server did not respond as expected${err.status >= 400 ? ` (HTTP ${err.status})` : ''}. ${next}`;
+  }
+  if (err?.name === 'TypeError') {
+    return `Could not start the run: The server could not be reached. Check your connection. ${next}`;
+  }
+  const detail = String(err?.message || '').trim().replace(/([^.!?])$/, '$1.');
+  return `Could not start the run: ${detail} ${next}`;
+}
+
+function markBrowserDriven(run, job) {
+  if (run) run.driver = 'browser';
+  if (job?.id) saveActiveJob(job, 'browser');
+}
+
+const KEEP_OPEN_NOTICE = 'Keep this tab open until the run finishes. Closing this tab pauses the run. Reopen the job to continue.';
 
 function showKeepOpenNotice() {
   document.getElementById('infoBox').innerHTML = `<div class="info-msg">${esc(KEEP_OPEN_NOTICE)}</div>`;
@@ -5006,10 +5622,21 @@ function parseBatchResult(result, batchFiles, globalStartIdx) {
 }
 
 async function analyze() {
-  if (!files.length) return;
+  if (!files.length || intakeLanes.home.pending > 0 || buildStarting || activeAnalysisRun) return;
+  return runStagedAnalysis(files.slice());
+}
+
+// `files` here is the frozen snapshot taken when Build was clicked, so later drops or removals cannot change
+// what this run submits; totalDocuments always equals the documents processed.
+async function runStagedAnalysis(files) {
+  buildEpoch += 1;
   clearError();
   prepareHomeForAnalysisRun();
-  document.getElementById('analyzeBtn').disabled = true;
+  renderResumeNotice(null);
+  // The new run supersedes the last-run record (as Dismiss does), so nothing can resume the old job mid-Build.
+  clearSavedJob();
+  buildStarting = true;
+  refreshBuildState();
   document.getElementById('uploadSection').style.display = 'none';
   document.getElementById('progressSection').style.display = 'block';
 
@@ -5024,14 +5651,18 @@ async function analyze() {
       totalDocuments: files.length,
     });
   } catch (e) {
-    showError('Job setup failed: ' + e.message);
+    buildStarting = false;
+    showError(jobSetupErrorMessage(e));
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
-    document.getElementById('analyzeBtn').disabled = false;
+    refreshBuildState();
+    focusErrorBox();
     return;
   }
+  buildStarting = false;
 
   const run = beginAnalysisRun(job.id);
+  saveActiveJob(job, 'browser');
   try {
   updateProgress(0, 'Checking durable file storage...', null);
   const uploadRegistration = await registerJobUploads(job.id, files).catch(err => ({
@@ -5042,6 +5673,8 @@ async function analyze() {
   if (uploadRegistration.warning) {
     showError(uploadRegistration.warning);
   } else if (uploadRegistration.durable) {
+    run.driver = 'server';
+    saveActiveJob(job, 'server');
     updateProgress(8, 'Durable uploads complete; starting browser-driven analysis...', null);
     if (job?.id) {
       try {
@@ -5076,6 +5709,7 @@ async function analyze() {
       if (isAnalysisCanceled(run)) return;
       if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
       showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);
+      markBrowserDriven(run, job);
     }
   }
 
@@ -5152,6 +5786,7 @@ async function analyze() {
         if (isAnalysisCanceled(run)) return;
         if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
         showError(`Server-side synthesis unavailable (${serverErr.message}); falling back to browser synthesis. Keep this tab open until the run finishes.`);
+        markBrowserDriven(run, job);
       }
     }
     if (isAnalysisCanceled(run)) return;
@@ -5407,9 +6042,10 @@ function showAddDocs() {
   ['dragenter','dragover'].forEach(evt => zone2.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone2.classList.add('drag'); }));
   ['dragleave','drop'].forEach(evt => zone2.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); zone2.classList.remove('drag'); }));
   zone2.addEventListener('drop', e => { handleAdditionalFiles(Array.from(e.dataTransfer.files)); });
-  document.getElementById('fileInput2').addEventListener('change', async e => {
-    await handleAdditionalFiles(Array.from(e.target.files));
+  document.getElementById('fileInput2').addEventListener('change', e => {
+    const picked = Array.from(e.target.files || []);
     e.target.value = '';
+    handleAdditionalFiles(picked);
   });
 }
 
@@ -5417,57 +6053,51 @@ function hideAddDocs() {
   document.getElementById('addDocsSection').style.display = 'none';
   document.getElementById('followupSection').style.display = 'block';
   additionalFiles = [];
+  clearIntakeSummary('additional');
   document.getElementById('fileList2').innerHTML = '';
-  document.getElementById('addDocsBtn').disabled = true;
+  refreshAddDocsState();
 }
 
 let additionalFiles = [];
 
-async function handleAdditionalFiles(newFiles) {
-  if (MAX_FILES - additionalFiles.length <= 0) return;
-  document.getElementById('addDocsBtn').disabled = true;
-  const statusEl = document.getElementById('fileList2');
-  if (newFiles.length > 2) {
-    statusEl.innerHTML = `<div class="file-count" style="margin-top:.6rem">Reading ${newFiles.length} files...</div>`;
-  }
-  try {
-    const splitParts = await ingestUploadedFiles(Array.from(newFiles), additionalFiles, statusEl);
-    if (splitParts > 0) {
-      showError(`Large PDFs auto-split: ${splitParts} extra segment(s) created to stay inside the model request budget. Each segment is abstracted separately; synthesis groups them by source document.`);
-    } else {
-      clearError();
-    }
-  } catch (e) {
-    showError(e.message);
-  }
-  renderAdditionalFileList();
-  document.getElementById('addDocsBtn').disabled = additionalFiles.length === 0;
+function handleAdditionalFiles(newFiles) {
+  return queueIntake(intakeLanes.additional, newFiles);
 }
 
 function renderAdditionalFileList() {
   const el = document.getElementById('fileList2');
   if (!additionalFiles.length) { el.innerHTML = ''; return; }
-  const limitNote = additionalFiles.length >= MAX_FILES ? ' <span style="color:#b45309">(limit reached)</span>' : '';
-  const displayFiles = additionalFiles.length > MAX_FILE_LIST_DISPLAY ? additionalFiles.slice(0, MAX_FILE_LIST_DISPLAY) : additionalFiles;
-  const hiddenCount = additionalFiles.length - displayFiles.length;
-  el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${additionalFiles.length} of ${MAX_FILES} additional document${additionalFiles.length !== 1 ? 's' : ''} loaded${limitNote}</div>` +
-    displayFiles.map((f, i) => `
-      <div class="file-item" onclick="event.stopPropagation()">
-        <span class="file-name">${f.type === 'text/csv' || f.name.toLowerCase().endsWith('.csv') ? '📊' : '📄'} ${esc(f.name)}</span>
+  additionalFiles.forEach(f => { if (!f.stageId) f.stageId = nextStageId++; });
+  const count = additionalFiles.length;
+  const limitNote = count >= MAX_FILES ? ' <span style="color:#b45309">(limit reached)</span>' : '';
+  el.innerHTML = `<div class="file-count" style="margin-top:.6rem">${count} of ${MAX_FILES} additional document${count !== 1 ? 's' : ''} ready${limitNote}</div>`
+    + `<div class="add-rows">${additionalFiles.map(f => {
+      const tag = stagedFileTag(f);
+      return `<div class="file-item" data-stage-id="${f.stageId}">
+        <span class="file-type file-type--${tag.kind}">${tag.label}</span>
+        <span class="file-name" title="${esc(f.name)}">${fileNameHtml(f.name)}</span>
+        ${f.duplicate ? '<span class="file-status file-status--attn">Duplicate</span>' : ''}
         <span class="file-size">${formatBytes(f.size)}</span>
-        <button class="file-remove" onclick="event.stopPropagation();removeAdditionalFile(${i})">×</button>
-      </div>`).join('') +
-    (hiddenCount > 0 ? `<div class="file-item" style="justify-content:center;color:#64748b;font-style:italic">… and ${hiddenCount} more document${hiddenCount !== 1 ? 's' : ''}</div>` : '');
+        <button type="button" class="file-remove" aria-label="Remove ${esc(f.name)}" onclick="removeAdditionalFile(${f.stageId})">Remove</button>
+      </div>`;
+    }).join('')}</div>`;
 }
 
-function removeAdditionalFile(i) {
-  additionalFiles.splice(i, 1);
+function removeAdditionalFile(stageId) {
+  const index = additionalFiles.findIndex(f => f.stageId === stageId);
+  if (index < 0) return;
+  const [removed] = additionalFiles.splice(index, 1);
+  markDuplicates(additionalFiles);
   renderAdditionalFileList();
-  document.getElementById('addDocsBtn').disabled = additionalFiles.length === 0;
+  refreshAddDocsState();
+  announce(`Removed ${removed.name}. ${plural(additionalFiles.length, 'additional file')} ready.`);
+  const neighbor = additionalFiles[index] || additionalFiles[index - 1];
+  focusAfterRemoval(neighbor ? `#fileList2 [data-stage-id="${neighbor.stageId}"] .file-remove` : null, 'uploadZone2');
 }
 
 async function analyzeAdditional() {
-  if (!additionalFiles.length) return;
+  if (!additionalFiles.length || intakeLanes.additional.pending > 0) return;
+  buildEpoch += 1;
   clearError();
   prepareHomeForAnalysisRun();
   document.getElementById('addDocsBtn').disabled = true;
@@ -5496,10 +6126,11 @@ async function analyzeAdditional() {
       totalDocuments: totalAfter,
     });
   } catch (e) {
-    showError('Job setup failed: ' + e.message);
+    showError(jobSetupErrorMessage(e));
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('addDocsSection').style.display = 'block';
     document.getElementById('addDocsBtn').disabled = false;
+    focusErrorBox();
     return;
   }
 
@@ -5553,6 +6184,7 @@ async function analyzeAdditional() {
       if (isAnalysisCanceled(run)) return;
       if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
       showError(`Server-side abstraction unavailable (${serverErr.message}); falling back to browser abstraction. Keep this tab open until the run finishes.`);
+      markBrowserDriven(run, job);
     }
   }
 
@@ -5636,6 +6268,7 @@ async function analyzeAdditional() {
         if (isAnalysisCanceled(run)) return;
         if (!serverErr.browserFallback) return showServerRunUnconfirmed(job.id, serverErr);
         showError(`Server-side synthesis unavailable (${serverErr.message}); falling back to browser synthesis. Keep this tab open until the run finishes.`);
+        markBrowserDriven(run, job);
       }
     }
     if (isAnalysisCanceled(run)) return;
