@@ -689,8 +689,11 @@ test('finding 12: a failed first follow-up removes only its own question and lea
   await Promise.all([first, second]);
 
   assert.deepEqual(turns(), ['user:Q2 fast', 'assistant:ANSWER-TO-Q2']);
-  assert.deepEqual(rendered(), ['Q2', 'ANSWER-TO-Q2']);
-  assert.match(errorText(app), /Q1 slow|failed/);
+  // Round 2 (R06): the failed question is kept as an inline Ask again card after the conversation, not lost.
+  assert.deepEqual(rendered(), ['Q2', 'ANSWER-TO-Q2', 'Q1']);
+  const html = app.getEl('results').innerHTML;
+  assert.equal((html.match(/data-followup-retry=/g) || []).length, 1);
+  assert.match(html, /Q: Q1 slow[\s\S]*The answer could not be loaded/);
 });
 
 test('finding 12: an answer that arrives after Start New Job is not published into the reset page', async () => {

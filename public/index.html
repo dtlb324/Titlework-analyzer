@@ -46,6 +46,8 @@
   .recent-jobs-toolbar-button--disabled { color: #94a3b8; cursor: not-allowed; }
   .recent-jobs-hint { position: absolute; top: calc(100% + 8px); right: 0; width: 230px; padding: 8px 10px; border-radius: 7px; background: var(--ink); color: #f8fafc; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(15,23,42,.18); opacity: 0; transform: translateY(-3px); pointer-events: none; transition: opacity .16s ease, transform .16s ease; z-index: 30; }
   .recent-jobs-toolbar:hover .recent-jobs-hint, .recent-jobs-toolbar:focus-within .recent-jobs-hint { opacity: 1; transform: none; }
+  /* A closed tooltip takes no layout space, so it cannot widen a narrow page. */
+  .recent-jobs-toolbar:not(:hover):not(:focus-within) .recent-jobs-hint { display: none; }
 
   /* Layout */
   .container { max-width: 1180px; margin: 0 auto; padding: 18px 20px 0; }
@@ -267,6 +269,8 @@
   .job-stepper { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.55rem; align-items:stretch; margin:0 0 1rem; font-size:.85rem; color:#475569; }
   .job-stepper .step-card { border:1px solid #dfdcd4; border-radius:10px; background:#fff; padding:.65rem .75rem; min-width:0; transition:border-color .2s ease, background-color .2s ease; }
   .job-stepper .step-card.done { background:#f0fdf4; border-color:#bbf7d0; color:#166534; }
+  .job-stepper .step-card.stopped { background:#fef2f2; border-color:#fca5a5; color:#991b1b; }
+  .job-stepper .step-card.unreached { background:#f8fafc; color:#64748b; border-style:dashed; }
   .job-stepper .step-card.active { background:#fffbeb; border-color:#b45309; color:#78350f; animation:step-pulse 2.4s ease-in-out infinite; }
   .job-stepper .step-meta { display:block; margin-bottom:.18rem; color:#64748b; font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
   .job-stepper .step-name { display:block; color:inherit; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -276,6 +280,8 @@
   @media (max-width: 620px) { .job-stepper { grid-template-columns:1fr; } }
   .job-actions { display:flex; flex-wrap:wrap; gap:.55rem; margin-top:.8rem; }
   .job-actions button[disabled] { opacity:.55; cursor:not-allowed; }
+  #jobTitleBlock { min-width:0; max-width:100%; }
+  #jobTitleText { min-width:0; overflow-wrap:anywhere; }
   #jobHeaderActionsFooter .btn-primary,
   #jobHeaderActionsFooter .btn-secondary,
   #jobTitleBlock .btn-primary,
@@ -286,6 +292,18 @@
     border:1px solid #dfdcd4; border-radius:8px; margin-bottom:.5rem; cursor:pointer;
     background:#fff; transition:background-color .15s ease, border-color .15s ease; }
   .recent-jobs-row:hover { background:#fafaf8; border-color:#cbd5e1; }
+  .recent-jobs-row { align-items:center; cursor:default; }
+  .recent-jobs-link { flex:1; min-width:0; text-decoration:none; color:inherit; overflow-wrap:anywhere; }
+  .recent-jobs-link:hover div:first-child { color:var(--accent-ink); text-decoration:underline; text-underline-offset:2px; }
+  .recent-jobs-side { display:flex; align-items:center; gap:8px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; }
+  .recent-jobs-remove { font:600 12px/1.2 var(--sans); color:#64748b; background:none; border:1px solid transparent; border-radius:6px; padding:8px 8px; cursor:pointer; min-height:36px; }
+  .recent-jobs-remove:hover { color:#991b1b; border-color:#fecaca; background:#fef2f2; }
+  .recent-jobs-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+  .recent-jobs-head .btn-secondary { padding:7px 12px; font-size:12.5px; }
+  .recent-jobs-note { font-size:12.5px; color:#64748b; margin:0 0 10px; }
+  .recent-jobs-check { font-size:.78rem; color:#64748b; margin-top:2px; }
+  .recent-jobs-row--missing .recent-jobs-check { color:#991b1b; }
+  @media (max-width: 560px) { .recent-jobs-row { flex-direction:column; align-items:stretch; } .recent-jobs-side { justify-content:space-between; } }
   .recent-jobs-empty { color:#64748b; padding:.6rem 0; }
   #view-history h2 { font-size:17px; font-weight:700; color:#0f172a; margin-bottom:12px; }
 
@@ -395,6 +413,60 @@
   .rd-raw > summary { cursor:pointer; font-size:12.5px; font-weight:600; color:var(--text-2); padding:6px 2px; width:max-content; max-width:100%; }
   .rd-raw > summary:hover { color:var(--accent); }
   .rd-raw[open] > summary { margin-bottom:8px; }
+  h3.rd-eyebrow { margin:0; line-height:1.4; }
+  .rd [tabindex="-1"]:focus { outline:none; }
+  .rd [tabindex="-1"]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:4px; }
+  /* Section jump bar and long-result controls (R09). */
+  .rd-jump { display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 14px; }
+  .rd-jump-btn { font:600 12px/1.2 var(--sans); color:var(--text-2); background:#fff; border:1px solid var(--line); border-radius:999px; padding:7px 12px; cursor:pointer; transition:border-color .15s ease, color .15s ease; }
+  .rd-jump-btn:hover { border-color:var(--accent); color:var(--accent-ink); }
+  .rd-chain-tools { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; margin:-2px 0 10px; }
+  .rd-seg-group { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .rd-seg-btn { font:600 12px/1.2 var(--sans); color:var(--text-2); background:#fff; border:0; padding:8px 11px; cursor:pointer; }
+  .rd-seg-btn + .rd-seg-btn { border-left:1px solid var(--line); }
+  .rd-seg-btn[aria-pressed="true"] { background:var(--accent-soft); color:var(--accent-ink); }
+  .rd-seg-btn[disabled] { color:#94a3b8; cursor:not-allowed; }
+  .rd-chain-search { flex:1 1 220px; min-width:0; max-width:340px; padding:8px 10px; font-size:13px; }
+  .rd-chain-count { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .rd-chain-tools [hidden], .rd-chain-none[hidden], .rd-chain tr[hidden] { display:none; }
+  .rd-scroll-hint { display:none; font-size:11.5px; color:var(--muted); margin:0 0 6px; }
+  .rd-dmore > summary { cursor:pointer; font-size:12px; font-weight:600; color:var(--text-2); margin-top:6px; width:max-content; max-width:100%; }
+  .rd-dmore[open] > summary { margin-bottom:6px; }
+  .rd-dtoggle { margin-left:8px; font-size:12px; }
+  /* Job view states (R04, R05, R07, R03). */
+  .job-conn { margin:-.4rem 0 .8rem; font-size:.85rem; font-weight:600; color:#92400e; }
+  .job-conn:empty { display:none; }
+  .job-problem-actions { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem 1rem; margin-top:.7rem; }
+  .job-problem-actions .btn-primary, .job-problem-actions .btn-secondary { width:auto; margin-top:0; padding:.5rem 1rem; font-size:.85rem; }
+  .rd-unavailable { background:#fff; border:1px solid #fecaca; border-left:3px solid #b91c1c; border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  .rd-unavailable h3 { font-size:14.5px; font-weight:700; color:#991b1b; margin-bottom:4px; }
+  .rd-unavailable p { font-size:13px; color:var(--text); margin-bottom:10px; }
+  .rd-unavailable .btn-primary, .job-refresh-failed .btn-secondary { width:auto; margin-top:0; padding:.45rem 1rem; font-size:.85rem; }
+  .job-result-loading { color:#64748b; font-size:.9rem; padding:.6rem 0; }
+  .job-refresh-failed { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem .8rem; margin-bottom:.8rem; }
+  .job-reason { margin-top:.8rem; padding:.7rem .9rem; border:1px solid #e2e8f0; border-radius:10px; background:#f8fafc; color:#334155; font-size:.9rem; line-height:1.5; }
+  .job-reason--failed { border-color:#fecaca; border-left:3px solid #b91c1c; background:#fff; }
+  .job-action-error { margin:.5rem 0 0; color:#991b1b; font-size:.85rem; font-weight:600; }
+  .job-action-error:empty { display:none; }
+  .job-name-label { display:block; margin:0 0 .3rem; }
+  .job-name-error { margin:.35rem 0 0; color:#991b1b; font-size:.85rem; font-weight:600; }
+  .job-name-error:empty { display:none; }
+  .followup-pending { display:flex; align-items:center; gap:8px; margin:.4rem 0 0; font-size:13px; color:var(--muted); }
+  .followup-error { margin:.5rem 0 0; font-size:13px; color:#991b1b; font-weight:600; display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; }
+  .followup-error .btn-secondary { padding:6px 12px; font-size:12px; }
+  .followup-card--error .q-card { margin-bottom:0; }
+  /* Completeness notices: one amber block above the dashboard (the PDF prints the same list). */
+  .rd-incomplete { background:var(--accent-wash); border:1px solid #fde68a; border-left:3px solid var(--accent); border-radius:10px; padding:10px 14px; margin-bottom:12px; color:var(--accent-ink); font-size:13px; line-height:1.5; }
+  .rd-incomplete-head { display:flex; align-items:center; gap:4px 8px; flex-wrap:wrap; }
+  .rd-incomplete-head svg { color:var(--accent); flex-shrink:0; }
+  .rd-incomplete h3 { font-size:13.5px; font-weight:700; color:var(--accent-ink); }
+  .rd-incomplete-docs { margin-left:auto; font:600 12px/1.4 var(--mono); color:var(--accent-text); }
+  .rd-incomplete ul { margin:5px 0 0 1.1rem; display:grid; gap:2px; }
+  .rd-incomplete li { overflow-wrap:anywhere; }
+  .rd-codes { display:inline; }
+  .rd-codes summary { display:inline; cursor:pointer; font-weight:600; text-decoration:underline; text-underline-offset:2px; }
+  .rd-codes code { font:500 11.5px/1.4 var(--mono); margin-left:4px; }
+  .export-notice { display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; }
   /* Sticky action bar: follow-up + document actions (both job view and in-tab results) */
   #jobFollowup { display:contents; }
   #followupSection { position:sticky; bottom:12px; z-index:20; }
@@ -441,6 +513,52 @@
     .rd-raw > summary { padding:13px 2px; }
     button.rd-cite { position:relative; overflow:visible; white-space:normal; text-align:left; }
     button.rd-cite::after { content:''; position:absolute; inset:-8px -4px; }
+  }
+  /* Phones (R08): stacked owner rows keep every share in view, the chain scrolls with a pinned first column and an
+     edge shadow, and the job header and action bar stay compact (the bar is one row, still sticky). */
+  @media (max-width: 560px) {
+    .rd-owners, .rd-owners tbody, .rd-owners tfoot, .rd-owners tr, .rd-owners td { display:block; }
+    .rd-owners { min-width:0; }
+    .rd-owners thead { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+    .rd-owners tr { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:6px 14px; padding:10px 12px; border-bottom:1px solid #f1efe9; }
+    .rd-owners tbody tr:last-child { border-bottom:none; }
+    .rd-owners td, .rd-owners tbody tr:last-child td { padding:0; border:0; }
+    .rd-owners td:first-child { grid-column:1 / -1; }
+    .rd-owners .num { text-align:left; white-space:normal; }
+    .rd-owners td[data-label]:not(:first-child)::before { content:attr(data-label); display:block; font:700 10px/1.4 var(--sans); text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+    .rd-owners tfoot tr { background:var(--tint); }
+    .rd-owners tfoot td { background:transparent; border:0; }
+    .rd-owners tfoot td:empty { display:none; }
+    .rd-owners tfoot td[colspan] { grid-column:1 / -1; }
+    .rd-owner { min-width:0; }
+    .rd-scroll-hint { display:block; }
+    .rd-tbl-wrap.rd-scroll { background:
+      linear-gradient(to left, #fff 30%, rgba(255,255,255,0)) right / 36px 100% no-repeat local,
+      radial-gradient(farthest-side at 100% 50%, rgba(15,23,42,.22), rgba(15,23,42,0)) right / 14px 100% no-repeat scroll; }
+    .rd-chain td:first-child, .rd-chain th:first-child { position:sticky; left:0; z-index:1; background:#fff; box-shadow:1px 0 0 var(--line-soft); }
+    .rd-chain th:first-child { background:var(--tint); }
+    .rd-chain tr.flagged td:first-child { box-shadow:inset 3px 0 0 #fca5a5, 1px 0 0 var(--line-soft); }
+    .rd-hero .rd-kpis { order:2; }
+    .rd-hero .rd-sumlist { order:3; }
+    .rd-hero { gap:10px; }
+    .rd-kpi { padding:10px 12px; }
+    #jobHeader { padding:12px 14px; }
+    #jobHeader > div { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; }
+    #jobHeader > div > div:first-child { display:contents !important; }
+    #jobTitleBlock { flex:1 1 100%; min-width:0; }
+    #jobTitleBlock > div:first-child { flex-wrap:nowrap !important; align-items:flex-start !important; }
+    #jobTitleBlock h2 { font-size:17px; line-height:1.3; min-width:0; overflow-wrap:anywhere; }
+    #jobTitleBlock > div:last-child { font-size:12px !important; margin-top:.15rem !important; }
+    #jobRenameBtn { flex-shrink:0; }
+    #jobHeaderActionsFooter { flex:1 1 auto; border-top:0 !important; margin-top:0 !important; padding-top:0 !important; justify-content:flex-end !important; }
+    #jobHeaderActionsFooter .btn-primary, #jobHeaderActionsFooter .btn-secondary { padding:.45rem .85rem; font-size:.8rem; }
+    #view-job .rd-actionbar { flex-wrap:nowrap; padding:6px; gap:6px; bottom:6px; }
+    #view-job .rd-ask { flex:1 1 auto; flex-basis:auto; padding:0 4px 0 10px; }
+    #view-job .rd-ask > svg { display:none; }
+    #view-job .rd-ask input[type=text] { padding:10px 0; font-size:16px; }
+    #view-job .rd-ask .btn-ask { min-height:34px; padding:6px 10px; }
+    #view-job .rd-actionbar > button { flex:0 0 auto; min-height:44px; padding:0 12px; font-size:12.5px; }
+    .rd-chain-search { max-width:none; font-size:16px; }
   }
 
   /* Motion */
@@ -514,6 +632,8 @@
   }
   html:has(#jobFollowup:not([style*="none"])), html:has(#followupSection:not([style*="none"])) { scroll-padding-bottom: 96px; }
   @media (max-width: 760px) { html:has(#jobFollowup:not([style*="none"])), html:has(#followupSection:not([style*="none"])) { scroll-padding-bottom: 148px; } }
+  /* The job view's phone bar is one row (about 56px), so it reserves less. */
+  @media (max-width: 560px) { html:has(#jobFollowup:not([style*="none"])) { scroll-padding-bottom: 72px; } }
 </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha384-weMABwrltA6jWR8DDe9Jp5blk+tZQh7ugpCsF3JwSA53WZM9/14PjS5LAJNHNjAI" crossorigin="anonymous"></script>
@@ -641,13 +761,15 @@
 
     <div id="results"></div>
 
+    <div id="exportNotice"></div>
     <div id="followupSection" style="display:none">
+      <p id="followupStatus" class="rd-sr" role="status" aria-live="polite"></p>
       <div class="rd-actionbar" role="toolbar" aria-label="Analysis actions">
         <div class="rd-ask">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
           <label class="rd-sr" for="followupInput">Ask a follow-up</label>
           <input type="text" id="followupInput" placeholder="Ask a follow-up about owners, fractions, gaps, curative items…" />
-          <button class="btn-ask" type="button" onclick="askFollowup()">Ask</button>
+          <button class="btn-ask" id="followupAskBtn" type="button" onclick="askFollowup()">Ask</button>
         </div>
         <button class="btn-secondary" type="button" onclick="showAddDocs()">+ Add Documents</button>
         <button class="btn-primary" type="button" onclick="downloadPDF()">Download PDF</button>
@@ -682,6 +804,7 @@
     <div id="view-job" data-view="job" style="display:none">
       <div class="card" id="jobHeader"></div>
       <div id="jobStepper" class="job-stepper" style="display:none"></div>
+      <p id="jobConnStatus" class="job-conn" role="status" aria-live="polite"></p>
       <div id="jobProgress" style="display:none">
         <div class="progress-card">
           <div class="progress-status" id="jobProgressStatus">Loading…</div>
@@ -693,9 +816,13 @@
       </div>
       <div id="jobDetail"></div>
       <div id="jobActions" class="job-actions"></div>
+      <p id="jobActionError" class="job-action-error" role="alert"></p>
+      <div id="jobResultNotice" role="status" aria-live="polite"></div>
       <div id="jobResults"></div>
+      <div id="jobExportNotice"></div>
       <div id="jobFollowup" style="display:none">
         <div id="jobFollowupHistory"></div>
+        <p id="jobFollowupStatus" class="rd-sr" role="status" aria-live="polite"></p>
         <div class="rd-actionbar" id="jobActionBar" role="toolbar" aria-label="Job actions">
           <div class="rd-ask">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
@@ -1149,21 +1276,109 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (canLoadInitialRoute) applyRoute(parseRoute());
 });
 
-async function checkPasswordRequired() {
+// The one API boundary for the job view, poller, actions, follow-ups and the password ping. It never throws and
+// never hands parser text to the UI: callers branch on `kind` and read `data` only when it is 'ok'.
+const isJsonObject = data => Boolean(data) && typeof data === 'object' && !Array.isArray(data);
+const isJobPayload = data => isJsonObject(data) && isJsonObject(data.job) && typeof data.job.id === 'string' && Boolean(data.job.id) && typeof data.job.status === 'string' && Boolean(data.job.status);
+// A job reply must be for the job that was asked for; a reply naming another id is unreadable, not that job.
+const isJobPayloadFor = jobId => data => isJobPayload(data) && data.job.id === jobId;
+const isResultPayload = data => isJsonObject(data) && isJsonObject(data.result) && typeof data.result.finalTitleOpinion === 'string' && Boolean(data.result.finalTitleOpinion.trim());
+
+async function fetchApiJson(url, init = {}, validate = isJsonObject) {
+  let res;
   try {
-    const r = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
-      body: JSON.stringify({ ping: true }),
-    });
-    if (r.status === 401) {
-      document.getElementById('passwordGate').style.display = 'block';
-      return false;
-    } else {
-      showMain();
-      return true;
+    res = await fetch(url, init);
+  } catch (error) {
+    return { kind: 'network', status: 0, data: null, error };
+  }
+  const status = Number(res?.status) || 0;
+  let data = null;
+  let parsed = false;
+  try {
+    if (typeof res.text === 'function') {
+      const text = await res.text();
+      if (String(text || '').trim()) { data = JSON.parse(text); parsed = true; }
+    } else if (typeof res.json === 'function') {
+      data = await res.json();
+      parsed = true;
     }
-  } catch { showMain(); return true; }
+  } catch {
+    data = null;
+    parsed = false;
+  }
+  if (status === 401) return { kind: 'unauthorized', status, data };
+  if (status === 404) return { kind: 'not_found', status, data };
+  if (!res.ok) return { kind: 'server', status, data };
+  if (validate && (!parsed || !validate(data))) return { kind: 'invalid', status, data: null };
+  return { kind: 'ok', status, data };
+}
+
+// A server-provided error sentence, or a plain fallback. Never parser output.
+function apiErrorText(r, fallback) {
+  const msg = r && isJsonObject(r.data) && typeof r.data.error === 'string' ? r.data.error.trim() : '';
+  return msg && msg.length <= 300 ? msg : fallback;
+}
+
+function apiFailureSentence(r, what) {
+  if (r.kind === 'network') return `Could not reach the server to ${what}. Check your connection and try again.`;
+  if (r.kind === 'invalid') return `The server sent a reply this page could not read while trying to ${what}. Try again in a moment.`;
+  const base = apiErrorText(r, `The server could not ${what}`).replace(/[.!?]\s*$/, '');
+  return `${base}${r.status ? ` (HTTP ${r.status})` : ''}. Try again in a moment.`;
+}
+
+function showPasswordServerError(retryCall) {
+  const box = document.getElementById('passwordError');
+  if (box) box.innerHTML = `<div class="error-msg" role="alert">Could not reach the server, so the password could not be checked. Check your connection. <button class="btn-secondary" type="button" onclick="${retryCall}" style="margin-left:.4rem;padding:.25rem .6rem;font-size:.82rem">Retry</button></div>`;
+}
+
+function showPasswordGate() {
+  const gate = document.getElementById('passwordGate');
+  if (gate) gate.style.display = 'block';
+}
+
+// Any 401 from the app's own API lands here: show the gate, forget the password, pause polling, and keep
+// everything else (staged files, drafts, the route) so re-entry picks up where the reader was.
+function handleUnauthorized(source) {
+  clearStoredPassword();
+  const state = activeJobPollState;
+  if (state && !state.cancelled) {
+    state.pausedForAuth = true;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = null;
+    state.conn = 'unauthorized';
+    renderJobConnStatus(state);
+  }
+  const main = document.getElementById('mainApp');
+  if (main) main.style.display = 'none';
+  showPasswordGate();
+  const box = document.getElementById('passwordError');
+  if (box) box.innerHTML = '<div class="error-msg" role="alert">Enter the access password again to continue. Your staged files and this page are kept.</div>';
+  const input = document.getElementById('passwordInput');
+  if (input && typeof input.focus === 'function') { try { input.focus(); } catch {} }
+  return source;
+}
+
+async function retryPasswordPing() {
+  if (await checkPasswordRequired()) applyRoute(parseRoute());
+}
+
+async function checkPasswordRequired() {
+  const r = await fetchApiJson('/api/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
+    body: JSON.stringify({ ping: true }),
+  });
+  if (r.kind === 'ok') {
+    const gate = document.getElementById('passwordGate');
+    if (gate) gate.style.display = 'none';
+    const box = document.getElementById('passwordError');
+    if (box) box.innerHTML = '';
+    showMain();
+    return true;
+  }
+  showPasswordGate();
+  if (r.kind !== 'unauthorized') showPasswordServerError('retryPasswordPing()');
+  return false;
 }
 
 function showMain() {
@@ -1178,21 +1393,42 @@ function checkPassword() {
   const pw = document.getElementById('passwordInput').value.trim();
   if (!pw) return;
   persistPassword(pw);
-  return fetch('/api/analyze', {
+  // A poller paused by a 401 on the home view belongs to this tab's run; it resumes after re-entry.
+  const paused = activeJobPollState && activeJobPollState.pausedForAuth && !activeJobPollState.cancelled ? activeJobPollState : null;
+  return fetchApiJson('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
     body: JSON.stringify({ ping: true }),
   }).then(r => {
-    if (r.status === 401) {
-      document.getElementById('passwordError').innerHTML = '<div class="error-msg">Incorrect password.</div>';
-      clearStoredPassword();
-    } else {
+    if (r.kind === 'ok') {
       document.getElementById('passwordInput').value = '';
       document.getElementById('passwordGate').style.display = 'none';
+      document.getElementById('passwordError').innerHTML = '';
       showMain();
       applyRoute(parseRoute());
+      resumePollerAfterAuth(paused);
+      return;
+    }
+    clearStoredPassword();
+    if (r.kind === 'unauthorized') {
+      document.getElementById('passwordError').innerHTML = '<div class="error-msg" role="alert">Incorrect password.</div>';
+    } else {
+      showPasswordServerError('checkPassword()');
     }
   });
+}
+
+function resumePollerAfterAuth(paused) {
+  if (!paused) return;
+  // On a job route, applyRoute -> loadJobView already starts a fresh poller for that job.
+  if (parseRoute().name === 'job') return;
+  if (activeJobPollState === paused && !paused.cancelled) {
+    paused.pausedForAuth = false;
+    paused.conn = 'live';
+    scheduleJobPoll(paused, 0);
+  } else if (paused.scope === 'run' && !activeJobPollState && parseRoute().name === 'home') {
+    startJobPolling(paused.jobId);
+  }
 }
 
 function setupDragDrop() {
@@ -1625,10 +1861,13 @@ function applyRoute(route) {
   if (route.name === 'job') {
     loadJobView(route.jobId).catch(err => console.warn('Job view load failed', err));
   } else if (route.name === 'history') {
+    // A job opened from the job view polls only while its route is shown; this tab's own run keeps polling.
+    if (activeJobPollState && activeJobPollState.scope !== 'run') stopJobPoller();
     renderRecentJobsView();
   } else {
     renderRecentJobsToolbar();
-    stopJobPolling();
+    // Home stops a job view's route poller; the run this tab is driving keeps polling (its lifecycle owns it).
+    if (!activeJobPollState || activeJobPollState.scope !== 'run') stopJobPolling();
   }
 }
 
@@ -1683,10 +1922,14 @@ function formatRelative(iso) {
 function renderJobHeader(job) {
   const el = document.getElementById('jobHeader');
   if (!el || !job) return;
-  if (document.getElementById('jobNameInput')) return;
+  jobHeaderLatest = job;
+  // A poll re-render must not wipe a rename in progress; only Save, Cancel or Escape close the editor.
+  if (jobNameEditor.jobId === job.id) return;
+  if (jobNameEditor.jobId) jobNameEditor = { jobId: null };
   const info = statusInfo(job.status);
   const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
   const hasDownloadableResult = job.status === 'complete' || job.status === 'partial_failed';
+  const pdf = hasDownloadableResult ? jobPdfAvailability(job) : { ok: false, why: '' };
   el.innerHTML = `
     <div>
       <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:.8rem">
@@ -1703,16 +1946,16 @@ function renderJobHeader(job) {
         <span class="status-badge ${info.badge}">${esc(info.label)}</span>
       </div>
       <div id="jobHeaderActionsFooter" style="display:flex;justify-content:flex-end;gap:.6rem;align-items:center;flex-wrap:wrap;border-top:1px solid #eeece6;margin-top:1rem;padding-top:.85rem">
-        ${hasDownloadableResult ? '<button class="btn-primary" id="jobDownloadPdfBtn" type="button">Download PDF</button>' : ''}
+        ${hasDownloadableResult ? `<button class="btn-primary" id="jobDownloadPdfBtn" type="button"${pdf.ok ? '' : ` disabled aria-disabled="true" title="${esc(pdf.why)}"`}>Download PDF</button>` : ''}
         <button class="btn-secondary" id="jobStartNewBtn" type="button">Start New Job</button>
       </div>
     </div>`;
   const renameBtn = document.getElementById('jobRenameBtn');
   if (renameBtn) {
-    renameBtn.addEventListener('click', () => renderJobNameEditor(job, title));
+    renameBtn.onclick = () => renderJobNameEditor(job, title);
   }
   const downloadBtn = document.getElementById('jobDownloadPdfBtn');
-  if (downloadBtn) {
+  if (downloadBtn && pdf.ok) {
     downloadBtn.addEventListener('click', () => {
       downloadPDF({ rootElement: document.getElementById('jobResults'), tractOverride: title });
     });
@@ -1726,15 +1969,35 @@ function renderJobHeader(job) {
   }
 }
 
+let jobHeaderLatest = null;
+// The open rename editor. `token` identifies one opening of it; `saving` allows one Save in flight per editor.
+let jobNameEditor = { jobId: null };
+let jobNameEditorSeq = 0;
+
+function focusJobRenameControl() {
+  const btn = document.getElementById('jobRenameBtn');
+  if (btn && typeof btn.focus === 'function') { try { btn.focus(); } catch {} }
+}
+
+function closeJobNameEditor(job) {
+  jobNameEditor = { jobId: null };
+  const latest = jobHeaderLatest && jobHeaderLatest.id === job.id ? jobHeaderLatest : job;
+  renderJobHeader(latest);
+  focusJobRenameControl();
+}
+
 function renderJobNameEditor(job, currentTitle) {
   const block = document.getElementById('jobTitleBlock');
   if (!block || !job) return;
+  jobNameEditor = { jobId: job.id, token: ++jobNameEditorSeq, saving: false };
   block.innerHTML = `
+    <label class="field-label job-name-label" for="jobNameInput">Job name</label>
     <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
-      <input id="jobNameInput" type="text" value="${esc(currentTitle)}" maxlength="500" style="font-size:1.25rem;font-weight:700;padding:.42rem .55rem;border:1px solid #cbd5e1;border-radius:8px;min-width:min(420px, 80vw)" />
+      <input id="jobNameInput" type="text" value="${esc(currentTitle)}" maxlength="500" aria-describedby="jobNameError" style="font-size:1.25rem;font-weight:700;padding:.42rem .55rem;border:1px solid #cbd5e1;border-radius:8px;min-width:min(420px, 80vw)" />
       <button class="btn-primary" id="jobNameSaveBtn" type="button" style="padding:.35rem .75rem;font-size:.82rem">Save</button>
       <button class="btn-secondary" id="jobNameCancelBtn" type="button" style="padding:.35rem .75rem;font-size:.82rem">Cancel</button>
     </div>
+    <p class="job-name-error" id="jobNameError" role="alert"></p>
     <div style="color:#64748b;font-size:.85rem;margin-top:.3rem">
       Job <code>${esc(shortJobId(job.id))}</code> · created ${esc(formatRelative(job.createdAt))} ·
       updated ${esc(formatRelative(job.updatedAt))}
@@ -1742,39 +2005,89 @@ function renderJobNameEditor(job, currentTitle) {
   const input = document.getElementById('jobNameInput');
   const saveBtn = document.getElementById('jobNameSaveBtn');
   const cancelBtn = document.getElementById('jobNameCancelBtn');
-  const save = () => saveJobName(job, input?.value || '');
-  if (saveBtn) saveBtn.addEventListener('click', save);
-  if (cancelBtn) cancelBtn.addEventListener('click', () => renderJobHeader(job));
+  const errorEl = document.getElementById('jobNameError');
+  if (errorEl) { errorEl.textContent = ''; errorEl.innerHTML = ''; }
+  const save = () => (jobNameEditor.saving ? undefined : saveJobName(job, input?.value || ''));
+  if (saveBtn) { saveBtn.disabled = false; saveBtn.onclick = save; }
+  if (cancelBtn) cancelBtn.onclick = () => closeJobNameEditor(job);
   if (input) {
-    input.focus();
+    if (typeof input.focus === 'function') { try { input.focus(); } catch {} }
     input.select?.();
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter') save();
-      if (e.key === 'Escape') renderJobHeader(job);
+      if (e.key === 'Escape') closeJobNameEditor(job);
     });
   }
+}
+
+function showJobNameError(text) {
+  const el = document.getElementById('jobNameError');
+  if (!el) return;
+  el.textContent = text;
+  el.innerHTML = esc(text);
 }
 
 async function saveJobName(job, value) {
   const nextName = String(value || '').trim();
   if (!nextName) {
-    alert('Enter a job name before saving.');
+    showJobNameError('Enter a job name before saving.');
     return;
   }
+  // The editor this Save came from. Only that editor, still open on this job's route, may be closed or focused
+  // by the reply; a reply that lands after the reader moved on only updates the cached job.
+  const editor = jobNameEditor.jobId === job.id ? jobNameEditor : null;
+  if (editor && editor.saving) return;
+  if (editor) editor.saving = true;
+  const ownsView = () => Boolean(editor) && jobNameEditor === editor && isCurrentJobRoute(job.id);
   const saveBtn = document.getElementById('jobNameSaveBtn');
   if (saveBtn) saveBtn.disabled = true;
-  try {
-    const updated = await patchAnalysisJob(job.id, { subjectTract: nextName });
-    rememberRecentJob(updated);
-    if (isCurrentJobRoute(job.id)) {
-      await applyJobToView(updated, () => isCurrentJobRoute(job.id));
-    } else {
-      renderJobHeader(updated);
+  let updated;
+  const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(job.id)}`, {
+    method: 'PATCH',
+    headers: getJobHeaders(),
+    body: JSON.stringify({ subjectTract: nextName }),
+  }, isJobPayloadFor(job.id));
+  if (editor) editor.saving = false;
+  if (r.kind === 'ok') {
+    updated = r.data.job;
+    // The home view's saved run pointer and job meta belong to the home run; a rename of any other job
+    // never replaces them.
+    if (isHomeRunJob(updated.id)) {
+      saveActiveJob(updated);
+      renderJobMeta(updated);
     }
-  } catch (err) {
-    alert(err.message || 'Could not rename job.');
+  } else {
+    if (r.kind === 'unauthorized') handleUnauthorized('rename');
+    if (!ownsView()) return;
+    const reason = r.kind === 'network'
+      ? 'Check your connection and try again.'
+      : r.kind === 'invalid'
+        ? 'The server sent a reply this page could not read. Try again in a moment.'
+        : apiFailureSentence(r, 'save the name');
+    showJobNameError(`Could not rename the job. ${reason}`);
     if (saveBtn) saveBtn.disabled = false;
+    return;
   }
+  rememberRecentJob(updated);
+  if (ownsView()) {
+    jobNameEditor = { jobId: null };
+    await applyJobToView(updated, () => isCurrentJobRoute(job.id));
+    focusJobRenameControl();
+  } else if (editor && jobNameEditor === editor) {
+    // The reader left this job's route with its editor open: the save is done, so the hidden editor closes
+    // without touching the page now shown.
+    jobNameEditor = { jobId: null };
+  } else if (isCurrentJobRoute(job.id) && !jobNameEditor.jobId) {
+    // Same job still shown with no editor open (it was canceled meanwhile): show the saved name, keep focus.
+    renderJobHeader(updated);
+  }
+}
+
+// True when this job is the one the home view runs or would resume. Renaming it refreshes that record;
+// renaming any other job never points the record somewhere else.
+function isHomeRunJob(jobId) {
+  const homeId = (activeAnalysisRun && activeAnalysisRun.jobId) || activeJobId || loadSavedJobRecord()?.id || null;
+  return Boolean(homeId) && homeId === jobId;
 }
 
 const liveAnalysisRuns = new Set();
@@ -1936,6 +2249,22 @@ function renderJobProgressView(job) {
   if (listEl) listEl.innerHTML = '';
 }
 
+// Where a failed or canceled job stopped, from what it finished: uploads, then reading, then synthesis.
+function jobStoppedPhaseIndex(job) {
+  const err = String(job.errorMessage || job.lastError || (typeof job.error === 'string' ? job.error : '')).toLowerCase();
+  if (/synth|merge|opinion/.test(err)) return 2;
+  if (/abstract|split|storage/.test(err)) return 1;
+  const phase = String(job.currentPhase || '').toLowerCase();
+  if (/synth|merge|opinion/.test(phase)) return 2;
+  if (/abstract|read|chunk/.test(phase)) return 1;
+  if (/upload/.test(phase)) return 0;
+  const total = Number(job.totalDocuments) || 0;
+  const done = (Number(job.completedDocuments) || 0) + failedDocumentCount(job.failedDocuments);
+  if (total > 0 && done >= total) return 2;
+  if (done > 0 || Number(job.completedChunks) > 0 || Number(job.totalChunks) > 0) return 1;
+  return total > 0 && job.status !== 'canceled' ? 1 : 0;
+}
+
 function renderJobStepper(job) {
   const el = document.getElementById('jobStepper');
   if (!el || !job) return;
@@ -1946,9 +2275,18 @@ function renderJobStepper(job) {
   }
   el.style.display = '';
   const phases = ['Upload', 'Abstract', 'Synthesize'];
+  if (job.status === 'failed' || job.status === 'canceled') {
+    // A stopped job never shows "Next": phases are Done, Stopped here, or Not reached.
+    const stopped = jobStoppedPhaseIndex(job);
+    el.innerHTML = phases.map((p, i) => {
+      const cls = i < stopped ? 'step-card done' : i === stopped ? 'step-card stopped' : 'step-card unreached';
+      const meta = i < stopped ? 'Done' : i === stopped ? 'Stopped here' : 'Not reached';
+      return `<span class="${cls}"><span class="step-meta">${esc(meta)}</span><span class="step-name">${esc(p)}</span></span>`;
+    }).join('');
+    return;
+  }
   const order = { uploading: 0, ready: 1, queued: 1, planning: 1, abstracting: 1, synthesizing: 2 };
   let activeIdx = order[job.status];
-  if (job.status === 'complete' || job.status === 'partial_failed') activeIdx = phases.length;
   if (job.status === 'created') activeIdx = 0;
   el.innerHTML = phases.map((p, i) => {
     const cls = i === activeIdx ? 'step-card active' :
@@ -1960,41 +2298,112 @@ function renderJobStepper(job) {
   }).join('');
 }
 
+// Known job-level error texts and codes, as sentences a landman can act on. Unknown text is never the headline.
+const JOB_ERROR_SENTENCES = [
+  [/synthesis attempt limit|synthesis failed after \d+ attempts|final_merge_failed|merge.*attempt/i, 'Building the chain of title failed after several attempts.'],
+  [/synthesis|final merge|merge failed/i, 'Building the chain of title failed.'],
+  [/abstraction attempt limit|max_attempts/i, 'Reading the documents failed after several attempts.'],
+  [/no abstracts available|missing_abstracts/i, 'No readable document summaries were available to build the chain of title.'],
+  [/pdf split|split child/i, 'A large PDF could not be split into readable parts.'],
+  [/timed? ?out|timeout|deadline/i, 'The AI service took too long to respond.'],
+  [/rate limit|\b429\b|overloaded|quota/i, 'The AI service was too busy to finish the job.'],
+  [/storage|bucket|signed url/i, 'The uploaded files could not be read from storage.'],
+];
+
+function jobErrorSentence(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { sentence: '', raw: '' };
+  for (const [re, sentence] of JOB_ERROR_SENTENCES) if (re.test(text)) return { sentence, raw: text };
+  return { sentence: 'The job stopped because of an error this page does not recognize.', raw: text };
+}
+
 function renderJobDetail(job) {
   const el = document.getElementById('jobDetail');
   if (!el || !job) return;
   const failed = failedDocumentList(job.failedDocuments);
   const failedCount = failed.length || failedDocumentCount(job.failedDocuments);
-  if (!failedCount) { el.innerHTML = ''; return; }
-  el.innerHTML = `
+  let reasonHtml = '';
+  if (job.status === 'failed' || job.status === 'canceled' || job.status === 'partial_failed') {
+    const { sentence, raw } = jobErrorSentence(job.errorMessage || job.lastError || (typeof job.error === 'string' ? job.error : ''));
+    const phase = ['uploading', 'reading the documents', 'building the chain of title'][jobStoppedPhaseIndex(job)];
+    const headline = job.status === 'canceled'
+      ? `This job was canceled while ${phase}.`
+      : job.status === 'failed' ? 'This job failed.' : '';
+    const next = job.status === 'failed'
+      ? 'Use the actions below to retry, or start a new job.'
+      : job.status === 'canceled' ? 'Nothing more will run for it. Start a new job to analyze these documents again.' : '';
+    const body = [sentence, next].filter(Boolean).join(' ');
+    if (headline || sentence) {
+      reasonHtml = `<div class="job-reason${job.status === 'failed' ? ' job-reason--failed' : ''}" role="status">
+        ${headline ? `<strong>${esc(headline)}</strong> ` : ''}${esc(body)}
+        ${raw ? `<details class="rd-codes"><summary>Details</summary><code>${esc(raw)}</code></details>` : ''}
+      </div>`;
+    }
+  }
+  // With the opinion on screen, its completeness block already states the failed count; only the file list
+  // (when the job has one) adds anything, so it folds into a disclosure instead of a second warning.
+  const resultShown = (job.status === 'complete' || job.status === 'partial_failed') && rdJobIsShown(job.id);
+  const failedItems = failed.map(d => `<li>${esc(d.originalFilename || d.name || d.id)}${d.lastError || d.errorMessage ? ` — ${esc(d.lastError || d.errorMessage)}` : ''}</li>`).join('');
+  const failedLabel = `${failedCount} document${failedCount === 1 ? '' : 's'} failed to read.`;
+  const failedHtml = !failedCount ? '' : resultShown
+    ? (failed.length ? `<details class="verify-note job-failed-list" style="margin-top:.8rem"><summary>Show the ${failedCount} failed document${failedCount === 1 ? '' : 's'}</summary><ul style="margin:.4rem 0 0 1.2rem">${failedItems}</ul></details>` : '')
+    : `
     <div class="verify-note" style="margin-top:.8rem">
-      <strong>${failedCount} document${failedCount === 1 ? '' : 's'} failed to read.</strong>
+      <strong>${failedLabel}</strong>
       ${failed.length ? `<ul style="margin:.4rem 0 0 1.2rem">
-        ${failed.map(d => `<li>${esc(d.originalFilename || d.name || d.id)}${d.lastError || d.errorMessage ? ` — ${esc(d.lastError || d.errorMessage)}` : ''}</li>`).join('')}
+        ${failedItems}
       </ul>` : ''}
     </div>`;
+  el.innerHTML = reasonHtml + failedHtml;
 }
 
 let actionInFlight = false;
+
+// The last failed action for a job, shown inline under the action buttons (no alert()).
+let jobActionError = { jobId: null, text: '' };
+
+const JOB_ACTION_VERBS = {
+  '/cancel': 'cancel this job',
+  '/retry-failed': 'retry the failed documents',
+  '/synthesis/start': 'start synthesis',
+};
 
 async function runJobAction(job, endpointPath, opts = {}) {
   if (actionInFlight) return;
   actionInFlight = true;
   const buttons = document.querySelectorAll('#jobActions button');
   buttons.forEach(b => { b.disabled = true; });
+  jobActionError = { jobId: null, text: '' };
   try {
-    const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`, {
+    const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(job.id)}${endpointPath}`, {
       method: 'POST',
       headers: getJobHeaders(),
       body: opts.body ? JSON.stringify(opts.body) : '{}',
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      alert(data.error || `Action failed (HTTP ${res.status}).`);
+    }, null);
+    if (r.kind === 'unauthorized') {
+      handleUnauthorized('action');
+      return;
+    }
+    // A reply that names another job is unreadable for this action, never applied to this job.
+    if (r.kind === 'ok' && isJsonObject(r.data) && isJsonObject(r.data.job) && r.data.job.id !== job.id) {
+      r.kind = 'invalid';
+      r.data = null;
+    }
+    if (r.kind !== 'ok') {
+      jobActionError = { jobId: job.id, text: apiFailureSentence(r, JOB_ACTION_VERBS[endpointPath] || 'run that action') };
+      renderJobActionError(job.id);
       return;
     }
     if (endpointPath === '/cancel') {
-      handleJobCanceled();
+      // Only the run the home view is driving resets home; any other job reloads to show its canceled state.
+      const isHomeRun = Boolean(job.id) && (activeJobId === job.id || activeAnalysisRun?.jobId === job.id);
+      if (isHomeRun) {
+        handleJobCanceled();
+        return;
+      }
+      if (activeJobPollState && activeJobPollState.jobId === job.id) stopJobPoller();
+      if (isJsonObject(r.data) && isJsonObject(r.data.job) && r.data.job.id === job.id) rememberRecentJob(r.data.job);
+      if (isCurrentJobRoute(job.id)) await loadJobView(job.id);
       return;
     }
     if (activeJobPollState && !activeJobPollState.cancelled && activeJobPollState.jobId === job.id) {
@@ -2004,13 +2413,20 @@ async function runJobAction(job, endpointPath, opts = {}) {
     } else {
       await loadJobView(job.id);
     }
-  } catch (err) {
-    alert(err.message || 'Action failed.');
   } finally {
     actionInFlight = false;
     buttons.forEach(b => { b.disabled = false; });
   }
 }
+
+function renderJobActionError(jobId) {
+  const el = document.getElementById('jobActionError');
+  if (!el) return;
+  el.textContent = jobActionError.jobId === jobId ? jobActionError.text : '';
+}
+
+// The buttons last drawn into #jobActions, in display order (primary recovery first).
+let jobActionButtons = [];
 
 function renderJobActions(job) {
   const el = document.getElementById('jobActions');
@@ -2019,6 +2435,38 @@ function renderJobActions(job) {
   const failedDocs = failedDocumentCount(job.failedDocuments);
   const buttons = [];
 
+  if (failedDocs > 0 && (job.status === 'abstracting' || job.status === 'partial_failed' || job.status === 'failed')) {
+    buttons.push({
+      label: `Retry ${failedDocs} failed`,
+      class: 'btn-primary',
+      onClick: () => runJobAction(job, '/retry-failed'),
+    });
+  }
+  if (job.status === 'partial_failed') {
+    // With an opinion already on screen, this rebuilds it; the label and confirm say so.
+    const hasOpinion = rdJobIsShown(job.id);
+    const n = failedDocs;
+    const without = n ? `without the ${n} failed document${n === 1 ? '' : 's'}` : 'without the failed documents';
+    buttons.push({
+      label: hasOpinion ? 'Rebuild opinion without failed documents' : 'Synthesize with warnings',
+      class: 'btn-secondary',
+      onClick: () => {
+        const message = hasOpinion
+          ? `Rebuild the opinion ${without}? This will replace the opinion shown on this page.`
+          : 'Synthesize without retrying the failed documents? The opinion may be incomplete.';
+        if (confirm(message)) {
+          runJobAction(job, '/synthesis/start');
+        }
+      },
+    });
+  }
+  if (job.status === 'failed') {
+    buttons.push({
+      label: 'Retry synthesis',
+      class: failedDocs > 0 ? 'btn-secondary' : 'btn-primary',
+      onClick: () => runJobAction(job, '/synthesis/start'),
+    });
+  }
   if (!isTerminal) {
     buttons.push({
       label: 'Cancel job',
@@ -2030,32 +2478,9 @@ function renderJobActions(job) {
       },
     });
   }
-  if (failedDocs > 0 && (job.status === 'abstracting' || job.status === 'partial_failed' || job.status === 'failed')) {
-    buttons.push({
-      label: `Retry ${failedDocs} failed`,
-      class: 'btn-primary',
-      onClick: () => runJobAction(job, '/retry-failed'),
-    });
-  }
-  if (job.status === 'partial_failed') {
-    buttons.push({
-      label: 'Synthesize with warnings',
-      class: 'btn-primary',
-      onClick: () => {
-        if (confirm('Synthesize without retrying the failed documents? The opinion may be incomplete.')) {
-          runJobAction(job, '/synthesis/start');
-        }
-      },
-    });
-  }
-  if (job.status === 'failed') {
-    buttons.push({
-      label: 'Retry synthesis',
-      class: 'btn-secondary',
-      onClick: () => runJobAction(job, '/synthesis/start'),
-    });
-  }
 
+  jobActionButtons = buttons;
+  renderJobActionError(job.id);
   el.innerHTML = buttons.map((b, i) =>
     `<button class="${b.class}" data-action-idx="${i}" type="button">${esc(b.label)}</button>`
   ).join('');
@@ -2657,6 +3082,8 @@ function rdDonut(p, pid, kpi) {
 }
 
 let rdInstanceSeq = 0;
+const RD_DEFECTS_OPEN_MAX = 8;
+const RD_CHAIN_TOOLS_MIN = 12;
 const rdAnimatedKeys = new Set();
 let rdLastJobRender = { el: null, sig: '', jobId: null };
 // The job and result most recently handed to renderJobResults. A follow-up that finishes later redraws
@@ -2796,7 +3223,7 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
     </div>`;
   const hero = `<section class="card rd-hero ${enter()}" aria-labelledby="${pid}-exec">
     <div class="rd-hero-top">
-      <div><div class="rd-eyebrow" id="${pid}-exec">Executive summary</div>${p.title ? `<p class="rd-subject">${rdInline(p.title)}</p>` : ''}</div>
+      <div><h3 class="rd-eyebrow" id="${pid}-exec" tabindex="-1">Executive summary</h3>${p.title ? `<p class="rd-subject">${rdInline(p.title)}</p>` : ''}</div>
       <span class="rd-ai-pill" role="note">${RD_ICON.alert}AI draft · verify against instruments</span>
     </div>
     ${headline ? `<p class="rd-headline">${headline}</p>` : ''}
@@ -2832,20 +3259,22 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
     ? `<div class="legend"><span class="rd-swatch hatch"></span>Hatched = unreconciled${esc(legendWhy)}</div>`
     : st.sumState === 'under' ? '<div class="legend"><span class="rd-swatch" style="background:#cbd5e1"></span>Grey = unaccounted interest</div>' : '';
   const places = Math.max(0, ...p.owners.map(o => ((o.decimal.split('.')[1] || '').match(/^\d+/) || [''])[0].length));
+  // data-label lets the phone layout stack each owner as a small card with the share always in view.
   const ownerRows = p.owners.map(o => `<tr class="${o.value === 0 && !o.royalty ? 'muted-row' : ''}">
-      <td><div class="rd-owner">${swatchFor(o)}<div><b>${rdInline(o.name || '—')}</b>${ownerNote(o)}</div></div></td>
-      <td class="num rd-frac">${rdInline(o.interest || '—')}</td>
-      <td class="num rd-mono">${rdInline(o.decimal || '—')}</td>
-      <td>${o.royalty ? `<span class="rd-frac">${rdInline(o.royalty)}</span>` : '<span class="rd-none">none</span>'}</td>
-      <td>${subjectChips(o)}</td></tr>`).join('');
+      <td data-label="Owner"><div class="rd-owner">${swatchFor(o)}<div><b>${rdInline(o.name || '—')}</b>${ownerNote(o)}</div></div></td>
+      <td class="num rd-frac" data-label="Interest">${rdInline(o.interest || '—')}</td>
+      <td class="num rd-mono" data-label="Decimal">${rdInline(o.decimal || '—')}</td>
+      <td data-label="Royalty / NPRI">${o.royalty ? `<span class="rd-frac">${rdInline(o.royalty)}</span>` : '<span class="rd-none">none</span>'}</td>
+      <td data-label="Subject to">${subjectChips(o)}</td></tr>`).join('');
   const ownersCard = `<section class="card ${enter()}" aria-labelledby="${pid}-own">
-    <div class="rd-card-head"><h3 id="${pid}-own">Final ownership determination</h3><span class="aside">${esc(rdPlural(st.ownerCount, 'owner'))}${places >= 4 ? ` · decimals to ${places} places` : ''}</span></div>
+    <div class="rd-card-head"><h3 id="${pid}-own" tabindex="-1">Final ownership determination</h3><span class="aside">${esc(rdPlural(st.ownerCount, 'owner'))}${places >= 4 ? ` · decimals to ${places} places` : ''}</span></div>
     ${p.owners.length ? `<div class="rd-own">
       <div class="rd-own-viz">${donut.svg}${legend}</div>
       <div class="rd-tbl-wrap"><table class="rd-tbl rd-owners">
-        <thead><tr><th>Owner</th><th class="num">Interest</th><th class="num">Decimal</th><th>Royalty / NPRI</th><th>Subject to</th></tr></thead>
+        <caption class="rd-sr">Final ownership: each owner's interest, decimal, royalty and the defects it is subject to</caption>
+        <thead><tr><th scope="col">Owner</th><th scope="col" class="num">Interest</th><th scope="col" class="num">Decimal</th><th scope="col">Royalty / NPRI</th><th scope="col">Subject to</th></tr></thead>
         <tbody>${ownerRows}</tbody>
-        <tfoot><tr><td>Total mineral interest</td><td class="num rd-frac">${st.sumState === 'whole' ? '1/1' : ''}</td><td class="num rd-mono">${st.sumState === 'unknown' ? '—' : esc(st.decimalTotal.toFixed(8))}</td><td colspan="2">${sumCell}</td></tr></tfoot>
+        <tfoot><tr class="rd-total"><td>Total mineral interest</td><td class="num rd-frac"${st.sumState === 'whole' ? ' data-label="Interest"' : ''}>${st.sumState === 'whole' ? '1/1' : ''}</td><td class="num rd-mono" data-label="Decimal">${st.sumState === 'unknown' ? '—' : esc(st.decimalTotal.toFixed(8))}</td><td colspan="2">${sumCell}</td></tr></tfoot>
       </table></div>
     </div>` : '<p class="rd-empty">No owners are listed in the opinion’s ownership table.</p>'}
     ${(p.notes.owners || []).length ? `<p class="rd-note">${p.notes.owners.map(rdInline).join('<br>')}</p>` : ''}
@@ -2855,6 +3284,8 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
   let defectsCard = '';
   if (p.sections.includes('defects')) {
     const chainIndex = rdChainIndex(p.chain);
+    // Long defect lists start collapsed to their titles; eight or fewer start open.
+    const defectsOpen = p.defects.length <= RD_DEFECTS_OPEN_MAX;
     const cards = p.defects.map(d => {
       const affected = p.owners.filter(o => o.subjectTo.some(id => id.toUpperCase() === d.id.toUpperCase()));
       const rowIdx = rdMatchChainRow(d, chainIndex);
@@ -2867,13 +3298,15 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
       return `<article class="rd-dcard ${d.severity}">
         <div class="rd-dtop"><span class="rd-chip d ${rdSevClass[d.severity]}">${esc(d.id)}</span><span class="rd-sev ${d.severity}">${rdSevLabel[d.severity]}</span>${cite}</div>
         <h4>${rdInline(d.defect || '—')}</h4>
+        <details class="rd-dmore"${defectsOpen ? ' open' : ''}><summary>Curative${affected.length ? ' and affected owners' : ''}</summary>
         <dl class="rd-dgrid"><dt>Curative</dt><dd class="cure">${rdInline(d.curative || '—')}</dd>${affected.length ? `<dt>Affects</dt><dd>${affected.map(o => `${esc(o.name)}${o.interest && o.interest !== '0' ? ` · ${esc(o.interest)}` : ''}`).join('; ')}</dd>` : ''}</dl>
         ${askInput ? `<div class="rd-dfoot"><button type="button" class="rd-link" data-rd-ask="${esc(d.id)}" data-rd-input="${esc(askInput)}">Ask about ${esc(d.id)} ${RD_ICON.arrow}</button></div>` : ''}
+        </details>
       </article>`;
     }).join('');
     defectsCard = `<section class="card ${enter()}" aria-labelledby="${pid}-def">
-      <div class="rd-card-head"><h3 id="${pid}-def">Title defects &amp; curative requirements</h3><span class="aside">${esc(st.defectsState === 'prose' ? 'as text' : st.defectsState === 'unknown' ? 'unknown' : `${st.defectCount} open`)}</span></div>
-      ${p.defects.length ? `<div class="rd-defects">${cards}</div>` : st.defectsState === 'prose'
+      <div class="rd-card-head"><h3 id="${pid}-def" tabindex="-1">Title defects &amp; curative requirements</h3><span class="aside">${esc(st.defectsState === 'prose' ? 'as text' : st.defectsState === 'unknown' ? 'unknown' : `${st.defectCount} open`)}${p.defects.length > 1 ? ` <button type="button" class="rd-link rd-dtoggle" data-rd-defects-toggle="${p.defects.length <= RD_DEFECTS_OPEN_MAX ? 'collapse' : 'expand'}" aria-controls="${pid}-defs">${p.defects.length <= RD_DEFECTS_OPEN_MAX ? 'Collapse all' : 'Expand all'}</button>` : ''}</span></div>
+      ${p.defects.length ? `<div class="rd-defects" id="${pid}-defs">${cards}</div>` : st.defectsState === 'prose'
         ? `<p class="rd-note">The opinion lists defects as text, not as a table. They are shown as written and are not counted or linked.</p><ul class="rd-sumlist">${p.defectProse.map(t => `<li>${rdInline(t)}</li>`).join('')}</ul>`
         : st.defectsState === 'unknown'
           ? '<p class="rd-empty">The defects section is empty. The opinion neither lists defects nor says there are none.</p>'
@@ -2892,26 +3325,52 @@ function renderResultsDashboard(p, rawMarkdown, opts = {}) {
       <td class="conv"><span class="rd-frac">${rdInline(r.conveyed || '—')}</span>${r.convNote ? `<small>${rdInline(r.convNote)}</small>` : ''}</td>
       <td class="bal rd-mono">${rdInline(r.balance || '—')}</td><td>${rdFlagChips(r.flags)}</td></tr>`).join('');
     const aside = [rdPlural(st.chainCount, 'instrument'), span, st.flaggedCount ? `${st.flaggedCount} flagged` : ''].filter(Boolean).join(' · ');
+    const flaggedRows = p.chain.filter(r => r.flags.length).length;
+    // Long chains get a flagged-only filter and a text search. They only hide rows on screen; the PDF reads the
+    // full opinion text, so every row still exports.
+    const tools = p.chain.length >= RD_CHAIN_TOOLS_MIN ? `<div class="rd-chain-tools" data-rd-chain-tools="${pid}">
+        <div class="rd-seg-group" role="group" aria-label="Rows shown">
+          <button type="button" class="rd-seg-btn" data-rd-chain-filter="all" aria-pressed="true">All</button>
+          <button type="button" class="rd-seg-btn" data-rd-chain-filter="flagged" aria-pressed="false"${flaggedRows ? '' : ' disabled'}>Flagged only (${flaggedRows})</button>
+        </div>
+        <label class="rd-sr" for="${pid}-chain-q">Search the chain of title</label>
+        <input type="search" class="rd-chain-search" id="${pid}-chain-q" data-rd-chain-search placeholder="Search parties, recording refs, dates" autocomplete="off" />
+        <button type="button" class="rd-link" data-rd-chain-clear hidden>Clear filters</button>
+        <span class="rd-chain-count" data-rd-chain-count role="status" aria-live="polite">Showing ${p.chain.length} of ${p.chain.length}</span>
+      </div>` : '';
     chainCard = `<section class="card ${enter()}" aria-labelledby="${pid}-chain">
-      <div class="rd-card-head"><h3 id="${pid}-chain">Chain of title</h3><span class="aside">${esc(aside)}</span></div>
-      ${p.chain.length ? `<div class="rd-tbl-wrap"><table class="rd-tbl rd-chain">
-        <thead><tr><th>#</th><th>Date</th><th>Instrument · Recording</th><th>Grantor → Grantee</th><th>Conveyed</th><th>Running balance</th><th>Flags</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>` : '<p class="rd-empty">No instruments are listed in the chain of title table.</p>'}
+      <div class="rd-card-head"><h3 id="${pid}-chain" tabindex="-1">Chain of title</h3><span class="aside">${esc(aside)}</span></div>
+      ${tools}
+      ${p.chain.length ? `<p class="rd-scroll-hint">Swipe the table sideways to see every column.</p><div class="rd-tbl-wrap rd-scroll"><table class="rd-tbl rd-chain">
+        <caption class="rd-sr">Chain of title: each instrument in date order with its recording reference, parties, interest conveyed and flags</caption>
+        <thead><tr><th scope="col">#</th><th scope="col">Date</th><th scope="col">Instrument · Recording</th><th scope="col">Grantor → Grantee</th><th scope="col">Conveyed</th><th scope="col">Running balance</th><th scope="col">Flags</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+        <p class="rd-empty rd-chain-none" hidden>No instruments match. <button type="button" class="rd-link" data-rd-chain-clear>Clear filters</button></p>` : '<p class="rd-empty">No instruments are listed in the chain of title table.</p>'}
       ${(p.notes.chain || []).length ? `<p class="rd-note">${p.notes.chain.map(rdInline).join('<br>')}</p>` : ''}
     </section>`;
   }
 
   // Qualifications
   const qualsCard = p.qualifications.length ? `<section class="card ${enter()}" aria-labelledby="${pid}-q">
-      <div class="rd-card-head"><h3 id="${pid}-q">Opinion qualifications</h3></div>
+      <div class="rd-card-head"><h3 id="${pid}-q" tabindex="-1">Opinion qualifications</h3></div>
       <dl class="rd-quals">${p.qualifications.map(q => `<dt>${esc(q.label || 'Note')}</dt><dd>${rdInline(q.text)}</dd>`).join('')}</dl>
     </section>` : '';
 
   // Full text stays in the DOM as the .analysis-card the PDF export reads.
   const raw = `<details class="rd-raw ${enter()}"${opts.rawOpen ? ' open' : ''}><summary>Full opinion text</summary><div class="analysis-card"><div class="ac">${md(String(rawMarkdown))}</div></div></details>`;
 
+  // Section jump bar: buttons, not #anchors, because the hash is the app's router.
+  const jumps = [
+    ['Summary', `${pid}-exec`, true],
+    ['Ownership', `${pid}-own`, true],
+    ['Defects', `${pid}-def`, Boolean(defectsCard)],
+    ['Chain', `${pid}-chain`, Boolean(chainCard)],
+    ['Qualifications', `${pid}-q`, Boolean(qualsCard)],
+  ].filter(j => j[2]);
+  const jumpBar = jumps.length >= 3 ? `<nav class="rd-jump" aria-label="Result sections">${jumps.map(([name, target]) => `<button type="button" class="rd-jump-btn" data-rd-jump="${target}">${name}</button>`).join('')}</nav>` : '';
+
   const cls = ['rd', opts.animate ? 'rd-animate' : '', opts.fromProcessing ? 'rd-from-processing' : ''].filter(Boolean).join(' ');
-  return `<div class="${cls}" data-rd="${pid}">${hero}${ownersCard}${defectsCard}${chainCard}${qualsCard}${raw}</div>`;
+  return `<div class="${cls}" data-rd="${pid}">${hero}${jumpBar}${ownersCard}${defectsCard}${chainCard}${qualsCard}${raw}</div>`;
 }
 
 function rdRawIsOpen(root) {
@@ -2962,9 +3421,74 @@ function rdAnimateCounts(root) {
   });
 }
 
+// Applies the chain filter (All / Flagged only) and search text to one dashboard's chain rows.
+function rdApplyChainFilter(tools) {
+  const card = tools && typeof tools.closest === 'function' ? tools.closest('section') : null;
+  if (!card) return;
+  const flaggedOnly = Boolean(tools.querySelector('[data-rd-chain-filter="flagged"][aria-pressed="true"]'));
+  const search = tools.querySelector('[data-rd-chain-search]');
+  const q = String(search ? search.value : '').trim().toLowerCase();
+  const rows = Array.from(card.querySelectorAll('.rd-chain tbody tr'));
+  let shown = 0;
+  rows.forEach(tr => {
+    const show = (!flaggedOnly || tr.classList.contains('flagged')) && (!q || String(tr.textContent || '').toLowerCase().includes(q));
+    tr.hidden = !show;
+    if (show) shown++;
+  });
+  const filtered = flaggedOnly || Boolean(q);
+  const count = tools.querySelector('.rd-chain-count');
+  if (count) count.textContent = `Showing ${shown} of ${rows.length}${filtered ? (flaggedOnly ? ' · flagged only' : '') + (q ? ` · matching “${q}”` : '') : ''}`;
+  card.querySelectorAll('[data-rd-chain-clear]').forEach(b => { b.hidden = !filtered; });
+  const none = card.querySelector('.rd-chain-none');
+  if (none) none.hidden = shown > 0;
+}
+
+function rdHandleInput(e) {
+  const target = e && e.target;
+  if (!target || typeof target.closest !== 'function' || !target.hasAttribute('data-rd-chain-search')) return;
+  rdApplyChainFilter(target.closest('[data-rd-chain-tools]'));
+}
+
 function rdHandleClick(e) {
   const target = e && e.target;
   if (!target || typeof target.closest !== 'function') return;
+  const jump = target.closest('[data-rd-jump]');
+  if (jump) {
+    const heading = document.getElementById(jump.getAttribute('data-rd-jump'));
+    if (!heading) return;
+    const section = typeof heading.closest === 'function' ? (heading.closest('section') || heading) : heading;
+    if (typeof section.scrollIntoView === 'function') section.scrollIntoView({ behavior: rdMotionAllowed() ? 'smooth' : 'auto', block: 'start' });
+    if (typeof heading.focus === 'function') { try { heading.focus({ preventScroll: true }); } catch {} }
+    return;
+  }
+  const filter = target.closest('[data-rd-chain-filter]');
+  if (filter) {
+    const tools = filter.closest('[data-rd-chain-tools]');
+    tools.querySelectorAll('[data-rd-chain-filter]').forEach(b => b.setAttribute('aria-pressed', String(b === filter)));
+    rdApplyChainFilter(tools);
+    return;
+  }
+  const clear = target.closest('[data-rd-chain-clear]');
+  if (clear) {
+    const card = clear.closest('section');
+    const tools = card && card.querySelector('[data-rd-chain-tools]');
+    if (!tools) return;
+    tools.querySelectorAll('[data-rd-chain-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.getAttribute('data-rd-chain-filter') === 'all')));
+    const search = tools.querySelector('[data-rd-chain-search]');
+    if (search) search.value = '';
+    rdApplyChainFilter(tools);
+    if (search && typeof search.focus === 'function') search.focus();
+    return;
+  }
+  const toggle = target.closest('[data-rd-defects-toggle]');
+  if (toggle) {
+    const open = toggle.getAttribute('data-rd-defects-toggle') === 'expand';
+    const list = document.getElementById(toggle.getAttribute('aria-controls'));
+    if (list) list.querySelectorAll('details.rd-dmore').forEach(d => { d.open = open; });
+    toggle.setAttribute('data-rd-defects-toggle', open ? 'collapse' : 'expand');
+    toggle.textContent = open ? 'Collapse all' : 'Expand all';
+    return;
+  }
   const ask = target.closest('[data-rd-ask]');
   if (ask) {
     const input = document.getElementById(ask.getAttribute('data-rd-input'));
@@ -2978,6 +3502,16 @@ function rdHandleClick(e) {
   if (go) {
     const row = document.getElementById(go.getAttribute('data-rd-goto'));
     if (!row || typeof row.scrollIntoView !== 'function') return;
+    if (row.hidden) {
+      // The cited row is filtered out; show every row again so the jump lands on it.
+      const tools = row.closest('section') && row.closest('section').querySelector('[data-rd-chain-tools]');
+      if (tools) {
+        tools.querySelectorAll('[data-rd-chain-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.getAttribute('data-rd-chain-filter') === 'all')));
+        const search = tools.querySelector('[data-rd-chain-search]');
+        if (search) search.value = '';
+        rdApplyChainFilter(tools);
+      }
+    }
     row.scrollIntoView({ behavior: rdMotionAllowed() ? 'smooth' : 'auto', block: 'center' });
     row.classList.add('rd-hit');
     setTimeout(() => row.classList.remove('rd-hit'), 1600);
@@ -2991,6 +3525,70 @@ function rdBarStatus(parsed) {
   if (defectsState === 'missing') return 'Draft · no defects section';
   if (defectsState === 'unknown') return 'Draft · defects section empty';
   return `Draft · ${n ? rdPlural(n, 'open defect') : 'no open defects'}`;
+}
+
+// Completeness notices are one list. The dashboard renders it and the PDF export prints the same list,
+// so a caveat the reader saw can never be missing from the file they download.
+function rdCompletenessNotices(job, result) {
+  const notices = [];
+  const seen = new Set();
+  const add = (kind, text, code) => {
+    const key = kind === 'other' ? `other:${code || text}` : kind;
+    if (seen.has(key)) return;
+    seen.add(key);
+    notices.push(code ? { kind, text, code } : { kind, text });
+  };
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+  const excluded = Array.isArray(result?.failedDocuments) ? result.failedDocuments.length : 0;
+  const driver = result?.synthesisDriver
+    || (warnings.some(w => String(w) === 'synthesis_driver:browser') ? 'browser' : 'server');
+  if (driver === 'browser') {
+    add('browser_fallback', 'Browser synthesis fallback: written in the browser because server synthesis was unavailable. Check it against the documents.');
+  }
+  if (excluded) {
+    add('omitted_documents', `Excluded ${plural(excluded, 'failed document')}. ${excluded === 1 ? 'It' : 'They'} could not be read and ${excluded === 1 ? 'is' : 'are'} not reflected in this opinion.`);
+  }
+  for (const w of warnings) {
+    const text = (typeof w === 'string' ? w : (w && typeof w.message === 'string' ? w.message : '')).trim();
+    if (!text || text === 'synthesis_driver:browser') continue;
+    if (/opinion[^.]*truncat|truncat[^.]*(opinion|last section|output limit)/i.test(text)) {
+      add('truncated_opinion', 'The opinion was cut off at the model’s length limit; its last section may be missing text.');
+      continue;
+    }
+    const omitted = text.match(/^(\d+)\s+(?:abstraction\s+)?(chunk|document|file)[^.]*\b(failed|omitted)\b/i);
+    if (omitted) {
+      const n = Number(omitted[1]);
+      const noun = /chunk/i.test(omitted[2]) ? 'failed document part' : 'failed document';
+      add('omitted_documents', `Excluded ${plural(n, noun)}. ${n === 1 ? 'It' : 'They'} could not be read and ${n === 1 ? 'is' : 'are'} not reflected in this opinion.`);
+      continue;
+    }
+    if (/^[a-z0-9]+(?:[_:][\w.-]+)+$/i.test(text)) {
+      add('other', 'The run reported a warning this page does not recognize.', text);
+      continue;
+    }
+    add('other', text);
+  }
+  const jobFailed = failedDocumentCount(job?.failedDocuments);
+  if (jobFailed && !seen.has('omitted_documents')) {
+    add('failed_documents', `${plural(jobFailed, 'document')} failed to read and may be missing from this opinion.`);
+  }
+  return notices;
+}
+
+function rdDocumentsAnalyzedLine(job) {
+  const total = Number(job?.totalDocuments);
+  const done = Number(job?.completedDocuments);
+  if (!(total > 0) || job?.completedDocuments == null || !Number.isFinite(done)) return '';
+  return `Documents analyzed: ${done} of ${total}`;
+}
+
+function rdNoticeBlock(notices, docsLine) {
+  if (!notices.length) return '';
+  return `<section class="rd-incomplete" aria-labelledby="rdIncompleteTitle">
+    <div class="rd-incomplete-head">${RD_ICON.alert}<h3 id="rdIncompleteTitle">This result may be incomplete</h3>${docsLine ? `<span class="rd-incomplete-docs">${esc(docsLine)}</span>` : ''}</div>
+    <ul>${notices.map(n => `<li>${esc(n.text)}${n.code ? ` <details class="rd-codes"><summary>Details</summary><code>${esc(n.code)}</code></details>` : ''}</li>`).join('')}</ul>
+  </section>`;
 }
 
 const jobFollowupHistoryByJob = new Map();
@@ -3013,15 +3611,14 @@ function renderJobResults(job, result) {
   const failedDocs = Array.isArray(result.failedDocuments) ? result.failedDocuments : [];
   const synthesisDriver = result.synthesisDriver
     || (warnings.some(w => String(w) === 'synthesis_driver:browser') ? 'browser' : 'server');
-  const browserFallbackBanner = synthesisDriver === 'browser'
-    ? `<div class="error-msg"><strong>Browser synthesis fallback.</strong> This opinion was generated in the browser because server-side synthesis was unavailable. Re-run on a durable job or investigate server synthesis errors before relying on this result for large runs.</div>`
-    : '';
+  // One consolidated completeness block (also printed by downloadPDF) instead of separate warning boxes.
+  const noticeHtml = rdNoticeBlock(rdCompletenessNotices(job, result), rdDocumentsAnalyzedLine(job));
   const opinionText = String(result.finalTitleOpinion);
   rdLatestJob = { jobId: job.id, job, result };
   // The poller applies a finished job twice (onUpdate + onTerminal). Re-writing identical markup
   // would cut the entrance animation short, so keep the DOM when nothing visible changed. The key
   // holds the full opinion text and every job field the render reads.
-  const renderSig = JSON.stringify([job.id, opinionText, warnings, failedDocs.length, synthesisDriver, job.totalDocuments ?? null]);
+  const renderSig = JSON.stringify([job.id, opinionText, warnings, failedDocs.length, synthesisDriver, job.totalDocuments ?? null, job.completedDocuments ?? null, failedDocumentCount(job.failedDocuments)]);
   const sameJobShown = rdLastJobRender.el === el && rdLastJobRender.jobId === job.id && Boolean(el.innerHTML);
   const sameAsShown = sameJobShown && rdLastJobRender.sig === renderSig;
   // Keep the reader's open/closed choice on 'Full opinion text' across re-renders of the same job.
@@ -3038,14 +3635,11 @@ function renderJobResults(job, result) {
     })
     : `<div class="analysis-card"><div class="ac">${md(opinionText)}</div></div>`;
   if (!sameAsShown) {
-    el.innerHTML = `
-    ${browserFallbackBanner}
-    ${warnings.length ? `<div class="verify-note"><strong>Warnings:</strong><ul style="margin:.4rem 0 0 1.2rem">${warnings.map(w => `<li>${esc(typeof w === 'string' ? w : ((w && w.message) || ''))}</li>`).join('')}</ul></div>` : ''}
-    ${failedDocs.length ? `<div class="verify-note"><strong>Excluded ${failedDocs.length} failed document${failedDocs.length === 1 ? '' : 's'}.</strong></div>` : ''}
-    ${opinionHtml}`;
+    el.innerHTML = `${noticeHtml}${opinionHtml}`;
     rdLastJobRender = { el, sig: renderSig, jobId: job.id };
   }
   el.onclick = rdHandleClick;
+  el.oninput = rdHandleInput;
   if (animate) rdAnimateCounts(el);
   if (followupWrap) {
     followupWrap.style.display = '';
@@ -3061,65 +3655,18 @@ function renderJobResults(job, result) {
       const title = job.subjectTract || job.tractDescription || `Job ${shortJobId(job.id)}`;
       barDownload.onclick = () => downloadPDF({ rootElement: document.getElementById('jobResults'), tractOverride: title });
     }
+    renderJobFollowupHistory(job.id, opinionText);
+    const submit = (questionOverride) => submitJobFollowup(job, result, typeof questionOverride === 'string' ? questionOverride : null);
     if (historyEl) {
-      const list = jobFollowupHistoryByJob.get(job.id) || [];
-      historyEl.innerHTML = list.map(pair => `
-        <div class="analysis-card" style="margin-top:.7rem">
-          <div class="ac"><strong>Q:</strong> ${esc(pair.question)}${pair.opinionHash && pair.opinionHash !== rdHash(opinionText) ? ' <em>(asked about an earlier draft of this opinion)</em>' : ''}<br><br><strong>A:</strong> ${md(String(pair.answer || ''))}</div>
-        </div>`).join('');
+      historyEl.onclick = e => {
+        const retry = e && e.target && typeof e.target.closest === 'function' ? e.target.closest('[data-followup-retry]') : null;
+        if (!retry) return;
+        const entry = (jobFollowupPendingByJob.get(job.id) || []).find(p => String(p.id) === retry.getAttribute('data-followup-retry'));
+        if (entry) submit(entry.question);
+      };
     }
-    const submit = async () => {
-      const q = (input?.value || '').trim();
-      if (!q || !btn || jobFollowupsInFlight.has(job.id)) return;
-      jobFollowupsInFlight.add(job.id);
-      btn.disabled = true;
-      const prevLabel = btn.textContent;
-      btn.textContent = 'Asking…';
-      try {
-        let answer = '';
-        const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/followup`, {
-          method: 'POST',
-          headers: getJobHeaders(),
-          body: JSON.stringify({ question: q }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-          answer = data.followup?.answer || '';
-          if (data.truncationWarning) showError(data.truncationWarning);
-        } else if (res.status === 503) {
-          showError(`Server follow-up unavailable (${data.error || `HTTP ${res.status}`}); using browser fallback.`);
-          const priorPairs = jobFollowupHistoryByJob.get(job.id) || [];
-          answer = await callBackend(buildFollowupMessages(q, result.finalTitleOpinion, priorPairs), SYNTHESIS_PROMPT, {
-            model: SYNTHESIS_MODEL,
-            max_tokens: SYNTHESIS_MAX_TOKENS,
-            phase: 'followup',
-            docCount: job.totalDocuments || 0,
-            label: 'Follow-up request',
-          });
-        } else {
-          throw new Error(data.error || `HTTP ${res.status}`);
-        }
-        const list = jobFollowupHistoryByJob.get(job.id) || [];
-        list.push({ question: q, answer, opinionHash: rdHash(result.finalTitleOpinion) });
-        jobFollowupHistoryByJob.set(job.id, list);
-        // The answer is stored either way; only redraw if this job is still the one on screen,
-        // so a late answer never paints job A over job B.
-        if (rdJobIsShown(job.id)) {
-          if (input && input.value.trim() === q) input.value = '';
-          renderJobResults(rdLatestJob.job, rdLatestJob.result);
-        }
-      } catch (err) {
-        alert(err.message || 'Follow-up failed.');
-      } finally {
-        jobFollowupsInFlight.delete(job.id);
-        if (btn && (rdJobIsShown(job.id) || !rdLastJobRender.jobId)) {
-          btn.disabled = false;
-          btn.textContent = prevLabel;
-        }
-      }
-    };
     if (btn) {
-      btn.onclick = submit;
+      btn.onclick = () => submit();
       // The Ask button is shared across jobs; show this job's own in-flight state.
       const busy = jobFollowupsInFlight.has(job.id);
       btn.disabled = busy;
@@ -3131,11 +3678,189 @@ function renderJobResults(job, result) {
   }
 }
 
+// Follow-ups waiting on an answer or that failed, per job: [{ id, question, state: 'pending'|'error', message }].
+// Answered pairs live in jobFollowupHistoryByJob; these never enter it, so a failure leaves no blank answer.
+const jobFollowupPendingByJob = new Map();
+let jobFollowupSeq = 0;
+const FOLLOWUP_EMPTY_MESSAGE = 'The answer came back empty. Try asking again.';
+
+function renderJobFollowupHistory(jobId, opinionText) {
+  const historyEl = document.getElementById('jobFollowupHistory');
+  if (!historyEl) return;
+  const list = jobFollowupHistoryByJob.get(jobId) || [];
+  const waiting = jobFollowupPendingByJob.get(jobId) || [];
+  historyEl.innerHTML = list.map(pair => `
+        <div class="analysis-card" style="margin-top:.7rem">
+          <div class="ac"><strong>Q:</strong> ${esc(pair.question)}${pair.opinionHash && pair.opinionHash !== rdHash(opinionText) ? ' <em>(asked about an earlier draft of this opinion)</em>' : ''}<br><br><strong>A:</strong> ${md(String(pair.answer || ''))}</div>
+        </div>`).join('') + waiting.map(p => `
+        <div class="analysis-card followup-card followup-card--${p.state}" style="margin-top:.7rem">
+          <div class="ac"><strong>Q:</strong> ${esc(p.question)}</div>
+          ${p.state === 'pending'
+            ? '<p class="followup-pending"><span class="spinner" aria-hidden="true"></span>Working on the answer…</p>'
+            : `<p class="followup-error">${esc(p.message)} <button class="btn-secondary" type="button" data-followup-retry="${esc(String(p.id))}">Ask again</button></p>`}
+        </div>`).join('');
+}
+
+function announceJobFollowup(text) {
+  const el = document.getElementById('jobFollowupStatus');
+  if (el) el.textContent = text;
+}
+
+// Brings the new answer into view without moving focus (the reader may be typing the next question).
+function revealLatestFollowup(container) {
+  if (!container) return;
+  const cards = typeof container.querySelectorAll === 'function' ? container.querySelectorAll('.analysis-card') : [];
+  const last = cards && cards.length ? cards[cards.length - 1] : null;
+  if (!last || typeof last.scrollIntoView !== 'function') return;
+  try { last.scrollIntoView({ block: 'nearest', behavior: rdMotionAllowed() ? 'smooth' : 'auto' }); } catch {}
+}
+
+async function submitJobFollowup(job, result, questionOverride) {
+  const input = document.getElementById('jobFollowupInput');
+  const btn = document.getElementById('jobFollowupBtn');
+  const q = (questionOverride != null ? questionOverride : (input?.value || '')).trim();
+  if (!q || !btn || jobFollowupsInFlight.has(job.id)) return;
+  jobFollowupsInFlight.add(job.id);
+  btn.disabled = true;
+  btn.textContent = 'Asking…';
+  // The same question asked again replaces its failed card; it never stacks a duplicate.
+  const waiting = (jobFollowupPendingByJob.get(job.id) || []).filter(p => p.question !== q);
+  const entry = { id: ++jobFollowupSeq, question: q, state: 'pending', message: '' };
+  waiting.push(entry);
+  jobFollowupPendingByJob.set(job.id, waiting);
+  const opinionText = String(result.finalTitleOpinion);
+  if (rdJobIsShown(job.id)) {
+    renderJobFollowupHistory(job.id, opinionText);
+    announceJobFollowup('Working on the answer…');
+  }
+  const fail = message => { entry.state = 'error'; entry.message = message; };
+  let answer = '';
+  try {
+    const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(job.id)}/followup`, {
+      method: 'POST',
+      headers: getJobHeaders(),
+      body: JSON.stringify({ question: q }),
+    }, null);
+    if (r.kind === 'ok') {
+      answer = r.data && isJsonObject(r.data.followup) && typeof r.data.followup.answer === 'string' ? r.data.followup.answer : '';
+      if (r.data?.truncationWarning) showError(r.data.truncationWarning);
+    } else if (r.kind === 'server' && r.status === 503) {
+      showError(`Server follow-up unavailable (${apiErrorText(r, `HTTP ${r.status}`)}); using browser fallback.`);
+      const priorPairs = jobFollowupHistoryByJob.get(job.id) || [];
+      answer = await callBackend(buildFollowupMessages(q, result.finalTitleOpinion, priorPairs), SYNTHESIS_PROMPT, {
+        model: SYNTHESIS_MODEL,
+        max_tokens: SYNTHESIS_MAX_TOKENS,
+        phase: 'followup',
+        docCount: job.totalDocuments || 0,
+        label: 'Follow-up request',
+      });
+    } else if (r.kind === 'unauthorized') {
+      handleUnauthorized('followup');
+      fail('The access password is needed again. Enter it, then ask again.');
+    } else {
+      fail(`The answer could not be loaded. ${apiFailureSentence(r, 'answer the question')}`);
+    }
+    if (entry.state === 'pending') {
+      if (!String(answer || '').trim()) {
+        fail(FOLLOWUP_EMPTY_MESSAGE);
+      } else {
+        const list = jobFollowupHistoryByJob.get(job.id) || [];
+        list.push({ question: q, answer, opinionHash: rdHash(result.finalTitleOpinion) });
+        jobFollowupHistoryByJob.set(job.id, list);
+        jobFollowupPendingByJob.set(job.id, (jobFollowupPendingByJob.get(job.id) || []).filter(p => p !== entry));
+      }
+    }
+  } catch (err) {
+    console.warn('Follow-up failed', err);
+    fail('The answer could not be loaded. Check your connection and try again.');
+  } finally {
+    jobFollowupsInFlight.delete(job.id);
+    if (btn && (rdJobIsShown(job.id) || !rdLastJobRender.jobId)) {
+      btn.disabled = false;
+      btn.textContent = 'Ask';
+    }
+  }
+  // Stored either way; only redraw if this job is still the one on screen, so a late answer never paints
+  // job A over job B.
+  if (!rdJobIsShown(job.id)) return;
+  if (entry.state === 'pending') {
+    if (input && input.value.trim() === q) input.value = '';
+    renderJobResults(rdLatestJob.job, rdLatestJob.result);
+    announceJobFollowup('Answer ready.');
+  } else {
+    renderJobFollowupHistory(job.id, opinionText);
+    announceJobFollowup(entry.message);
+  }
+  revealLatestFollowup(document.getElementById('jobFollowupHistory'));
+}
+
 let jobViewLoadSeq = 0;
 
 function isCurrentJobRoute(jobId) {
   const route = parseRoute();
   return route.name === 'job' && route.jobId === jobId;
+}
+
+// The job view's result area: loading -> ready | unavailable(reason). `refreshFailed` marks a ready result whose
+// re-fetch failed; the result stays on screen under a banner. Header "Download PDF" reads this, not job status.
+let jobResultView = { jobId: null, state: 'idle', reason: '', refreshFailed: false };
+
+function setJobResultView(jobId, state, extra = {}) {
+  jobResultView = { jobId, state, reason: extra.reason || '', refreshFailed: Boolean(extra.refreshFailed) };
+  renderJobResultNotice();
+}
+
+function jobPdfAvailability(job) {
+  const v = jobResultView;
+  if (v.jobId === job.id && v.state === 'ready' && rdJobIsShown(job.id) && rdLatestJob.result && String(rdLatestJob.result.finalTitleOpinion || '').trim()) return { ok: true, why: '' };
+  if (v.jobId === job.id && v.state === 'unavailable') return { ok: false, why: 'No opinion to download: the result is unavailable.' };
+  return { ok: false, why: 'The opinion is still loading.' };
+}
+
+function renderJobResultNotice() {
+  const el = document.getElementById('jobResultNotice');
+  if (!el) return;
+  const v = jobResultView;
+  if (v.state === 'ready' && v.refreshFailed && isCurrentJobRoute(v.jobId)) {
+    const said = v.reason === 'not_found'
+      ? 'The saved result could not be found. Showing the last loaded copy.'
+      : 'Could not refresh this result. Showing the copy already loaded.';
+    el.innerHTML = `<div class="info-msg job-refresh-failed">${said} <button class="btn-secondary" type="button" id="jobResultRefreshBtn">Retry</button></div>`;
+    const btn = document.getElementById('jobResultRefreshBtn');
+    if (btn) btn.addEventListener('click', () => { const job = rdLatestJob.job; if (job && job.id === v.jobId) loadJobResult(job, () => isCurrentJobRoute(job.id)); });
+  } else {
+    el.innerHTML = '';
+  }
+}
+
+function clearJobViewBody() {
+  const stepper = document.getElementById('jobStepper');
+  if (stepper) { stepper.style.display = 'none'; stepper.innerHTML = ''; }
+  const progress = document.getElementById('jobProgress');
+  if (progress) progress.style.display = 'none';
+  ['jobDetail', 'jobActions'].forEach(id => { const n = document.getElementById(id); if (n) n.innerHTML = ''; });
+  renderJobResults({ id: null }, null);
+  setJobResultView(null, 'idle');
+  renderJobConnStatus(null);
+}
+
+// The header for a job that could not be shown: not found (with Remove from Recent Jobs) or a load error with Retry.
+function renderJobLoadProblem(jobId, kind, message) {
+  const headerEl = document.getElementById('jobHeader');
+  clearJobViewBody();
+  if (!headerEl) return;
+  if (kind === 'not_found') {
+    const known = loadRecentJobs().some(entry => entry.id === jobId);
+    headerEl.innerHTML = `<div class="error-msg" role="alert"><strong>Job not found.</strong> The id is unknown or the link is wrong. Jobs are kept until they are canceled or deleted; they do not expire on a timer.
+      <div class="job-problem-actions">${known ? '<button class="btn-secondary" type="button" id="jobRemoveRecentBtn">Remove from Recent Jobs</button>' : ''}<a href="#/jobs">Recent Jobs</a></div></div>`;
+    const remove = document.getElementById('jobRemoveRecentBtn');
+    if (remove) remove.addEventListener('click', () => { removeRecentJob(jobId); navigate('#/jobs'); });
+    return;
+  }
+  headerEl.innerHTML = `<div class="error-msg" role="alert"><strong>Could not load this job.</strong> ${esc(message)}
+    <div class="job-problem-actions"><button class="btn-primary" type="button" id="jobLoadRetryBtn">Retry</button><a href="#/jobs">Recent Jobs</a></div></div>`;
+  const retry = document.getElementById('jobLoadRetryBtn');
+  if (retry) retry.addEventListener('click', () => loadJobView(jobId));
 }
 
 async function loadJobView(jobId) {
@@ -3148,53 +3873,40 @@ async function loadJobView(jobId) {
     return;
   }
   if (activeJobPollState && activeJobPollState.jobId !== jobId) stopJobPoller();
-  if (headerEl) headerEl.innerHTML = '<div style="color:#64748b">Loading job…</div>';
+  if (headerEl) headerEl.innerHTML = '<div style="color:#64748b" role="status">Loading job…</div>';
   // Another job's results must not sit under this job's header while it loads.
   if (rdLastJobRender.jobId && rdLastJobRender.jobId !== jobId) renderJobResults({ id: jobId }, null);
-  let res;
-  try {
-    res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
-      method: 'GET',
-      headers: getJobHeaders(),
-    });
-  } catch (err) {
-    if (!stillCurrent()) return;
-    stopJobPoller();
-    if (headerEl) headerEl.innerHTML = `<div class="error-msg"><strong>Network error</strong><br>${esc(err.message || 'Could not reach server.')}</div>`;
-    return;
-  }
+  if (jobResultView.jobId !== jobId) setJobResultView(jobId, 'loading');
+  renderJobConnStatus(null);
+  const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'GET',
+    headers: getJobHeaders(),
+  }, isJobPayloadFor(jobId));
   if (!stillCurrent()) return;
-  if (res.status === 401) {
-    stopJobPoller();
-    document.getElementById('mainApp').style.display = 'none';
-    document.getElementById('passwordGate').style.display = 'block';
+  if (r.kind === 'unauthorized') {
+    handleUnauthorized('job-load');
     return;
   }
-  if (res.status === 404) {
+  if (r.kind !== 'ok') {
     stopJobPoller();
-    if (headerEl) headerEl.innerHTML = '<div class="error-msg"><strong>Job not found.</strong> The id is unknown or the link is wrong. Jobs are kept until they are canceled or deleted; they do not expire on a timer.</div>';
+    renderJobLoadProblem(jobId, r.kind, r.kind === 'not_found' ? '' : apiFailureSentence(r, 'load this job'));
     return;
   }
-  const data = await res.json();
-  if (!res.ok) {
-    if (!stillCurrent()) return;
-    stopJobPoller();
-    if (headerEl) headerEl.innerHTML = `<div class="error-msg"><strong>Could not load job</strong><br>${esc(data.error || `HTTP ${res.status}`)}</div>`;
-    return;
-  }
-  if (!stillCurrent()) return;
-  const job = data.job;
+  const job = r.data.job;
   rememberRecentJob(job);
   await applyJobToView(job, stillCurrent);
   if (!stillCurrent()) return;
   if (!TERMINAL_STATUSES.has(job.status)) {
+    // Work this tab is driving keeps its poller across navigation (the leave guard covers it); any other job
+    // polls only while its route is on screen.
+    const scope = activeAnalysisRun && activeAnalysisRun.jobId === jobId ? 'run' : 'route';
     startJobPoller(jobId, jobUpdate => {
       if (isCurrentJobRoute(jobId)) return applyJobToView(jobUpdate, () => isCurrentJobRoute(jobId));
     }, async terminalJob => {
       if (!isCurrentJobRoute(jobId)) return;
       rememberRecentJob(terminalJob);
       await applyJobToView(terminalJob, () => isCurrentJobRoute(jobId));
-    });
+    }, scope);
   } else {
     stopJobPoller();
   }
@@ -3208,34 +3920,75 @@ async function applyJobToView(job, isCurrent = () => true) {
   renderJobDetail(job);
   renderJobActions(job);
   if (job.status === 'complete' || job.status === 'partial_failed') {
-    let result = null;
-    let fetchFailed = false;
-    try {
-      const r = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/result`, {
-        method: 'GET',
-        headers: getJobHeaders(),
-      });
-      if (r.ok) {
-        const payload = await r.json();
-        result = payload.result || null;
-      } else if (r.status !== 404) {
-        fetchFailed = true;
-      }
-    } catch (err) {
-      fetchFailed = true;
-      console.warn('Could not fetch durable job result', err);
-    }
-    if (!isCurrent()) return;
-    // A failed re-fetch (network blip, 5xx) keeps the result already on screen for this job.
-    if (fetchFailed && rdJobIsShown(job.id)) return;
-    renderJobResults(job, result);
+    await loadJobResult(job, isCurrent);
   } else {
     if (!isCurrent()) return;
     renderJobResults(job, null);
+    setJobResultView(job.id, 'idle');
   }
+}
+
+const RESULT_UNAVAILABLE_REASONS = {
+  not_found: 'The analysis finished, but no saved opinion was found for this job.',
+  invalid: 'The saved opinion came back empty or in a form this page could not read.',
+};
+
+// Fetches only the result. A failed re-fetch keeps the result already on screen for this job.
+async function loadJobResult(job, isCurrent = () => true) {
+  if (!rdJobIsShown(job.id)) {
+    setJobResultView(job.id, 'loading');
+    const el = document.getElementById('jobResults');
+    if (el && !el.innerHTML) el.innerHTML = '<p class="job-result-loading" role="status">Loading the opinion…</p>';
+  }
+  const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(job.id)}/result`, {
+    method: 'GET',
+    headers: getJobHeaders(),
+  }, isResultPayload);
+  if (!isCurrent()) return;
+  if (r.kind === 'unauthorized') {
+    handleUnauthorized('result');
+    return;
+  }
+  if (r.kind === 'ok') {
+    renderJobResults(job, r.data.result);
+    setJobResultView(job.id, 'ready');
+    renderJobHeader(job);
+    renderJobDetail(job);
+    renderJobActions(job);
+    return;
+  }
+  // Any failed re-fetch of a result already on screen (404 included) keeps it under a banner; only a first load
+  // that finds nothing becomes "Result unavailable".
+  if (rdJobIsShown(job.id)) {
+    console.warn('Could not refresh the job result', r.kind, r.status);
+    setJobResultView(job.id, 'ready', { refreshFailed: true, reason: r.kind === 'not_found' ? 'not_found' : '' });
+    return;
+  }
+  renderJobResultUnavailable(job, RESULT_UNAVAILABLE_REASONS[r.kind] || apiFailureSentence(r, 'load the opinion'));
+}
+
+function renderJobResultUnavailable(job, reason) {
+  renderJobResults(job, null);
+  setJobResultView(job.id, 'unavailable', { reason });
+  const el = document.getElementById('jobResults');
+  if (el) {
+    el.innerHTML = `<section class="rd-unavailable" role="alert" aria-labelledby="jobResultUnavailableTitle">
+      <h3 id="jobResultUnavailableTitle">Result unavailable</h3>
+      <p>${esc(reason)}</p>
+      <button class="btn-primary" type="button" id="jobResultRetryBtn">Retry</button>
+    </section>`;
+    const retry = document.getElementById('jobResultRetryBtn');
+    if (retry) retry.addEventListener('click', () => {
+      el.innerHTML = '';
+      loadJobResult(job, () => isCurrentJobRoute(job.id));
+    });
+  }
+  renderJobHeader(job);
 }
 const RECENT_JOBS_KEY = 'title-analyzer:recent-jobs:v1';
 const RECENT_JOBS_LIMIT = 20;
+// Per-row outcome of the last Recent Jobs refresh in this tab: 'updated' | 'not_found' | 'unknown'. Not stored.
+const recentJobsCheck = new Map();
 const COMPLETED_RECENT_JOB_STATUSES = new Set(['complete', 'partial_failed']);
 
 function normalizeRecentJobTimestamp(value) {
@@ -3286,6 +4039,13 @@ function rememberRecentJob(job) {
   renderRecentJobsToolbar();
 }
 
+function removeRecentJob(jobId) {
+  saveRecentJobs(loadRecentJobs().filter(entry => entry.id !== jobId));
+  recentJobsCheck.delete(jobId);
+  renderRecentJobsToolbar();
+  if (parseRoute().name === 'history') renderRecentJobsView();
+}
+
 function hasCompletedRecentJob() {
   return loadRecentJobs().some(entry => COMPLETED_RECENT_JOB_STATUSES.has(entry.status));
 }
@@ -3315,6 +4075,66 @@ function renderRecentJobsToolbar() {
   }
 }
 
+// Recent Jobs lists what this device last saw. Refresh asks the server for current status (at most 4 at a time)
+// and records only status and a checkedAt time; the per-row outcome lives in recentJobsCheck for this tab.
+let recentJobsRefresh = { running: false, summary: '' };
+const RECENT_JOBS_REFRESH_CONCURRENCY = 4;
+
+function updateRecentJobStatus(jobId, status) {
+  const list = loadRecentJobs();
+  const entry = list.find(e => e.id === jobId);
+  if (!entry) return;
+  entry.status = status;
+  entry.checkedAt = Date.now();
+  saveRecentJobs(list);
+}
+
+async function refreshRecentJobs() {
+  if (recentJobsRefresh.running) return;
+  const list = loadRecentJobs().slice(0, RECENT_JOBS_LIMIT);
+  recentJobsRefresh = { running: true, summary: '' };
+  if (parseRoute().name === 'history') renderRecentJobsView();
+  let next = 0;
+  let unauthorized = false;
+  const counts = { updated: 0, not_found: 0, unknown: 0 };
+  const worker = async () => {
+    while (next < list.length && !unauthorized) {
+      const entry = list[next++];
+      const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(entry.id)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayload);
+      if (r.kind === 'ok') {
+        updateRecentJobStatus(entry.id, r.data.job.status);
+        recentJobsCheck.set(entry.id, 'updated');
+        counts.updated++;
+      } else if (r.kind === 'not_found') {
+        recentJobsCheck.set(entry.id, 'not_found');
+        counts.not_found++;
+      } else if (r.kind === 'unauthorized') {
+        unauthorized = true;
+      } else {
+        recentJobsCheck.set(entry.id, 'unknown');
+        counts.unknown++;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(RECENT_JOBS_REFRESH_CONCURRENCY, list.length) }, worker));
+  const parts = [
+    counts.updated ? `${counts.updated} updated` : '',
+    counts.not_found ? `${counts.not_found} not found` : '',
+    counts.unknown ? `${counts.unknown} could not be checked` : '',
+  ].filter(Boolean);
+  recentJobsRefresh = { running: false, summary: parts.length ? `Checked just now: ${parts.join(', ')}.` : '' };
+  renderRecentJobsToolbar();
+  if (unauthorized) {
+    handleUnauthorized('recent-jobs');
+    return;
+  }
+  if (parseRoute().name === 'history') renderRecentJobsView();
+  else {
+    const el = document.getElementById('view-history');
+    if (el && el.innerHTML) renderRecentJobsView();
+  }
+}
+
 function renderRecentJobsView() {
   const el = document.getElementById('view-history');
   if (!el) return;
@@ -3328,25 +4148,54 @@ function renderRecentJobsView() {
       </div>`;
     return;
   }
+  const busy = recentJobsRefresh.running;
   el.innerHTML = `
     <div class="card">
-      <h2 style="margin-top:0">Recent jobs</h2>
+      <div class="recent-jobs-head">
+        <h2 style="margin:0">Recent jobs</h2>
+        <button class="btn-secondary" id="recentJobsRefreshBtn" type="button"${busy ? ' disabled' : ''}>${busy ? 'Checking…' : 'Refresh status'}</button>
+      </div>
+      <p class="recent-jobs-note" role="status" aria-live="polite">${esc(busy ? `Checking ${list.length} job${list.length === 1 ? '' : 's'} with the server…` : recentJobsRefresh.summary || 'Last-seen statuses. Refresh to check the server.')}</p>
       ${list.map(entry => {
         const info = statusInfo(entry.status);
         const title = entry.tractDescription || `Job ${shortJobId(entry.id)}`;
         const lastViewed = formatRelative(entry.lastViewedAt);
+        const checked = formatRelative(entry.checkedAt);
         const documentCount = Number.isFinite(Number(entry.documentCount)) ? Number(entry.documentCount) : 0;
+        const check = recentJobsCheck.get(entry.id);
+        const badge = check === 'not_found'
+          ? '<span class="status-badge status-badge--failed">Not found</span>'
+          : `<span class="status-badge ${info.badge}">${check === 'updated' ? '' : 'Last seen: '}${esc(info.label)}</span>`;
+        const note = check === 'not_found'
+          ? 'The server has no job with this id.'
+          : check === 'unknown' ? 'Could not check the server; this is the last status seen.'
+          : check === 'updated' && checked ? `Checked ${checked}` : '';
         return `
-          <a class="recent-jobs-row" href="#/job/${encodeURIComponent(entry.id)}" style="text-decoration:none;color:inherit">
-            <div>
+          <div class="recent-jobs-row${check === 'not_found' ? ' recent-jobs-row--missing' : ''}">
+            <a class="recent-jobs-link" href="#/job/${encodeURIComponent(entry.id)}">
               <div style="font-weight:600">${esc(title)}</div>
-              <div style="color:#64748b;font-size:.82rem">${esc(shortJobId(entry.id))}${lastViewed ? ` · ${esc(lastViewed)}` : ''} · ${documentCount} document${documentCount === 1 ? '' : 's'}</div>
+              <div style="color:#64748b;font-size:.82rem">${esc(shortJobId(entry.id))}${lastViewed ? ` · viewed ${esc(lastViewed)}` : ''} · ${documentCount} document${documentCount === 1 ? '' : 's'}</div>
+              ${note ? `<div class="recent-jobs-check">${esc(note)}</div>` : ''}
+            </a>
+            <div class="recent-jobs-side">
+              ${badge}
+              <button class="recent-jobs-remove" type="button" data-recent-remove="${esc(entry.id)}" aria-label="Remove ${esc(title)} from Recent Jobs">Remove</button>
             </div>
-            <span class="status-badge ${info.badge}">${esc(info.label)}</span>
-          </a>`;
+          </div>`;
       }).join('')}
       <div style="margin-top:.8rem"><a href="#/" class="btn-secondary" style="text-decoration:none;display:inline-block;padding:.45rem .9rem">Back home</a></div>
     </div>`;
+  el.onclick = e => {
+    const target = e && e.target;
+    if (!target || typeof target.closest !== 'function') return;
+    if (target.closest('#recentJobsRefreshBtn')) { refreshRecentJobs(); return; }
+    const remove = target.closest('[data-recent-remove]');
+    if (remove) {
+      removeRecentJob(remove.getAttribute('data-recent-remove'));
+      const btn = document.getElementById('recentJobsRefreshBtn');
+      if (btn && typeof btn.focus === 'function') btn.focus();
+    }
+  };
 }
 
 const JOB_POLL_INTERVALS = {
@@ -3373,6 +4222,18 @@ function synthesisWorkflowSignature(status) {
   return `${status.complete || 0}|${status.failed || 0}|${status.processing || 0}|${status.retry_wait || 0}|${status.mergeInProgress ? 1 : 0}|${status.pending || 0}`;
 }
 
+// True while this poller is still the live one for its job: not stopped, not paused for the password, and
+// either this tab's own run or the job route on screen.
+function jobPollerOwnsWork(state) {
+  if (!state || state.cancelled || state.pausedForAuth || jobPollerSuperseded(state)) return false;
+  return state.scope === 'run' || isCurrentJobRoute(state.jobId);
+}
+
+// Another poller has replaced this one (a stopped poller is already marked cancelled).
+function jobPollerSuperseded(state) {
+  return Boolean(activeJobPollState) && activeJobPollState !== state;
+}
+
 async function maybeKickStalledJobWorkflow(state, job) {
   if (!job || state.workflowKickInFlight) return;
   const needsAbstraction = ['abstracting', 'queued', 'planning'].includes(job.status);
@@ -3394,6 +4255,7 @@ async function maybeKickStalledJobWorkflow(state, job) {
     let shouldKick = false;
     if (needsSynthesis) {
       const payload = await fetchServerSynthesisStatus(job.id);
+      if (!jobPollerOwnsWork(state)) return;
       const status = payload?.status || {};
       signature = synthesisWorkflowSignature(status);
       const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
@@ -3406,6 +4268,7 @@ async function maybeKickStalledJobWorkflow(state, job) {
         && (pending > 0 || (status.mergeInProgress && !status.mergeLeaseHeld));
     } else {
       const payload = await fetchServerAbstractionStatus(job.id);
+      if (!jobPollerOwnsWork(state)) return;
       const status = payload?.status || {};
       signature = abstractionWorkflowSignature(status);
       const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
@@ -3416,7 +4279,8 @@ async function maybeKickStalledJobWorkflow(state, job) {
       }
       shouldKick = state.workflowStallPolls >= WORKFLOW_STALL_THRESHOLD && pending > 0;
     }
-    if (!shouldKick) return;
+    // A poller that lost its route (or was stopped) while it waited never starts workflow work.
+    if (!shouldKick || !jobPollerOwnsWork(state)) return;
     state.workflowStallPolls = 0;
     state.workflowKickInFlight = true;
     if (needsSynthesis) await processServerSynthesisBatch(job.id);
@@ -3454,64 +4318,99 @@ function scheduleJobPoll(state, delayMs) {
   state.timer = setTimeout(() => runJobPollTick(state), delayMs);
 }
 
-async function runJobPollTick(state) {
-  if (state.cancelled) return;
-  try {
-    const res = await fetch(`/api/jobs/${encodeURIComponent(state.jobId)}`, {
-      method: 'GET',
-      headers: getJobHeaders(),
-    });
-    if (state.cancelled) return;
-    if (res.status === 429 || res.status === 503) {
-      state.errorBackoffMs = Math.min(
-        JOB_POLL_INTERVALS.backoffMax,
-        Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
-      );
-      scheduleJobPoll(state, nextPollDelay(state));
-      return;
-    }
-    state.errorBackoffMs = 0;
-    const data = await res.json();
-    if (state.cancelled) return;
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    const job = data.job;
-    const key = pollerKey(job);
-    if (key !== state.lastKey) {
-      state.lastKey = key;
-      state.lastChangeAt = Date.now();
-      state.consecutiveUnchanged = 0;
-    } else {
-      state.consecutiveUnchanged += 1;
-    }
-    state.lastJob = job;
-    if (typeof state.onUpdate === 'function') {
-      try { state.onUpdate(job); } catch (err) { console.warn('poller onUpdate failed', err); }
-    }
-    if (TERMINAL_STATUSES.has(job.status)) {
-      state.cancelled = true;
-      if (activeJobPollState === state) activeJobPollState = null;
-      if (typeof state.onTerminal === 'function') {
-        try { await state.onTerminal(job); } catch (err) { console.warn('poller onTerminal failed', err); }
-      }
-      return;
-    }
-    await maybeKickStalledJobWorkflow(state, job);
-    if (state.cancelled) return;
-    scheduleJobPoll(state, nextPollDelay(state));
-  } catch (err) {
-    console.warn('Job poll failed', err);
-    state.errorBackoffMs = Math.min(
-      JOB_POLL_INTERVALS.backoffMax,
-      Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
-    );
-    scheduleJobPoll(state, nextPollDelay(state));
-  }
+function jobPollBackoff(state) {
+  state.errorBackoffMs = Math.min(
+    JOB_POLL_INTERVALS.backoffMax,
+    Math.max(JOB_POLL_INTERVALS.backoffMin, (state.errorBackoffMs || JOB_POLL_INTERVALS.backoffMin) * 2)
+  );
 }
 
-function startJobPoller(jobId, onUpdate, onTerminal) {
+// One status line under the stepper: live (empty), reconnecting, or paused for the password.
+function renderJobConnStatus(state) {
+  const el = document.getElementById('jobConnStatus');
+  if (!el) return;
+  if (state && !isCurrentJobRoute(state.jobId)) return;
+  let text = '';
+  if (state && state.conn === 'reconnecting') {
+    text = state.failures > 2
+      ? `Connection lost. Retrying… (${state.failures} attempts so far). The status shown is the last one received.`
+      : 'Connection lost. Retrying…';
+  } else if (state && state.conn === 'unauthorized') {
+    text = 'Updates paused until the access password is entered.';
+  }
+  if (el.textContent !== text) el.textContent = text;
+}
+
+async function runJobPollTick(state) {
+  if (state.cancelled || state.pausedForAuth) return;
+  const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(state.jobId)}`, {
+    method: 'GET',
+    headers: getJobHeaders(),
+  }, isJobPayloadFor(state.jobId));
+  if (state.cancelled || jobPollerSuperseded(state)) return;
+  if (r.kind === 'unauthorized') {
+    state.pausedForAuth = true;
+    state.conn = 'unauthorized';
+    handleUnauthorized('poll');
+    renderJobConnStatus(state);
+    return;
+  }
+  if (r.kind === 'not_found') {
+    state.cancelled = true;
+    state.conn = 'missing';
+    if (activeJobPollState === state) activeJobPollState = null;
+    if (state.scope !== 'run' && isCurrentJobRoute(state.jobId)) renderJobLoadProblem(state.jobId, 'not_found');
+    return;
+  }
+  if (r.kind !== 'ok') {
+    console.warn('Job poll failed', r.kind, r.status || '');
+    state.failures = (state.failures || 0) + 1;
+    state.conn = 'reconnecting';
+    jobPollBackoff(state);
+    renderJobConnStatus(state);
+    scheduleJobPoll(state, nextPollDelay(state));
+    return;
+  }
+  state.errorBackoffMs = 0;
+  state.failures = 0;
+  state.conn = 'live';
+  renderJobConnStatus(state);
+  const job = r.data.job;
+  const key = pollerKey(job);
+  if (key !== state.lastKey) {
+    state.lastKey = key;
+    state.lastChangeAt = Date.now();
+    state.consecutiveUnchanged = 0;
+  } else {
+    state.consecutiveUnchanged += 1;
+  }
+  state.lastJob = job;
+  if (typeof state.onUpdate === 'function') {
+    try { state.onUpdate(job); } catch (err) { console.warn('poller onUpdate failed', err); }
+  }
+  if (TERMINAL_STATUSES.has(job.status)) {
+    state.cancelled = true;
+    if (activeJobPollState === state) activeJobPollState = null;
+    if (typeof state.onTerminal === 'function') {
+      try { await state.onTerminal(job); } catch (err) { console.warn('poller onTerminal failed', err); }
+    }
+    return;
+  }
+  await maybeKickStalledJobWorkflow(state, job);
+  if (!jobPollerOwnsWork(state)) return;
+  scheduleJobPoll(state, nextPollDelay(state));
+}
+
+// scope 'route': a job opened in the job view, polled only while its route is shown.
+// scope 'run': this tab's own run (home Build or resume); it survives navigation.
+function startJobPoller(jobId, onUpdate, onTerminal, scope = 'route') {
   stopJobPoller();
   activeJobPollState = {
     jobId,
+    scope,
+    conn: 'live',
+    failures: 0,
+    pausedForAuth: false,
     timer: null,
     cancelled: false,
     consecutiveUnchanged: 0,
@@ -3545,7 +4444,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     const state = activeJobPollState;
     if (!state || state.cancelled) return;
-    if (!document.hidden) {
+    if (!document.hidden && !state.pausedForAuth) {
       state.consecutiveUnchanged = 0;
       state.lastChangeAt = Date.now();
       scheduleJobPoll(state, 0);
@@ -3554,7 +4453,7 @@ if (typeof document !== 'undefined') {
 }
 
 function startJobPolling(jobId) {
-  startJobPoller(jobId, job => renderPolledJobStatus(job), null);
+  startJobPoller(jobId, job => renderPolledJobStatus(job), null, 'run');
 }
 function stopJobPolling() { stopJobPoller(); clearKeepOpenNotice(); }
 
@@ -5652,7 +6551,8 @@ async function runStagedAnalysis(files) {
     });
   } catch (e) {
     buildStarting = false;
-    showError(jobSetupErrorMessage(e));
+    if (e?.status === 401) handleUnauthorized('build');
+    showError(e?.status === 401 ? 'Enter the access password to start the run. Your files are still staged.' : jobSetupErrorMessage(e));
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     refreshBuildState();
@@ -5766,6 +6666,7 @@ async function runStagedAnalysis(files) {
   try {
     let synthesis = null;
     let usedServerSynthesis = false;
+    let exportResult = null;
     if (usedServerAbstraction) {
       try {
         const serverResult = await runServerSynthesis(job.id, files.length, items, (pct, label) => {
@@ -5778,6 +6679,7 @@ async function runStagedAnalysis(files) {
           });
         }, run);
         synthesis = serverResult.result.finalTitleOpinion;
+        exportResult = serverResult.result;
         usedServerSynthesis = true;
         if (serverResult.result.warnings?.length) {
           showError(`Server synthesis completed with warnings: ${serverResult.result.warnings.slice(0, 3).join('; ')}.`);
@@ -5811,7 +6713,7 @@ async function runStagedAnalysis(files) {
     updateProgress(100, `Analysis complete — ${documentAbstracts.length} document abstracts synthesized${serverAbstractionFailedCount ? ` (${serverAbstractionFailedCount} failed chunk(s) omitted)` : ''}`, items);
     if (!usedServerSynthesis) {
       const browserResultStatus = serverAbstractionFailedCount ? 'partial_failed' : 'complete';
-      await saveBrowserJobResult(job.id, {
+      exportResult = {
         status: browserResultStatus,
         finalTitleOpinion: synthesis,
         warnings: serverAbstractionFailedCount
@@ -5820,7 +6722,8 @@ async function runStagedAnalysis(files) {
         failedDocuments: [],
         modelUsed: SYNTHESIS_MODEL,
         synthesisDriver: 'browser',
-      });
+      };
+      await saveBrowserJobResult(job.id, exportResult);
     }
     if (isAnalysisCanceled(run)) return;
     clearProgressTimer();
@@ -5828,7 +6731,10 @@ async function runStagedAnalysis(files) {
     files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)`, kind: 'analysis-input' },
-      { role: 'assistant', content: synthesis, kind: 'title-opinion', sourceJobId: usedServerSynthesis ? job.id : null },
+      {
+        role: 'assistant', content: synthesis, kind: 'title-opinion', sourceJobId: usedServerSynthesis ? job.id : null,
+        exportContext: homeRunExportContext(job.id, files.length, completedDocumentsForJob(documentAbstracts.length, files.length), serverAbstractionFailedCount, exportResult),
+      },
     ];
     setTimeout(() => {
       if (isAnalysisCanceled(run)) return;
@@ -5899,21 +6805,41 @@ function buildFollowupMessages(question, titleOpinionOverride = null, priorPairs
 
 let followupTurnQueue = Promise.resolve();
 
-function askFollowup() {
+// Questions sent from this tab that have no answer yet. The same text is not sent twice while it waits.
+const followupPendingQuestions = new Set();
+// Failed in-tab follow-ups shown as cards with Ask again; keyed by the conversation they belong to.
+const followupFailuresByHistory = new WeakMap();
+
+function renderFollowupAskButton() {
+  const btn = document.getElementById('followupAskBtn');
+  if (!btn) return;
+  const busy = followupPendingQuestions.size > 0;
+  btn.disabled = busy;
+  btn.textContent = busy ? 'Asking…' : 'Ask';
+}
+
+function askFollowup(questionOverride) {
   const input = document.getElementById('followupInput');
-  const q = input.value.trim();
-  if (!q) return;
-  input.value = '';
+  const q = (typeof questionOverride === 'string' ? questionOverride : input.value).trim();
+  if (!q || followupPendingQuestions.has(q)) return;
+  if (typeof questionOverride !== 'string') input.value = '';
   clearError();
   const history = conversationHistory;
-  const turn = followupTurnQueue.then(() => runFollowupTurn(q, history));
+  const failures = followupFailuresByHistory.get(history);
+  if (failures) followupFailuresByHistory.set(history, failures.filter(f => f.question !== q));
+  followupPendingQuestions.add(q);
+  renderFollowupAskButton();
+  const turn = followupTurnQueue.then(() => runFollowupTurn(q, history)).finally(() => {
+    followupPendingQuestions.delete(q);
+    renderFollowupAskButton();
+  });
   followupTurnQueue = turn.catch(() => {});
   return turn;
 }
 
 async function runFollowupTurn(q, history) {
   if (conversationHistory !== history) return;
-  const question = { role: 'user', content: q, kind: 'followup' };
+  const question = { role: 'user', content: q, kind: 'followup', pending: true };
   history.push(question);
   renderResults();
   try {
@@ -5953,14 +6879,46 @@ async function runFollowupTurn(q, history) {
       });
     }
     if (conversationHistory !== history) return;
-    history.push({ role: 'assistant', content: reply, kind: 'followup' });
+    delete question.pending;
+    if (typeof reply !== 'string' || !reply.trim()) {
+      // An empty reply is a failed turn: drop the question from the conversation and show a retryable card.
+      const at = history.indexOf(question);
+      if (at !== -1) history.splice(at, 1);
+      const failures = followupFailuresByHistory.get(history) || [];
+      failures.push({ question: q, message: FOLLOWUP_EMPTY_MESSAGE });
+      followupFailuresByHistory.set(history, failures);
+    } else {
+      history.push({ role: 'assistant', content: reply, kind: 'followup' });
+    }
   } catch (e) {
     if (conversationHistory !== history) return;
-    showError('Error: ' + e.message);
+    // A failed turn (server error, network, abort) keeps the question as an inline Ask again card, with the
+    // same words as the job view, instead of a page-level error that loses the question.
+    console.warn('Follow-up failed', e);
+    if (Number(e?.status) === 401) handleUnauthorized('followup');
+    delete question.pending;
     const at = history.indexOf(question);
     if (at !== -1) history.splice(at, 1);
+    const failures = followupFailuresByHistory.get(history) || [];
+    failures.push({ question: q, message: homeFollowupFailureMessage(e) });
+    followupFailuresByHistory.set(history, failures);
   }
   renderResults();
+  revealLatestFollowup(document.getElementById('results'));
+  const said = document.getElementById('followupStatus');
+  if (said && conversationHistory === history) {
+    const failure = (followupFailuresByHistory.get(history) || []).find(f => f.question === q);
+    said.textContent = history.includes(question) && !failure ? 'Answer ready.' : (failure ? failure.message : 'The follow-up failed. Try asking again.');
+  }
+}
+
+// The job view's failure sentence for the same outcomes (fetchApiJson kinds), built from a thrown request error.
+function homeFollowupFailureMessage(err) {
+  const status = Number(err && err.status) || 0;
+  if (status === 401) return 'The access password is needed again. Enter it, then ask again.';
+  const network = !status && (err instanceof TypeError || err?.name === 'AbortError' || /network|fetch/i.test(String(err?.message || '')));
+  const kind = network ? 'network' : (status === 404 ? 'not_found' : 'server');
+  return `The answer could not be loaded. ${apiFailureSentence({ kind, status, data: err && isJsonObject(err.data) ? err.data : null }, 'answer the question')}`;
 }
 
 function renderResults() {
@@ -5991,28 +6949,42 @@ function renderResults() {
     }
     if (m.role === 'user' && i > 1) {
       const txt = typeof m.content === 'string' ? m.content : (m.displayText || '');
-      return txt ? `<div class="q-card">Q: ${esc(txt)}</div>` : '';
+      if (!txt) return '';
+      return `<div class="q-card">Q: ${esc(txt)}</div>${m.pending ? '<p class="followup-pending"><span class="spinner" aria-hidden="true"></span>Working on the answer…</p>' : ''}`;
     }
     return '';
-  }).join('');
-  resultsEl.onclick = rdHandleClick;
+  }).join('') + (followupFailuresByHistory.get(conversationHistory) || []).map((f, i) => `
+    <div class="followup-card followup-card--error"><div class="q-card">Q: ${esc(f.question)}</div>
+      <p class="followup-error">${esc(f.message)} <button class="btn-secondary" type="button" data-followup-retry="${i}">Ask again</button></p></div>`).join('');
+  resultsEl.onclick = e => {
+    const retry = e && e.target && typeof e.target.closest === 'function' ? e.target.closest('[data-followup-retry]') : null;
+    if (!retry) return rdHandleClick(e);
+    const failure = (followupFailuresByHistory.get(conversationHistory) || [])[Number(retry.getAttribute('data-followup-retry'))];
+    if (failure) askFollowup(failure.question);
+  };
+  resultsEl.oninput = rdHandleInput;
   if (animateRoot) rdAnimateCounts(resultsEl);
   renderHomeSubtitle();
 }
 
 function md(text) {
   let h = esc(text);
-  h = h.replace(/(\|[^\n]+\|\n)+/g, match => {
-    const rows = match.trim().split('\n');
+  // A table is a run of whole lines that start and end with a pipe. The last row may end the text without a
+  // newline, and the table is set apart by blank lines so the prose after it stays its own paragraph.
+  h = h.replace(/(^|\n)((?:[ \t]*\|[^\n]*\|[ \t]*(?:\n|$))+)/g, (match, lead, block, offset) => {
+    const rows = block.trim().split('\n');
     let bodyStart = 1;
     if (rows[1] && /^\|?[\s\-\|:]+\|?$/.test(rows[1].trim())) bodyStart = 2;
     const headers = rows[0].split('|').map(c => c.trim()).filter(c => c);
-    const thead = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
+    const thead = '<tr>' + headers.map(h => `<th scope="col">${h}</th>`).join('') + '</tr>';
     const tbody = rows.slice(bodyStart).map(r => {
       const cells = r.split('|').map(c => c.trim()).filter((c,i,a) => !(i===0&&c==='') && !(i===a.length-1&&c===''));
       return '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
     }).join('');
-    return `<table>${thead}${tbody}</table>`;
+    // The nearest heading above names the table for screen readers.
+    const headings = h.slice(0, offset).match(/^#{1,3} .+$/gm);
+    const caption = headings ? headings[headings.length - 1].replace(/^#+ /, '').replace(/\*\*/g, '').trim() : 'Table';
+    return `${lead}\n\n<table><caption class="rd-sr">${caption || 'Table'}</caption>${thead}${tbody}</table>\n\n`;
   });
   h = h.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   h = h.replace(/^## (.+)$/gm, '<h3>$1</h3>');
@@ -6022,12 +6994,12 @@ function md(text) {
     const items = match.trim().split('\n').map(l => `<li>${l.replace(/^[-*•] /,'')}</li>`).join('');
     return `<ul>${items}</ul>`;
   });
-  h = h.split('\n\n').map(b => {
+  h = h.split(/\n[ \t]*\n/).map(b => {
     b = b.trim();
     if (!b) return '';
     if (/^<(h[23]|ul|table)/.test(b)) return b;
     return `<p>${b.replace(/\n/g,'<br>')}</p>`;
-  }).join('\n');
+  }).filter(Boolean).join('\n');
   return h;
 }
 
@@ -6248,6 +7220,7 @@ async function analyzeAdditional() {
   try {
     let synthesis = null;
     let usedServerSynthesis = false;
+    let exportResult = null;
     if (usedServerAbstraction && importedContinuation) {
       try {
         const serverResult = await runServerSynthesis(job.id, totalAfter, items, (pct, label) => {
@@ -6260,6 +7233,7 @@ async function analyzeAdditional() {
           });
         }, run);
         synthesis = serverResult.result.finalTitleOpinion;
+        exportResult = serverResult.result;
         usedServerSynthesis = true;
         if (serverResult.result.warnings?.length) {
           showError(`Server synthesis completed with warnings: ${serverResult.result.warnings.slice(0, 3).join('; ')}.`);
@@ -6287,7 +7261,7 @@ async function analyzeAdditional() {
         });
       });
       const browserResultStatus = serverAbstractionFailedCount ? 'partial_failed' : 'complete';
-      await saveBrowserJobResult(job.id, {
+      exportResult = {
         status: browserResultStatus,
         finalTitleOpinion: synthesis,
         warnings: serverAbstractionFailedCount
@@ -6296,7 +7270,8 @@ async function analyzeAdditional() {
         failedDocuments: [],
         modelUsed: SYNTHESIS_MODEL,
         synthesisDriver: 'browser',
-      });
+      };
+      await saveBrowserJobResult(job.id, exportResult);
     }
     if (isAnalysisCanceled(run)) return;
     items[items.length - 1].status = 'done';
@@ -6319,6 +7294,7 @@ async function analyzeAdditional() {
       content: synthesis,
       kind: 'title-opinion',
       sourceJobId: usedServerSynthesis ? job.id : null,
+      exportContext: homeRunExportContext(job.id, totalAfter, completedDocumentsForJob(allAbstracts.length, totalAfter), serverAbstractionFailedCount, exportResult),
     });
 
     setTimeout(() => {
@@ -6353,177 +7329,496 @@ function rdDecodeEntities(text) {
   return String(text).replace(/&(amp|lt|gt|quot|#39|#x27|nbsp);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", '#x27': "'", nbsp: ' ' })[e]);
 }
 
-function downloadPDF(options = {}) {
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
-  const rootElement = options.rootElement || document;
+const JSPDF_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+const JSPDF_INTEGRITY = 'sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk';
+const PDF_UNAVAILABLE = 'PDF export could not load. Check your connection and try again.';
+let pendingPdfExport = null;
 
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
+// The export notice sits beside the button the reader pressed: the job view's bar or the in-tab results bar.
+function pdfNoticeEl(options = {}) {
+  const jobRoot = document.getElementById('jobResults');
+  return document.getElementById(options.rootElement && options.rootElement === jobRoot ? 'jobExportNotice' : 'exportNotice');
+}
+
+function showPdfNotice(options, message, retry) {
+  const el = pdfNoticeEl(options);
+  if (!el) return;
+  el.innerHTML = `<div class="error-msg export-notice" role="alert"><span>${esc(message)}</span>${retry ? ' <button type="button" class="btn-secondary" data-pdf-retry>Retry</button>' : ''}</div>`;
+  el.onclick = e => {
+    const target = e && e.target;
+    if (target && typeof target.closest === 'function' && target.closest('[data-pdf-retry]')) retryPdfExport();
+  };
+}
+
+function clearPdfNotice(options) {
+  const el = pdfNoticeEl(options);
+  if (el) el.innerHTML = '';
+}
+
+// One tracked jsPDF load at a time. A retry reuses a load in flight, removes failed tags first (including the
+// page's own pinned tag when it never loaded), and keeps the exact pinned src, integrity and crossorigin.
+let jsPdfLoad = null;
+
+function jsPdfReady() {
+  return typeof window !== 'undefined' && Boolean(window.jspdf) && typeof window.jspdf.jsPDF === 'function';
+}
+
+function removeScriptTag(el) {
+  if (!el) return;
+  try {
+    if (typeof el.remove === 'function') el.remove();
+    else if (el.parentNode && typeof el.parentNode.removeChild === 'function') el.parentNode.removeChild(el);
+  } catch {}
+}
+
+function loadJsPdfScript(done) {
+  if (jsPdfLoad) return false;
+  const parent = document.head || document.body;
+  if (!parent || typeof document.createElement !== 'function') { done(false); return false; }
+  const stale = typeof document.querySelectorAll === 'function' ? Array.from(document.querySelectorAll('script')) : [];
+  stale.filter(el => el && (el.src === JSPDF_SRC || (typeof el.getAttribute === 'function' && el.getAttribute('src') === JSPDF_SRC)))
+    .forEach(removeScriptTag);
+  const script = document.createElement('script');
+  script.src = JSPDF_SRC;
+  script.integrity = JSPDF_INTEGRITY;
+  script.crossOrigin = 'anonymous';
+  if (typeof script.setAttribute === 'function') {
+    script.setAttribute('integrity', JSPDF_INTEGRITY);
+    script.setAttribute('crossorigin', 'anonymous');
+  }
+  const settle = ok => {
+    if (!jsPdfLoad || jsPdfLoad.script !== script) return;
+    jsPdfLoad = null;
+    if (!ok) removeScriptTag(script);
+    done(ok);
+  };
+  script.onload = () => settle(jsPdfReady());
+  script.onerror = () => settle(false);
+  jsPdfLoad = { script };
+  parent.appendChild(script);
+  return true;
+}
+
+// Loads the same pinned jsPDF build again, then runs the export the reader asked for.
+function retryPdfExport() {
+  const opts = pendingPdfExport || {};
+  if (jsPdfReady()) return downloadPDF(opts);
+  if (jsPdfLoad) return;
+  const started = loadJsPdfScript(ok => {
+    if (ok) downloadPDF(opts);
+    else showPdfNotice(opts, PDF_UNAVAILABLE, true);
+  });
+  if (!started) return;
+  const el = pdfNoticeEl(opts);
+  if (el && jsPdfLoad) el.innerHTML = '<div class="info-msg export-notice" role="status">Loading the PDF tool…</div>';
+}
+
+// Characters jsPDF's built-in Helvetica can draw: Latin-1 plus the WinAnsi punctuation. Anything else would be
+// drawn as wrong glyphs, so it is replaced with ? and counted, and page one says how many (never silently).
+const PDF_WINANSI_EXTRA = new Set('€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ');
+function pdfSafeText(text, counter) {
+  let s = String(text == null ? '' : text);
+  try { s = s.normalize('NFC'); } catch {}
+  let out = '';
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    if (c === 9 || c === 10 || (c >= 0x20 && c <= 0x7e) || (c >= 0xa0 && c <= 0xff) || PDF_WINANSI_EXTRA.has(ch)) {
+      out += ch;
+    } else {
+      out += '?';
+      if (counter) counter.count += 1;
+    }
+  }
+  return out;
+}
+
+function pdfUnshownNotice(n) {
+  return `${n} character${n === 1 ? '' : 's'} in this opinion could not be shown in this PDF and ${n === 1 ? 'appears' : 'appear'} as ?. Check owner names against the on-screen opinion or the source documents.`;
+}
+
+// The home view's export context: the job and result metadata saved with the newest title opinion of this tab's run.
+function homeExportContext() {
+  for (let i = conversationHistory.length - 1; i >= 0; i--) {
+    const m = conversationHistory[i];
+    if (m && m.role === 'assistant' && m.kind === 'title-opinion') return m.exportContext || null;
+  }
+  return null;
+}
+
+// The job/result fields rdCompletenessNotices reads, kept with a home opinion so its export carries the same caveats.
+function homeRunExportContext(jobId, totalDocuments, completedDocuments, failedDocuments, result) {
+  return {
+    job: { id: jobId, totalDocuments, completedDocuments, failedDocuments },
+    result: {
+      warnings: Array.isArray(result?.warnings) ? result.warnings.slice() : [],
+      failedDocuments: Array.isArray(result?.failedDocuments) ? result.failedDocuments.slice() : [],
+      ...(result?.synthesisDriver ? { synthesisDriver: result.synthesisDriver } : {}),
+    },
+  };
+}
+
+// Reads one opinion card into plain blocks. Every nonempty child is kept, including bare text nodes and tags
+// this exporter has no special style for, so nothing the reader saw is dropped.
+function pdfReadCard(acDiv) {
+  const blocks = [];
+  const nodes = acDiv && acDiv.childNodes ? Array.from(acDiv.childNodes) : [];
+  nodes.forEach(node => {
+    const isText = typeof Node !== 'undefined' && node.nodeType === Node.TEXT_NODE;
+    const text = String(node.textContent || node.innerText || '');
+    if (!text.trim()) return;
+    if (isText) {
+      blocks.push({ kind: 'p', text: text.replace(/\s+/g, ' ').trim() });
+      return;
+    }
+    const tag = node.tagName?.toLowerCase();
+    if (tag === 'h3') blocks.push({ kind: 'h3', text: text.trim().toUpperCase() });
+    else if (tag === 'h2') blocks.push({ kind: 'h2', text: text.trim() });
+    else if (tag === 'p' && typeof node.innerHTML === 'string') {
+      // Strip tags, then decode the entities esc() wrote, so the PDF says '&' not '&amp;'.
+      blocks.push({ kind: 'p', text: rdDecodeEntities(node.innerHTML.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '')).trim() });
+    } else if (tag === 'ul' || tag === 'ol') {
+      const items = Array.from(node.querySelectorAll('li')).map(li => String(li.textContent || li.innerText || '').trim()).filter(Boolean);
+      blocks.push({ kind: 'ul', items: items.length ? items : [text.trim()] });
+    } else if (tag === 'table') {
+      const rows = Array.from(node.querySelectorAll('tr')).map(tr => ({
+        header: tr.querySelector('th') !== null,
+        cells: Array.from(tr.querySelectorAll('th, td')).map(c => String(c.textContent || '').replace(/\s+/g, ' ').trim()),
+      })).filter(r => r.cells.length);
+      if (rows.length) blocks.push({ kind: 'table', rows });
+    } else {
+      blocks.push({ kind: 'p', text: text.replace(/\s+/g, ' ').trim() });
+    }
+  });
+  return blocks;
+}
+
+function downloadPDF(options = {}) {
+  if (typeof window === 'undefined' || !window.jspdf || typeof window.jspdf.jsPDF !== 'function') {
+    pendingPdfExport = options;
+    showPdfNotice(options, PDF_UNAVAILABLE, true);
+    return false;
+  }
+  const { jsPDF } = window.jspdf;
+  // The home button passes no root: it exports the home results only, never cards of a job view visited since.
+  const homeRoot = document.getElementById('results');
+  const rootElement = options.rootElement || homeRoot;
+  const analysisCards = rootElement && typeof rootElement.querySelectorAll === 'function'
+    ? Array.from(rootElement.querySelectorAll('.analysis-card')) : [];
+  if (analysisCards.length === 0) {
+    showPdfNotice(options, 'There is no opinion to download yet.', false);
+    return false;
+  }
+  clearPdfNotice(options);
+  pendingPdfExport = null;
+  // Exports carry the same completeness notices the page shows (one list, rdCompletenessNotices): the job view
+  // from the job on screen, the home view from the metadata kept with its own run's opinion.
+  const jobRoot = document.getElementById('jobResults');
+  const exportCtx = rootElement === jobRoot && rdLatestJob.jobId
+    ? rdLatestJob
+    : (rootElement === homeRoot ? homeExportContext() : null);
+  const unshown = { count: 0 };
+  const notices = (exportCtx ? rdCompletenessNotices(exportCtx.job, exportCtx.result) : [])
+    .map(n => ({ ...n, text: pdfSafeText(n.text, unshown) }));
+  const docsLine = exportCtx ? rdDocumentsAnalyzedLine(exportCtx.job) : '';
+
+  // Read every card into plain data first (hidden or filtered rows included), so the page-one notices can say
+  // how many characters had to be replaced before any of the opinion is drawn.
+  const closedRawOpinions = Array.from(rootElement.querySelectorAll('details.rd-raw:not([open])'));
+  closedRawOpinions.forEach(d => { d.open = true; });
+  let cards;
+  // Restore in finally so an error never leaves the collapsed card expanded.
+  try {
+    cards = analysisCards.map(card => {
+      const acDiv = card.querySelector('.ac');
+      return acDiv ? pdfReadCard(acDiv) : null;
+    });
+  } finally {
+    closedRawOpinions.forEach(d => { d.open = false; });
+  }
+  cards.forEach(blocks => (blocks || []).forEach(b => {
+    if (b.text != null) b.text = pdfSafeText(b.text, unshown);
+    if (b.items) b.items = b.items.map(t => pdfSafeText(t, unshown));
+    if (b.rows) b.rows.forEach(r => { r.cells = r.cells.map(c => pdfSafeText(c, unshown)); });
+  }));
+  if (unshown.count) notices.push({ kind: 'unshown_characters', text: pdfUnshownNotice(unshown.count) });
+
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
   const margin = 20;
-  const maxWidth = pageWidth - margin * 2;
+  const pageW = () => doc.internal.pageSize.getWidth();
+  const pageH = () => doc.internal.pageSize.getHeight();
+  const contentW = () => pageW() - margin * 2;
+  let orientation = 'portrait';
   let y = margin;
 
+  const startPage = (next = 'portrait') => {
+    doc.addPage('letter', next);
+    orientation = next;
+    doc.setFillColor(184, 99, 30);
+    doc.rect(0, 0, pageW(), 12, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Mineral Ownership Builder — Title Research Tool', margin, 8);
+    y = 20;
+  };
+
   doc.setFillColor(184, 99, 30);
-  doc.rect(0, 0, pageWidth, 18, 'F');
+  doc.rect(0, 0, pageW(), 18, 'F');
   doc.setTextColor(255, 255, 255);
   doc.setFontSize(14);
   doc.setFont('helvetica', 'bold');
   doc.text('Mineral Ownership Builder', margin, 12);
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
-  doc.text('Title Research Tool', pageWidth - margin, 12, { align: 'right' });
+  doc.text('Title Research Tool', pageW() - margin, 12, { align: 'right' });
 
   y = 28;
-
   doc.setTextColor(120, 80, 40);
   doc.setFontSize(8);
   doc.text('Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), margin, y);
+  if (docsLine && !notices.length) doc.text(docsLine, pageW() - margin, y, { align: 'right' });
   y += 8;
 
   doc.setFillColor(255, 248, 235);
   doc.setDrawColor(200, 169, 110);
-  doc.rect(margin, y, maxWidth, 10, 'FD');
+  doc.rect(margin, y, contentW(), 10, 'FD');
   doc.setTextColor(107, 52, 16);
   doc.setFontSize(7.5);
   doc.setFont('helvetica', 'bold');
   doc.text('AI-ASSISTED ANALYSIS — NOT A LEGAL OPINION. Verify all facts against source documents before any action.', margin + 3, y + 6.5);
   y += 16;
 
-  const analysisCards = rootElement.querySelectorAll('.analysis-card');
-  if (analysisCards.length === 0) {
-    alert('No analysis to download yet.');
-    return;
-  }
-  // The results dashboard keeps the full opinion card inside a closed <details>; open it while
-  // reading so innerText (and so the PDF text) matches the rendered card exactly.
-  const closedRawOpinions = Array.from(rootElement.querySelectorAll('details.rd-raw:not([open])'));
-  closedRawOpinions.forEach(d => { d.open = true; });
-  // Restore in finally so a jsPDF error never leaves the collapsed card expanded.
-  try {
-    function addText(text, fontSize, isBold, color, indent) {
-      doc.setFontSize(fontSize);
-      doc.setFont('helvetica', isBold ? 'bold' : 'normal');
-      doc.setTextColor(color[0], color[1], color[2]);
-      const lines = doc.splitTextToSize(text, maxWidth - (indent || 0));
-      lines.forEach(line => {
-        if (y + fontSize * 0.4 > pageHeight - margin) {
-          doc.addPage();
-          y = margin;
-          doc.setFillColor(184, 99, 30);
-          doc.rect(0, 0, pageWidth, 12, 'F');
-          doc.setTextColor(255, 255, 255);
-          doc.setFontSize(9);
-          doc.setFont('helvetica', 'bold');
-          doc.text('Mineral Ownership Builder — Title Research Tool', margin, 8);
-          y = 20;
-          doc.setFontSize(fontSize);
-          doc.setFont('helvetica', isBold ? 'bold' : 'normal');
-          doc.setTextColor(color[0], color[1], color[2]);
-        }
-        doc.text(line, margin + (indent || 0), y);
-        y += fontSize * 0.45;
-      });
-      y += fontSize * 0.15;
+  // Completeness notices: amber box on page one, right after the disclaimer.
+  if (notices.length) {
+    doc.setFontSize(8.5);
+    doc.setFont('helvetica', 'normal');
+    const inner = contentW() - 8;
+    const items = notices.map(n => doc.splitTextToSize(`• ${n.text}`, inner));
+    const lh = 8.5 * 0.3528 * 1.25;
+    const height = 6 + 5 + (docsLine ? 4.5 : 0) + items.reduce((sum, lines) => sum + lines.length * lh + 1, 0) + 2;
+    doc.setFillColor(255, 247, 230);
+    doc.setDrawColor(217, 119, 6);
+    doc.rect(margin, y, contentW(), height, 'FD');
+    let ny = y + 6;
+    doc.setTextColor(146, 64, 14);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    // Completeness caveats keep their heading; a box holding only the replaced-characters note says just that.
+    const onlyUnshown = notices.every(n => n.kind === 'unshown_characters');
+    doc.text(onlyUnshown ? 'Some characters could not be shown' : 'This result may be incomplete', margin + 4, ny);
+    ny += 5;
+    doc.setFontSize(8.5);
+    if (docsLine) {
+      doc.text(docsLine, margin + 4, ny);
+      ny += 4.5;
     }
-
-    analysisCards.forEach((card, cardIdx) => {
-      const acDiv = card.querySelector('.ac');
-      if (!acDiv) return;
-
-      if (cardIdx > 0) {
-        y += 4;
-        doc.setDrawColor(200, 169, 110);
-        doc.line(margin, y, pageWidth - margin, y);
-        y += 6;
-        doc.setFontSize(8);
-        doc.setFont('helvetica', 'italic');
-        doc.setTextColor(138, 111, 74);
-        doc.text('Updated Analysis', margin, y);
-        y += 6;
-      }
-
-      acDiv.childNodes.forEach(node => {
-        if (node.nodeType === Node.TEXT_NODE) return;
-        const tag = node.tagName?.toLowerCase();
-        const text = node.innerText || node.textContent || '';
-        if (!text.trim()) return;
-
-        if (tag === 'h3') {
-          y += 3;
-          doc.setFillColor(240, 227, 200);
-          doc.rect(margin, y - 4, maxWidth, 8, 'F');
-          addText(text.trim().toUpperCase(), 8.5, true, [184, 99, 30], 0);
-          y += 1;
-        } else if (tag === 'h2') {
-          y += 2;
-          addText(text.trim(), 11, true, [107, 52, 16], 0);
-        } else if (tag === 'p') {
-          // Strip tags, then decode the entities esc() wrote, so the PDF says '&' not '&amp;'.
-          const lineText = rdDecodeEntities(node.innerHTML.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, ''));
-          addText(lineText.trim(), 9, false, [74, 60, 40], 0);
-        } else if (tag === 'ul') {
-          node.querySelectorAll('li').forEach(li => {
-            addText('• ' + (li.innerText || li.textContent || '').trim(), 8.5, false, [74, 60, 40], 4);
-          });
-        } else if (tag === 'table') {
-          y += 2;
-          const rows = node.querySelectorAll('tr');
-          const colCount = rows[0]?.querySelectorAll('th,td').length || 1;
-          const colWidth = maxWidth / colCount;
-          const rowHeight = 7;
-
-          rows.forEach((row, ri) => {
-            if (y + rowHeight > pageHeight - margin) {
-              doc.addPage();
-              y = margin + 8;
-            }
-            const cells = row.querySelectorAll('th, td');
-            const isHeader = row.querySelector('th') !== null;
-
-            if (isHeader) {
-              doc.setFillColor(184, 99, 30);
-              doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
-              doc.setTextColor(255, 255, 255);
-              doc.setFontSize(7.5);
-              doc.setFont('helvetica', 'bold');
-            } else {
-              if (ri % 2 === 0) {
-                doc.setFillColor(250, 246, 238);
-                doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'F');
-              }
-              doc.setDrawColor(232, 216, 184);
-              doc.rect(margin, y - 4.5, maxWidth, rowHeight, 'D');
-              doc.setTextColor(74, 60, 40);
-              doc.setFontSize(7.5);
-              doc.setFont('helvetica', 'normal');
-            }
-
-            cells.forEach((cell, ci) => {
-              const cellText = (cell.innerText || cell.textContent || '').trim();
-              const x = margin + ci * colWidth + 2;
-              const lines = doc.splitTextToSize(cellText, colWidth - 4);
-              doc.text(lines[0] || '', x, y);
-            });
-            y += rowHeight;
-          });
-          y += 3;
-        }
-      });
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(120, 53, 15);
+    items.forEach(lines => {
+      lines.forEach(line => { doc.text(line, margin + 4, ny); ny += lh; });
+      ny += 1;
     });
-  } finally {
-    closedRawOpinions.forEach(d => { d.open = false; });
+    y += height + 6;
   }
+
+  function addText(text, fontSize, isBold, color, indent) {
+    doc.setFontSize(fontSize);
+    doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+    doc.setTextColor(color[0], color[1], color[2]);
+    const lines = doc.splitTextToSize(text, contentW() - (indent || 0));
+    lines.forEach(line => {
+      if (y + fontSize * 0.4 > pageH() - margin) {
+        startPage('portrait');
+        doc.setFontSize(fontSize);
+        doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+        doc.setTextColor(color[0], color[1], color[2]);
+      }
+      doc.text(line, margin + (indent || 0), y);
+      y += fontSize * 0.45;
+    });
+    y += fontSize * 0.15;
+  }
+
+  // splitTextToSize, plus a character break for any line still wider than the cell (one unbroken token).
+  function wrapCell(text, width) {
+    const out = [];
+    doc.splitTextToSize(text, width).forEach(line => {
+      if (typeof doc.getTextWidth !== 'function' || doc.getTextWidth(line) <= width + 0.01) { out.push(line); return; }
+      let cur = '';
+      for (const ch of String(line)) {
+        if (cur && doc.getTextWidth(cur + ch) > width) { out.push(cur); cur = ch; } else cur += ch;
+      }
+      if (cur) out.push(cur);
+    });
+    return out;
+  }
+
+  // Tables: every wrapped line of every cell, row height from the tallest cell, header repeated after a break.
+  function drawTable(sourceRows) {
+    const rows = sourceRows.map(r => ({ header: r.header, cells: r.cells.slice() }));
+    if (!rows.length) return;
+    const cols = Math.max(...rows.map(r => r.cells.length));
+    rows.forEach(r => { while (r.cells.length < cols) r.cells.push(''); });
+    const head = rows[0].header ? rows[0] : null;
+    const body = head ? rows.slice(1) : rows;
+    const pad = 1.6;
+    const MIN_COL = 14;
+    const COMPACT = 30;
+    const measure = (text, fs, bold) => {
+      doc.setFont('helvetica', bold ? 'bold' : 'normal');
+      doc.setFontSize(fs);
+      return typeof doc.getTextWidth === 'function' ? doc.getTextWidth(text) : String(text).length * fs * 0.19;
+    };
+    const sum = list => list.reduce((a, b) => a + b, 0);
+    // Reference and number columns (every cell short and holding a digit: recording refs, dates, fractions,
+    // decimals) keep their natural width so they never break; prose columns share the rest by content.
+    const numeric = Array.from({ length: cols }, (_, i) => body.length > 0
+      && body.every(r => !r.cells[i] || /\d/.test(r.cells[i])));
+    const tiny = Array.from({ length: cols }, (_, i) => rows.every(r => r.cells[i].length <= 4));
+    const plan = (fs, avail, keepCompact) => {
+      const nat = Array(cols).fill(0);
+      const word = Array(cols).fill(0);
+      rows.forEach(r => r.cells.forEach((c, i) => {
+        nat[i] = Math.max(nat[i], measure(c, fs, r.header) + pad * 2);
+        c.split(' ').forEach(w => { word[i] = Math.max(word[i], measure(w, fs, r.header) + pad * 2); });
+      }));
+      const min = nat.map((n, i) => Math.max(tiny[i] ? 9 : MIN_COL, keepCompact && numeric[i] && n <= COMPACT ? n : word[i]));
+      const natural = nat.map((n, i) => Math.max(n, min[i]));
+      if (sum(min) > avail) return null;
+      if (sum(natural) <= avail) return natural.map(n => n + (avail - sum(natural)) * n / sum(natural));
+      const flex = natural.map((n, i) => n - min[i]);
+      const spare = avail - sum(min);
+      return min.map((m, i) => m + (sum(flex) ? spare * flex[i] / sum(flex) : spare / cols));
+    };
+    const portraitW = 215.9 - margin * 2;
+    const landscapeW = 279.4 - margin * 2;
+    let layout = null;
+    for (const [fs, keep, orient] of [[7.5, true, 'portrait'], [7, true, 'portrait'], [7, false, 'portrait'], [7, false, 'landscape']]) {
+      const widths = plan(fs, orient === 'landscape' ? landscapeW : portraitW, keep);
+      if (widths) { layout = { fs, widths, orient }; break; }
+    }
+    if (!layout) {
+      // Even landscape cannot hold the longest words: shrink proportionally; splitTextToSize still keeps every character.
+      // Weights are each column's natural width capped at the page, so they stay finite; cells then wrap
+      // inside their share, breaking an unbreakable token by character.
+      const capped = Array(cols).fill(9);
+      rows.forEach(r => r.cells.forEach((c, i) => { capped[i] = Math.max(capped[i], Math.min(landscapeW, measure(c, 7, r.header) + pad * 2)); }));
+      layout = { fs: 7, widths: capped.map(w => w * landscapeW / sum(capped)), orient: 'landscape' };
+    }
+    if (layout.orient !== orientation) startPage(layout.orient);
+    const { fs, widths } = layout;
+    const lh = fs * 0.3528 * 1.22;
+    const baseline = fs * 0.3528 * 0.85;
+    const split = (r) => r.cells.map((c, i) => {
+      doc.setFont('helvetica', r.header ? 'bold' : 'normal');
+      doc.setFontSize(fs);
+      const lines = c ? wrapCell(c, Math.max(1, widths[i] - pad * 2)) : [''];
+      return lines.length ? lines : [''];
+    });
+    const rowHeight = lines => Math.max(...lines.map(l => l.length)) * lh + pad * 2;
+    const tableW = sum(widths);
+    const bottom = () => pageH() - margin;
+    const headLines = head ? split(head) : null;
+    const headH = head ? rowHeight(headLines) : 0;
+    const paint = (r, lines, from, count, idx) => {
+      const h = count * lh + pad * 2;
+      if (r.header) {
+        doc.setFillColor(184, 99, 30);
+        doc.rect(margin, y, tableW, h, 'F');
+        doc.setTextColor(255, 255, 255);
+      } else {
+        if (idx % 2 === 1) {
+          doc.setFillColor(250, 246, 238);
+          doc.rect(margin, y, tableW, h, 'F');
+        }
+        doc.setDrawColor(232, 216, 184);
+        doc.rect(margin, y, tableW, h, 'D');
+        doc.setTextColor(74, 60, 40);
+      }
+      doc.setFont('helvetica', r.header ? 'bold' : 'normal');
+      doc.setFontSize(fs);
+      let x = margin;
+      lines.forEach((cellLines, i) => {
+        cellLines.slice(from, from + count).forEach((line, k) => {
+          if (line) doc.text(line, x + pad, y + pad + baseline + k * lh);
+        });
+        x += widths[i];
+      });
+      y += h;
+    };
+    const drawHead = () => { if (head) paint(head, headLines, 0, Math.max(...headLines.map(l => l.length)), 0); };
+    const freshPage = () => { startPage(orientation); drawHead(); };
+    y += 2;
+    const firstH = body.length ? rowHeight(split(body[0])) : 0;
+    if (y + headH + Math.min(firstH, 40) > bottom()) startPage(orientation);
+    drawHead();
+    body.forEach((r, idx) => {
+      const lines = split(r);
+      const total = Math.max(...lines.map(l => l.length));
+      const h = rowHeight(lines);
+      // Keep a row on one page when it fits on a fresh page; split only rows taller than a page.
+      if (y + h > bottom() && h <= bottom() - 20 - headH) freshPage();
+      let from = 0;
+      while (from < total) {
+        let fit = Math.floor((bottom() - y - pad * 2) / lh);
+        if (fit < 1) { freshPage(); fit = Math.floor((bottom() - y - pad * 2) / lh); }
+        const count = Math.min(total - from, Math.max(1, fit));
+        paint(r, lines, from, count, idx);
+        from += count;
+      }
+    });
+    y += 3;
+  }
+
+  // Draw from the blocks read above. A landscape table page is for that table only; the text continues in portrait.
+  cards.forEach((blocks, cardIdx) => {
+    if (!blocks) return;
+    if (cardIdx > 0) {
+      if (orientation !== 'portrait') startPage('portrait');
+      y += 4;
+      doc.setDrawColor(200, 169, 110);
+      doc.line(margin, y, pageW() - margin, y);
+      y += 6;
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(138, 111, 74);
+      doc.text('Updated Analysis', margin, y);
+      y += 6;
+    }
+    blocks.forEach(b => {
+      if (b.kind !== 'table' && orientation !== 'portrait') startPage('portrait');
+      if (b.kind === 'h3') {
+        // Keep a section heading with what follows: never draw its band at the foot of a page.
+        if (y + 26 > pageH() - margin) startPage('portrait');
+        y += 3;
+        doc.setFillColor(240, 227, 200);
+        doc.rect(margin, y - 5, contentW(), 7.5, 'F');
+        addText(b.text, 8.5, true, [184, 99, 30], 0);
+        y += 3;
+      } else if (b.kind === 'h2') {
+        y += 2;
+        addText(b.text, 11, true, [107, 52, 16], 0);
+      } else if (b.kind === 'p') {
+        if (b.text) addText(b.text, 9, false, [74, 60, 40], 0);
+      } else if (b.kind === 'ul') {
+        b.items.forEach(item => addText('• ' + item, 8.5, false, [74, 60, 40], 4));
+      } else if (b.kind === 'table') {
+        drawTable(b.rows);
+      }
+    });
+  });
 
   const totalPages = doc.internal.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
+    const w = pageW();
+    const h = pageH();
     doc.setFontSize(7);
     doc.setTextColor(160, 138, 106);
     doc.setFont('helvetica', 'normal');
-    doc.text('Page ' + p + ' of ' + totalPages, pageWidth / 2, pageHeight - 8, { align: 'center' });
-    doc.text('Mineral Ownership Builder — Title Research Tool', margin, pageHeight - 8);
-    doc.text('AI-assisted analysis — not a legal opinion', pageWidth - margin, pageHeight - 8, { align: 'right' });
+    doc.text('Page ' + p + ' of ' + totalPages, w / 2, h - 8, { align: 'center' });
+    doc.text('Mineral Ownership Builder — Title Research Tool', margin, h - 8);
+    doc.text('AI-assisted analysis — not a legal opinion', w - margin, h - 8, { align: 'right' });
   }
 
   const date = new Date().toISOString().slice(0, 10);
@@ -6535,6 +7830,7 @@ function downloadPDF(options = {}) {
     : 'Title-Analysis-' + date + '.pdf';
 
   doc.save(filename);
+  return true;
 }
 
 function resetAll() {
