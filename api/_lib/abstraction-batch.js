@@ -184,7 +184,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   }
 
   try {
-    const preparedItems = await Promise.all(ready.map(async entry => {
+    const preparations = await Promise.allSettled(ready.map(async entry => {
       const payload = await blobLoader(entry.chunk);
       const delivery = await enrichVisualDeliveryForModel(
         await resolveChunkDelivery(entry.chunk, payload.bytes),
@@ -198,6 +198,13 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         delivery,
       };
     }));
+    const failedPreparation = preparations.find(result => result.status === 'rejected');
+    if (failedPreparation) {
+      preparations.length = 0;
+      throw failedPreparation.reason;
+    }
+    const preparedItems = preparations.map(result => result.value);
+    preparations.length = 0;
 
     const messages = buildAbstractMessagesForChunks(preparedItems, globalStart);
     const payloadBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, messages);

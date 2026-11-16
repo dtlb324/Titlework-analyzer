@@ -99,7 +99,8 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   checks `x-app-password` with `secureCompare` and returns 401 when
   `APP_PASSWORD` is unset.
 - The rate-limit IP is the rightmost `X-Forwarded-For` hop (`getClientIp`
-  in `api/_lib/client-ip.js`), the hop Cloud Run appends.
+  in `api/_lib/client-ip.js`) only with nonblank Cloud Run `K_SERVICE`.
+  Other deployments ignore forwarded headers and use the socket address.
 - `POST /internal/drain` (`worker.js`) verifies `x-internal-drain-token`
   against `INTERNAL_DRAIN_TOKEN` via `secureCompare`. Production fails closed
   when that token is unset. Set it on the worker before a release that
