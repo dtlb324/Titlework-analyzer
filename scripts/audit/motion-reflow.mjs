@@ -58,8 +58,9 @@ await runProbe('motion-reflow', async ({ rec, step, srv, browser }) => {
         const all = [...onload, ...afterStage, ...processing];
         if (rm === 'reduce') {
           const moving = all.filter(a => !a.spinner && (a.duration > 1 || a.iterations !== 1));
-          rec.check('reduced motion: only the busy spinner animates', { onload: fmt(onload), afterStage: fmt(afterStage), processing: fmt(processing), moving: fmt(moving) },
-            'every non-spinner animation/transition collapsed to <= 1 ms, one iteration', moving.length === 0, clean(errors));
+          const spinning = processing.filter(a => a.spinner && a.duration > 100 && a.iterations === Infinity);
+          rec.check('reduced motion: only the busy spinner animates', { onload: fmt(onload), afterStage: fmt(afterStage), processing: fmt(processing), moving: fmt(moving), spinning: fmt(spinning) },
+            'every non-spinner animation/transition collapsed to <= 1 ms, one iteration; the busy spinner still loops', moving.length === 0 && spinning.length > 0, clean(errors));
         } else {
           const decorative = all.filter(a => !a.spinner && a.duration > 100);
           rec.check('no-preference: decorative motion present', { onload: fmt(onload), afterStage: fmt(afterStage), processing: fmt(processing) },

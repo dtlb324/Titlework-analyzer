@@ -107,6 +107,18 @@ test('active probes import only node:, their own files, or packages declared in 
   assert.ok(declared.has('playwright-core'), 'playwright-core must be declared for the probes');
 });
 
+test('the reduced-motion check requires the busy spinner to keep looping, and the 2 MB export asserts no wall-clock limit', () => {
+  const motion = readFileSync(join(auditDir, 'motion-reflow.mjs'), 'utf8');
+  assert.match(motion, /spinning\.length > 0/, 'reduced-motion check must assert the spinner still animates');
+  const p6 = readFileSync(join(auditDir, 'p6-pdf-recent.mjs'), 'utf8');
+  assert.doesNotMatch(p6, /ms\s*<\s*\d+/, 'a wall-clock threshold makes the 2 MB export check network-dependent');
+});
+
+test('the production image context excludes the audit probes', () => {
+  const lines = readFileSync(join(here, '../.dockerignore'), 'utf8').split('\n').map(l => l.trim());
+  assert.ok(lines.includes('scripts/audit/'), '.dockerignore must list scripts/audit/');
+});
+
 test('archived originals are inert: .before extension, never .mjs', () => {
   const files = readdirSync(join(auditDir, 'before'));
   for (const name of ['p4-actions.mjs.before', 'p6-pdf-recent.mjs.before', 'motion-reflow.mjs.before', 'lib.mjs.before', 'harness.mjs.before']) {
