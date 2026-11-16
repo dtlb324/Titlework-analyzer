@@ -11,6 +11,7 @@ __pycache__/
 
 docs/
 test/
+scripts/audit/
 *.log
 *.md
 repo_agent_cloud.py

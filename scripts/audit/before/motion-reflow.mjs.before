@@ -1,0 +1,66 @@
+// pixel-front: reduced motion on/off, 640px and 320px reflow, and what the queue shows while a big batch is read.
+import path from 'node:path';
+import { startServer, launch, newPage, fileObjs, measure, fullShot } from '<SCRATCH>/tw-results-fix/pixel-probes/harness.mjs';
+
+const COPY = '<REPO>';
+const SHOTS = '<SCRATCH>/tw-results-fix/pixel-probes/out/pixel-front/shots';
+const srv = await startServer(COPY, 8314);
+const browser = await launch();
+const out = {};
+const anims = page => page.evaluate(() => document.getAnimations().map(a => {
+  const t = a.effect?.getTiming?.() || {}; const tgt = a.effect?.target;
+  return `${a.animationName || a.transitionProperty || a.constructor.name}@${tgt ? (tgt.id || String(tgt.className).split(' ')[0] || tgt.tagName) : '?'}:${Math.round(+t.duration || 0)}ms x${t.iterations}`;
+}));
+try {
+  for (const rm of ['no-preference', 'reduce']) {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: rm });
+    let { page } = await newPage(ctx);
+    await page.goto(srv.base); await page.waitForSelector('#view-home', { state: 'visible' });
+    await page.waitForTimeout(30);
+    out[`${rm}-onload`] = await anims(page);
+    await page.setInputFiles('#fileInput', fileObjs(6)); await page.waitForSelector('#fileList .file-item'); await page.waitForTimeout(20);
+    out[`${rm}-afterStage`] = await anims(page);
+    await page.route('**/api/jobs', () => {});
+    await page.click('#analyzeBtn'); await page.waitForSelector('#progressSection', { state: 'visible' });
+    await page.evaluate(() => updateProgress(30, 'Abstracted 2 of 6 documents...', [{ label: 'a.pdf', status: 'done' }, { label: 'b.pdf', status: 'active' }, { label: 'Synthesize', status: 'pending' }]));
+    await page.waitForTimeout(600);
+    out[`${rm}-processing`] = await anims(page);
+    await page.close(); await ctx.close();
+  }
+
+  // Reflow: 1280 @200% = 640 CSS px; 1280 @400% = 320 CSS px.
+  for (const [w, h] of [[640, 430], [320, 256]]) {
+    const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: 'reduce' });
+    const { page } = await newPage(ctx);
+    await page.goto(srv.base); await page.waitForSelector('#view-home', { state: 'visible' });
+    await page.setInputFiles('#fileInput', [{ name: '001_Warranty_Deed_Vane_to_Pettibone_Book_412_Page_88_recorded_1948.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n%%EOF\n') }, ...fileObjs(4)]);
+    await page.waitForSelector('#fileList .file-item'); await page.waitForTimeout(200);
+    out[`reflow-${w}`] = { ...(await measure(page)), layout: await page.evaluate(() => {
+      const r = s => { const b = document.querySelector(s).getBoundingClientRect(); return [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)]; };
+      const over = [...document.querySelectorAll('body *')].filter(e => { const b = e.getBoundingClientRect(); return b.width > 0 && b.right > innerWidth + 1; }).map(e => e.id || String(e.className).split(' ')[0] || e.tagName).slice(0, 8);
+      const nameW = [...document.querySelectorAll('#fileList .file-name')].map(e => Math.round(e.getBoundingClientRect().width));
+      return { header: r('header'), cta: r('#analyzeBtn'), zone: r('#uploadZone'), firstRemove: r('#fileList .file-remove'), fileNameWidths: nameW, pastRightEdge: over, ctaFoldPx: document.querySelector('#analyzeBtn').getBoundingClientRect().top, zoneTop: document.querySelector('#uploadZone').getBoundingClientRect().top };
+    }) };
+    await fullShot(page, path.join(SHOTS, `reflow-${w}.png`));
+    await page.close(); await ctx.close();
+  }
+
+  // What the queue shows while 300 more files are read on top of 12 staged ones.
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: 'reduce' });
+    const { page } = await newPage(ctx);
+    await page.goto(srv.base); await page.waitForSelector('#view-home', { state: 'visible' });
+    await page.setInputFiles('#fileInput', fileObjs(12)); await page.waitForSelector('#fileList .file-item');
+    const t0 = Date.now();
+    const p = page.setInputFiles('#fileInput', fileObjs(300, { padBytes: 150000 }));
+    await page.waitForFunction(() => /Reading/.test(document.getElementById('fileList').textContent), null, { timeout: 20000 });
+    await page.waitForTimeout(400);
+    out.duringRead = await page.evaluate(() => ({ fileListText: document.getElementById('fileList').innerText.trim().slice(0, 120), rowsVisible: document.querySelectorAll('#fileList .file-item').length, ctaDisabled: document.getElementById('analyzeBtn').disabled, badge: document.getElementById('stagedBadge').textContent, progressbar: !!document.querySelector('#view-home [role=progressbar], #view-home progress') }));
+    await page.screenshot({ path: path.join(SHOTS, 'during-read-w1280.png') });
+    await p;
+    await page.waitForFunction(() => document.getElementById('analyzeBtnCount').textContent === '(312)', null, { timeout: 120000 });
+    out.readMs300x150KB = Date.now() - t0;
+    await page.close(); await ctx.close();
+  }
+} finally { await browser.close(); srv.stop(); }
+console.log(JSON.stringify(out, null, 1));
