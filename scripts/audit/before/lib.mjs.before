@@ -1,0 +1,49 @@
+// Local helpers for the buggy-results probes.
+import path from 'node:path';
+import { startServer, launch, newPage, JOBS, DESKTOP, PHONE, fixture } from '<SCRATCH>/tw-results-fix/pixel-probes/harness.mjs';
+export { startServer, launch, newPage, JOBS, DESKTOP, PHONE, fixture };
+
+export const ROOT = '<SCRATCH>/tw-audit';
+export const COPY = '<REPO>';
+export const OUT = '<SCRATCH>/tw-results-fix/pixel-probes/out/buggy-results';
+export const PORT = 8312;
+
+export const NOISE = /X-Frame-Options|ERR_FAILED|Failed to load resource: net::/;
+export const clean = errs => errs.filter(e => !NOISE.test(e));
+
+export const json = (r, status, body) => r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+
+// Open a page, record dialogs (alert/confirm are accepted), apply overrides (array of [matcher, handler]).
+export async function open(browser, opts = {}, overrides = [], device = DESKTOP) {
+  const ctx = await browser.newContext({ ...device, reducedMotion: opts.motion || 'reduce' });
+  const { page, errors, calls } = await newPage(ctx, opts);
+  const dialogs = [];
+  page.on('dialog', d => { dialogs.push(`${d.type()}: ${d.message()}`); d.accept().catch(() => {}); });
+  for (const [match, handler] of overrides) await page.route(match, handler);
+  return { ctx, page, errors, calls, dialogs };
+}
+
+export const isJobGet = id => u => u.pathname === `/api/jobs/${id}`;
+export const isResultGet = id => u => u.pathname === `/api/jobs/${id}/result`;
+
+export async function snap(page) {
+  return page.evaluate(() => {
+    const t = id => (document.getElementById(id)?.innerText || '').replace(/\s+/g, ' ').trim();
+    const vis = id => { const e = document.getElementById(id); return !!e && getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().height > 0; };
+    return {
+      hash: location.hash,
+      header: t('jobHeader').slice(0, 140),
+      resultsLen: t('jobResults').length,
+      resultsHead: t('jobResults').slice(0, 90),
+      jobViewVisible: vis('view-job'),
+      gateVisible: vis('passwordGate'),
+      followupVisible: vis('jobFollowup'),
+      progressVisible: vis('jobProgress'),
+      actions: [...document.querySelectorAll('#jobActions button')].map(b => b.innerText.trim() + (b.disabled ? '(disabled)' : '')),
+    };
+  });
+}
+
+export function row(name, observed, expected, pass, errs, extra = '') {
+  console.log(`${name} | ${observed} | ${expected} | ${pass ? 'PASS' : 'FAIL'} | ${errs.length ? errs.join(' // ').slice(0, 220) : '-'}${extra ? ' | ' + extra : ''}`);
+}

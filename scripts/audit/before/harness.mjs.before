@@ -1,0 +1,152 @@
+// Shared audit harness: local server.js + headless Chromium + mocked /api.
+// Usage: import { startServer, launch, newPage, fileObjs, JOBS, measure } from '<abs>/harness.mjs'
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PW = '<SCRATCH>/pr135-pixel/tools/node_modules/playwright-core/index.mjs';
+const { chromium } = await import(PW);
+export const EXE = `${process.env.HOME}/Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell`;
+
+export const fixture = name => fs.readFileSync(path.join(HERE, 'fixtures', name), 'utf8');
+
+// Starts `node server.js` from repoDir on port with a clean env (no .env.local, no keys).
+export async function startServer(repoDir, port) {
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: repoDir,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, PORT: String(port), NODE_ENV: 'test' },
+    stdio: 'ignore',
+  });
+  const base = `http://127.0.0.1:${port}/`;
+  for (let i = 0; i < 50; i++) {
+    try { const r = await fetch(base + 'api/healthz'); if (r.ok) return { child, base, stop: () => child.kill() }; } catch {}
+    await new Promise(r => setTimeout(r, 100));
+  }
+  child.kill();
+  throw new Error(`server did not start on ${port}`);
+}
+
+// Default: headless Chromium shell. AUDIT_CHROME=real runs the same probe in the user's installed
+// Google Chrome, headed, with a throwaway profile (their own profile and tabs are not touched).
+export const REAL_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+export async function launch() {
+  if (process.env.AUDIT_CHROME === 'real') return chromium.launch({ executablePath: REAL_CHROME, headless: false });
+  return chromium.launch({ executablePath: EXE, headless: true });
+}
+
+export const DESKTOP = { viewport: { width: 1280, height: 860 }, deviceScaleFactor: 2 };
+export const PHONE = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true };
+
+const now = Date.now();
+const iso = ms => new Date(now - ms).toISOString();
+export const JOBS = {
+  job_complete: {
+    job: { id: 'job_complete', status: 'complete', name: 'NW/4 Sec 22 Larkspur', subjectTract: 'NW/4 Sec. 22, Block C-9, Larkspur Rail Survey', totalDocuments: 400, completedDocuments: 400, createdAt: iso(600000), updatedAt: iso(252000) },
+    result: { finalTitleOpinion: fixture('opinion.md'), warnings: [], failedDocuments: [] },
+  },
+  job_partial: {
+    job: { id: 'job_partial', status: 'partial_failed', subjectTract: 'NW/4 Sec. 22 (partial run)', totalDocuments: 400, completedDocuments: 396, failedDocuments: 4, createdAt: iso(600000), updatedAt: iso(60000) },
+    result: { finalTitleOpinion: fixture('opinion.md'), warnings: ['synthesis_driver:browser', '4 abstraction chunk(s) failed and were omitted from browser synthesis.', 'Final opinion was truncated at the model output limit; the last section may be incomplete.'], failedDocuments: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }] },
+  },
+  job_defect: {
+    job: { id: 'job_defect', status: 'complete', subjectTract: 'Smith tract (62.5% stated)', totalDocuments: 3, completedDocuments: 3, createdAt: iso(600000), updatedAt: iso(60000) },
+    result: { finalTitleOpinion: fixture('defect-625.md'), warnings: [], failedDocuments: [] },
+  },
+  job_over: {
+    job: { id: 'job_over', status: 'complete', subjectTract: 'Smith tract (over-allocated)', totalDocuments: 3, completedDocuments: 3, createdAt: iso(600000), updatedAt: iso(60000) },
+    result: { finalTitleOpinion: fixture('over-alloc.md'), warnings: [], failedDocuments: [] },
+  },
+  job_fallback: {
+    job: { id: 'job_fallback', status: 'complete', subjectTract: 'Malformed output job', totalDocuments: 12, completedDocuments: 12, createdAt: iso(600000), updatedAt: iso(60000) },
+    result: { finalTitleOpinion: 'The model returned prose instead of the required sections.\n\n## Notes\n- Owner list unavailable\n\n| a | b |\n|---|---|\n| 1 | 2 |', warnings: [], failedDocuments: [] },
+  },
+  job_running: {
+    job: { id: 'job_running', status: 'abstracting', name: 'SE/4 Sec 14 Reeves', subjectTract: 'SE/4 of Section 14, T-3-N, R-5-W, Reeves County, TX', totalDocuments: 12, completedDocuments: 5, createdAt: iso(120000), updatedAt: iso(1000) },
+  },
+  job_failed: {
+    job: { id: 'job_failed', status: 'failed', subjectTract: 'Failed run', totalDocuments: 12, completedDocuments: 0, error: 'Synthesis failed after 3 attempts.', createdAt: iso(120000), updatedAt: iso(1000) },
+  },
+  job_canceled: {
+    job: { id: 'job_canceled', status: 'canceled', subjectTract: 'Canceled run', totalDocuments: 12, completedDocuments: 4, createdAt: iso(120000), updatedAt: iso(1000) },
+  },
+};
+
+// Opens a page with every /api call mocked and recorded. No request reaches a model or a database.
+// opts.password: when set, /api/analyze ping answers 401 unless x-app-password matches.
+// opts.jobs: map id -> { job, result }. opts.allowCdn: let cdnjs (jsPDF, pdf-lib) load.
+// Register extra page.route() handlers AFTER this call to override one endpoint (last registered wins).
+export async function newPage(ctx, opts = {}) {
+  const jobs = opts.jobs || JOBS;
+  const page = await ctx.newPage();
+  const errors = [];
+  const calls = [];
+  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+  if (!opts.allowCdn) await page.route('https://cdnjs.cloudflare.com/**', r => r.abort());
+  const json = (r, status, body) => r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+  await page.route('**/api/**', r => {
+    const req = r.request();
+    const u = new URL(req.url());
+    calls.push(`${req.method()} ${u.pathname}`);
+    if (u.pathname === '/api/healthz') return r.continue();
+    if (opts.password && req.headers()['x-app-password'] !== opts.password) return json(r, 401, { error: 'Unauthorized' });
+    if (u.pathname === '/api/analyze') return json(r, 200, { ok: true });
+    const m = u.pathname.match(/^\/api\/jobs\/([^/]+)(?:\/(.*))?$/);
+    if (m && req.method() === 'GET') {
+      const j = jobs[decodeURIComponent(m[1])];
+      if (!j) return json(r, 404, { error: 'Job not found.' });
+      if (!m[2]) return json(r, 200, { job: j.job });
+      if (m[2] === 'result') return j.result ? json(r, 200, { result: j.result }) : json(r, 404, { error: 'No result.' });
+    }
+    return json(r, 404, { error: `unmocked ${req.method()} ${u.pathname}` });
+  });
+  return { page, errors, calls };
+}
+
+const pdf = title => Buffer.from(`%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length 44>>stream
+BT /F1 18 Tf 72 720 Td (${title}) Tj ET
+endstream endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+trailer<</Root 1 0 R>>
+%%EOF
+`);
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+// n fictional staged files for page.setInputFiles('#fileInput', fileObjs(n)). Mostly PDFs, some CSV/PNG.
+export function fileObjs(n, { padBytes = 0 } = {}) {
+  return Array.from({ length: n }, (_, i) => {
+    const k = String(i + 1).padStart(3, '0');
+    if (i % 11 === 2) return { name: `${k}_Runsheet_Sec22.csv`, mimeType: 'text/csv', buffer: Buffer.from('grantor,grantee,date\nVane,Pettibone,1948-03-02\n'.repeat(40)) };
+    if (i % 11 === 3) return { name: `${k}_MineralDeed_scan.png`, mimeType: 'image/png', buffer: PNG };
+    const name = `${k}_WarrantyDeed_Vane_to_Pettibone_${1900 + i}.pdf`;
+    return { name, mimeType: 'application/pdf', buffer: Buffer.concat([pdf(name), Buffer.alloc(padBytes, 32)]) };
+  });
+}
+
+export async function measure(page, scope = 'body') {
+  return page.evaluate(sel => {
+    const root = document.querySelector(sel) || document.body;
+    const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+    return {
+      overflowX: document.documentElement.scrollWidth - window.innerWidth,
+      smallTargets: [...root.querySelectorAll('a,button,[role=button],input,textarea,summary')].filter(vis)
+        .filter(el => el.getBoundingClientRect().height < 44)
+        .map(el => `${el.id || el.className || el.tagName}:${Math.round(el.getBoundingClientRect().width)}x${Math.round(el.getBoundingClientRect().height)}`).slice(0, 20),
+    };
+  }, scope);
+}
+
+export async function fullShot(page, file) {
+  const vp = page.viewportSize();
+  const h = await page.evaluate(() => document.documentElement.scrollHeight);
+  await page.setViewportSize({ width: vp.width, height: Math.min(h, 12000) });
+  await page.waitForTimeout(150);
+  await page.screenshot({ path: file });
+  await page.setViewportSize(vp);
+}
