@@ -189,8 +189,8 @@ test('R11 Download PDF without jsPDF shows an inline alert with Retry that reloa
   app.run('retryPdfExport()');
   assert.equal(appended.length, 1, 'retry loads the script again');
   const script = appended[0];
-  assert.equal(script.src, 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
-  assert.equal(script.integrity || script.attrs.integrity, 'sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk');
+  assert.equal(script.src, '/vendor/jspdf/jspdf.umd.min.js');
+  assert.equal(script.integrity || script.attrs.integrity, 'sha384-qovJwSBbRDPP5cEjCp8S0UP66wrvnjaa60XMOGzTNanrThcrGfXfnZkvgY8N1KT3');
   const pdf = fakeJsPdf();
   app.ctx.jspdf = pdf.jspdf;
   script.onload();
@@ -902,7 +902,7 @@ test('R2 R06 a home follow-up 500 or aborted fetch keeps the question as one inl
 // ---- R2-14 (R11 Low): one tracked jsPDF loader; retries never stack script tags.
 test('R2 R11 three blocked retries then success leave exactly one jsPDF script tag', () => {
   const app = loadIndex({ fetchImpl: async () => jsonResponse(404, {}) });
-  const SRC = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+  const SRC = '/vendor/jspdf/jspdf.umd.min.js';
   const head = { children: [] };
   const makeScript = () => {
     const el = { tagName: 'SCRIPT', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return k === 'src' ? this.src : (this.attrs[k] ?? null); } };
@@ -930,7 +930,7 @@ test('R2 R11 three blocked retries then success leave exactly one jsPDF script t
   assert.equal(jsTags().length, 1);
   const tag = jsTags()[0];
   assert.equal(tag.src, SRC);
-  assert.equal(tag.integrity || tag.attrs.integrity, 'sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk');
+  assert.equal(tag.integrity || tag.attrs.integrity, 'sha384-qovJwSBbRDPP5cEjCp8S0UP66wrvnjaa60XMOGzTNanrThcrGfXfnZkvgY8N1KT3');
   assert.equal(tag.crossOrigin || tag.attrs.crossorigin, 'anonymous');
   const pdf = fakeJsPdf();
   app.ctx.jspdf = pdf.jspdf;

@@ -18,7 +18,8 @@
   "dependencies": {
     "@google-cloud/storage": "^8.4.0",
     "@neondatabase/serverless": "^1.2.0",
-    "pdf-lib": "^1.17.1",
+    "jspdf": "4.2.1",
+    "pdf-lib": "1.17.1",
     "pdfjs-dist": "6.4.299",
     "unpdf": "^2.0.1"
   },

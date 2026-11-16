@@ -14,8 +14,12 @@ import { createOcrCompareHandler } from './api/ocr-compare.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, 'public');
-const PDFJS_FILES = new Map(['pdf.mjs', 'pdf.worker.mjs'].map(name => [`/vendor/pdfjs/${name}`, join(__dirname, 'node_modules', 'pdfjs-dist', 'build', name)]));
-// Scanned PDFs may need JBIG2/JPEG2000 decoders. Expose only known renderer
+const VENDOR_FILES = new Map([
+  ['/vendor/jspdf/jspdf.umd.min.js', join(__dirname, 'node_modules', 'jspdf', 'dist', 'jspdf.umd.min.js')],
+  ['/vendor/pdf-lib/pdf-lib.min.js', join(__dirname, 'node_modules', 'pdf-lib', 'dist', 'pdf-lib.min.js')],
+  ...['pdf.mjs', 'pdf.worker.mjs'].map(name => [`/vendor/pdfjs/${name}`, join(__dirname, 'node_modules', 'pdfjs-dist', 'build', name)]),
+]);
+// Scanned PDFs may need JBIG2/JPEG2000 decoders. Expose only known browser
 // assets, never a general node_modules directory or user-controlled file path.
 const PDFJS_ASSETS = {
   wasm: ['jbig2.wasm', 'jbig2_nowasm_fallback.js', 'openjpeg.wasm', 'openjpeg_nowasm_fallback.js', 'qcms_bg.wasm'],
@@ -23,7 +27,7 @@ const PDFJS_ASSETS = {
   standard_fonts: ['FoxitDingbats.pfb', 'FoxitFixed.pfb', 'FoxitFixedBold.pfb', 'FoxitFixedBoldItalic.pfb', 'FoxitFixedItalic.pfb', 'FoxitSerif.pfb', 'FoxitSerifBold.pfb', 'FoxitSerifBoldItalic.pfb', 'FoxitSerifItalic.pfb', 'FoxitSymbol.pfb', 'LiberationSans-Regular.ttf', 'LiberationSans-Bold.ttf', 'LiberationSans-BoldItalic.ttf', 'LiberationSans-Italic.ttf'],
 };
 for (const [directory, names] of Object.entries(PDFJS_ASSETS)) {
-  for (const name of names) PDFJS_FILES.set(`/vendor/pdfjs/${directory}/${name}`, join(__dirname, 'node_modules', 'pdfjs-dist', directory, name));
+  for (const name of names) VENDOR_FILES.set(`/vendor/pdfjs/${directory}/${name}`, join(__dirname, 'node_modules', 'pdfjs-dist', directory, name));
 }
 
 function publicHealth(serviceName) {
@@ -123,11 +127,12 @@ export function createServer({ ocrCompareModelClient } = {}) {
       if (url.pathname.startsWith('/api/jobs/')) return await callApiHandler(jobPathHandler, req, res, url);
       if (url.pathname === '/api/blob/upload') return await callApiHandler(blobUploadHandler, req, res, url);
       if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'Method not allowed.' });
-      if (url.pathname.startsWith('/vendor/pdfjs/')) {
-        const filePath = PDFJS_FILES.get(url.pathname);
+      if (url.pathname === '/vendor' || url.pathname.startsWith('/vendor/')) {
+        const filePath = VENDOR_FILES.get(url.pathname);
         if (!filePath) return sendJson(res, 404, { error: 'Not found.' });
+        const fileStat = await stat(filePath);
         const contentType = /\.(mjs|js)$/.test(filePath) ? 'text/javascript; charset=utf-8' : filePath.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream';
-        res.writeHead(200, { 'content-type': contentType, ...staticSecurityHeaders() });
+        res.writeHead(200, { 'content-type': contentType, 'content-length': fileStat.size, 'cache-control': 'no-cache', ...staticSecurityHeaders() });
         if (req.method === 'HEAD') return res.end();
         return createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
       }

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
+import vm from 'node:vm';
 import { createServer } from '../server.js';
 import { createOcrCompareHandler } from '../api/ocr-compare.js';
 import { spawnSync } from 'node:child_process';
@@ -254,6 +256,66 @@ test('PDF renderer serves allowlisted local modules and image decoders, not arbi
     assert.deepEqual([...bytes.slice(0, 4)], [0, 97, 115, 109]);
     const denied = await fetch(`${base}/vendor/pdfjs/package.json`);
     assert.equal(denied.status, 404);
+  });
+});
+
+test('index.html serves pinned jsPDF and pdf-lib locally with verified SRI hashes and no external script host', async () => {
+  await withServer(async base => {
+    const home = await fetch(`${base}/`);
+    assert.equal(home.status, 200);
+    const html = await home.text();
+    assert.doesNotMatch(html, /cdnjs\.cloudflare\.com/);
+    assert.doesNotMatch(html, /<script\b[^>]*\bsrc=["']https?:/i);
+    assert.match(html, /http-equiv="Content-Security-Policy"[^>]*script-src 'self' 'unsafe-inline'(?=;|")/);
+
+    const externalScripts = [...html.matchAll(/<script\b([^>]*\bsrc="([^"]+)"[^>]*)><\/script>/g)];
+    assert.deepEqual(externalScripts.map(m => m[2]), ['/vendor/jspdf/jspdf.umd.min.js', '/vendor/pdf-lib/pdf-lib.min.js']);
+
+    const hashes = new Map();
+    for (const [, attrs, src] of externalScripts) {
+      const integrity = attrs.match(/\bintegrity="(sha384-[A-Za-z0-9+/=]+)"/)?.[1];
+      assert.ok(integrity, `${src} must carry a sha384 integrity attribute`);
+      assert.match(attrs, /\bcrossorigin="anonymous"/);
+      const res = await fetch(`${base}${src}`);
+      assert.equal(res.status, 200, `${src} must return 200`);
+      assert.equal(res.headers.get('content-type'), 'text/javascript; charset=utf-8');
+      assert.equal(res.headers.get('cache-control'), 'no-cache');
+      assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+      const bytes = Buffer.from(await res.arrayBuffer());
+      assert.equal(Number(res.headers.get('content-length')), bytes.byteLength);
+      const actual = `sha384-${createHash('sha384').update(bytes).digest('base64')}`;
+      assert.equal(actual, integrity, `${src} bytes must match its SRI attribute`);
+      hashes.set(src, { integrity, bytes });
+      const head = await fetch(`${base}${src}`, { method: 'HEAD' });
+      assert.equal(head.status, 200);
+      assert.equal(Number(head.headers.get('content-length')), bytes.byteLength);
+    }
+
+    assert.match(html, /const JSPDF_SRC = '\/vendor\/jspdf\/jspdf\.umd\.min\.js';/);
+    const retryHash = html.match(/const JSPDF_INTEGRITY = '([^']+)';/)?.[1];
+    assert.equal(retryHash, hashes.get('/vendor/jspdf/jspdf.umd.min.js').integrity);
+
+    const ctx = {
+      window: {}, self: {}, navigator: { userAgent: 'Mozilla/5.0' },
+      document: { createElement: () => ({ getContext: () => ({}) }) },
+      btoa: s => Buffer.from(s, 'binary').toString('base64'),
+      atob: s => Buffer.from(s, 'base64').toString('binary'),
+      Uint8Array, Uint16Array, Uint32Array, Int8Array, Int16Array, Int32Array,
+      Float32Array, Float64Array, BigInt64Array, BigUint64Array,
+      ArrayBuffer, DataView, TextEncoder, TextDecoder, URL, Blob, console,
+    };
+    ctx.window = ctx; ctx.self = ctx; ctx.globalThis = ctx;
+    vm.runInNewContext(hashes.get('/vendor/jspdf/jspdf.umd.min.js').bytes.toString('utf8'), ctx);
+    assert.equal(typeof ctx.window.jspdf?.jsPDF, 'function');
+    const doc = new ctx.window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' });
+    doc.text('Mineral Ownership Builder', 20, 20);
+    assert.equal(Buffer.from(doc.output('arraybuffer')).subarray(0, 5).toString(), '%PDF-');
+
+    for (const deniedPath of ['/vendor', '/vendor/', '/vendor/jspdf/package.json', '/vendor/pdf-lib/package.json', '/vendor/unknown.js']) {
+      const denied = await fetch(`${base}${deniedPath}`);
+      assert.equal(denied.status, 404, `${deniedPath} must return 404, never index.html`);
+      assert.match(denied.headers.get('content-type'), /application\/json/);
+    }
   });
 });
 

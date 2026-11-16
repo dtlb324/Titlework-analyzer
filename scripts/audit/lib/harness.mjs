@@ -121,7 +121,6 @@ export async function newPage(ctx, opts = {}) {
   await page.route('**/*', r => {
     const u = new URL(r.request().url());
     if (u.hostname === '127.0.0.1' || u.protocol === 'data:' || u.protocol === 'blob:') return r.fallback();
-    if (opts.allowCdn && u.hostname === 'cdnjs.cloudflare.com') return r.fallback();
     external.push(u.origin + u.pathname);
     return r.abort();
   });
