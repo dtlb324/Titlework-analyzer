@@ -1,6 +1,6 @@
 
 import { isInvalidJobStatusTransition } from './jobs.js';
-import { processChunkAbstraction } from './abstraction.js';
+import { abstractionReadLimit, defaultBlobLoader, processChunkAbstraction } from './abstraction.js';
 import {
   isAbstractionBatchingEnabled,
   planAbstractionWork,
@@ -152,10 +152,21 @@ async function listReadyChunks(store, jobId, limit, now) {
     .slice(0, limit);
 }
 
+function planAbstractionWave(chunks) {
+  const wave = [];
+  let bytes = 0;
+  for (const chunk of chunks) {
+    const limit = abstractionReadLimit(chunk);
+    if (bytes + limit > 128_000_000) break;
+    wave.push(chunk);
+    bytes += limit;
+  }
+  return wave;
+}
+
 export async function processAbstractionBatch(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to process abstraction.');
-  const blobLoader = options.blobLoader || createBlobReadCache(options);
   const config = {
     batchLimit: options.batchLimit ?? DEFAULT_BATCH_LIMIT,
     concurrency: options.concurrency ?? DEFAULT_CONCURRENCY,
@@ -185,8 +196,12 @@ export async function processAbstractionBatch(jobId, options = {}) {
     const fetchLimit = isAbstractionBatchingEnabled()
       ? Math.min(64, config.batchLimit * ABSTRACTION_FETCH_MULTIPLIER)
       : config.batchLimit;
-    const ready = await listReadyChunks(store, jobId, fetchLimit, now);
+    const ready = planAbstractionWave(await listReadyChunks(store, jobId, fetchLimit, now));
     if (!ready.length) break;
+    const blobLoader = createBlobReadCache({
+      blobLoader: chunk => defaultBlobLoader(chunk, options),
+      cacheKey: chunk => JSON.stringify([chunk.jobId, chunk.blobUrl || chunk.objectUrl, chunk.sizeBytes, abstractionReadLimit(chunk), chunk.mediaType, chunk.originalFilename, chunk.pageStart, chunk.pageEnd]),
+    });
 
     let results = [];
     if (isAbstractionBatchingEnabled()) {

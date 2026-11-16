@@ -47,22 +47,31 @@ function mockReq({ method = 'GET', headers = {}, url = '/api/jobs/job_test_1', b
 }
 
 test('getClientIp trusts the rightmost X-Forwarded-For hop', () => {
-  const spoofed = getClientIp({
-    headers: { 'x-forwarded-for': '198.51.100.1, 203.0.113.9' },
-    socket: { remoteAddress: '10.0.0.1' },
-  });
-  assert(spoofed === '203.0.113.9', `Expected rightmost hop, got ${spoofed}`);
-  const rotating = getClientIp({
-    headers: { 'x-forwarded-for': '192.0.2.55, 203.0.113.9' },
-    socket: { remoteAddress: '10.0.0.1' },
-  });
-  assert(rotating === '203.0.113.9', 'Rotating leftmost XFF must not change the trusted IP');
-  const local = getClientIp({ headers: {}, socket: { remoteAddress: '127.0.0.1' } });
-  assert(local === '127.0.0.1', 'Without XFF, use the socket address');
+  const previousService = process.env.K_SERVICE;
+  process.env.K_SERVICE = 'test-cloud-run-api';
+  try {
+    const spoofed = getClientIp({
+      headers: { 'x-forwarded-for': '198.51.100.1, 203.0.113.9' },
+      socket: { remoteAddress: '10.0.0.1' },
+    });
+    assert(spoofed === '203.0.113.9', `Expected rightmost hop, got ${spoofed}`);
+    const rotating = getClientIp({
+      headers: { 'x-forwarded-for': '192.0.2.55, 203.0.113.9' },
+      socket: { remoteAddress: '10.0.0.1' },
+    });
+    assert(rotating === '203.0.113.9', 'Rotating leftmost XFF must not change the trusted IP');
+    const local = getClientIp({ headers: {}, socket: { remoteAddress: '127.0.0.1' } });
+    assert(local === '127.0.0.1', 'Without XFF, use the socket address');
+  } finally {
+    if (previousService === undefined) delete process.env.K_SERVICE;
+    else process.env.K_SERVICE = previousService;
+  }
 });
 
 test('rotating leftmost XFF cannot bypass job password strike limit', async () => {
   const previous = process.env.APP_PASSWORD;
+  const previousService = process.env.K_SERVICE;
+  process.env.K_SERVICE = 'test-cloud-run-api';
   process.env.APP_PASSWORD = 'correct-horse';
   resetJobRateLimits();
   try {
@@ -97,6 +106,8 @@ test('rotating leftmost XFF cannot bypass job password strike limit', async () =
     assert(otherHop.statusCode === 401, `A different trusted hop should still be 401, got ${otherHop.statusCode}`);
   } finally {
     resetJobRateLimits();
+    if (previousService === undefined) delete process.env.K_SERVICE;
+    else process.env.K_SERVICE = previousService;
     if (previous === undefined) delete process.env.APP_PASSWORD;
     else process.env.APP_PASSWORD = previous;
   }

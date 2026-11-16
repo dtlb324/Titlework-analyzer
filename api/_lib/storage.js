@@ -266,16 +266,17 @@ function blobCacheKey(chunk) {
 export function createBlobReadCache(options = {}) {
   const pending = new Map();
   const load = async chunk => {
+    if (options.blobLoader) return await options.blobLoader(chunk);
     if (options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__) {
       return await (options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__)(chunk);
     }
-    if (options.blobLoader || globalThis.__TITLE_ANALYZER_BLOB_LOADER__) {
-      return await (options.blobLoader || globalThis.__TITLE_ANALYZER_BLOB_LOADER__)(chunk);
+    if (globalThis.__TITLE_ANALYZER_BLOB_LOADER__) {
+      return await globalThis.__TITLE_ANALYZER_BLOB_LOADER__(chunk);
     }
     return await readObject(chunk, options);
   };
   return async chunk => {
-    const key = blobCacheKey(chunk);
+    const key = options.cacheKey ? options.cacheKey(chunk) : blobCacheKey(chunk);
     if (!key) return await load(chunk);
     if (pending.has(key)) return await pending.get(key);
     const promise = load(chunk);
@@ -302,10 +303,21 @@ export async function readObject(chunk, options = {}) {
   const location = resolveReadableObject(chunk, config);
   const bucket = options.bucket || await getBucket({ ...config, bucket: location.bucket });
   const file = bucket.file(location.objectKey);
-  const [bytes] = await file.download();
+  const maxBytes = options.maxBytes ?? config.maxUploadBytes;
+  const parts = [];
+  let total = 0;
+  for await (const part of file.createReadStream()) {
+    total += part.byteLength;
+    if (total > maxBytes) {
+      const error = new Error('Chunk storage bytes exceed the admitted raw byte limit.');
+      error.status = 413;
+      throw error;
+    }
+    parts.push(part);
+  }
   const [metadata] = await file.getMetadata().catch(() => [{}]);
   return {
-    bytes: Buffer.from(bytes),
+    bytes: Buffer.concat(parts, total),
     mediaType: metadata.contentType || chunk.mediaType,
   };
 }

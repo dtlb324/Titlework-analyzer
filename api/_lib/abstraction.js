@@ -394,7 +394,13 @@ export function assertSafeBlobUrl(blobUrl) {
   return parsed;
 }
 
-export async function defaultBlobLoader(chunk) {
+export function abstractionReadLimit(chunk) {
+  const declared = Number(chunk.sizeBytes);
+  const maximum = maxRawBlobBytesForChunk(chunk);
+  return Number.isFinite(declared) && declared > 0 ? Math.min(Math.ceil(declared), maximum) : maximum;
+}
+
+export async function defaultBlobLoader(chunk, options = {}) {
   if (!chunk.blobUrl) {
     const error = new Error(`Chunk ${chunk.id} is missing a storage URL.`);
     error.statusCode = 500;
@@ -402,8 +408,17 @@ export async function defaultBlobLoader(chunk) {
   }
   assertSafeBlobUrl(chunk.blobUrl);
   assertBlobSizeWithinBudget(chunk, chunk.sizeBytes);
-  const payload = await readObject(chunk);
+  const maxBytes = abstractionReadLimit(chunk);
+  const loader = options.blobLoader || options.objectReader || globalThis.__TITLE_ANALYZER_OBJECT_READER__ || globalThis.__TITLE_ANALYZER_BLOB_LOADER__;
+  const payload = loader
+    ? await loader(chunk)
+    : await readObject(chunk, { ...options, maxBytes });
   assertBlobSizeWithinBudget(chunk, payload.bytes.byteLength);
+  if (payload.bytes.byteLength > maxBytes) {
+    const error = new Error('Chunk storage bytes exceed the admitted raw byte limit.');
+    error.status = 413;
+    throw error;
+  }
   return payload;
 }
 
