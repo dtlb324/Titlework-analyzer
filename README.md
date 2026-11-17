@@ -436,7 +436,7 @@ Report vulnerabilities as `SECURITY.md` describes.
 - Abstraction admits at most 128 MB (128,000,000 bytes) of raw source reservations per processing wave, independently of model-payload estimates. Unknown sizes reserve the full media-specific read limit. Reads stop at their admitted ceiling; understated positive sizes fail rather than grow the reservation. The read cache ends with the wave. This is not a process-wide memory ceiling: parser, encoding and concurrent-job overhead still require headroom.
 - The manual `node test/smoke-server.js` listener uses the normal server's path containment, password and body-size controls and binds only `127.0.0.1:3456`.
 - Job metadata routes reject base64 and raw document fields. The update check rejects raw documents, abstracts, CSV text, base64 payloads, and title opinions.
-- `public/index.html` sets `script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com` for the inline script, jsPDF, and pdf-lib. `connect-src` allows this origin plus `https://storage.googleapis.com` and `https://*.storage.googleapis.com`.
+- `public/index.html` sets `script-src 'self' 'unsafe-inline'` for the inline script and the locally served jsPDF and pdf-lib builds. `connect-src` allows this origin plus `https://storage.googleapis.com` and `https://*.storage.googleapis.com`.
 
 ## Repository layout
 

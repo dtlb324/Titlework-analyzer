@@ -16,8 +16,10 @@ const enabledDownloadControls = page => page.evaluate(() => [...document.querySe
   .map(b => b.id || b.innerText.trim()));
 
 await runProbe('p6-pdf-recent', async ({ rec, step, srv, browser }) => {
-  await step('PDF with CDN blocked', async () => {
-    await withPage(browser, {}, async ({ page, errors, dialogs, external }) => {
+  await step('PDF with jsPDF blocked then retried', async () => {
+    let blockJsPdf = true;
+    const over = [[u => u.pathname === '/vendor/jspdf/jspdf.umd.min.js', r => (blockJsPdf ? r.abort() : r.fallback())]];
+    await withPage(browser, { overrides: over }, async ({ page, errors, dialogs, external }) => {
       await page.goto(srv.base + '#/job/job_complete');
       await page.waitForSelector('#jobBarDownloadBtn', { state: 'visible' });
       let dl = null; page.on('download', d => { dl = d; });
@@ -30,9 +32,24 @@ await runProbe('p6-pdf-recent', async ({ rec, step, srv, browser }) => {
         barEnabled: !document.getElementById('jobBarDownloadBtn').disabled,
         jspdf: typeof window.jspdf,
       }));
-      rec.check('PDF with CDN blocked', { download: !!dl, dialogs: dialogs.length, notice, ...st, blockedHosts: [...new Set(external.map(u => new URL(u).hostname))] },
-        'no download, no dialog; visible inline alert with a Retry button; Download stays enabled',
-        !dl && dialogs.length === 0 && !!notice && st.role === 'alert' && st.retry && st.barEnabled, clean(errors));
+      const blockedDownload = !!dl;
+      const blockedOk = !blockedDownload && dialogs.length === 0 && !!notice && st.role === 'alert' && st.retry && st.barEnabled && st.jspdf === 'undefined';
+      blockJsPdf = false;
+      let retryHead = '';
+      if (st.retry) {
+        const [retried] = await Promise.all([
+          page.waitForEvent('download', { timeout: 30000 }).catch(() => null),
+          page.click('#jobExportNotice [data-pdf-retry]'),
+        ]);
+        if (retried) {
+          const f = path.join(OUT, 'pdf-job_complete-retry.pdf');
+          await retried.saveAs(f);
+          retryHead = fs.readFileSync(f).subarray(0, 5).toString();
+        }
+      }
+      rec.check('PDF with jsPDF blocked then retried', { blockedDownload, dialogs: dialogs.length, notice, ...st, retryHead, externalRequests: external.length },
+        'no download while blocked, visible inline alert with Retry, then Retry loads local jsPDF and downloads a PDF with zero external requests',
+        blockedOk && retryHead === '%PDF-' && dialogs.length === 0 && external.length === 0, clean(errors));
     });
   });
 
@@ -45,12 +62,12 @@ await runProbe('p6-pdf-recent', async ({ rec, step, srv, browser }) => {
   ];
   for (const [id, needle] of pdfCases) {
     await step('PDF ' + id, async () => {
-      await withPage(browser, { allowCdn: true }, async ({ page, errors, dialogs }) => {
+      await withPage(browser, {}, async ({ page, errors, dialogs, external }) => {
         await page.goto(srv.base + '#/job/' + id);
         await page.waitForSelector('#jobBarDownloadBtn', { state: 'visible', timeout: 60000 });
         const t0 = Date.now();
         const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }).catch(() => null), page.click('#jobBarDownloadBtn')]);
-        const observed = { download: !!dl, dialogs: dialogs.length, notice: await visibleText(page, '#jobExportNotice') };
+        const observed = { download: !!dl, dialogs: dialogs.length, externalRequests: external.length, notice: await visibleText(page, '#jobExportNotice') };
         let pass = false;
         if (dl) {
           const f = path.join(OUT, `pdf-${id}.pdf`);
@@ -59,10 +76,10 @@ await runProbe('p6-pdf-recent', async ({ rec, step, srv, browser }) => {
           const { pages, text } = await pdfText(f);
           Object.assign(observed, { file: dl.suggestedFilename(), bytes: fs.statSync(f).size, ms: Date.now() - t0, head, pages, hasNeedle: text.includes(needle) });
           if (id === 'job_partial') observed.mentionsFailedDocs = /fail|omitted|incomplete/i.test(text);
-          pass = head === '%PDF-' && pages > 0 && observed.hasNeedle && /\.pdf$/i.test(dl.suggestedFilename()) && dialogs.length === 0 && !observed.notice
+          pass = head === '%PDF-' && pages > 0 && observed.hasNeedle && /\.pdf$/i.test(dl.suggestedFilename()) && dialogs.length === 0 && external.length === 0 && !observed.notice
             && (id !== 'job_partial' || observed.mentionsFailedDocs);
         }
-        rec.check('PDF ' + id, observed, `a PDF file containing "${needle}"${id === 'job_partial' ? ' and the failed-document warning' : ''}; no dialog or error notice`, pass, clean(errors));
+        rec.check('PDF ' + id, observed, `a PDF file containing "${needle}"${id === 'job_partial' ? ' and the failed-document warning' : ''}; no dialog, error notice or external request`, pass, clean(errors));
       });
     });
   }
@@ -72,7 +89,7 @@ await runProbe('p6-pdf-recent', async ({ rec, step, srv, browser }) => {
     let big = base;
     while (big.length < 2_000_000) big += '\n\n' + base.replace(/^# /m, '## Appendix ');
     const over = [[u => u.pathname === '/api/jobs/job_complete/result', r => json(r, 200, { result: { finalTitleOpinion: big, warnings: [], failedDocuments: [] } })]];
-    await withPage(browser, { allowCdn: true, overrides: over }, async ({ page, errors, dialogs }) => {
+    await withPage(browser, { overrides: over }, async ({ page, errors, dialogs, external }) => {
       await page.goto(srv.base + '#/job/job_complete');
       await page.waitForSelector('#jobBarDownloadBtn', { state: 'visible', timeout: 60000 });
       const t0 = Date.now();
@@ -81,13 +98,13 @@ await runProbe('p6-pdf-recent', async ({ rec, step, srv, browser }) => {
       let bytes = 0;
       let head = '';
       if (dl) { const f = path.join(OUT, 'pdf-job_complete-2mb.pdf'); await dl.saveAs(f); bytes = fs.statSync(f).size; head = fs.readFileSync(f).subarray(0, 5).toString(); }
-      rec.check('PDF 2MB opinion', { download: !!dl, bytes, head, ms, dialogs: dialogs.length }, 'a non-empty PDF file, no dialog (duration is recorded, not asserted: it includes the jsPDF download)', !!dl && head === '%PDF-' && bytes > 0 && dialogs.length === 0, clean(errors));
+      rec.check('PDF 2MB opinion', { download: !!dl, bytes, head, ms, dialogs: dialogs.length, externalRequests: external.length }, 'a non-empty PDF file, no dialog or external request (duration is recorded, not asserted)', !!dl && head === '%PDF-' && bytes > 0 && dialogs.length === 0 && external.length === 0, clean(errors));
     });
   });
 
   await step('PDF controls while result is missing', async () => {
     const over = [[u => u.pathname === '/api/jobs/job_complete/result', r => json(r, 404, { error: 'No result.' })]];
-    await withPage(browser, { allowCdn: true, overrides: over }, async ({ page, errors, dialogs }) => {
+    await withPage(browser, { overrides: over }, async ({ page, errors, dialogs }) => {
       let dl = null; page.on('download', d => { dl = d; });
       await page.goto(srv.base + '#/job/job_complete');
       await page.waitForSelector('#jobResults .rd-unavailable', { state: 'visible', timeout: 15000 }).catch(() => {});

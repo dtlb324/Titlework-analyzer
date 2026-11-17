@@ -112,6 +112,10 @@ test('the reduced-motion check requires the busy spinner to keep looping, and th
   assert.match(motion, /spinning\.length > 0/, 'reduced-motion check must assert the spinner still animates');
   const p6 = readFileSync(join(auditDir, 'p6-pdf-recent.mjs'), 'utf8');
   assert.doesNotMatch(p6, /ms\s*<\s*\d+/, 'a wall-clock threshold makes the 2 MB export check network-dependent');
+  assert.doesNotMatch(p6, /allowCdn|cdnjs\.cloudflare\.com/, 'PDF probes run against locally served jsPDF without CDN access');
+  assert.match(p6, /\/vendor\/jspdf\/jspdf\.umd\.min\.js/, 'p6 blocks the local jsPDF vendor route to verify missing-script recovery');
+  const harness = readFileSync(join(auditDir, 'lib/harness.mjs'), 'utf8');
+  assert.doesNotMatch(harness, /allowCdn|cdnjs\.cloudflare\.com/, 'audit harness aborts all external hosts');
 });
 
 test('the production image context excludes the audit probes', () => {
