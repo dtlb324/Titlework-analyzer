@@ -170,7 +170,7 @@ test('queue rejects understated bytes and does not let a cache hit bypass a stri
 });
 
 test('batched queue rejects oversized declared inputs without a read or model call', async () => {
-  const fixture = queueFixture(2, { sizeBytes: 101_000_000, mediaType: 'application/pdf', originalFilename: 'security.pdf' });
+  const fixture = queueFixture(2, { sizeBytes: 105_000_000, mediaType: 'application/pdf', originalFilename: 'security.pdf' });
   let reads = 0;
   let calls = 0;
   const previous = process.env.ABSTRACTION_BATCH_ENABLED;
