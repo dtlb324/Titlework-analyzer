@@ -2,15 +2,22 @@
 import {
   ABSTRACTION_PROMPT,
   BATCH_ABSTRACT_RESPONSE_SCHEMA,
+  addUsage,
   buildAbstractMessagesForChunks,
+  buildEscalationQualityContext,
   enrichVisualDeliveryForModel,
   estimateAbstractPayloadBytes,
   estimateRequestBytes,
+  evaluateAbstractEscalation,
   getAbstractionConfig,
+  isAbstractionEscalationEnabled,
   parseBatchAbstracts,
   persistCompletedAbstract,
   processChunkAbstraction,
   resolveChunkDelivery,
+  resolveEscalationMaxTokens,
+  resolveEscalationModel,
+  runChunkEscalation,
   runModelAbstraction,
   getBlobLoader,
   stripDocumentLabel,
@@ -183,6 +190,11 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     return [...finished, await processChunkAbstraction(ready[0].chunk, { ...options, workerId, leaseMs, maxAttempts })];
   }
 
+  const model = options.model || config.model;
+  const escalationModel = options.escalationModel ?? resolveEscalationModel();
+  const escalationMaxTokens = options.escalationMaxTokens ?? resolveEscalationMaxTokens();
+  const escalationEnabled = isAbstractionEscalationEnabled({ model, escalationModel, options });
+
   try {
     const preparations = await Promise.allSettled(ready.map(async entry => {
       const payload = await blobLoader(entry.chunk);
@@ -190,7 +202,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         await resolveChunkDelivery(entry.chunk, payload.bytes),
         entry.chunk,
         payload.bytes,
-        config.model,
+        model,
       );
       return {
         chunk: entry.chunk,
@@ -207,7 +219,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     preparations.length = 0;
 
     const messages = buildAbstractMessagesForChunks(preparedItems, globalStart);
-    const payloadBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, messages);
+    const payloadBytes = estimateRequestBytes(model, config.maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
       if (ready.length > 2) {
         const mid = Math.ceil(ready.length / 2);
@@ -227,11 +239,11 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
     const modelResult = await runModelAbstraction({
       messages,
-      model: config.model,
+      model,
       maxTokens: batchMaxTokens,
       payloadBytes,
-      escalationModel: config.escalationModel,
-      escalationMaxTokens: config.escalationMaxTokens,
+      escalationModel,
+      escalationMaxTokens,
       responseSchema: BATCH_ABSTRACT_RESPONSE_SCHEMA,
       options,
     });
@@ -239,37 +251,91 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     const perChunkPayload = Math.floor(payloadBytes / preparedItems.length);
     const batchResults = [];
     const fallbackChunks = [];
+    const noEscalateFallbackChunks = [];
     for (let i = 0; i < preparedItems.length; i++) {
       const item = preparedItems[i];
       const parsedItem = parsed[i];
       const text = String(parsedItem?.abstractText || '').trim();
       if (!text) {
+        item.payloadBytes = null;
         fallbackChunks.push(item.chunk);
         continue;
       }
+      const perChunkUsage = {
+        inputTokens: modelResult.usage.inputTokens != null
+          ? Math.floor(modelResult.usage.inputTokens / preparedItems.length)
+          : null,
+        outputTokens: modelResult.usage.outputTokens != null
+          ? Math.floor(modelResult.usage.outputTokens / preparedItems.length)
+          : null,
+      };
+      let finalText = text;
+      let finalModel = modelResult.model;
+      let finalPayloadBytes = perChunkPayload;
+      let finalUsage = perChunkUsage;
+      let escalationAttempted = false;
       try {
+        if (escalationEnabled) {
+          const assessment = evaluateAbstractEscalation(
+            text,
+            perChunkUsage,
+            config.maxTokens,
+            buildEscalationQualityContext(item.chunk, item.delivery),
+          );
+          if (assessment.shouldEscalate) {
+            const latestChunk = store.getChunk
+              ? await store.getChunk(item.chunk.jobId, item.chunk.id)
+              : item.chunk;
+            if (
+              !latestChunk
+              || latestChunk.abstractionStatus !== 'processing'
+              || (latestChunk.abstractionWorkerId && latestChunk.abstractionWorkerId !== workerId)
+            ) {
+              item.payloadBytes = null;
+              batchResults.push({ status: 'stale', chunkId: item.chunk.id });
+              continue;
+            }
+            escalationAttempted = true;
+            const escalated = await runChunkEscalation({
+              chunk: item.chunk,
+              payloadBytes: item.payloadBytes,
+              sequenceIndex: globalStart + i,
+              escalationModel,
+              escalationMaxTokens,
+              reasons: assessment.reasons,
+              options,
+            });
+            if (escalated.usage) {
+              finalUsage = addUsage(perChunkUsage, escalated.usage);
+            }
+            if (escalated.ok) {
+              finalText = escalated.text;
+              finalModel = escalated.model;
+              finalPayloadBytes = escalated.payloadBytes ?? finalPayloadBytes;
+            }
+          }
+        }
+        item.payloadBytes = null;
         const saved = await persistCompletedAbstract({
           store,
           chunk: item.chunk,
           workerId,
           sequenceIndex: globalStart + i,
-          abstractText: text,
-          modelUsed: modelResult.model,
-          payloadBytes: perChunkPayload,
-          usage: {
-            inputTokens: modelResult.usage.inputTokens != null
-              ? Math.floor(modelResult.usage.inputTokens / preparedItems.length)
-              : null,
-            outputTokens: modelResult.usage.outputTokens != null
-              ? Math.floor(modelResult.usage.outputTokens / preparedItems.length)
-              : null,
-          },
+          abstractText: finalText,
+          modelUsed: finalModel,
+          payloadBytes: finalPayloadBytes,
+          usage: finalUsage,
           latencyMs: Date.now() - startedAt,
           attemptCount: Math.max(1, Number(item.chunk.abstractionAttempts) || 1),
         });
         batchResults.push(saved);
       } catch (err) {
-        fallbackChunks.push(item.chunk);
+        item.payloadBytes = null;
+        if (escalationAttempted) {
+          noEscalateFallbackChunks.push(item.chunk);
+        } else {
+          fallbackChunks.push(item.chunk);
+        }
       }
     }
     if (fallbackChunks.length) {
@@ -277,6 +343,14 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         fallbackChunks,
         { ...options, workerId, leaseMs, maxAttempts },
         `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
+      );
+      batchResults.push(...partialResults);
+    }
+    if (noEscalateFallbackChunks.length) {
+      const partialResults = await fallbackToSingles(
+        noEscalateFallbackChunks,
+        { ...options, escalationEnabled: false, workerId, leaseMs, maxAttempts },
+        `batch_persist_partial:${noEscalateFallbackChunks.length}/${preparedItems.length}`,
       );
       batchResults.push(...partialResults);
     }

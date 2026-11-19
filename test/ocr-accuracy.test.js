@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { assessAccuracy, scoreModel } from '../public/ocr-accuracy.js';
+import {
+  assessAccuracy,
+  extractCalendarDates,
+  isDateEarlier,
+  parseAbstractFields,
+  scoreAbstractAgainstText,
+  scoreModel,
+  validateAbstractQuality,
+} from '../public/ocr-accuracy.js';
 
 const identity = fields => ({ fields });
 
@@ -200,4 +208,215 @@ test('abstention ranking is unchanged by boundary matching', () => {
   const shy = { id: 'shy', label: 'Abstains on 4 of 5', fields: { GRANTOR: 'John Smith', GRANTEE: 'ILLEGIBLE', 'DATE EXECUTED': 'ILLEGIBLE', 'DATE RECORDED': 'ILLEGIBLE', 'RECORDING REF': 'ILLEGIBLE' } };
   const { ranking } = assessAccuracy([{ filename: 'a.pdf', documentText: text, models: [full, shy] }]);
   assert.deepEqual(ranking.rows.map(row => [row.id, row.rank, row.matched, row.scored]), [['shy', 1, 1, 1], ['full', 2, 4, 5]]);
+});
+
+const CLEAN_BILATERAL_DEED = [
+  'DOC TYPE: Warranty Deed',
+  'DATE EXECUTED: April 7, 1923',
+  'DATE RECORDED: April 10, 1923',
+  'RECORDING REF: Vol 42, Page 118',
+  'GRANTOR: Ada Owner',
+  'GRANTEE: Bea Buyer',
+  'LEGAL DESC: NW/4 of Section 12, Block C-9 (metes and bounds)',
+  'SURFACE: yes',
+  'MINERALS: yes - 1/2',
+  'ROYALTY/NPRI: no',
+  'TERM: perpetual',
+  'AFTER-ACQUIRED TITLE: no',
+  'FRACTION CONVEYED: an undivided 1/2 interest in the minerals',
+  'RESERVATIONS: none stated',
+  'WARRANTY: full',
+  'ACKNOWLEDGMENT: yes',
+  'ISSUES: none noted',
+  'CONFIDENCE: High confidence across all fields.',
+].join('\n');
+
+test('parseAbstractFields handles DOCUMENT headers, bold/bullet labels, code fences, and continuation lines', () => {
+  const raw = [
+    '```',
+    'DOCUMENT #3 (deed.pdf):',
+    '- **DOC TYPE:** Mineral Deed',
+    '* **GRANTOR**: Ada Owner',
+    '  and John Owner',
+    '• GRANTEE: Bea Buyer',
+    '**LEGAL DESC:** Lot 1, Block 2',
+    '  Survey Abstract 104',
+    '```',
+  ].join('\n');
+  const fields = parseAbstractFields(raw);
+  assert.equal(fields['DOC TYPE'], 'Mineral Deed');
+  assert.equal(fields.GRANTOR, 'Ada Owner\nand John Owner');
+  assert.equal(fields.GRANTEE, 'Bea Buyer');
+  assert.equal(fields['LEGAL DESC'], 'Lot 1, Block 2\nSurvey Abstract 104');
+});
+
+test('extractCalendarDates and isDateEarlier handle courthouse phrasings and mixed precision', () => {
+  assert.deepEqual(extractCalendarDates('April 7th, A.D. 1923'), [{ year: 1923, month: 4, day: 7 }]);
+  assert.deepEqual(extractCalendarDates('7th day of April, A.D. 1923'), [{ year: 1923, month: 4, day: 7 }]);
+  assert.deepEqual(extractCalendarDates('Sept. 15, 1954'), [{ year: 1954, month: 9, day: 15 }]);
+  assert.deepEqual(extractCalendarDates('1923-04-07 and 04/10/1923'), [
+    { year: 1923, month: 4, day: 7 },
+    { year: 1923, month: 4, day: 10 },
+  ]);
+  assert.deepEqual(extractCalendarDates('April, 1923'), [{ year: 1923, month: 4, day: null }]);
+  assert.deepEqual(extractCalendarDates('1923'), [{ year: 1923, month: null, day: null }]);
+
+  assert.equal(isDateEarlier({ year: 1923, month: 4, day: 6 }, { year: 1923, month: 4, day: 7 }), true);
+  assert.equal(isDateEarlier({ year: 1923, month: 4, day: 7 }, { year: 1923, month: 4, day: 7 }), false);
+  assert.equal(isDateEarlier({ year: 1923, month: 4, day: null }, { year: 1923, month: 4, day: 7 }), false);
+  assert.equal(isDateEarlier({ year: 1923, month: 3, day: null }, { year: 1923, month: 4, day: 7 }), true);
+  assert.equal(isDateEarlier(null, { year: 1923, month: 4, day: 7 }), false);
+});
+
+test('validateAbstractQuality accepts clean bilateral deeds and unilateral affidavits', () => {
+  const bilateral = validateAbstractQuality(CLEAN_BILATERAL_DEED);
+  assert.equal(bilateral.valid, true);
+  assert.deepEqual(bilateral.reasons, []);
+
+  const affidavit = CLEAN_BILATERAL_DEED
+    .replace('DOC TYPE: Warranty Deed', 'DOC TYPE: Affidavit of Heirship')
+    .replace('GRANTEE: Bea Buyer', 'GRANTEE: not applicable')
+    .replace('SURFACE: yes', 'SURFACE: unclear')
+    .replace('ACKNOWLEDGMENT: yes', 'ACKNOWLEDGMENT: unclear')
+    .replace('DATE RECORDED: April 10, 1923\n', '');
+  const unilateral = validateAbstractQuality(affidavit);
+  assert.equal(unilateral.valid, true, JSON.stringify(unilateral.reasons));
+});
+
+test('validateAbstractQuality rejects not applicable grantee on bilateral conveyances', () => {
+  const result = validateAbstractQuality(CLEAN_BILATERAL_DEED.replace('GRANTEE: Bea Buyer', 'GRANTEE: not applicable'));
+  assert.equal(result.valid, false);
+  assert(result.reasons.includes('abstained_required_field:GRANTEE'));
+});
+
+test('validateAbstractQuality flags missing, blank, placeholder, and abstained required fields', () => {
+  for (const field of ['GRANTOR', 'GRANTEE', 'DATE EXECUTED', 'RECORDING REF', 'LEGAL DESC']) {
+    const missing = CLEAN_BILATERAL_DEED.replace(new RegExp(`^${field}:.*$`, 'm'), '');
+    assert(validateAbstractQuality(missing).reasons.includes(`missing_required_field:${field}`), `missing ${field}`);
+
+    const blank = CLEAN_BILATERAL_DEED.replace(new RegExp(`^${field}:.*$`, 'm'), `${field}:   `);
+    assert(validateAbstractQuality(blank).reasons.includes(`missing_required_field:${field}`), `blank ${field}`);
+
+    for (const badValue of ['not visible', 'unclear', 'n/a', 'none stated', '[placeholder]']) {
+      const abstained = CLEAN_BILATERAL_DEED.replace(new RegExp(`^${field}:.*$`, 'm'), `${field}: ${badValue}`);
+      assert(
+        validateAbstractQuality(abstained).reasons.includes(`abstained_required_field:${field}`),
+        `${field}: ${badValue}`,
+      );
+    }
+  }
+});
+
+test('validateAbstractQuality handles DATE RECORDED uncertainty without false positives on valid unclear flags', () => {
+  const uncertainRecorded = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: not visible'),
+  );
+  assert.equal(uncertainRecorded.valid, false);
+  assert(uncertainRecorded.reasons.includes('abstained_key_field:DATE RECORDED'));
+
+  const unclearRecorded = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: unclear'),
+  );
+  assert(unclearRecorded.reasons.includes('abstained_key_field:DATE RECORDED'));
+
+  const unrecorded = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: unrecorded'),
+  );
+  assert.equal(unrecorded.valid, true, JSON.stringify(unrecorded.reasons));
+
+  const validUnclearFlags = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED
+      .replace('SURFACE: yes', 'SURFACE: unclear')
+      .replace('ACKNOWLEDGMENT: yes', 'ACKNOWLEDGMENT: unclear'),
+  );
+  assert.equal(validUnclearFlags.valid, true, JSON.stringify(validUnclearFlags.reasons));
+});
+
+test('validateAbstractQuality detects inverted dates and minerals without fraction conveyed', () => {
+  const inverted = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: April 1, 1923'),
+  );
+  assert.equal(inverted.valid, false);
+  assert(inverted.reasons.includes('inverted_dates'));
+
+  const sameDay = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: April 7, 1923'),
+  );
+  assert.equal(sameDay.valid, true);
+
+  const multiGrantorExec = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED
+      .replace('DATE EXECUTED: April 7, 1923', 'DATE EXECUTED: April 7, 1923 and April 12, 1923')
+      .replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: April 10, 1923'),
+  );
+  assert.equal(multiGrantorExec.valid, true, 'latest recorded vs earliest executed should not false-positive');
+
+  for (const badFraction of ['', 'none stated', 'unclear', 'not applicable']) {
+    const replacement = badFraction === '' ? '' : `FRACTION CONVEYED: ${badFraction}`;
+    const missingFraction = validateAbstractQuality(
+      CLEAN_BILATERAL_DEED.replace('FRACTION CONVEYED: an undivided 1/2 interest in the minerals', replacement),
+    );
+    assert(missingFraction.reasons.includes('minerals_without_fraction'), `fraction=${badFraction}`);
+  }
+
+  const mineralsNo = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED
+      .replace('MINERALS: yes - 1/2', 'MINERALS: no')
+      .replace('FRACTION CONVEYED: an undivided 1/2 interest in the minerals', 'FRACTION CONVEYED: none stated'),
+  );
+  assert.equal(mineralsNo.valid, true);
+
+  const affidavitMinerals = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED
+      .replace('DOC TYPE: Warranty Deed', 'DOC TYPE: Affidavit of Heirship')
+      .replace('GRANTEE: Bea Buyer', 'GRANTEE: not applicable')
+      .replace('FRACTION CONVEYED: an undivided 1/2 interest in the minerals', 'FRACTION CONVEYED: not applicable'),
+  );
+  assert.equal(affidavitMinerals.valid, true);
+});
+
+test('validateAbstractQuality and scoreAbstractAgainstText ground identity fields against embedded PDF text', () => {
+  const embeddedText = [
+    'WARRANTY DEED',
+    'Know all men by these presents that Ada Owner, grantor, for valuable consideration, grants to Bea Buyer, grantee,',
+    'all of the NW/4 of Section 12, Block C-9, Ward County, Texas.',
+    'Witness my hand this 7th day of April, A.D. 1923.',
+    'Recorded April 10, 1923 in Book 42, Page 118, Deed Records.',
+  ].join('\n');
+
+  const grounded = validateAbstractQuality(CLEAN_BILATERAL_DEED, { documentText: embeddedText });
+  assert.equal(grounded.valid, true, JSON.stringify(grounded));
+  assert.equal(grounded.textMatch.status, 'scored');
+  assert.equal(grounded.textMatch.percent, 100);
+
+  const oneMismatch = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: April 11, 1923'),
+    { documentText: embeddedText },
+  );
+  assert.equal(oneMismatch.textMatch.percent, 80);
+  assert.equal(oneMismatch.valid, true, '4/5 = 80% should pass default 65% grounding threshold');
+
+  const hallucinated = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED
+      .replace('GRANTOR: Ada Owner', 'GRANTOR: Zebra Corp')
+      .replace('GRANTEE: Bea Buyer', 'GRANTEE: Omega Trust')
+      .replace('RECORDING REF: Vol 42, Page 118', 'RECORDING REF: Vol 999, Page 1'),
+    { documentText: embeddedText },
+  );
+  assert.equal(hallucinated.valid, false);
+  assert(hallucinated.reasons.includes('low_text_match'));
+  assert(hallucinated.textMatch.percent < 65);
+
+  const multiParty = scoreAbstractAgainstText(
+    'Ada Owner and John Owner convey to Bea Buyer and Carl Buyer on 04/07/1923 in Instrument No. 2024-55.',
+    {
+      GRANTOR: 'Ada Owner; John Owner',
+      GRANTEE: 'Bea Buyer\nCarl Buyer',
+      'DATE EXECUTED': 'April 7, 1923',
+      'RECORDING REF': 'Doc #2024-55',
+    },
+  );
+  assert.equal(multiParty.matched, 4);
+  assert.equal(multiParty.scored, 4);
+  assert.equal(multiParty.percent, 100);
 });

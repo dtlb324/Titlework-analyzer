@@ -6,11 +6,15 @@ import {
   buildAbstractMessagesForChunks,
   resolveChunkDelivery,
   estimateAbstractPayloadBytes,
+  evaluateAbstractEscalation,
   defaultBlobLoader,
   getAbstractionConfig,
   resolveAbstractModel,
+  resolveEscalationMaxTokens,
+  resolveEscalationModel,
   processChunkAbstraction,
   processJobAbstraction,
+  shouldEscalateAbstract,
   tryReuseExistingAbstract,
   validateAbstractPersistenceInput,
   enrichVisualDeliveryForModel,
@@ -55,6 +59,30 @@ function mockRes() {
     status(code) { this.statusCode = code; return this; },
     json(data) { this.body = data; return this; },
   };
+}
+
+function cleanAbstract(note = 'All fields clearly legible.', docNum = 1) {
+  return [
+    `DOCUMENT #${docNum}:`,
+    'DOC TYPE: Warranty Deed',
+    'DATE EXECUTED: January 1, 2020',
+    'DATE RECORDED: January 2, 2020',
+    'RECORDING REF: Vol 1, Page 2',
+    'GRANTOR: John Smith',
+    'GRANTEE: Mary Jones',
+    'LEGAL DESC: Section 1, Block C-9',
+    'SURFACE: yes',
+    'MINERALS: yes - 1/2',
+    'ROYALTY/NPRI: no',
+    'TERM: perpetual',
+    'AFTER-ACQUIRED TITLE: no',
+    'FRACTION CONVEYED: 1/2 mineral interest',
+    'RESERVATIONS: none stated',
+    'WARRANTY: full',
+    'ACKNOWLEDGMENT: yes',
+    'ISSUES: none noted',
+    `CONFIDENCE: ${note}`,
+  ].join('\n');
 }
 
 function makeChunk(overrides = {}) {
@@ -472,7 +500,7 @@ test('POST /api/jobs/:id/abstraction/start enqueues quickly for the Cloud Run wo
     assert(blockTypes.includes('document'), 'Expected PDF document block');
     assert(request.payloadBytes <= 3_900_000, 'Expected safe payload envelope');
     return {
-      text: 'DOCUMENT #1:\nAbstracted deed facts.',
+      text: cleanAbstract('Abstracted deed facts.'),
       model: 'gemini-2.5-flash',
       usage: { input_tokens: 111, output_tokens: 22 },
     };
@@ -713,7 +741,7 @@ test('processJobAbstraction preserves completed chunks when another chunk fails'
         err.status = 500;
         throw err;
       }
-      return { text: 'DOCUMENT #1:\nCompleted abstract.', model: 'gemini-2.5-flash', usage: {} };
+      return { text: cleanAbstract('Completed abstract.'), model: 'gemini-2.5-flash', usage: {} };
     },
     maxAttempts: 1,
   });
@@ -778,7 +806,7 @@ test('Phase 4: worker claims pending chunks under a lease', async () => {
     modelClient: async () => {
       modelCalls += 1;
       return {
-        text: '["Claim test A.","Claim test B."]',
+        text: JSON.stringify([cleanAbstract('Claim test A.', 1), cleanAbstract('Claim test B.', 2)]),
         model: 'gemini-2.5-flash',
         usage: {},
       };
@@ -805,7 +833,7 @@ test('Phase 4: claim sets lease fields while chunk is in flight', async () => {
     blobLoader: async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType }),
     modelClient: async () => {
       observedDuringRun = store.chunks.get('chk_test_1');
-      return { text: 'DOCUMENT #1:\nok.', model: 'gemini-2.5-flash', usage: {} };
+      return { text: cleanAbstract('ok.'), model: 'gemini-2.5-flash', usage: {} };
     },
     batchLimit: 1,
     concurrency: 1,
@@ -880,7 +908,7 @@ test('Phase 4: stale abstraction worker cannot overwrite a reclaimed chunk', asy
           status: 'completed',
         });
       }
-      return { text: 'DOCUMENT #1:\nstale worker abstract', model: 'gemini-2.5-flash', usage: {} };
+      return { text: cleanAbstract('stale worker abstract'), model: 'gemini-2.5-flash', usage: {} };
     },
     maxAttempts: 1,
   });
@@ -912,7 +940,7 @@ test('Phase 4: completed chunks are not reprocessed when /abstraction/process ru
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
     modelCalls += 1;
-    return { text: 'DOCUMENT #2:\nNew abstract.', model: 'gemini-2.5-flash', usage: {} };
+    return { text: cleanAbstract('New abstract.', 2), model: 'gemini-2.5-flash', usage: {} };
   };
 
   const res = mockRes();
@@ -932,7 +960,7 @@ test('Phase 4: failed chunks can be retried via /retry-failed', async () => {
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from('%PDF'), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => {
     modelCalls += 1;
-    return { text: 'DOCUMENT #1:\nRetried.', model: 'gemini-2.5-flash', usage: {} };
+    return { text: cleanAbstract('Retried.'), model: 'gemini-2.5-flash', usage: {} };
   };
 
   const res = mockRes();
@@ -1023,7 +1051,7 @@ test('Phase 4: 504 timeout still splits PDF chunks into smaller children', async
       err.status = 504;
       throw err;
     }
-    return { text: 'DOCUMENT #1:\nSplit child abstract.', model: 'gemini-2.5-flash', usage: {} };
+    return { text: cleanAbstract('Split child abstract.'), model: 'gemini-2.5-flash', usage: {} };
   };
 
   const result = await processAbstractionBatch('job_test_1', {
@@ -1159,7 +1187,7 @@ test('Phase 4: job progress rolls up correctly across pending/processing/complet
         err.status = 400;
         throw err;
       }
-      return { text: 'DOCUMENT #1:\nok.', model: 'gemini-2.5-flash', usage: {} };
+      return { text: cleanAbstract('ok.'), model: 'gemini-2.5-flash', usage: {} };
     },
     batchLimit: 5,
     concurrency: 1,
@@ -1447,7 +1475,7 @@ test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', a
     modelClient: async request => {
       models.push(request.model);
       return {
-        text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nGRANTOR: A\nGRANTEE: B\nISSUES: none noted\nCONFIDENCE: Clear, single-instrument abstract.',
+        text: cleanAbstract('Clear, single-instrument abstract.'),
         model: 'gemini-2.5-flash',
         usage: { input_tokens: 10, output_tokens: 15 },
       };
@@ -1691,7 +1719,7 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
   globalThis.__TITLE_ANALYZER_BLOB_LOADER__ = async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType });
   globalThis.__TITLE_ANALYZER_MODEL_CLIENT__ = async () => ({
-    text: '["ok X.","ok Y.","ok Z."]',
+    text: JSON.stringify([cleanAbstract('ok X.', 1), cleanAbstract('ok Y.', 2), cleanAbstract('ok Z.', 3)]),
     model: 'gemini-2.5-flash',
     usage: {},
   });
@@ -1701,6 +1729,366 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.completedInBatch === 3, `Expected three completions in process batch, got ${res.body.completedInBatch}`);
   assert(res.body.hasMore === false, 'Expected no more work after draining batch');
+});
+
+async function makeTextPdfBytes(lines, { extraBlankPage = false, scanBytes = 0 } = {}) {
+  const { PDFDocument, PDFName, StandardFonts } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([612, 792]);
+  lines.forEach((line, i) => page.drawText(line, { x: 36, y: 760 - i * 14, size: 10, font }));
+  if (scanBytes > 0) {
+    page.node.set(PDFName.of('ScanData'), doc.context.register(doc.context.stream(Buffer.alloc(scanBytes, 65))));
+  }
+  if (extraBlankPage) {
+    doc.addPage([612, 792]);
+  }
+  return Buffer.from(await doc.save({ useObjectStreams: false }));
+}
+
+async function withEnvOverrides(vars, fn) {
+  const prev = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('Priority 4: text-mode PDF flagged for ILLEGIBLE or deterministic mismatch escalates once with visual PDF bytes', async () => {
+  const textPdfBytes = await makeTextPdfBytes([
+    'WARRANTY DEED',
+    'Grantor: John Smith conveys to Grantee: Mary Jones',
+    'Executed January 1, 2020 and recorded January 2, 2020 in Vol 1, Page 2.',
+    'Legal Description: Section 1, Block C-9, Ward County, Texas. Minerals 1/2 conveyed.',
+  ]);
+  const base64Pdf = textPdfBytes.toString('base64');
+
+  for (const scenario of ['illegible', 'missing_ref', 'low_text_match']) {
+    const store = createMemoryPhase3Store([makeChunk({ id: `chk_text_${scenario}`, sizeBytes: textPdfBytes.byteLength })]);
+    const requests = [];
+    const result = await processChunkAbstraction(store.chunks.get(`chk_text_${scenario}`), {
+      store,
+      workerId: 'wkr_text_esc',
+      blobLoader: async () => ({ bytes: textPdfBytes, mediaType: 'application/pdf' }),
+      modelClient: async req => {
+        requests.push(req);
+        if (!req.escalation) {
+          let text = cleanAbstract('Initial text-mode pass.');
+          if (scenario === 'illegible') {
+            text = text.replace('Vol 1, Page 2', 'ILLEGIBLE - VERIFY MANUALLY');
+          } else if (scenario === 'missing_ref') {
+            text = text.replace('RECORDING REF: Vol 1, Page 2\n', '');
+          } else if (scenario === 'low_text_match') {
+            text = text
+              .replace('GRANTOR: John Smith', 'GRANTOR: Zebra Corp')
+              .replace('GRANTEE: Mary Jones', 'GRANTEE: Omega Trust')
+              .replace('RECORDING REF: Vol 1, Page 2', 'RECORDING REF: Vol 99, Page 999');
+          }
+          return { text, model: 'gemini-3.1-flash-lite', usage: { input_tokens: 15, output_tokens: 25 } };
+        }
+        return {
+          text: cleanAbstract('Visual escalation verified.'),
+          model: 'claude-sonnet-5-5',
+          usage: { input_tokens: 40, output_tokens: 35 },
+        };
+      },
+    });
+
+    assert(result.status === 'completed', `Expected completed for ${scenario}`);
+    assert(requests.length === 2, `Expected 1 Tier 1 + 1 escalation call for ${scenario}, got ${requests.length}`);
+
+    const tier1Content = requests[0].messages[0].content;
+    assert(!tier1Content.some(b => b.type === 'document'), `Tier 1 should be text-only for ${scenario}`);
+    assert(tier1Content.at(-1).text.includes('EXTRACTED PDF TEXT'), 'Tier 1 prompt should contain extracted text');
+
+    const escContent = requests[1].messages[0].content;
+    const docBlock = escContent.find(b => b.type === 'document');
+    assert(docBlock, `Escalation must attach PDF document block for ${scenario}`);
+    assert(docBlock.source.type === 'base64', 'Escalation must send base64 PDF bytes');
+    assert(docBlock.source.data === base64Pdf, 'Escalation must attach the full PDF bytes');
+    assert(!escContent.at(-1).text.includes('EXTRACTED PDF TEXT'), 'Escalation must not be text-only');
+
+    const saved = store.abstracts.get(`chk_text_${scenario}`);
+    assert(saved.modelUsed === 'claude-sonnet-5-5', 'Expected escalated model saved');
+    assert(saved.inputTokens === 55 && saved.outputTokens === 60, 'Expected summed input/output tokens');
+  }
+});
+
+test('Priority 4: gemini_file PDF escalates via base64 for Anthropic/OpenRouter and fresh upload for Gemini', async () => {
+  const { PDFDocument, PDFName } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  page.node.set(PDFName.of('ScanData'), doc.context.register(doc.context.stream(Buffer.alloc(120_000, 66))));
+  const scannedPdfBytes = Buffer.from(await doc.save({ useObjectStreams: false }));
+  const base64Pdf = scannedPdfBytes.toString('base64');
+
+  const prevFetch = globalThis.fetch;
+  let uploadCounter = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (init.method === 'POST' && target.includes('/upload/v1beta/files')) {
+      uploadCounter += 1;
+      return new Response(JSON.stringify({
+        file: {
+          uri: `https://generativelanguage.googleapis.com/v1beta/files/scan_${uploadCounter}`,
+          name: `files/scan_${uploadCounter}`,
+          mimeType: 'application/pdf',
+        },
+      }), { status: 200 });
+    }
+    if (target.includes('/files/scan_')) {
+      return new Response(JSON.stringify({ state: 'ACTIVE' }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${target}`);
+  };
+
+  try {
+    await withEnvOverrides({
+      GEMINI_API_KEY: 'synthetic-gemini-key',
+      GEMINI_FILE_API_ENABLED: 'true',
+      GEMINI_FILE_API_MIN_BYTES: '100000',
+    }, async () => {
+      for (const targetModel of ['claude-sonnet-5-5', 'anthropic/claude-haiku-5.5']) {
+        const beforeUploads = uploadCounter;
+        const store = createMemoryPhase3Store([makeChunk({ id: `chk_gf_${targetModel}`, sizeBytes: scannedPdfBytes.byteLength })]);
+        const requests = [];
+        await processChunkAbstraction(store.chunks.get(`chk_gf_${targetModel}`), {
+          store,
+          escalationModel: targetModel,
+          blobLoader: async () => ({ bytes: scannedPdfBytes, mediaType: 'application/pdf' }),
+          modelClient: async req => {
+            requests.push(req);
+            if (!req.escalation) {
+              return {
+                text: cleanAbstract().replace('GRANTOR: John Smith', 'GRANTOR: ILLEGIBLE - VERIFY MANUALLY'),
+                model: 'gemini-3.1-flash-lite',
+                usage: { input_tokens: 10, output_tokens: 10 },
+              };
+            }
+            return {
+              text: cleanAbstract('Base64 escalation complete.'),
+              model: targetModel,
+              usage: { input_tokens: 20, output_tokens: 20 },
+            };
+          },
+        });
+        assert(requests.length === 2, `Expected 2 calls for ${targetModel}`);
+        assert(uploadCounter === beforeUploads + 1, 'Only Tier 1 should upload to Gemini Files API');
+        const tier1Doc = requests[0].messages[0].content.find(b => b.type === 'document');
+        assert(tier1Doc.source.type === 'file_uri', 'Tier 1 should use file_uri');
+        const escDoc = requests[1].messages[0].content.find(b => b.type === 'document');
+        assert(escDoc.source.type === 'base64', `${targetModel} escalation must use base64, not file_uri`);
+        assert(escDoc.source.data === base64Pdf, `${targetModel} must receive raw PDF base64`);
+      }
+
+      const beforeGeminiUploads = uploadCounter;
+      const storeGemini = createMemoryPhase3Store([makeChunk({ id: 'chk_gf_gemini', sizeBytes: scannedPdfBytes.byteLength })]);
+      const geminiRequests = [];
+      await processChunkAbstraction(storeGemini.chunks.get('chk_gf_gemini'), {
+        store: storeGemini,
+        escalationModel: 'gemini-4-hydrogen',
+        blobLoader: async () => ({ bytes: scannedPdfBytes, mediaType: 'application/pdf' }),
+        modelClient: async req => {
+          geminiRequests.push(req);
+          if (!req.escalation) {
+            return {
+              text: cleanAbstract().replace('GRANTOR: John Smith', 'GRANTOR: ILLEGIBLE - VERIFY MANUALLY'),
+              model: 'gemini-3.1-flash-lite',
+              usage: {},
+            };
+          }
+          return { text: cleanAbstract('Fresh Gemini upload escalation.'), model: 'gemini-4-hydrogen', usage: {} };
+        },
+      });
+      assert(uploadCounter === beforeGeminiUploads + 2, 'Gemini escalation should upload a fresh Gemini file instead of reusing Tier 1 URI');
+      const t1Uri = geminiRequests[0].messages[0].content.find(b => b.type === 'document').source.uri;
+      const escUri = geminiRequests[1].messages[0].content.find(b => b.type === 'document').source.uri;
+      assert(t1Uri !== escUri, 'Escalation must not reuse Tier 1 file_uri');
+    });
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('Priority 4: hybrid-mode PDF escalates with full visual PDF bytes', async () => {
+  const hybridBytes = await makeTextPdfBytes([
+    'WARRANTY DEED',
+    'Grantor: John Smith conveys to Grantee: Mary Jones',
+    'Executed January 1, 2020 and recorded January 2, 2020 in Vol 1, Page 2.',
+    'Legal Description: Section 1, Block C-9, Ward County, Texas.',
+  ], { extraBlankPage: true });
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_hybrid', sizeBytes: hybridBytes.byteLength })]);
+  const requests = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_hybrid'), {
+    store,
+    blobLoader: async () => ({ bytes: hybridBytes, mediaType: 'application/pdf' }),
+    modelClient: async req => {
+      requests.push(req);
+      if (!req.escalation) {
+        return {
+          text: cleanAbstract().replace('CONFIDENCE: All fields clearly legible.', 'CONFIDENCE: low'),
+          model: 'gemini-3.1-flash-lite',
+          usage: {},
+        };
+      }
+      return { text: cleanAbstract('Full visual hybrid escalation.'), model: 'claude-sonnet-5-5', usage: {} };
+    },
+  });
+  assert(result.status === 'completed');
+  assert(requests.length === 2);
+  assert(requests[0].messages[0].content.at(-1).text.includes('HYBRID PDF'), 'Tier 1 should be hybrid mode');
+  const escContent = requests[1].messages[0].content;
+  assert(!escContent.at(-1).text.includes('HYBRID PDF'), 'Escalation must not send partial hybrid prompt');
+  const escDoc = escContent.find(b => b.type === 'document');
+  assert(escDoc?.source?.type === 'base64' && escDoc.source.data === hybridBytes.toString('base64'), 'Escalation must send full PDF bytes');
+});
+
+test('Priority 4: escalation error logs structured warning without retrying and preserves Tier 1 abstract', async () => {
+  const warnings = [];
+  const prevWarn = console.warn;
+  console.warn = msg => warnings.push(msg);
+  try {
+    await withEnvOverrides({ ANTHROPIC_API_KEY: 'sk-ant-secret-value-12345' }, async () => {
+      const store = createMemoryPhase3Store([makeChunk({ id: 'chk_esc_err' })]);
+      let escalationCalls = 0;
+      const tier1Text = cleanAbstract('Tier 1 preserved despite error.').replace('RECORDING REF: Vol 1, Page 2\n', '');
+      const result = await processChunkAbstraction(store.chunks.get('chk_esc_err'), {
+        store,
+        blobLoader: async () => ({ bytes: Buffer.from('%PDF-test'), mediaType: 'application/pdf' }),
+        modelClient: async req => {
+          if (req.escalation) {
+            escalationCalls += 1;
+            throw new Error('Upstream rejected sk-ant-secret-value-12345 on escalation');
+          }
+          return { text: tier1Text, model: 'gemini-3.1-flash-lite', usage: { input_tokens: 12, output_tokens: 18 } };
+        },
+      });
+      assert(result.status === 'completed');
+      assert(escalationCalls === 1, `Escalation must never retry, got ${escalationCalls} calls`);
+      assert(store.abstracts.get('chk_esc_err').modelUsed === 'gemini-3.1-flash-lite', 'Tier 1 model should be preserved');
+      assert(store.abstracts.get('chk_esc_err').abstractText.includes('Tier 1 preserved'), 'Tier 1 abstract should be preserved');
+      const parsedWarn = warnings.map(w => { try { return JSON.parse(w); } catch { return null; } }).find(e => e?.event === 'abstraction_escalation_failed');
+      assert(parsedWarn, 'Expected structured abstraction_escalation_failed warning');
+      assert(parsedWarn.chunkId === 'chk_esc_err');
+      assert(parsedWarn.reasons.includes('missing_required_field:RECORDING REF'));
+      assert(!JSON.stringify(parsedWarn).includes('sk-ant-secret-value-12345'), 'Warning must redact secret keys');
+    });
+
+    warnings.length = 0;
+    const hugePdfBytes = Buffer.alloc(14_000_000, 65);
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      const target = String(url);
+      if (init.method === 'POST' && target.includes('/upload/v1beta/files')) {
+        return new Response(JSON.stringify({ file: { uri: 'https://generativelanguage.googleapis.com/v1beta/files/huge1', name: 'files/huge1', mimeType: 'application/pdf' } }), { status: 200 });
+      }
+      if (target.includes('/files/huge1')) return new Response(JSON.stringify({ state: 'ACTIVE' }), { status: 200 });
+      throw new Error(`unexpected fetch ${target}`);
+    };
+    try {
+      await withEnvOverrides({ GEMINI_API_KEY: 'synthetic-key', GEMINI_FILE_API_ENABLED: 'true' }, async () => {
+        const store = createMemoryPhase3Store([makeChunk({ id: 'chk_esc_413', sizeBytes: hugePdfBytes.byteLength })]);
+        let escalationCalls = 0;
+        const result = await processChunkAbstraction(store.chunks.get('chk_esc_413'), {
+          store,
+          blobLoader: async () => ({ bytes: hugePdfBytes, mediaType: 'application/pdf' }),
+          modelClient: async req => {
+            if (req.escalation) {
+              escalationCalls += 1;
+              return { text: cleanAbstract(), model: req.model, usage: {} };
+            }
+            return {
+              text: cleanAbstract('Tier 1 kept when inline escalation too large.').replace(/CONFIDENCE:.*$/m, 'CONFIDENCE: low'),
+              model: 'gemini-3.1-flash-lite',
+              usage: {},
+            };
+          },
+        });
+        assert(result.status === 'completed');
+        assert(escalationCalls === 0, 'Oversized inline escalation must fail before invoking modelClient');
+        const parsedWarn = warnings.map(w => { try { return JSON.parse(w); } catch { return null; } }).find(e => e?.event === 'abstraction_escalation_failed');
+        assert(parsedWarn && parsedWarn.errorType === 'payload_too_large', `Expected payload_too_large warning, got ${JSON.stringify(parsedWarn)}`);
+      });
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  } finally {
+    console.warn = prevWarn;
+  }
+});
+
+test('Priority 4: escalation never loops even when escalated abstract remains illegible or incomplete', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_no_loop' })]);
+  let calls = 0;
+  const result = await processChunkAbstraction(store.chunks.get('chk_no_loop'), {
+    store,
+    blobLoader: async () => ({ bytes: Buffer.from('%PDF-test'), mediaType: 'application/pdf' }),
+    modelClient: async req => {
+      calls += 1;
+      return {
+        text: `DOC TYPE: Warranty Deed\nGRANTOR: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: ${req.escalation ? 'low still illegible' : 'low'}`,
+        model: req.model,
+        usage: { input_tokens: 10, output_tokens: 10 },
+      };
+    },
+  });
+  assert(result.status === 'completed');
+  assert(calls === 2, `Expected exactly 2 calls (Tier 1 + 1 bounded escalation), got ${calls}`);
+  assert(store.abstracts.get('chk_no_loop').modelUsed === 'claude-sonnet-5-5');
+});
+
+test('Priority 5: deterministic triggers fire via shouldEscalateAbstract/evaluateAbstractEscalation while clean and CSV skip false positives', async () => {
+  const clean = cleanAbstract();
+  assert(shouldEscalateAbstract(clean) === false, 'Clean abstract must not escalate');
+
+  const missingField = clean.replace('RECORDING REF: Vol 1, Page 2\n', '');
+  const missingEval = evaluateAbstractEscalation(missingField);
+  assert(missingEval.shouldEscalate === true && missingEval.reasons.includes('missing_required_field:RECORDING REF'));
+
+  const abstainedField = clean.replace('GRANTEE: Mary Jones', 'GRANTEE: not visible');
+  const abstainedEval = evaluateAbstractEscalation(abstainedField);
+  assert(abstainedEval.shouldEscalate === true && abstainedEval.reasons.includes('abstained_required_field:GRANTEE'));
+
+  const invertedDates = clean.replace('DATE RECORDED: January 2, 2020', 'DATE RECORDED: December 20, 2019');
+  const invertedEval = evaluateAbstractEscalation(invertedDates);
+  assert(invertedEval.shouldEscalate === true && invertedEval.reasons.includes('inverted_dates'));
+
+  const mineralsNoFrac = clean.replace('FRACTION CONVEYED: 1/2 mineral interest', 'FRACTION CONVEYED: none stated');
+  const mineralsEval = evaluateAbstractEscalation(mineralsNoFrac);
+  assert(mineralsEval.shouldEscalate === true && mineralsEval.reasons.includes('minerals_without_fraction'));
+
+  const lowMatchEval = evaluateAbstractEscalation(
+    clean
+      .replace('GRANTOR: John Smith', 'GRANTOR: Fake Person')
+      .replace('GRANTEE: Mary Jones', 'GRANTEE: Another Fake')
+      .replace('RECORDING REF: Vol 1, Page 2', 'RECORDING REF: Vol 99, Page 99'),
+    {},
+    2000,
+    { documentText: 'Grantor John Smith conveys to Grantee Mary Jones on January 1, 2020, recorded January 2, 2020 in Vol 1 Page 2.' },
+  );
+  assert(lowMatchEval.shouldEscalate === true && lowMatchEval.reasons.includes('low_text_match'));
+
+  assert(
+    shouldEscalateAbstract('Owner: John Smith, 50% mineral interest.', {}, 2000, { isCsv: true }) === false,
+    'CSV abstract without deed template fields must not false-positive escalate',
+  );
+});
+
+test('Priority 4: resolveEscalationModel and resolveEscalationMaxTokens read env dynamically', async () => {
+  await withEnvOverrides({ ABSTRACT_ESCALATION_MODEL: 'anthropic/claude-haiku-5.5', ABSTRACT_ESCALATION_MAX_TOKENS: '6000' }, async () => {
+    assert(resolveEscalationModel() === 'anthropic/claude-haiku-5.5');
+    assert(resolveEscalationMaxTokens() === 6000);
+    assert(getAbstractionConfig().escalationModel === 'anthropic/claude-haiku-5.5');
+    assert(getAbstractionConfig().escalationMaxTokens === 6000);
+  });
 });
 
 for (const { name, fn } of tests) {
