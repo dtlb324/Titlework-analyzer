@@ -333,6 +333,10 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(releaseWorkflow.includes('BULK_JOB_MIN_ABSTRACTS=50'), 'Expected 50-doc parallel synthesis threshold on API deploy');
   assert(releaseWorkflow.includes('SYNTHESIS_CHUNK_SIZE=50'), 'Expected 50-doc synthesis chunk cap on API deploy');
   assert(releaseWorkflow.includes('BULK_SYNTHESIS_CHUNK_SIZE=50'), 'Expected bulk synthesis chunk cap to match parallel chunk cap');
+  assert(releaseWorkflow.includes('SYNTHESIS_MAX_TOKENS=8000'), 'Expected raised 8000-token synthesis output cap on API deploy');
+  assert(releaseWorkflow.includes('SYNTHESIS_PARTIAL_MAX_TOKENS=5000'), 'Expected raised 5000-token partial synthesis output cap on API deploy');
+  assert(!releaseWorkflow.includes('SYNTHESIS_MAX_TOKENS=5000'), 'Old 5000-token synthesis cap must not remain');
+  assert(!releaseWorkflow.includes('SYNTHESIS_PARTIAL_MAX_TOKENS=4000'), 'Old 4000-token partial synthesis cap must not remain');
   assert(releaseWorkflow.includes('ABSTRACTION_ESCALATION_ENABLED=false'), 'Expected Phase 0 abstraction escalation off on API deploy');
   assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
   assert(releaseWorkflow.includes('GH_REPO: ${{ github.repository }}'), 'Expected github-release job to set GH_REPO without a checkout');

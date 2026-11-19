@@ -42,6 +42,7 @@ export function estimateChunkPayloadBytes(chunk, payloadBytes = null, delivery =
 }
 
 export function chunkRequiresSoloBatch(chunk, estimatedPayload = null) {
+  if (chunk?.renderedImages) return true;
   const payload = estimatedPayload ?? estimateChunkPayloadBytes(chunk);
   if (payload > LARGE_CHUNK_BYTES) return true;
   if (chunk.pageStart && chunk.pageEnd && isPdfChunk(chunk)) {

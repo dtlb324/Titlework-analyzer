@@ -715,6 +715,204 @@ test('finding 12 control: one follow-up renders its question then its answer', a
   assert.deepEqual(turns(), ['user:Q1 only', 'assistant:ANSWER-TO-Q1']);
 });
 
+function makePdfFile(name, extraBytes = 0) {
+  const head = Buffer.from('%PDF-1.4\n');
+  const tail = Buffer.from('\n%%EOF\n');
+  const buf = extraBytes > 0 ? Buffer.concat([head, Buffer.alloc(extraBytes, 65), tail]) : Buffer.concat([head, tail]);
+  return new File([buf], name, { type: 'application/pdf' });
+}
+
+const hasVisualBlock = body =>
+  Array.isArray(body?.messages?.[0]?.content) &&
+  body.messages[0].content.some(block => block?.type === 'document' || block?.type === 'image');
+
+const parseBlocks = call => (call.content.startsWith('[') ? JSON.parse(call.content) : null);
+
+test('priority 6: browser callAbstractionWithEscalation escalates once to claude-sonnet-5-5 on ILLEGIBLE marker', async () => {
+  const server = makeJobServer({
+    hooks: browserOnlyStorage,
+    analyzeReply: body => {
+      if (body.model.startsWith('gemini')) return 'Instrument: Warranty Deed\nDate: [ILLEGIBLE - VERIFY MANUALLY]';
+      if (hasVisualBlock(body)) return 'Instrument: Warranty Deed\nDate: 1991-05-10\nGrantee: Alice.';
+      return '## FINAL OWNERSHIP DETERMINATION\nAlice owns 100%.';
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('illegible.png')]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.equal(server.analyze.length, 3);
+  assert.equal(server.analyze[0].model.startsWith('gemini'), true);
+  assert.equal(server.analyze[1].model, 'claude-sonnet-5-5');
+  assert.equal(Array.isArray(parseBlocks(server.analyze[1])), true);
+  assert.equal(server.analyze[2].model, 'claude-sonnet-5-5');
+  assert.equal(parseBlocks(server.analyze[2]), null);
+  assert.equal(app.getEl('highDpiRereadBar').innerHTML, '');
+});
+
+test('priority 6: staging a 15+ page PDF shows multi-instrument split hint in #intakeSummary', async () => {
+  const server = makeJobServer({ hooks: browserOnlyStorage });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  app.ctx.PDFLib = { PDFDocument: { load: async () => ({ getPageCount: () => 18 }) } };
+  await app.ctx.handleFiles([makePdfFile('long-bundle.pdf')]);
+
+  const html = app.getEl('intakeSummary').innerHTML;
+  assert.match(html, /18 pages/i);
+  assert.match(html, /split|separate|instrument/i);
+  assert.doesNotMatch(html, /\b(batch|synthesis|adaptive|claude)\b/i);
+});
+
+test('priority 7: fast default raw PDF run sends document block and never invokes PDF rasterizer', async () => {
+  const server = makeJobServer({
+    hooks: browserOnlyStorage,
+    analyzeReply: geminiOrSonnetReply('Instrument: Mineral Deed\nGrantor: Bob\nGrantee: Alice.'),
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  let rasterCalls = 0;
+  app.ctx.__TITLE_ANALYZER_PDF_RASTER__ = {
+    prepareDocument: async () => {
+      rasterCalls++;
+      return [];
+    },
+  };
+  app.ctx.PDFLib = { PDFDocument: { load: async () => ({ getPageCount: () => 2 }) } };
+
+  await app.ctx.handleFiles([makePdfFile('fast-deed.pdf')]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.equal(rasterCalls, 0);
+  const geminiCall = server.analyze.find(call => call.model.startsWith('gemini'));
+  assert.ok(geminiCall);
+  const blocks = parseBlocks(geminiCall);
+  assert.equal(Array.isArray(blocks), true);
+  assert.equal(blocks.some(b => b.type === 'document'), true);
+  assert.equal(blocks.some(b => b.type === 'image'), false);
+  assert.equal(app.getEl('highDpiRereadBar').innerHTML, '');
+});
+
+test('priority 7: flagged PDF reveals #highDpiRereadBar and selective reread renders only flagged PDF as images', async () => {
+  let synthesisPass = 0;
+  const server = makeJobServer({
+    hooks: browserOnlyStorage,
+    analyzeReply: body => {
+      if (hasVisualBlock(body)) {
+        const content = body.messages[0].content;
+        if (content.some(b => b.type === 'document')) {
+          return 'Instrument: Oil Lease\nRecording: [ILLEGIBLE - VERIFY MANUALLY]';
+        }
+        const images = content.filter(b => b.type === 'image');
+        if (images.length >= 2) {
+          return 'Instrument: Oil Lease\nRecording: Vol. 42, Page 109 (High-DPI Clear).';
+        }
+        return 'Instrument: Assignment\nClean PNG abstract to Alice.';
+      }
+      synthesisPass++;
+      const text = typeof body.messages[0].content === 'string'
+        ? body.messages[0].content
+        : body.messages[0].content.map(b => b.text || '').join('\n');
+      assert.match(text, /Clean PNG abstract to Alice/);
+      return synthesisPass === 1
+        ? '## FINAL OWNERSHIP DETERMINATION\nInitial uncertain lease.'
+        : '## FINAL OWNERSHIP DETERMINATION\nUpdated Carol Vol. 42, Page 109.';
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  const rasterizedNames = [];
+  app.ctx.__TITLE_ANALYZER_PDF_RASTER__ = {
+    prepareDocument: async file => {
+      rasterizedNames.push(file.name);
+      return [
+        { mediaType: 'image/png', data: Buffer.from('page-1-png').toString('base64') },
+        { mediaType: 'image/png', data: Buffer.from('page-2-png').toString('base64') },
+      ];
+    },
+  };
+  app.ctx.PDFLib = { PDFDocument: { load: async () => ({ getPageCount: () => 2 }) } };
+
+  const flaggedPdf = makePdfFile('flagged.pdf', 700_000);
+  const cleanPng = pngFile('clean.png');
+  await app.ctx.handleFiles([flaggedPdf, cleanPng]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.deepEqual(rasterizedNames, []);
+  const callsBeforeReread = server.analyze.length;
+  assert.equal(callsBeforeReread, 4);
+  assert.match(app.getEl('highDpiRereadBar').innerHTML, /Re-read as high-DPI page images/);
+
+  await app.ctx.rereadFlaggedPdfsAsHighDpi();
+
+  assert.deepEqual(rasterizedNames, ['flagged.pdf']);
+  const newCalls = server.analyze.slice(callsBeforeReread);
+  assert.equal(newCalls.length, 2);
+  assert.equal(newCalls[0].model.startsWith('gemini'), true);
+  const rereadBlocks = parseBlocks(newCalls[0]);
+  assert.equal(rereadBlocks.some(b => b.type === 'document'), false);
+  assert.equal(rereadBlocks.filter(b => b.type === 'image').length, 2);
+  assert.equal(newCalls[1].model, 'claude-sonnet-5-5');
+  assert.match(newCalls[1].content, /Clean PNG abstract to Alice/);
+  assert.match(newCalls[1].content, /Vol\. 42, Page 109/);
+  assert.equal(app.getEl('highDpiRereadBar').innerHTML, '');
+  assert.match(app.getEl('results').innerHTML, /Updated Carol Vol\. 42, Page 109/);
+});
+
+test('priority 7: raw PDF failure renders #highDpiRetryBtn and retry skips GCS upload and completes with images', async () => {
+  let blobAvailable = false;
+  let postUploadAttempts = 0;
+  const server = makeJobServer({
+    hooks: {
+      'GET /api/blob/upload': async () => jsonResponse(200, { available: blobAvailable }),
+      'POST /api/blob/upload': async () => {
+        postUploadAttempts++;
+        return jsonResponse(500, { error: 'should not upload during high-DPI retry' });
+      },
+      'POST /api/analyze': async (_server, options) => {
+        const body = JSON.parse(options.body || '{}');
+        if (body.ping) return undefined;
+        if (hasVisualBlock(body) && body.messages[0].content.some(b => b?.type === 'document')) {
+          return jsonResponse(400, { error: 'Could not read scanned PDF' });
+        }
+        return undefined;
+      },
+    },
+    analyzeReply: body => {
+      if (hasVisualBlock(body)) return 'Instrument: Mineral Deed\nRecovered via high-DPI images.';
+      return '## FINAL OWNERSHIP DETERMINATION\nRecovered Alice.';
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  const rasterizedNames = [];
+  app.ctx.__TITLE_ANALYZER_PDF_RASTER__ = {
+    prepareDocument: async file => {
+      rasterizedNames.push(file.name);
+      return [{ mediaType: 'image/png', data: Buffer.from('recovered-page-1').toString('base64') }];
+    },
+  };
+  app.ctx.PDFLib = { PDFDocument: { load: async () => ({ getPageCount: () => 1 }) } };
+
+  await app.ctx.handleFiles([makePdfFile('broken-scan.pdf')]);
+  await app.run('analyze()');
+  await tick(30);
+
+  assert.match(app.getEl('errorBox').innerHTML, /id="highDpiRetryBtn"[^>]*>Re-read as high-DPI page images/);
+
+  blobAvailable = true;
+  await app.ctx.retryFailedWithHighDpiImages();
+  await tick(30);
+
+  assert.equal(postUploadAttempts, 0);
+  assert.equal(server.calls.includes('POST /api/blob/upload'), false);
+  assert.deepEqual(rasterizedNames, ['broken-scan.pdf']);
+  const imageCall = server.analyze.find(c => {
+    const blocks = parseBlocks(c);
+    return Array.isArray(blocks) && blocks.some(b => b.type === 'image') && !blocks.some(b => b.type === 'document');
+  });
+  assert.ok(imageCall);
+  assert.match(app.getEl('results').innerHTML, /Recovered Alice/);
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

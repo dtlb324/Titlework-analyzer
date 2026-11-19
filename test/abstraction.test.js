@@ -1,9 +1,11 @@
+import nodeAssert from 'node:assert/strict';
 import jobsRouteHandler from '../api/jobs/[...path].js';
 import {
   ABSTRACTION_PROMPT,
   assertSafeBlobUrl,
   buildAbstractMessagesForChunk,
   buildAbstractMessagesForChunks,
+  computePdfSplitRanges,
   resolveChunkDelivery,
   estimateAbstractPayloadBytes,
   defaultBlobLoader,
@@ -15,6 +17,8 @@ import {
   validateAbstractPersistenceInput,
   enrichVisualDeliveryForModel,
 } from '../api/_lib/abstraction.js';
+import { chunkRequiresSoloBatch } from '../api/_lib/abstraction-batch.js';
+import { groupAbstractsByDocument } from '../api/_lib/synthesis.js';
 import {
   getBackgroundPromise,
   processAbstractionBatch,
@@ -1101,7 +1105,7 @@ test('Phase 4: 504 timeout splits whole PDFs even when page range metadata is mi
   const parent = store.chunks.get('chk_whole_big');
   const children = [...store.chunks.values()].filter(chunk => chunk.splitParentChunkId === 'chk_whole_big');
   assert(parent.abstractionStatus === 'split_superseded', `Expected parent superseded, got ${parent.abstractionStatus}`);
-  assert(children.map(child => `${child.pageStart}-${child.pageEnd}`).join(',') === '1-2,3-4', 'Expected inferred child page ranges 1-2 and 3-4');
+  assert(children.map(child => `${child.pageStart}-${child.pageEnd}`).join(',') === '1-2,2-4', 'Expected inferred child page ranges 1-2 and 2-4 with 1-page overlap');
 });
 
 test('Phase 4: single-page oversized PDFs fail instead of split', async () => {
@@ -1701,6 +1705,185 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.completedInBatch === 3, `Expected three completions in process batch, got ${res.body.completedInBatch}`);
   assert(res.body.hasMore === false, 'Expected no more work after draining batch');
+});
+
+test('Priority 6: browser ABSTRACT_PROMPT matches server ABSTRACTION_PROMPT verbatim', () => {
+  const match = indexHtml.match(/const ABSTRACT_PROMPT = `([\s\S]*?)`;/);
+  assert(match, 'Expected ABSTRACT_PROMPT template literal in public/index.html');
+  assert(match[1] === ABSTRACTION_PROMPT, 'Expected browser ABSTRACT_PROMPT to match server ABSTRACTION_PROMPT verbatim');
+  assert(!match[1].includes('or "not visible"'), 'Browser prompt must not instruct writing "not visible"');
+  assert(match[1].includes('Never write "not visible"'), 'Browser prompt must explicitly forbid "not visible"');
+  assert(match[1].includes('ILLEGIBLE - VERIFY MANUALLY'), 'Browser prompt must instruct ILLEGIBLE - VERIFY MANUALLY');
+});
+
+test('Priority 6: computePdfSplitRanges and splitPdfChunk add 1-page overlap for >=4 pages without infinite recursion on 2-page PDFs', async () => {
+  nodeAssert.deepEqual(
+    computePdfSplitRanges(4, 1, 4).map(r => [r.pageStart, r.pageEnd]),
+    [[1, 2], [2, 4]],
+    'Expected 4-page PDF split with 1-page overlap (1-2, 2-4)',
+  );
+  nodeAssert.deepEqual(
+    computePdfSplitRanges(5, 1, 5).map(r => [r.pageStart, r.pageEnd]),
+    [[1, 3], [3, 5]],
+    'Expected 5-page PDF split with 1-page overlap (1-3, 3-5)',
+  );
+  nodeAssert.deepEqual(
+    computePdfSplitRanges(3, 1, 3).map(r => [r.pageStart, r.pageEnd]),
+    [[1, 2], [3, 3]],
+    'Expected 3-page PDF split with zero overlap',
+  );
+  nodeAssert.deepEqual(
+    computePdfSplitRanges(2, 1, 2).map(r => [r.pageStart, r.pageEnd]),
+    [[1, 1], [2, 2]],
+    'Expected 2-page PDF split with zero overlap',
+  );
+
+  const { PDFDocument } = await import('pdf-lib');
+
+  // Verify actual split PDF page counts on a 4-page PDF and grouping order in groupAbstractsByDocument.
+  const pdf4 = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) pdf4.addPage([200, 200]);
+  const bytes4 = Buffer.from(await pdf4.save());
+  const chunk4 = makeChunk({ id: 'chk_overlap_4', pageStart: 1, pageEnd: 4, sizeBytes: bytes4.byteLength });
+  const store4 = createMemoryPhase3Store([chunk4]);
+  const childPageCounts = [];
+  store4.createSplitChunk = async (jobId, documentId, input) => {
+    const childId = `chk_overlap_child_${childPageCounts.length + 1}`;
+    const child = {
+      ...makeChunk({
+        id: childId,
+        chunkOrder: input.chunkOrder,
+        originalFilename: input.originalFilename,
+        pageStart: input.pageStart,
+        pageEnd: input.pageEnd,
+        sizeBytes: input.sizeBytes,
+      }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      splitParentChunkId: input.splitParentChunkId,
+    };
+    store4.chunks.set(childId, child);
+    return child;
+  };
+  store4.markChunkAbstractionSplitSuperseded = async (_jobId, chunkId) => {
+    const row = store4.chunks.get(chunkId);
+    store4.chunks.set(chunkId, { ...row, abstractionStatus: 'split_superseded' });
+    return store4.chunks.get(chunkId);
+  };
+  await processChunkAbstraction(chunk4, {
+    store: store4,
+    maxAttempts: 1,
+    blobLoader: async () => ({ bytes: bytes4, mediaType: 'application/pdf' }),
+    blobWriter: async (parent, name, childBytes) => {
+      const parsedChild = await PDFDocument.load(childBytes);
+      childPageCounts.push(parsedChild.getPageCount());
+      return { blobKey: `jobs/${parent.jobId}/${name}`, blobUrl: `gs://test/${name}` };
+    },
+    modelClient: async () => { const err = new Error('timeout'); err.status = 504; throw err; },
+  });
+  nodeAssert.deepEqual(childPageCounts, [2, 3], 'Expected 4-page split children to contain 2 and 3 pages due to 1-page overlap');
+  const overlapChildren = [...store4.chunks.values()].filter(c => c.splitParentChunkId === 'chk_overlap_4');
+  nodeAssert.deepEqual(overlapChildren.map(c => [c.pageStart, c.pageEnd]), [[1, 2], [2, 4]]);
+
+  const grouped = groupAbstractsByDocument([
+    { documentId: 'doc_1', chunkId: overlapChildren[1].id, chunkOrder: 0, pageStart: 2, pageEnd: 4, sourceFilename: 'deed.pdf', abstractText: 'Second half with overlap' },
+    { documentId: 'doc_1', chunkId: overlapChildren[0].id, chunkOrder: 0, pageStart: 1, pageEnd: 2, sourceFilename: 'deed.pdf', abstractText: 'First half' },
+  ]);
+  nodeAssert.equal(grouped.length, 1);
+  assert(grouped[0].abstract.indexOf('**Pages 1-2:**') < grouped[0].abstract.indexOf('**Pages 2-4:**'), 'Expected overlapping split chunks ordered cleanly by pageStart');
+
+  // Verify 2-page PDF splits into 1-page children which then fail rather than recursing infinitely.
+  const pdf2 = await PDFDocument.create();
+  pdf2.addPage([200, 200]);
+  pdf2.addPage([200, 200]);
+  const bytes2 = Buffer.from(await pdf2.save());
+  const chunk2 = makeChunk({ id: 'chk_two_page', pageStart: 1, pageEnd: 2, sizeBytes: bytes2.byteLength });
+  const store2 = createMemoryPhase3Store([chunk2]);
+  const childBytesById = new Map();
+  store2.createSplitChunk = async (jobId, documentId, input) => {
+    const childId = `chk_two_child_${childBytesById.size + 1}`;
+    const child = {
+      ...makeChunk({
+        id: childId,
+        chunkOrder: input.chunkOrder,
+        originalFilename: input.originalFilename,
+        pageStart: input.pageStart,
+        pageEnd: input.pageEnd,
+        sizeBytes: input.sizeBytes,
+      }),
+      abstractionStatus: 'pending',
+      uploadStatus: 'uploaded',
+      splitParentChunkId: input.splitParentChunkId,
+    };
+    store2.chunks.set(childId, child);
+    return child;
+  };
+  store2.markChunkAbstractionSplitSuperseded = async (_jobId, chunkId) => {
+    const row = store2.chunks.get(chunkId);
+    store2.chunks.set(chunkId, { ...row, abstractionStatus: 'split_superseded' });
+    return store2.chunks.get(chunkId);
+  };
+  const twoSplitRes = await processChunkAbstraction(chunk2, {
+    store: store2,
+    maxAttempts: 1,
+    blobLoader: async () => ({ bytes: bytes2, mediaType: 'application/pdf' }),
+    blobWriter: async (parent, name, childBytes) => {
+      childBytesById.set(name, childBytes);
+      return { blobKey: `jobs/${parent.jobId}/${name}`, blobUrl: `gs://test/${name}` };
+    },
+    modelClient: async () => { const err = new Error('timeout'); err.status = 504; throw err; },
+  });
+  assert(twoSplitRes.status === 'split_superseded');
+  const twoChildren = [...store2.chunks.values()].filter(c => c.splitParentChunkId === 'chk_two_page');
+  nodeAssert.deepEqual(twoChildren.map(c => [c.pageStart, c.pageEnd]), [[1, 1], [2, 2]]);
+  for (const child of twoChildren) {
+    const childRes = await processChunkAbstraction(child, {
+      store: store2,
+      maxAttempts: 1,
+      blobLoader: async c => ({ bytes: childBytesById.get(c.originalFilename), mediaType: 'application/pdf' }),
+      modelClient: async () => { const err = new Error('timeout'); err.status = 504; throw err; },
+    });
+    assert(childRes.status === 'failed', '1-page split child must terminate as failed, never split infinitely');
+  }
+});
+
+test('Priority 7: multi-page renderedImages bundles build image blocks, stay solo, and skip PDF text/File API paths', async () => {
+  const page1 = Buffer.from('page-1-png').toString('base64');
+  const page2 = Buffer.from('page-2-jpeg').toString('base64');
+  const chunk = {
+    ...makeChunk({
+      id: 'chk_rendered_bundle',
+      originalFilename: 'pathological.pdf',
+      mediaType: 'application/pdf',
+    }),
+    renderedImages: [
+      { mediaType: 'image/png', data: page1 },
+      { mediaType: 'image/jpeg', data: page2 },
+    ],
+  };
+
+  assert(chunkRequiresSoloBatch(chunk) === true, 'Rendered image bundle chunk must require solo batching');
+
+  const delivery = await resolveChunkDelivery(chunk, Buffer.from('%PDF-ignored'));
+  assert(delivery.mode === 'rendered_images' && delivery.pages.length === 2, 'Expected rendered_images delivery');
+
+  const enriched = await enrichVisualDeliveryForModel(delivery, chunk, Buffer.alloc(5_000_000), 'gemini-3.1-flash-lite');
+  assert(enriched === delivery, 'Expected rendered_images delivery to bypass Gemini Files API upload');
+
+  const singleMsg = buildAbstractMessagesForChunk(chunk, null, 0, delivery);
+  const imageBlocks = singleMsg[0].content.filter(b => b.type === 'image');
+  assert(imageBlocks.length === 2, `Expected 2 image blocks, got ${imageBlocks.length}`);
+  assert(!singleMsg[0].content.some(b => b.type === 'document'), 'Rendered bundle must not include PDF document block');
+  assert(imageBlocks[0].source.media_type === 'image/png' && imageBlocks[0].source.data === page1);
+  assert(imageBlocks[1].source.media_type === 'image/jpeg' && imageBlocks[1].source.data === page2);
+  assert(singleMsg[0].content.at(-1).text.includes('pathological.pdf (rendered pages)'));
+  assert(singleMsg[0].content.at(-1).text.includes('high-DPI rendered page images'));
+
+  const batchMsg = buildAbstractMessagesForChunks([{ chunk, payloadBytes: null, delivery }], 0);
+  assert(batchMsg[0].content.filter(b => b.type === 'image').length === 2);
+
+  const estimated = estimateAbstractPayloadBytes(chunk, null, delivery);
+  assert(estimated === page1.length + page2.length + 2000, `Unexpected byte estimate ${estimated}`);
 });
 
 for (const { name, fn } of tests) {

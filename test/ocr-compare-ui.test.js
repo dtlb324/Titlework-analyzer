@@ -1104,3 +1104,17 @@ test('the main app page is unaffected by the lab password change', () => {
   const index = read('public/index.html');
   assert.doesNotMatch(index, /ocr-compare|passwordRequired|password-field/);
 });
+
+test('pdf-raster helper exports 2x rasterizer and limits, avoids DOM/storage, and is delegated to by ocr-compare', () => {
+  const raster = read('public/pdf-raster.js');
+  const compare = read('public/ocr-compare.js');
+  assert.match(raster, /export const PDF_RASTER_LIMITS = \{\s*maxPages:\s*60,\s*maxBytes:\s*12000000,\s*renderScale:\s*2\s*\}/);
+  assert.match(raster, /export async function prepareDocument\(/);
+  assert.match(raster, /export async function readDocumentText\(/);
+  assert.match(raster, /\/vendor\/pdfjs\/pdf\.mjs/);
+  assert.doesNotMatch(raster, /innerHTML|localStorage/);
+  assert.match(compare, /import\s*\{[^}]*PDF_RASTER_LIMITS[^}]*prepareDocument[^}]*readDocumentText[^}]*\}\s*from '\.\/pdf-raster\.js'/);
+  assert.match(compare, /const LIMITS = PDF_RASTER_LIMITS;/);
+  assert.match(compare, /rasterizeDocument\(file,\s*\{/);
+  assert.match(compare, /extractDocumentText\(file,\s*\{/);
+});
