@@ -4,7 +4,7 @@ const MONTHS = {
   jan: 'january', feb: 'february', mar: 'march', apr: 'april', jun: 'june',
   jul: 'july', aug: 'august', sep: 'september', oct: 'october', nov: 'november', dec: 'december',
 };
-const ABSTAIN = /illegible|not visible|verify manually|unclear|^n\/a$|^none$|^none stated$|not applicable/i;
+const ABSTAIN = /illegible|not visible|verify manually|unclear|^n\/a$|^none$|^none stated$|^not stated$|^unrecorded$|not applicable/i;
 
 export function normalizeForMatch(value) {
   if (typeof value !== 'string') return '';
@@ -102,6 +102,21 @@ export function assessAccuracy(files) {
 }
 
 const REQUIRED_IDENTITY_FIELDS = ['GRANTOR', 'GRANTEE', 'DATE EXECUTED', 'RECORDING REF', 'LEGAL DESC'];
+const ILLEGIBLE_MARKER_RE = /ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i;
+const KEY_ILLEGIBLE_FIELDS = new Set([
+  'DOC TYPE',
+  'GRANTOR',
+  'GRANTEE',
+  'DATE EXECUTED',
+  'DATE RECORDED',
+  'RECORDING REF',
+  'LEGAL DESC',
+  'MINERALS',
+  'ROYALTY/NPRI',
+  'FRACTION CONVEYED',
+  'RESERVATIONS',
+]);
+const UNRECORDED_VALUE = /^(?:unrecorded|not recorded)(?:\s*(?:\([^)]*\)|[-—:].*))?$/i;
 const DATE_MONTHS = {
   jan: 1, january: 1,
   feb: 2, february: 2,
@@ -361,12 +376,46 @@ function isFieldAbstained(value) {
   return false;
 }
 
+export function hasKeyIllegibleMarker(text) {
+  const value = String(text || '').trim();
+  if (!value || !ILLEGIBLE_MARKER_RE.test(value)) return false;
+
+  let sawTemplateField = false;
+  let currentField = null;
+  for (const rawLine of value.replace(/\r\n?/g, '\n').split('\n')) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || /^```/.test(trimmed)) continue;
+    if (/^DOCUMENT\s*#\d+(?:\s*\([^)]*\))?\s*:?/i.test(trimmed) || /^\[[^\]]+\]$/.test(trimmed)) {
+      currentField = null;
+      continue;
+    }
+    const candidate = trimmed
+      .replace(/^(?:[-*•]\s+)/, '')
+      .replace(/^\*\*([^*:]+?)\*\*:/, '$1:')
+      .replace(/^\*\*([^*:]+?:)\*\*\s*/, '$1 ');
+    const match = candidate.match(/^([A-Z][A-Z /-]*[A-Z]):\s*(.*)$/);
+    if (match) {
+      sawTemplateField = true;
+      currentField = match[1].trim();
+      if (KEY_ILLEGIBLE_FIELDS.has(currentField) && ILLEGIBLE_MARKER_RE.test(match[2])) {
+        return true;
+      }
+    } else if (currentField && KEY_ILLEGIBLE_FIELDS.has(currentField) && ILLEGIBLE_MARKER_RE.test(trimmed)) {
+      return true;
+    }
+  }
+  return !sawTemplateField;
+}
+
 export function validateAbstractQuality(text, options = {}) {
   const { documentText = null, minTextMatchPercent = 65 } = options || {};
   const fields = parseAbstractFields(text);
   const reasons = [];
   const docType = String(fields['DOC TYPE'] || '').trim();
   const isBilateral = BILATERAL_DOC_TYPE.test(docType) && !UNILATERAL_DOC_TYPE.test(docType);
+  const dateRecorded = fields['DATE RECORDED'];
+  const dateRecordedUncertain = typeof dateRecorded === 'string' && UNCERTAIN_RECORDED_DATE.test(dateRecorded);
+  const recordedDates = extractCalendarDates(dateRecorded);
 
   for (const field of REQUIRED_IDENTITY_FIELDS) {
     const raw = fields[field];
@@ -381,18 +430,19 @@ export function validateAbstractQuality(text, options = {}) {
       }
       continue;
     }
+    if (field === 'RECORDING REF' && UNRECORDED_VALUE.test(trimmed) && !recordedDates.length && !dateRecordedUncertain) {
+      continue;
+    }
     if (isFieldAbstained(trimmed)) {
       reasons.push(`abstained_required_field:${field}`);
     }
   }
 
-  const dateRecorded = fields['DATE RECORDED'];
-  if (typeof dateRecorded === 'string' && UNCERTAIN_RECORDED_DATE.test(dateRecorded)) {
+  if (dateRecordedUncertain) {
     reasons.push('abstained_key_field:DATE RECORDED');
   }
 
   const executedDates = extractCalendarDates(fields['DATE EXECUTED']);
-  const recordedDates = extractCalendarDates(dateRecorded);
   if (executedDates.length && recordedDates.length) {
     const earliestExecuted = executedDates.slice().sort(compareDatePrecisionOrder)[0];
     const latestRecorded = recordedDates.slice().sort(compareDatePrecisionOrder).at(-1);

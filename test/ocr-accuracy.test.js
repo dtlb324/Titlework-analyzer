@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import {
   assessAccuracy,
   extractCalendarDates,
+  hasKeyIllegibleMarker,
   isDateEarlier,
   parseAbstractFields,
   scoreAbstractAgainstText,
@@ -419,4 +420,55 @@ test('validateAbstractQuality and scoreAbstractAgainstText ground identity field
   assert.equal(multiParty.matched, 4);
   assert.equal(multiParty.scored, 4);
   assert.equal(multiParty.percent, 100);
+});
+
+test('hasKeyIllegibleMarker scopes ILLEGIBLE triggers to key title fields and allows secondary fields', () => {
+  assert.equal(hasKeyIllegibleMarker(CLEAN_BILATERAL_DEED), false);
+
+  const secondaryIllegible = CLEAN_BILATERAL_DEED
+    .replace('WARRANTY: full', 'WARRANTY: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('TERM: perpetual', 'TERM: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('AFTER-ACQUIRED TITLE: no', 'AFTER-ACQUIRED TITLE: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('ACKNOWLEDGMENT: yes', 'ACKNOWLEDGMENT: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('SURFACE: yes', 'SURFACE: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('ISSUES: none noted', 'ISSUES: Notary seal is ILLEGIBLE - VERIFY MANUALLY');
+  assert.equal(hasKeyIllegibleMarker(secondaryIllegible), false);
+
+  for (const [before, after] of [
+    ['GRANTOR: Ada Owner', 'GRANTOR: ILLEGIBLE - VERIFY MANUALLY'],
+    ['RECORDING REF: Vol 42, Page 118', 'RECORDING REF: ILLEGIBLE - VERIFY MANUALLY'],
+    ['RESERVATIONS: none stated', 'RESERVATIONS: 1/8 royalty — remainder ILLEGIBLE - VERIFY MANUALLY'],
+    ['LEGAL DESC: NW/4 of Section 12, Block C-9 (metes and bounds)', 'LEGAL DESC: NW/4 of Section 12\nmetes and bounds ILLEGIBLE - VERIFY MANUALLY'],
+  ]) {
+    assert.equal(hasKeyIllegibleMarker(CLEAN_BILATERAL_DEED.replace(before, after)), true, after);
+  }
+
+  assert.equal(
+    hasKeyIllegibleMarker('Instrument: Warranty Deed\nDate: [ILLEGIBLE - VERIFY MANUALLY]'),
+    true,
+    'Unstructured non-template output still falls back to matching ILLEGIBLE markers',
+  );
+});
+
+test('validateAbstractQuality allows consistently unrecorded instruments and scoreModel abstains on not stated / unrecorded', () => {
+  const unrecorded = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED
+      .replace('DATE RECORDED: April 10, 1923', 'DATE RECORDED: unrecorded')
+      .replace('RECORDING REF: Vol 42, Page 118', 'RECORDING REF: unrecorded'),
+  );
+  assert.equal(unrecorded.valid, true, JSON.stringify(unrecorded.reasons));
+
+  const contradictory = validateAbstractQuality(
+    CLEAN_BILATERAL_DEED.replace('RECORDING REF: Vol 42, Page 118', 'RECORDING REF: unrecorded'),
+  );
+  assert.equal(contradictory.valid, false);
+  assert(contradictory.reasons.includes('abstained_required_field:RECORDING REF'));
+
+  assert.deepEqual(scoreModel('Ada Owner', identity({
+    GRANTOR: 'Ada Owner',
+    GRANTEE: 'not stated',
+    'DATE EXECUTED': 'not stated',
+    'DATE RECORDED': 'unrecorded',
+    'RECORDING REF': 'unrecorded',
+  })), { status: 'scored', matched: 1, scored: 1, percent: 100 });
 });

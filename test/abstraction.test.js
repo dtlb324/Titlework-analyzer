@@ -2089,6 +2089,46 @@ test('Priority 5: deterministic triggers fire via shouldEscalateAbstract/evaluat
     shouldEscalateAbstract('Owner: John Smith, 50% mineral interest.', {}, 2000, { isCsv: true }) === false,
     'CSV abstract without deed template fields must not false-positive escalate',
   );
+  assert(
+    shouldEscalateAbstract(
+      'DOC TYPE: Ownership Schedule\nRECORDING REF: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: High confidence.',
+      {},
+      2000,
+      { isCsv: true },
+    ) === false,
+    'CSV abstract with ILLEGIBLE marker must not escalate to visual Sonnet',
+  );
+
+  const secondaryIllegible = clean
+    .replace('WARRANTY: full', 'WARRANTY: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('ACKNOWLEDGMENT: yes', 'ACKNOWLEDGMENT: ILLEGIBLE - VERIFY MANUALLY')
+    .replace('ISSUES: none noted', 'ISSUES: Notary seal is ILLEGIBLE - VERIFY MANUALLY');
+  const secondaryEval = evaluateAbstractEscalation(secondaryIllegible);
+  assert(
+    secondaryEval.shouldEscalate === false,
+    `Secondary-field ILLEGIBLE marker must not escalate, got ${JSON.stringify(secondaryEval.reasons)}`,
+  );
+
+  const keyIllegibleEval = evaluateAbstractEscalation(
+    clean.replace('RESERVATIONS: none stated', 'RESERVATIONS: ILLEGIBLE - VERIFY MANUALLY'),
+  );
+  assert(
+    keyIllegibleEval.shouldEscalate === true && keyIllegibleEval.reasons.includes('illegible_marker'),
+    `Key-field ILLEGIBLE marker must still escalate, got ${JSON.stringify(keyIllegibleEval.reasons)}`,
+  );
+
+  const unrecordedClean = clean
+    .replace('DATE RECORDED: January 2, 2020', 'DATE RECORDED: unrecorded')
+    .replace('RECORDING REF: Vol 1, Page 2', 'RECORDING REF: unrecorded');
+  assert(
+    shouldEscalateAbstract(unrecordedClean) === false,
+    'Consistently unrecorded instrument must not false-positive escalate',
+  );
+
+  assert(
+    ABSTRACTION_PROMPT.includes('"not stated"') && ABSTRACTION_PROMPT.includes('"unrecorded"'),
+    'ABSTRACTION_PROMPT must distinguish absent/unrecorded fields from ILLEGIBLE - VERIFY MANUALLY',
+  );
 });
 
 test('Priority 4: resolveEscalationModel and resolveEscalationMaxTokens read env dynamically', async () => {
