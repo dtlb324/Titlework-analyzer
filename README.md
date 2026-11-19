@@ -292,6 +292,7 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `GEMINI_FILE_API_MAX_BYTES` | `48000000`, range 1000000 to 50000000. |
 | `GEMINI_FILE_API_POLL_MS` | `500`, range 100 to 5000. |
 | `GEMINI_FILE_API_POLL_MAX_MS` | `60000`, range 1000 to 120000. |
+| `GEMINI_PDF_MEDIA_RESOLUTION` | `MEDIA_RESOLUTION_HIGH` on direct Gemini visual, hybrid, and image abstraction requests (omitted on text-only requests). Accepts `low`, `medium`, `high`, the full `MEDIA_RESOLUTION_*` names, or `off`/`false` to omit. |
 | `ABSTRACTION_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` is the fallback. |
 
 ### Synthesis settings

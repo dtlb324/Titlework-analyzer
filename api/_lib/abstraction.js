@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
 import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { messagesHaveVisualMedia, resolveGeminiMediaResolution } from './gemini-request.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
@@ -633,10 +634,15 @@ export async function runModelAbstraction({
   escalationModel = ABSTRACT_ESCALATION_MODEL,
   escalationMaxTokens = ABSTRACT_ESCALATION_MAX_TOKENS,
   responseSchema = null,
+  mediaResolution = undefined,
   options = {},
 }) {
   const modelClient = getModelClient(options);
   const schemaForModel = responseSchema && isGeminiModel(model) ? responseSchema : null;
+  const hasVisualMedia = messagesHaveVisualMedia(messages);
+  const mediaResolutionForModel = isGeminiModel(model) && !shouldUseOpenRouter(model) && hasVisualMedia
+    ? resolveGeminiMediaResolution(mediaResolution)
+    : null;
   let response = await modelClient({
     model,
     maxTokens,
@@ -644,6 +650,7 @@ export async function runModelAbstraction({
     messages,
     payloadBytes,
     ...(schemaForModel ? { responseSchema: schemaForModel } : {}),
+    ...(mediaResolutionForModel ? { mediaResolution: mediaResolutionForModel } : {}),
   });
   let usage = extractUsage(response.usage);
   const escalationEnabled = !responseSchema
@@ -653,6 +660,9 @@ export async function runModelAbstraction({
     && escalationModel !== model;
   let escalated = false;
   if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
+    const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && hasVisualMedia
+      ? resolveGeminiMediaResolution(mediaResolution)
+      : null;
     try {
       const escalatedResponse = await modelClient({
         model: escalationModel,
@@ -661,6 +671,7 @@ export async function runModelAbstraction({
         messages,
         payloadBytes,
         escalation: true,
+        ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
       });
       usage = addUsage(usage, extractUsage(escalatedResponse.usage));
       response = escalatedResponse;
@@ -1012,6 +1023,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       payloadBytes,
       escalationModel: options.escalationModel || ABSTRACT_ESCALATION_MODEL,
       escalationMaxTokens: options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS,
+      mediaResolution: options.mediaResolution,
       options,
     });
     logChunkStage('model_response', processingChunk, {

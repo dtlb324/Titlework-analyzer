@@ -16,6 +16,55 @@ export function isGeminiModel(model) {
 const GEMINI_3_THINKING_LEVELS = new Set(['minimal', 'low', 'medium', 'high']);
 const GEMINI_4_THINKING_LEVELS = new Set(['low', 'medium', 'high']);
 const GEMINI_4_HYDROGEN_THINKING_LEVELS = new Set([...GEMINI_4_THINKING_LEVELS, 'xhigh']);
+const GEMINI_MEDIA_RESOLUTIONS = new Map([
+  ['low', 'MEDIA_RESOLUTION_LOW'],
+  ['media_resolution_low', 'MEDIA_RESOLUTION_LOW'],
+  ['medium', 'MEDIA_RESOLUTION_MEDIUM'],
+  ['media_resolution_medium', 'MEDIA_RESOLUTION_MEDIUM'],
+  ['high', 'MEDIA_RESOLUTION_HIGH'],
+  ['media_resolution_high', 'MEDIA_RESOLUTION_HIGH'],
+]);
+
+export function normalizeGeminiMediaResolution(raw) {
+  const value = String(raw || '').trim().toLowerCase();
+  return GEMINI_MEDIA_RESOLUTIONS.get(value) || null;
+}
+
+export function resolveGeminiMediaResolution(override) {
+  const raw = override !== undefined ? override : process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return 'MEDIA_RESOLUTION_HIGH';
+  }
+  return normalizeGeminiMediaResolution(raw);
+}
+
+export function messagesHaveVisualMedia(messages = []) {
+  for (const message of messages || []) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const block of message.content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'image' || block.type === 'document') {
+        const source = block.source || {};
+        if (
+          (source.type === 'base64' && source.data && source.media_type)
+          || (source.type === 'file_uri' && source.uri && source.media_type)
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function geminiContentsHasVisualMedia(contents = []) {
+  for (const entry of contents) {
+    for (const part of entry?.parts || []) {
+      if (part?.inline_data || part?.file_data) return true;
+    }
+  }
+  return false;
+}
 
 export function isGemini3SeriesModel(model) {
   return /^gemini-3/i.test(String(model || '').trim());
@@ -109,9 +158,11 @@ export function buildGeminiGenerateContentBody({
   thinkingBudget,
   thinkingLevel,
   responseSchema = null,
+  mediaResolution = null,
 }) {
+  const contents = anthropicMessagesToGeminiContents(messages);
   const body = {
-    contents: anthropicMessagesToGeminiContents(messages),
+    contents,
     generationConfig: {
       maxOutputTokens: maxTokens,
     },
@@ -130,6 +181,10 @@ export function buildGeminiGenerateContentBody({
     body.generationConfig.thinkingConfig = resolvedThinking;
   } else if (!isGemini4SeriesModel(model) && Number.isFinite(Number(thinkingBudget))) {
     body.generationConfig.thinkingConfig = { thinkingBudget: Number(thinkingBudget) };
+  }
+  const resolvedMediaResolution = normalizeGeminiMediaResolution(mediaResolution);
+  if (resolvedMediaResolution && geminiContentsHasVisualMedia(contents)) {
+    body.generationConfig.mediaResolution = resolvedMediaResolution;
   }
   if (responseSchema) {
     body.generationConfig.responseMimeType = 'application/json';
@@ -191,6 +246,7 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
     thinkingBudget: request.thinkingBudget,
     thinkingLevel: request.thinkingLevel,
     responseSchema: request.responseSchema ?? null,
+    mediaResolution: request.mediaResolution ?? null,
   });
   const baseUrl = String(process.env.GEMINI_API_BASE_URL || DEFAULT_GEMINI_BASE_URL).replace(/\/$/, '');
   const url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
