@@ -767,18 +767,28 @@ test('frontend contains server-abstraction start, poll, fetch, and fallback hook
 
 
 test('Phase 4: worker claims pending chunks under a lease', async () => {
+  const { PDFDocument, StandardFonts } = await import('pdf-lib');
+  async function makeTextPdf(label) {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([612, 792]);
+    page.drawText(`STATE OF TEXAS\nCOUNTY OF REEVES\nDOCUMENT: ${label}\nGRANTOR: A\nGRANTEE: B\n`.repeat(6), { x: 72, y: 700, size: 11, font, lineHeight: 14, maxWidth: 460 });
+    return Buffer.from(await doc.save());
+  }
+  const pdfA = await makeTextPdf('A');
+  const pdfB = await makeTextPdf('B');
   const store = createMemoryPhase3Store([
-    makeChunk({ id: 'chk_a', chunkOrder: 0, originalFilename: 'a.pdf' }),
-    makeChunk({ id: 'chk_b', chunkOrder: 1, originalFilename: 'b.pdf' }),
+    makeChunk({ id: 'chk_a', chunkOrder: 0, originalFilename: 'a.pdf', sizeBytes: pdfA.byteLength }),
+    makeChunk({ id: 'chk_b', chunkOrder: 1, originalFilename: 'b.pdf', sizeBytes: pdfB.byteLength }),
   ]);
   let modelCalls = 0;
   const result = await processAbstractionBatch('job_test_1', {
     store,
-    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    blobLoader: async chunk => ({ bytes: chunk.id === 'chk_a' ? pdfA : pdfB, mediaType: chunk.mediaType }),
     modelClient: async () => {
       modelCalls += 1;
       return {
-        text: '["Claim test A.","Claim test B."]',
+        text: '[{"docIndex":1,"abstract":"Claim test A."},{"docIndex":2,"abstract":"Claim test B."}]',
         model: 'gemini-2.5-flash',
         usage: {},
       };

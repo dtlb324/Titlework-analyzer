@@ -274,14 +274,14 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `ABSTRACT_ESCALATION_MAX_TOKENS` | `4096`, range 512 to 8192. |
 | `ABSTRACTION_ESCALATION_ENABLED` | On, unless the value is `false`. The release workflow sets `false` on the API. |
 | `ABSTRACTION_PDF_TEXT_FIRST` | On, unless the value is `false`. A text PDF can be sent as extracted text. |
-| `ABSTRACTION_PDF_TEXT_STRICT` | Off. `true` uses the stricter text-quality floors. |
+| `ABSTRACTION_PDF_TEXT_STRICT` | On, unless the value is `false`. Uses the stricter text-quality floors. |
 | `ABSTRACTION_PDF_TEXT_MIN_CHARS_PER_PAGE` | `80`, or `100` when strict. Range 20 to 2000. |
 | `ABSTRACTION_PDF_TEXT_MIN_PRINTABLE_RATIO` | `0.82`, or `0.88` when strict. Range 0.5 to 1. |
 | `ABSTRACTION_PDF_TEXT_MAX_BYTES_PER_CHAR` | `800`, or `600` when strict. Range 50 to 5000. |
 | `ABSTRACTION_PDF_TEXT_MIN_SPARSE_CHARS_PER_PAGE` | `400`, or `500` when strict. Range 100 to 5000. |
 | `ABSTRACTION_PDF_TEXT_MAX_CHARS` | `500000`, range 10000 to 2000000. |
 | `ABSTRACTION_BATCH_ENABLED` | On, unless the value is `false`. |
-| `ABSTRACTION_BATCH_MAX_DOCS` | `24`, range 1 to 48. |
+| `ABSTRACTION_BATCH_MAX_DOCS` | `6`, range 1 to 48 (visual PDFs and images run solo). |
 | `ABSTRACTION_BATCH_MAX_PAGE_SPAN` | `32`, range 4 to 120. A wider chunk runs alone. |
 | `ABSTRACTION_BATCH_LARGE_BYTES` | `2000000`, range 100000 to 8000000. |
 | `ABSTRACTION_BATCH_FETCH_MULTIPLIER` | `4`, range 1 to 16. |

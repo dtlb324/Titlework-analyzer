@@ -3,7 +3,6 @@ import {
   ABSTRACTION_PROMPT,
   BATCH_ABSTRACT_RESPONSE_SCHEMA,
   buildAbstractMessagesForChunks,
-  enrichVisualDeliveryForModel,
   estimateAbstractPayloadBytes,
   estimateRequestBytes,
   getAbstractionConfig,
@@ -20,7 +19,7 @@ import {
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const MAX_PAYLOAD_BYTES = REQUEST_ENVELOPE_SAFE_BYTES - 350_000;
-const MAX_DOCS_PER_BATCH = clampInt(process.env.ABSTRACTION_BATCH_MAX_DOCS, 24, 1, 48);
+const MAX_DOCS_PER_BATCH = clampInt(process.env.ABSTRACTION_BATCH_MAX_DOCS, 6, 1, 48);
 const LARGE_CHUNK_BYTES = clampInt(process.env.ABSTRACTION_BATCH_LARGE_BYTES, 2_000_000, 100_000, 8_000_000);
 const MAX_BATCH_PAGE_SPAN = clampInt(process.env.ABSTRACTION_BATCH_MAX_PAGE_SPAN, 32, 4, 120);
 function clampInt(raw, fallback, min, max) {
@@ -33,8 +32,21 @@ export function isAbstractionBatchingEnabled() {
   return process.env.ABSTRACTION_BATCH_ENABLED !== 'false';
 }
 
+function isImageChunk(chunk) {
+  return Boolean(chunk?.renderedImages) || /^image\/[-+.a-z0-9]+$/i.test(chunk?.mediaType || '');
+}
+
 function isPdfChunk(chunk) {
-  return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
+  return !chunk?.renderedImages && (chunk?.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk?.originalFilename || ''));
+}
+
+function isCsvChunk(chunk) {
+  return !chunk?.renderedImages && (chunk?.mediaType === 'text/csv' || /\.csv$/i.test(chunk?.originalFilename || ''));
+}
+
+function isTextBatchableItem(item) {
+  if (isCsvChunk(item.chunk)) return true;
+  return isPdfChunk(item.chunk) && item.delivery?.mode === 'text' && Boolean(String(item.delivery.extractedText || '').trim());
 }
 
 export function estimateChunkPayloadBytes(chunk, payloadBytes = null, delivery = null) {
@@ -42,12 +54,19 @@ export function estimateChunkPayloadBytes(chunk, payloadBytes = null, delivery =
 }
 
 export function chunkRequiresSoloBatch(chunk, estimatedPayload = null) {
+  if (isImageChunk(chunk)) return true;
+  if (isPdfChunk(chunk)) {
+    const largePdfSoloBytes = clampInt(process.env.GEMINI_FILE_API_MIN_BYTES, 1_500_000, 250_000, 10_000_000);
+    if (Number.isFinite(Number(chunk?.sizeBytes)) && Number(chunk.sizeBytes) >= largePdfSoloBytes) {
+      return true;
+    }
+    if (chunk.pageStart && chunk.pageEnd) {
+      const span = chunk.pageEnd - chunk.pageStart + 1;
+      if (span > MAX_BATCH_PAGE_SPAN) return true;
+    }
+  }
   const payload = estimatedPayload ?? estimateChunkPayloadBytes(chunk);
   if (payload > LARGE_CHUNK_BYTES) return true;
-  if (chunk.pageStart && chunk.pageEnd && isPdfChunk(chunk)) {
-    const span = chunk.pageEnd - chunk.pageStart + 1;
-    if (span > MAX_BATCH_PAGE_SPAN) return true;
-  }
   return false;
 }
 
@@ -183,19 +202,17 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     return [...finished, await processChunkAbstraction(ready[0].chunk, { ...options, workerId, leaseMs, maxAttempts })];
   }
 
+  let preparedItems;
   try {
-    const preparations = await Promise.allSettled(ready.map(async entry => {
+    const preparations = await Promise.allSettled(ready.map(async (entry, batchPosition) => {
       const payload = await blobLoader(entry.chunk);
-      const delivery = await enrichVisualDeliveryForModel(
-        await resolveChunkDelivery(entry.chunk, payload.bytes),
-        entry.chunk,
-        payload.bytes,
-        config.model,
-      );
+      const delivery = await resolveChunkDelivery(entry.chunk, payload.bytes);
       return {
         chunk: entry.chunk,
+        payload,
         payloadBytes: payload.bytes,
         delivery,
+        batchPosition,
       };
     }));
     const failedPreparation = preparations.find(result => result.status === 'rejected');
@@ -203,28 +220,53 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       preparations.length = 0;
       throw failedPreparation.reason;
     }
-    const preparedItems = preparations.map(result => result.value);
+    preparedItems = preparations.map(result => result.value);
     preparations.length = 0;
+  } catch (err) {
+    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err))];
+  }
 
-    const messages = buildAbstractMessagesForChunks(preparedItems, globalStart);
+  const textItems = [];
+  const visualItems = [];
+  for (const item of preparedItems) {
+    if (isTextBatchableItem(item)) textItems.push(item);
+    else visualItems.push(item);
+  }
+  preparedItems.length = 0;
+
+  const visualResults = [];
+  for (const item of visualItems) {
+    visualResults.push(await runSoloPreparedItem(item, options, { workerId, leaseMs, maxAttempts, globalStart }));
+  }
+
+  if (!textItems.length) {
+    return [...finished, ...visualResults];
+  }
+  if (textItems.length === 1) {
+    const soloText = await runSoloPreparedItem(textItems[0], options, { workerId, leaseMs, maxAttempts, globalStart });
+    return [...finished, ...visualResults, soloText];
+  }
+
+  try {
+    const messages = buildAbstractMessagesForChunks(textItems, globalStart);
     const payloadBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
-      if (ready.length > 2) {
-        const mid = Math.ceil(ready.length / 2);
+      if (textItems.length > 2) {
+        const mid = Math.ceil(textItems.length / 2);
         const leftResults = await processMultiChunkAbstraction(
-          ready.slice(0, mid).map(entry => entry.chunk),
+          textItems.slice(0, mid).map(item => item.chunk),
           { ...options, globalStart, workerId, leaseMs, maxAttempts },
         );
         const rightResults = await processMultiChunkAbstraction(
-          ready.slice(mid).map(entry => entry.chunk),
+          textItems.slice(mid).map(item => item.chunk),
           { ...options, globalStart: globalStart + mid, workerId, leaseMs, maxAttempts },
         );
-        return [...finished, ...leftResults, ...rightResults];
+        return [...finished, ...visualResults, ...leftResults, ...rightResults];
       }
-      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, 'payload_too_large')];
+      return [...finished, ...visualResults, ...await fallbackToSingles(textItems.map(item => item.chunk), { ...options, workerId, leaseMs, maxAttempts }, 'payload_too_large')];
     }
 
-    const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
+    const batchMaxTokens = Math.min(config.maxTokens * textItems.length, 65536);
     const modelResult = await runModelAbstraction({
       messages,
       model: config.model,
@@ -235,12 +277,12 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       responseSchema: BATCH_ABSTRACT_RESPONSE_SCHEMA,
       options,
     });
-    const parsed = parseBatchAbstracts(modelResult.text, preparedItems, globalStart);
-    const perChunkPayload = Math.floor(payloadBytes / preparedItems.length);
+    const parsed = parseBatchAbstracts(modelResult.text, textItems, globalStart);
+    const perChunkPayload = Math.floor(payloadBytes / textItems.length);
     const batchResults = [];
     const fallbackChunks = [];
-    for (let i = 0; i < preparedItems.length; i++) {
-      const item = preparedItems[i];
+    for (let i = 0; i < textItems.length; i++) {
+      const item = textItems[i];
       const parsedItem = parsed[i];
       const text = String(parsedItem?.abstractText || '').trim();
       if (!text) {
@@ -258,10 +300,10 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
           payloadBytes: perChunkPayload,
           usage: {
             inputTokens: modelResult.usage.inputTokens != null
-              ? Math.floor(modelResult.usage.inputTokens / preparedItems.length)
+              ? Math.floor(modelResult.usage.inputTokens / textItems.length)
               : null,
             outputTokens: modelResult.usage.outputTokens != null
-              ? Math.floor(modelResult.usage.outputTokens / preparedItems.length)
+              ? Math.floor(modelResult.usage.outputTokens / textItems.length)
               : null,
           },
           latencyMs: Date.now() - startedAt,
@@ -276,13 +318,33 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       const partialResults = await fallbackToSingles(
         fallbackChunks,
         { ...options, workerId, leaseMs, maxAttempts },
-        `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
+        `batch_parse_partial:${fallbackChunks.length}/${textItems.length}`,
       );
       batchResults.push(...partialResults);
     }
-    return [...finished, ...batchResults];
+    return [...finished, ...visualResults, ...batchResults];
   } catch (err) {
-    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err))];
+    return [...finished, ...visualResults, ...await fallbackToSingles(textItems.map(item => item.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err))];
+  }
+}
+
+async function runSoloPreparedItem(item, options, { workerId, leaseMs, maxAttempts, globalStart }) {
+  try {
+    return await processChunkAbstraction(item.chunk, {
+      ...options,
+      workerId,
+      leaseMs,
+      maxAttempts,
+      sequenceIndex: Number.isInteger(item.chunk.chunkOrder)
+        ? item.chunk.chunkOrder
+        : (globalStart + item.batchPosition),
+      preloadedPayload: { chunkId: item.chunk.id, payload: item.payload },
+      preloadedDelivery: { chunkId: item.chunk.id, delivery: item.delivery },
+    });
+  } finally {
+    item.payload = null;
+    item.payloadBytes = null;
+    item.delivery = null;
   }
 }
 
