@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { validateAbstractQuality } from '../../public/ocr-accuracy.js';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
+import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
 import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
@@ -91,6 +92,7 @@ export function getAbstractionConfig() {
     escalationModel: resolveEscalationModel(),
     escalationMaxTokens: resolveEscalationMaxTokens(),
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
   };
 }
 
@@ -638,6 +640,7 @@ export async function runChunkEscalation({
   options = {},
 }) {
   const modelClient = getModelClient(options);
+  let guardError = null;
   try {
     const request = await buildEscalationRequestForChunk({
       chunk,
@@ -646,6 +649,12 @@ export async function runChunkEscalation({
       escalationModel,
       escalationMaxTokens,
     });
+    try {
+      await options.modelCallGuard?.();
+    } catch (err) {
+      guardError = err;
+      throw err;
+    }
     const escalatedResponse = await modelClient({
       model: escalationModel,
       maxTokens: escalationMaxTokens,
@@ -698,6 +707,7 @@ export async function runChunkEscalation({
       stopReason: escalatedResponse.stopReason || null,
     };
   } catch (err) {
+    if (guardError) throw guardError;
     logEscalationFailure({
       chunk,
       model: escalationModel,
@@ -730,6 +740,7 @@ export async function runModelAbstraction({
 }) {
   const modelClient = getModelClient(options);
   const schemaForModel = responseSchema && isGeminiModel(model) ? responseSchema : null;
+  await options.modelCallGuard?.();
   let response = await modelClient({
     model,
     maxTokens,
@@ -774,7 +785,14 @@ export async function runModelAbstraction({
         escalated = true;
       }
     } else {
+      let guardError = null;
       try {
+        try {
+          await options.modelCallGuard?.();
+        } catch (err) {
+          guardError = err;
+          throw err;
+        }
         const escalatedResponse = await modelClient({
           model: escalationModel,
           maxTokens: escalationMaxTokens,
@@ -807,6 +825,7 @@ export async function runModelAbstraction({
           });
         }
       } catch (err) {
+        if (guardError) throw guardError;
         logEscalationFailure({
           chunk,
           model: escalationModel,
@@ -1105,6 +1124,15 @@ export async function processChunkAbstraction(chunk, options = {}) {
     };
   }
   const processingChunk = claimedChunk;
+  const upstreamTimeoutMs = options.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS;
+  const ownGuard = async () => {
+    const state = await renewChunkLease(store, processingChunk, {
+      workerId,
+      leaseMs: callLeaseMs(leaseMs, upstreamTimeoutMs),
+    });
+    if (state === 'lost') throw chunkLeaseLostError(processingChunk.id);
+    await options.chunkLeaseGuard?.();
+  };
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
   const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';
 
@@ -1188,7 +1216,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       rawPayloadBytes: payload.bytes,
       sequenceIndex,
       escalationContext: buildEscalationQualityContext(processingChunk, delivery),
-      options,
+      options: { ...options, modelCallGuard: ownGuard },
     });
     const finalPayloadBytes = modelResult.payloadBytes ?? payloadBytes;
     logChunkStage('model_response', processingChunk, {
@@ -1218,6 +1246,9 @@ export async function processChunkAbstraction(chunk, options = {}) {
     }
     return saved;
   } catch (err) {
+    if (isChunkLeaseLostError(err)) {
+      return { status: 'stale', chunkId: processingChunk.id };
+    }
     const errorType = classifyError(err);
     logChunkStage('error', processingChunk, {
       workerId,

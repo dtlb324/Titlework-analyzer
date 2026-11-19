@@ -238,6 +238,15 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       chunks.set(chunkId, updated);
       return updated;
     },
+    async renewChunkAbstractionLease(jobId, chunkId, renewOptions = {}) {
+      if (options.renewThrows) throw new Error(options.renewThrows);
+      const chunk = chunks.get(chunkId);
+      if (!chunk || chunk.jobId !== jobId) return null;
+      if (chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== (renewOptions.workerId ?? null)) return null;
+      const updated = { ...chunk, abstractionLeaseExpiresAt: new Date(Date.now() + Math.max(1, Number(renewOptions.leaseMs) || 90_000)).toISOString() };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
     async markChunkAbstractionFailed(jobId, chunkId, failure) {
       const chunk = chunks.get(chunkId);
       if (options.enforceWorkerLease && (!failure.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== failure.workerId)) {
@@ -2089,6 +2098,142 @@ test('Priority 4: resolveEscalationModel and resolveEscalationMaxTokens read env
     assert(getAbstractionConfig().escalationModel === 'anthropic/claude-haiku-5.5');
     assert(getAbstractionConfig().escalationMaxTokens === 6000);
   });
+});
+
+const FLAGGED_TIER1 = 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low';
+
+test('lease: getAbstractionConfig exposes the upstream timeout', () => {
+  assert(Number.isFinite(getAbstractionConfig().upstreamTimeoutMs) && getAbstractionConfig().upstreamTimeoutMs >= 10_000, 'Expected upstreamTimeoutMs in config');
+});
+
+test('lease (solo): lease stolen before the escalation => no Sonnet call, stale, chunk not failed or retry_wait', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_solo_lost' })]);
+  const calls = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_solo_lost'), {
+    store,
+    workerId: 'wkr_A',
+    blobLoader: async () => ({ bytes: Buffer.from('%PDF-test'), mediaType: 'application/pdf' }),
+    modelClient: async req => {
+      calls.push(req.model);
+      if (!req.escalation) {
+        // Worker B reclaims the chunk while the slow Tier-1 call runs.
+        store.chunks.set('chk_solo_lost', { ...store.chunks.get('chk_solo_lost'), abstractionWorkerId: 'wkr_B' });
+        return { text: FLAGGED_TIER1, model: 'gemini-3.1-flash-lite', usage: {} };
+      }
+      return { text: cleanAbstract('Sonnet'), model: 'claude-sonnet-5-5', usage: {} };
+    },
+  });
+  assert(result.status === 'stale', `Expected stale, got ${result.status}`);
+  assert(calls.length === 1, `Expected only the Tier-1 call, got ${calls.join(',')}`);
+  const chunk = store.chunks.get('chk_solo_lost');
+  assert(chunk.abstractionStatus === 'processing' && chunk.abstractionWorkerId === 'wkr_B', `Lost chunk must be left to its new owner, got ${chunk.abstractionStatus}/${chunk.abstractionWorkerId}`);
+  assert(!store.abstracts.has('chk_solo_lost'), 'Stale worker must not persist an abstract');
+});
+
+test('lease (solo): an expired but unclaimed lease is renewed before the Sonnet call', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_solo_expired' })]);
+  let leaseAtSonnet = null;
+  const result = await processChunkAbstraction(store.chunks.get('chk_solo_expired'), {
+    store,
+    workerId: 'wkr_A',
+    leaseMs: 1000,
+    blobLoader: async () => ({ bytes: Buffer.from('%PDF-test'), mediaType: 'application/pdf' }),
+    modelClient: async req => {
+      if (!req.escalation) {
+        store.chunks.set('chk_solo_expired', { ...store.chunks.get('chk_solo_expired'), abstractionLeaseExpiresAt: new Date(Date.now() - 60_000).toISOString() });
+        return { text: FLAGGED_TIER1, model: 'gemini-3.1-flash-lite', usage: {} };
+      }
+      leaseAtSonnet = Date.parse(store.chunks.get('chk_solo_expired').abstractionLeaseExpiresAt);
+      return { text: cleanAbstract('Sonnet'), model: 'claude-sonnet-5-5', usage: {} };
+    },
+  });
+  assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+  assert(leaseAtSonnet !== null, 'Expected a Sonnet call');
+  const minMs = getAbstractionConfig().upstreamTimeoutMs + 60_000;
+  assert(leaseAtSonnet - Date.now() > minMs - 5_000, `Lease must cover upstream timeout + 60s at the Sonnet call, remaining ${leaseAtSonnet - Date.now()}ms`);
+});
+
+test('lease (solo): a renewal that throws is logged and the work proceeds', async () => {
+  const warnings = [];
+  const prevWarn = console.warn;
+  console.warn = msg => warnings.push(msg);
+  try {
+    const store = createMemoryPhase3Store([makeChunk({ id: 'chk_solo_renew_err' })], { renewThrows: 'db blip' });
+    const calls = [];
+    const result = await processChunkAbstraction(store.chunks.get('chk_solo_renew_err'), {
+      store,
+      workerId: 'wkr_A',
+      blobLoader: async () => ({ bytes: Buffer.from('%PDF-test'), mediaType: 'application/pdf' }),
+      modelClient: async req => {
+        calls.push(req.model);
+        return req.escalation
+          ? { text: cleanAbstract('Sonnet'), model: 'claude-sonnet-5-5', usage: {} }
+          : { text: FLAGGED_TIER1, model: 'gemini-3.1-flash-lite', usage: {} };
+      },
+    });
+    assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+    assert(calls.length === 2, `Expected Tier-1 + Sonnet, got ${calls.length}`);
+    assert(warnings.some(w => String(w).includes('abstraction_chunk_lease_renew_failed')), 'Expected a renew-failed warning');
+  } finally {
+    console.warn = prevWarn;
+  }
+});
+
+test('lease (solo): a store without renewChunkAbstractionLease behaves as before', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_solo_norenew' })]);
+  delete store.renewChunkAbstractionLease;
+  const calls = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_solo_norenew'), {
+    store,
+    workerId: 'wkr_A',
+    blobLoader: async () => ({ bytes: Buffer.from('%PDF-test'), mediaType: 'application/pdf' }),
+    modelClient: async req => {
+      calls.push(req.model);
+      return req.escalation
+        ? { text: cleanAbstract('Sonnet'), model: 'claude-sonnet-5-5', usage: {} }
+        : { text: FLAGGED_TIER1, model: 'gemini-3.1-flash-lite', usage: {} };
+    },
+  });
+  assert(result.status === 'completed' && calls.length === 2, `Expected completed with 2 calls, got ${result.status}/${calls.length}`);
+});
+
+test('lease: runModelAbstraction awaits modelCallGuard before every call and lets guard errors escape the escalation catch', async () => {
+  const { runModelAbstraction, runChunkEscalation } = await import('../api/_lib/abstraction.js');
+  const order = [];
+  const guardErr = Object.assign(new Error('lease lost'), { code: 'lease_lost' });
+  let n = 0;
+  const base = {
+    messages: [{ role: 'user', content: 'x' }],
+    model: 'gemini-3.1-flash-lite',
+    maxTokens: 100,
+    payloadBytes: 10,
+    escalationModel: 'claude-sonnet-5-5',
+    escalationMaxTokens: 100,
+  };
+  const modelClient = async req => {
+    order.push(req.escalation ? 'call:esc' : 'call:primary');
+    return { text: req.escalation ? cleanAbstract('Sonnet') : FLAGGED_TIER1, model: req.model, usage: {} };
+  };
+  await runModelAbstraction({ ...base, options: { modelClient, modelCallGuard: async () => { order.push(`guard${++n}`); } } });
+  assert(order.join(',') === 'guard1,call:primary,guard2,call:esc', `Unexpected order ${order.join(',')}`);
+  let thrown = null;
+  order.length = 0;
+  try {
+    await runModelAbstraction({ ...base, options: { modelClient, modelCallGuard: async () => { if (order.length) throw guardErr; order.push('guard'); } } });
+  } catch (err) { thrown = err; }
+  assert(thrown === guardErr, 'Guard error on the escalation call must propagate unchanged');
+  assert(order.join(',') === 'guard,call:primary', `Escalation must not be paid after a failed guard, got ${order.join(',')}`);
+  thrown = null;
+  const chunk = makeChunk({ id: 'chk_guard_chunk_esc' });
+  let paid = 0;
+  try {
+    await runChunkEscalation({
+      chunk,
+      payloadBytes: Buffer.from('%PDF-test'),
+      options: { modelClient: async () => { paid += 1; return { text: 'x', usage: {} }; }, modelCallGuard: async () => { throw guardErr; } },
+    });
+  } catch (err) { thrown = err; }
+  assert(thrown === guardErr && paid === 0, 'runChunkEscalation must rethrow the guard error and not pay');
 });
 
 for (const { name, fn } of tests) {
