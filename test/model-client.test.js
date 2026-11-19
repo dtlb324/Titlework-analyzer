@@ -54,6 +54,7 @@ test('abstractionApiKeyError uses the OpenRouter key for a bare Gemini model whe
     delete process.env.GEMINI_API_KEY;
     delete process.env.GOOGLE_API_KEY;
     assert(abstractionApiKeyError('gemini-3.1-flash-lite') === null, 'Expected OpenRouter routing not to require a Gemini key');
+    assert(abstractionApiKeyError('gemini-4-hydrogen') === null, 'Expected OpenRouter routing not to require a Gemini key for Hydrogen');
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
@@ -424,6 +425,105 @@ for (const [name, invoke] of [['invokeAnthropicModelStream', invokeAnthropicMode
     }
   });
 }
+
+test('invokeModel forwards thinkingLevel to direct Gemini and OpenRouter non-streaming/streaming reasoning.effort while omitting it on Sonnet', async () => {
+  const names = ['GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'MODEL_PROVIDER', 'GEMINI_THINKING_LEVEL'];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  const prevFetch = global.fetch;
+
+  try {
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    delete process.env.MODEL_PROVIDER;
+    delete process.env.GEMINI_THINKING_LEVEL;
+    const directCalls = [];
+    global.fetch = async (url, init) => {
+      directCalls.push({ url: String(url), body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }), { status: 200 });
+    };
+    await invokeModel({
+      model: 'gemini-4-hydrogen',
+      maxTokens: 2000,
+      thinkingLevel: 'low',
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assertStrict.equal(directCalls.length, 1);
+    assertStrict.match(directCalls[0].url, /gemini-4-hydrogen:generateContent$/);
+    assertStrict.deepEqual(directCalls[0].body.generationConfig.thinkingConfig, { thinkingLevel: 'low' });
+
+    process.env.MODEL_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    const openRouterCalls = [];
+    global.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      openRouterCalls.push({ url: String(url), body });
+      if (body.stream) {
+        const sse = [
+          `data: ${JSON.stringify({ model: body.model, choices: [{ delta: { content: 'ok' } }] })}`,
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } })}`,
+          'data: [DONE]',
+          '',
+        ].join('\n\n');
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      return new Response(JSON.stringify({
+        model: body.model,
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }), { status: 200 });
+    };
+
+    await invokeModel({
+      model: 'gemini-4-hydrogen',
+      maxTokens: 2000,
+      thinkingLevel: 'low',
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assertStrict.equal(openRouterCalls[0].body.model, 'google/gemini-4-hydrogen');
+    assertStrict.deepEqual(openRouterCalls[0].body.reasoning, { effort: 'low' });
+    assertStrict.equal(openRouterCalls[0].body.stream, undefined);
+
+    await invokeModel({
+      model: 'gemini-4-hydrogen',
+      maxTokens: 16000,
+      thinkingLevel: 'low',
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assertStrict.equal(openRouterCalls[1].body.model, 'google/gemini-4-hydrogen');
+    assertStrict.deepEqual(openRouterCalls[1].body.reasoning, { effort: 'low' });
+    assertStrict.equal(openRouterCalls[1].body.stream, true);
+
+    await invokeModel({
+      model: 'claude-sonnet-5-5',
+      maxTokens: 2000,
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assertStrict.equal(openRouterCalls[2].body.model, 'anthropic/claude-sonnet-5.5');
+    assertStrict.equal('reasoning' in openRouterCalls[2].body, false);
+
+    await invokeModel({
+      model: 'claude-sonnet-5-5',
+      maxTokens: 16000,
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assertStrict.equal(openRouterCalls[3].body.model, 'anthropic/claude-sonnet-5.5');
+    assertStrict.equal('reasoning' in openRouterCalls[3].body, false);
+    assertStrict.equal(openRouterCalls[3].body.stream, true);
+  } finally {
+    global.fetch = prevFetch;
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
 
 let failed = 0;
 for (const { name, fn } of tests) {

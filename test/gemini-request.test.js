@@ -9,6 +9,8 @@ import {
   isGeminiModel,
   normalizeGeminiUsage,
   resolveGeminiThinkingConfig,
+  DEFAULT_GEMINI_4_WORKFLOW_THINKING_LEVEL,
+  resolveWorkflowGeminiThinkingLevel,
 } from '../api/_lib/gemini-request.js';
 
 function assert(condition, message) {
@@ -257,6 +259,38 @@ test('extractGeminiText joins candidate parts', () => {
   });
   assert(text.includes('DOC TYPE: deed'), 'Expected first part text');
   assert(text.includes('GRANTOR: Smith'), 'Expected second part text');
+});
+
+test('resolveWorkflowGeminiThinkingLevel defaults Gemini 4 workflows to low, honors env overrides, and leaves Gemini 3/2.5/Claude unset', () => {
+  const prevLevel = process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  try {
+    assert(DEFAULT_GEMINI_4_WORKFLOW_THINKING_LEVEL === 'low', 'Expected default workflow level low');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen') === 'low', 'Hydrogen defaults to low');
+    assert(resolveWorkflowGeminiThinkingLevel('google/gemini-4-hydrogen') === 'low', 'OpenRouter Hydrogen defaults to low');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen', 'high') === 'high', 'Explicit high overrides default');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen', 'xhigh') === 'xhigh', 'Hydrogen accepts xhigh');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen', 'minimal') === 'low', 'Hydrogen rejects minimal and falls back to low');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-carbon', 'xhigh') === 'low', 'Carbon rejects xhigh and falls back to low');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-3.1-flash-lite') === undefined, 'Gemini 3 returns undefined when env is unset');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-2.5-flash') === undefined, 'Gemini 2.5 returns undefined');
+    assert(resolveWorkflowGeminiThinkingLevel('claude-sonnet-5-5') === undefined, 'Claude returns undefined');
+
+    process.env.GEMINI_THINKING_LEVEL = 'xhigh';
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen') === 'xhigh', 'Env xhigh applies to Hydrogen');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-carbon') === 'low', 'Env xhigh falls back to low on Carbon');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-3.1-flash-lite') === undefined, 'Env xhigh is ignored on Gemini 3');
+
+    process.env.GEMINI_THINKING_LEVEL = 'high';
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen') === 'high', 'Env high applies to Hydrogen');
+
+    process.env.GEMINI_THINKING_LEVEL = 'minimal';
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-4-hydrogen') === 'low', 'Env minimal falls back to low on Hydrogen');
+    assert(resolveWorkflowGeminiThinkingLevel('gemini-3.1-flash-lite') === 'minimal', 'Env minimal applies to Gemini 3');
+  } finally {
+    if (prevLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = prevLevel;
+  }
 });
 
 let failed = 0;

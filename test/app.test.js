@@ -56,9 +56,9 @@ test('index.html shows deployed release version under the tagline', () => {
   assert(script.includes('release?.version'), 'Expected version loader to read release.version');
 });
 
-test('uses Gemini Flash for abstraction and Sonnet for synthesis', () => {
-  assert(script.includes("ABSTRACT_MODEL = 'gemini-3.1-flash-lite'"), 'Expected Gemini Flash Lite for abstraction');
-  assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-3.1-flash-lite'"), 'Expected Gemini Flash Lite for partial synthesis segments');
+test('uses Gemini 4 Hydrogen for abstraction/partial synthesis and Sonnet 5.5 for synthesis', () => {
+  assert(script.includes("ABSTRACT_MODEL = 'gemini-4-hydrogen'"), 'Expected Gemini 4 Hydrogen for abstraction');
+  assert(script.includes("SYNTHESIS_PARTIAL_MODEL = 'gemini-4-hydrogen'"), 'Expected Gemini 4 Hydrogen for partial synthesis segments');
   assert(script.includes("SYNTHESIS_MODEL = 'claude-sonnet-5-5'"), 'Expected Sonnet 5.5 for final synthesis');
   assert(!script.includes("'claude-opus-4-7'"), 'Opus 4.7 should not be hardcoded');
   assert(!script.includes('claude-haiku-4-5'), 'Haiku should not be used for abstraction or partial synthesis');
@@ -183,6 +183,73 @@ test('API accepts gemini-2.5-flash, claude-sonnet-5, and claude-sonnet-5-5', asy
   else delete process.env.ANTHROPIC_API_KEY;
   if (prevGemini) process.env.GEMINI_API_KEY = prevGemini;
   else delete process.env.GEMINI_API_KEY;
+});
+
+test('POST /api/analyze defaults Gemini 4 Hydrogen to low effort, honors GEMINI_THINKING_LEVEL, and omits thinking for Sonnet', async () => {
+  const prev = {
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    GEMINI_THINKING_LEVEL: process.env.GEMINI_THINKING_LEVEL,
+    MODEL_PROVIDER: process.env.MODEL_PROVIDER,
+  };
+  const prevFetch = global.fetch;
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
+  delete process.env.MODEL_PROVIDER;
+  delete process.env.GEMINI_THINKING_LEVEL;
+
+  const sent = [];
+  global.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push({ url: String(url), body });
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+          usageMetadata: {},
+          modelVersion: 'gemini-4-hydrogen',
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: 'text', text: 'ok' }], model: body.model, stop_reason: 'end_turn', usage: {} }),
+    };
+  };
+
+  try {
+    let res = mockRes();
+    await handler(mockReq({ model: 'gemini-4-hydrogen', messages: [{ role: 'user', content: 'hello' }] }), res);
+    assert(res.statusCode === 200, `Expected 200 for Hydrogen default, got ${res.statusCode}`);
+    assert(JSON.stringify(sent.at(-1).body.generationConfig?.thinkingConfig) === '{"thinkingLevel":"low"}', `Expected default low effort, got ${JSON.stringify(sent.at(-1).body.generationConfig)}`);
+
+    process.env.GEMINI_THINKING_LEVEL = 'medium';
+    res = mockRes();
+    await handler(mockReq({ model: 'gemini-4-hydrogen', messages: [{ role: 'user', content: 'hello' }] }), res);
+    assert(res.statusCode === 200, `Expected 200 for Hydrogen medium, got ${res.statusCode}`);
+    assert(JSON.stringify(sent.at(-1).body.generationConfig?.thinkingConfig) === '{"thinkingLevel":"medium"}', `Expected medium effort, got ${JSON.stringify(sent.at(-1).body.generationConfig)}`);
+
+    process.env.GEMINI_THINKING_LEVEL = 'minimal';
+    res = mockRes();
+    await handler(mockReq({ model: 'gemini-4-hydrogen', messages: [{ role: 'user', content: 'hello' }] }), res);
+    assert(res.statusCode === 200, `Expected 200 for Hydrogen invalid minimal fallback, got ${res.statusCode}`);
+    assert(JSON.stringify(sent.at(-1).body.generationConfig?.thinkingConfig) === '{"thinkingLevel":"low"}', `Expected minimal to fall back to low, got ${JSON.stringify(sent.at(-1).body.generationConfig)}`);
+
+    delete process.env.GEMINI_THINKING_LEVEL;
+    res = mockRes();
+    await handler(mockReq({ model: 'claude-sonnet-5-5', messages: [{ role: 'user', content: 'hello' }] }), res);
+    assert(res.statusCode === 200, `Expected 200 for Sonnet, got ${res.statusCode}`);
+    assert(!('thinking' in sent.at(-1).body) && !('output_config' in sent.at(-1).body), `Expected no thinking/effort config on Sonnet, got ${JSON.stringify(sent.at(-1).body)}`);
+  } finally {
+    global.fetch = prevFetch;
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('rate limit default allows bulk throughput', () => {

@@ -1,4 +1,4 @@
-import { ABSTRACTION_PROMPT, buildAbstractMessagesForChunk, getAbstractionConfig } from './_lib/abstraction.js';
+import { ABSTRACTION_PROMPT, buildAbstractMessagesForChunk } from './_lib/abstraction.js';
 import { requireJobPassword, setJobSecurityHeaders } from './_lib/jobs.js';
 import { isProductionRuntime } from './_lib/runtime-info.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingConfig } from './_lib/gemini-request.js';
@@ -37,6 +37,7 @@ function usesOpenRouter() {
 }
 
 // Exact-model exception from https://ai.google.dev/gemini-api/docs/generate-content/thinking.
+const DEFAULT_BASELINE_MODEL = 'gemini-3.1-flash-lite';
 const HYDROGEN_ID = 'gemini-4-hydrogen';
 const GEMINI_EFFORTS = new Map([['gemini-3.1-flash-lite-image', ['minimal', 'high']], [HYDROGEN_ID, ['low', 'medium', 'high', 'xhigh']]]);
 const GEMINI_NO_MINIMAL = /^gemini-3(?:[.-][78]-flash(?!-lite)|.*-pro(?:-|$))/i;
@@ -96,22 +97,22 @@ function models() {
       return { ...withEffort({ id: slug, label: known?.label || slug, effortLevels: known?.effortLevels || ['default'], maxTokens }, known?.effort || 'default'), provider: 'openrouter' };
     });
   }
-  const config = getAbstractionConfig();
-  if (!/^gemini-3[.-][a-z0-9.-]+$/i.test(config.model)) {
+  const baselineModel = String(process.env.ABSTRACT_MODEL || DEFAULT_BASELINE_MODEL).trim();
+  if (!/^gemini-3[.-][a-z0-9.-]+$/i.test(baselineModel)) {
     const error = new Error('OCR comparison requires a Gemini 3-series ABSTRACT_MODEL.');
     error.statusCode = 503;
     throw error;
   }
   const configuredRaw = String(process.env.GEMINI_THINKING_LEVEL || '').trim();
-  const configured = resolveGeminiThinkingConfig(config.model)?.thinkingLevel || 'default';
-  const baselineLevels = geminiEfforts(config.model);
+  const configured = resolveGeminiThinkingConfig(baselineModel)?.thinkingLevel || 'default';
+  const baselineLevels = geminiEfforts(baselineModel);
   if (configuredRaw && !baselineLevels.includes(configured)) {
-    const error = new Error(`GEMINI_THINKING_LEVEL ${JSON.stringify(configuredRaw)} is not supported by ${config.model}.`);
+    const error = new Error(`GEMINI_THINKING_LEVEL ${JSON.stringify(configuredRaw)} is not supported by ${baselineModel}.`);
     error.statusCode = 503;
     throw error;
   }
   return [
-    withEffort({ id: config.model, label: 'Current Gemini', effortLevels: configured === 'default' ? ['default', ...baselineLevels] : baselineLevels, maxTokens }, configured),
+    withEffort({ id: baselineModel, label: 'Current Gemini', effortLevels: configured === 'default' ? ['default', ...baselineLevels] : baselineLevels, maxTokens }, configured),
     withEffort({ id: HYDROGEN_ID, label: 'Gemini 4 Hydrogen', effortLevels: geminiEfforts(HYDROGEN_ID), maxTokens }, 'medium'),
     withEffort({ id: HAIKU_ID, label: 'Claude Haiku 5.5', effortLevels: HAIKU_EFFORTS, maxTokens }, 'medium'),
   ].map(model => (viaOpenRouter ? { ...model, provider: 'openrouter' } : model));

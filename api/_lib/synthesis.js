@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
 import { buildMergeUserMessageContent, estimateTextTokens } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
+import { resolveWorkflowGeminiThinkingLevel } from './gemini-request.js';
 
 const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-5-5';
 
@@ -15,7 +16,7 @@ export function resolveFinalSynthesisModel() {
 }
 
 const DEFAULT_SYNTHESIS_MODEL = resolveFinalSynthesisModel();
-const DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID = 'gemini-3.1-flash-lite';
+const DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID = 'gemini-4-hydrogen';
 const REMOVED_PARTIAL_SYNTHESIS_MODELS = new Set([
   'claude-haiku-4-5',
   'claude-3-5-haiku-20241022',
@@ -296,10 +297,16 @@ export function getSynthesisConfig(overrides = {}) {
 
 export function getPartialSynthesisConfig(overrides = {}) {
   const base = getSynthesisConfig(overrides);
+  const model = overrides.partialModel || base.partialModel;
+  const thinkingLevel = resolveWorkflowGeminiThinkingLevel(
+    model,
+    overrides.partialThinkingLevel ?? overrides.thinkingLevel,
+  );
   return {
     ...base,
-    model: overrides.partialModel || base.partialModel,
+    model,
     maxTokens: overrides.partialMaxTokens || base.partialMaxTokens,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
   };
 }
 
@@ -667,6 +674,7 @@ async function callSynthesisModel({
   if (previewWriter?.begin) await previewWriter.begin();
   const started = Date.now();
   try {
+    const thinkingLevel = resolveWorkflowGeminiThinkingLevel(config.model, config.thinkingLevel);
     const response = await getModelClient(options)({
       model: config.model,
       maxTokens: config.maxTokens,
@@ -676,6 +684,7 @@ async function callSynthesisModel({
       upstreamTimeoutMs: config.upstreamTimeoutMs,
       stream: shouldStream,
       onDelta: previewWriter ? (delta, fullText) => previewWriter.onDelta(delta, fullText) : undefined,
+      ...(thinkingLevel ? { thinkingLevel } : {}),
     });
     // A response cut off at the token limit is never a finished result. Throwing here, before the preview is
     // marked complete, keeps every caller (single pass, repair, split merge, final merge) from accepting it.

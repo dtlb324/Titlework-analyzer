@@ -1,12 +1,13 @@
 import { createHash } from 'crypto';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
 import { shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { resolveWorkflowGeminiThinkingLevel } from './gemini-request.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
-const DEFAULT_ABSTRACT_MODEL = 'gemini-3.1-flash-lite';
+const DEFAULT_ABSTRACT_MODEL = 'gemini-4-hydrogen';
 const REMOVED_ABSTRACT_MODELS = new Set(['claude-haiku-4-5', 'claude-3-5-haiku-20241022', 'claude-3-5-haiku-latest']);
 
 export function resolveAbstractModel() {
@@ -75,6 +76,7 @@ CONFIDENCE: [one sentence]
 Write ILLEGIBLE - VERIFY MANUALLY for any text you cannot read or any field whose value is not visible on the document. Never write "not visible", "N/A", or leave a field blank as a substitute — use ILLEGIBLE - VERIFY MANUALLY. Only use "not applicable" when a field genuinely does not exist for this instrument type. DO NOT GUESS or fill in missing information.`;
 
 export function getAbstractionConfig() {
+  const thinkingLevel = resolveWorkflowGeminiThinkingLevel(ABSTRACT_MODEL);
   return {
     requestEnvelopeSafeBytes: REQUEST_ENVELOPE_SAFE_BYTES,
     model: ABSTRACT_MODEL,
@@ -82,6 +84,7 @@ export function getAbstractionConfig() {
     escalationModel: ABSTRACT_ESCALATION_MODEL,
     escalationMaxTokens: ABSTRACT_ESCALATION_MAX_TOKENS,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
   };
 }
 
@@ -544,12 +547,14 @@ export async function runModelAbstraction({
 }) {
   const modelClient = getModelClient(options);
   const schemaForModel = responseSchema && isGeminiModel(model) ? responseSchema : null;
+  const thinkingLevel = resolveWorkflowGeminiThinkingLevel(model, options.thinkingLevel);
   let response = await modelClient({
     model,
     maxTokens,
     system: ABSTRACTION_PROMPT,
     messages,
     payloadBytes,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(schemaForModel ? { responseSchema: schemaForModel } : {}),
   });
   let usage = extractUsage(response.usage);

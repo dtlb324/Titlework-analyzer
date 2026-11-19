@@ -37,6 +37,20 @@ function normalizeThinkingLevel(model, raw) {
   return allowed.has(level) ? level : null;
 }
 
+export const DEFAULT_GEMINI_4_WORKFLOW_THINKING_LEVEL = 'low';
+
+export function resolveWorkflowGeminiThinkingLevel(model, explicitLevel) {
+  const bareModel = String(model || '').trim().replace(/^google\//i, '');
+  if (!isGemini3SeriesModel(bareModel) && !isGemini4SeriesModel(bareModel)) {
+    return undefined;
+  }
+  const explicit = normalizeThinkingLevel(bareModel, explicitLevel);
+  if (explicit) return explicit;
+  const fromEnv = normalizeThinkingLevel(bareModel, process.env.GEMINI_THINKING_LEVEL);
+  if (fromEnv) return fromEnv;
+  return isGemini4SeriesModel(bareModel) ? DEFAULT_GEMINI_4_WORKFLOW_THINKING_LEVEL : undefined;
+}
+
 export function resolveGeminiThinkingConfig(model, overrides = {}) {
   if (!isGeminiModel(model)) return null;
 

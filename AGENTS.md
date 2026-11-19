@@ -20,7 +20,7 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   inline in `ensureSchema` (`CREATE TABLE IF NOT EXISTS` and
   `ADD COLUMN IF NOT EXISTS`). No migration files. GCS signed URLs live in
   `api/_lib/storage.js`; the browser uploads straight to the bucket.
-- AI: `gemini-3.1-flash-lite` abstracts each chunk (`api/_lib/abstraction.js`)
+- AI: `gemini-4-hydrogen` (at `low` effort by default) abstracts each chunk (`api/_lib/abstraction.js`)
   and writes partial synthesis on large jobs. `claude-sonnet-5-5` writes the
   final opinion, answers follow-ups, and re-reads low-confidence abstracts
   (`api/_lib/synthesis.js`, `ABSTRACT_ESCALATION_MODEL`).

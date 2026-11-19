@@ -238,7 +238,7 @@ export async function postOpenRouterChat(request, options = {}) {
     maxTokens: request.maxTokens,
     system: request.system,
     messages: request.messages,
-    reasoningEffort: request.reasoningEffort,
+    reasoningEffort: request.reasoningEffort ?? request.thinkingLevel,
   });
 
   const headers = buildOpenRouterHeaders();

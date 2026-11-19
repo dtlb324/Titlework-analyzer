@@ -15,6 +15,7 @@ import {
   validateAbstractPersistenceInput,
   enrichVisualDeliveryForModel,
 } from '../api/_lib/abstraction.js';
+import { processMultiChunkAbstraction } from '../api/_lib/abstraction-batch.js';
 import {
   getBackgroundPromise,
   processAbstractionBatch,
@@ -529,9 +530,9 @@ test('POST /api/jobs/:id/abstraction/start rejects jobs before uploads are ready
 test('resolveAbstractModel ignores removed Claude Haiku model ids', () => {
   const previous = process.env.ABSTRACT_MODEL;
   process.env.ABSTRACT_MODEL = 'claude-haiku-4-5';
-  assert(resolveAbstractModel() === 'gemini-3.1-flash-lite', 'Expected Haiku override to fall back to Gemini Flash Lite');
+  assert(resolveAbstractModel() === 'gemini-4-hydrogen', 'Expected Haiku override to fall back to Gemini 4 Hydrogen');
   process.env.ABSTRACT_MODEL = 'claude-haiku-4-5-20251001';
-  assert(resolveAbstractModel() === 'gemini-3.1-flash-lite', 'Expected Haiku version suffix to fall back to Gemini Flash Lite');
+  assert(resolveAbstractModel() === 'gemini-4-hydrogen', 'Expected Haiku version suffix to fall back to Gemini 4 Hydrogen');
   if (previous) process.env.ABSTRACT_MODEL = previous;
   else delete process.env.ABSTRACT_MODEL;
 });
@@ -578,8 +579,8 @@ test('browser abstraction fallback mirrors single-instrument prompt and token bu
   assert(!indexHtml.includes('INSTRUMENT 1 OF M'), 'Browser prompt should not ask for multi-instrument sub-sections');
   assert(!indexHtml.includes('multiple clearly identifiable recorded instruments'), 'Browser prompt should not ask for multi-instrument detection');
   assert(indexHtml.includes('const ABSTRACT_MAX_TOKENS = 2000'), 'Expected browser abstraction token default to match server default');
-  assert(indexHtml.includes("const ABSTRACT_MODEL = 'gemini-3.1-flash-lite'"), 'Expected browser fallback to use Gemini Flash Lite for abstraction');
-  assert(indexHtml.includes("const SYNTHESIS_PARTIAL_MODEL = 'gemini-3.1-flash-lite'"), 'Expected browser partial synthesis to use Gemini Flash Lite');
+  assert(indexHtml.includes("const ABSTRACT_MODEL = 'gemini-4-hydrogen'"), 'Expected browser fallback to use Gemini 4 Hydrogen for abstraction');
+  assert(indexHtml.includes("const SYNTHESIS_PARTIAL_MODEL = 'gemini-4-hydrogen'"), 'Expected browser partial synthesis to use Gemini 4 Hydrogen');
   assert(!indexHtml.includes('claude-haiku-4-5'), 'Browser abstraction must not reference Claude Haiku');
   assert(indexHtml.includes("const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-5-5'"), 'Expected browser fallback to define Sonnet 5.5 escalation model');
   assert(indexHtml.includes('callAbstractionWithEscalation'), 'Expected browser fallback to use abstraction escalation helper');
@@ -1431,10 +1432,10 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
 
   const saved = store.abstracts.get('chk_flagged');
   assert(result.status === 'completed', `Expected completed escalation, got ${result.status}`);
-  assert(models.join(',') === 'gemini-3.1-flash-lite,claude-sonnet-5-5', `Expected Gemini Flash Lite then Sonnet 5.5, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-4-hydrogen,claude-sonnet-5-5', `Expected Gemini 4 Hydrogen then Sonnet 5.5, got ${models.join(',')}`);
   assert(saved.modelUsed === 'claude-sonnet-5-5', `Expected Sonnet 5.5 saved, got ${saved.modelUsed}`);
   assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
-  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash Lite and Sonnet calls');
+  assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini 4 Hydrogen and Sonnet calls');
 });
 
 test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {
@@ -1455,7 +1456,7 @@ test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', a
   });
 
   const saved = store.abstracts.get('chk_clean');
-  assert(models.join(',') === 'gemini-3.1-flash-lite', `Expected only Gemini Flash Lite, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-4-hydrogen', `Expected only Gemini 4 Hydrogen, got ${models.join(',')}`);
   assert(saved.modelUsed === 'gemini-2.5-flash', `Expected Gemini Flash saved, got ${saved.modelUsed}`);
 });
 
@@ -1481,7 +1482,7 @@ test('processChunkAbstraction fails a max_tokens abstract instead of saving it a
   assert(result.failure.errorType === 'output_truncated', `Expected output_truncated, got ${result.failure.errorType}`);
   assert(!store.abstracts.has('chk_truncated'), 'A truncated abstract must not be saved');
   assert(store.chunks.get('chk_truncated').abstractionStatus === 'failed', 'Chunk must be failed, not completed');
-  assert(models.join(',') === 'gemini-3.1-flash-lite,claude-sonnet-5-5', `Expected one escalation attempt, got ${models.join(',')}`);
+  assert(models.join(',') === 'gemini-4-hydrogen,claude-sonnet-5-5', `Expected one escalation attempt, got ${models.join(',')}`);
 });
 
 test('processChunkAbstraction fails a truncated abstract when the escalation call errors', async () => {
@@ -1701,6 +1702,101 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.completedInBatch === 3, `Expected three completions in process batch, got ${res.body.completedInBatch}`);
   assert(res.body.hasMore === false, 'Expected no more work after draining batch');
+});
+
+test('getAbstractionConfig defaults to gemini-4-hydrogen at low thinkingLevel', () => {
+  const previousLevel = process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  try {
+    const config = getAbstractionConfig();
+    assert(config.model === 'gemini-4-hydrogen', `Expected gemini-4-hydrogen, got ${config.model}`);
+    assert(config.thinkingLevel === 'low', `Expected low thinkingLevel, got ${config.thinkingLevel}`);
+  } finally {
+    if (previousLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = previousLevel;
+  }
+});
+
+test('processChunkAbstraction sends low effort by default, honors GEMINI_THINKING_LEVEL, falls back on minimal, and omits thinkingLevel on Sonnet escalation', async () => {
+  const previousLevel = process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  try {
+    const observedDefault = [];
+    const store1 = createMemoryPhase3Store([makeChunk({ id: 'chk_h_default' })]);
+    await processChunkAbstraction(store1.chunks.get('chk_h_default'), {
+      store: store1,
+      workerId: 'wkr_h1',
+      blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+      modelClient: async request => {
+        observedDefault.push({ model: request.model, thinkingLevel: request.thinkingLevel, hasThinkingKey: 'thinkingLevel' in request });
+        if (request.model === 'claude-sonnet-5-5') {
+          return { text: 'DOC TYPE: Deed\nCONFIDENCE: verified', model: 'claude-sonnet-5-5', usage: {} };
+        }
+        return { text: 'DOC TYPE: Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low', model: request.model, usage: {} };
+      },
+    });
+    assert(observedDefault.length === 2, `Expected primary and escalation call, got ${observedDefault.length}`);
+    assert(observedDefault[0].model === 'gemini-4-hydrogen' && observedDefault[0].thinkingLevel === 'low', `Expected primary low, got ${JSON.stringify(observedDefault[0])}`);
+    assert(observedDefault[1].model === 'claude-sonnet-5-5' && !observedDefault[1].hasThinkingKey, `Expected Sonnet escalation without thinkingLevel, got ${JSON.stringify(observedDefault[1])}`);
+
+    process.env.GEMINI_THINKING_LEVEL = 'medium';
+    const observedMedium = [];
+    const store2 = createMemoryPhase3Store([makeChunk({ id: 'chk_h_med' })]);
+    await processChunkAbstraction(store2.chunks.get('chk_h_med'), {
+      store: store2,
+      workerId: 'wkr_h2',
+      escalationEnabled: false,
+      blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+      modelClient: async request => {
+        observedMedium.push({ model: request.model, thinkingLevel: request.thinkingLevel });
+        return { text: 'DOC TYPE: Deed\nCONFIDENCE: clear', model: request.model, usage: {} };
+      },
+    });
+    assert(observedMedium[0].thinkingLevel === 'medium', `Expected medium override, got ${observedMedium[0].thinkingLevel}`);
+
+    process.env.GEMINI_THINKING_LEVEL = 'minimal';
+    const observedFallback = [];
+    const store3 = createMemoryPhase3Store([makeChunk({ id: 'chk_h_min' })]);
+    await processChunkAbstraction(store3.chunks.get('chk_h_min'), {
+      store: store3,
+      workerId: 'wkr_h3',
+      escalationEnabled: false,
+      blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+      modelClient: async request => {
+        observedFallback.push({ model: request.model, thinkingLevel: request.thinkingLevel });
+        return { text: 'DOC TYPE: Deed\nCONFIDENCE: clear', model: request.model, usage: {} };
+      },
+    });
+    assert(observedFallback[0].thinkingLevel === 'low', `Expected minimal to fall back to low on Hydrogen, got ${observedFallback[0].thinkingLevel}`);
+  } finally {
+    if (previousLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = previousLevel;
+  }
+});
+
+test('processMultiChunkAbstraction uses gemini-4-hydrogen at low effort', async () => {
+  const previousLevel = process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  try {
+    const chunks = [makeChunk({ id: 'chk_b1', chunkOrder: 0 }), makeChunk({ id: 'chk_b2', chunkOrder: 1 })];
+    const store = createMemoryPhase3Store(chunks);
+    const observed = [];
+    const results = await processMultiChunkAbstraction(chunks, {
+      store,
+      workerId: 'wkr_batch_h',
+      blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+      modelClient: async request => {
+        observed.push({ model: request.model, thinkingLevel: request.thinkingLevel });
+        return { text: '["DOC TYPE: Deed A","DOC TYPE: Deed B"]', model: request.model, usage: { input_tokens: 10, output_tokens: 10 } };
+      },
+    });
+    assert(observed.length === 1, `Expected 1 batch model call, got ${observed.length}`);
+    assert(observed[0].model === 'gemini-4-hydrogen' && observed[0].thinkingLevel === 'low', `Expected Hydrogen low, got ${JSON.stringify(observed[0])}`);
+    assert(results.every(r => r.status === 'completed'), 'Expected all batched chunks to complete');
+  } finally {
+    if (previousLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = previousLevel;
+  }
 });
 
 for (const { name, fn } of tests) {

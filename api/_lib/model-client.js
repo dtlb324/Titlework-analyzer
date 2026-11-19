@@ -183,6 +183,7 @@ async function invokeOpenRouterModelStream(request, options = {}) {
       maxTokens: request.maxTokens,
       system: request.system,
       messages: request.messages,
+      reasoningEffort: request.reasoningEffort ?? request.thinkingLevel,
     }),
     stream: true,
   });

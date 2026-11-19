@@ -1,5 +1,6 @@
 
 import { getClientIp } from './_lib/client-ip.js';
+import { resolveWorkflowGeminiThinkingLevel } from './_lib/gemini-request.js';
 import { publicRequestId, secureCompare } from './_lib/jobs.js';
 import { isProductionRuntime } from './_lib/runtime-info.js';
 import { delayAuthFailure, mutateSharedRateLimit } from './_lib/shared-rate-limit.js';
@@ -273,11 +274,13 @@ export default async function handler(req, res) {
     let status = 200;
     let safeResponse;
     try {
+      const thinkingLevel = resolveWorkflowGeminiThinkingLevel(safeBody.model);
       const result = await invokeModel({
         model: safeBody.model,
         maxTokens: safeBody.max_tokens,
         system: safeBody.system,
         messages: safeBody.messages,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
       }, {
         timeoutMs: analyzeConfig.upstreamTimeoutMs,
         createTimeoutSignal: () => timeout,

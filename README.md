@@ -2,7 +2,7 @@
 
 Titlework Analyzer is a web app for oil and gas landmen. It reads courthouse PDFs and images, builds a chain of title, and drafts a mineral ownership opinion. The page heading is Mineral Ownership Builder. The browser tab title is Mineral Title Analyzer. The npm package name is `title-analyzer`.
 
-`gemini-3.1-flash-lite` abstracts each document. On a large job it also writes the partial segment summaries. `claude-sonnet-5-5` writes the final opinion and answers follow-up questions.
+`gemini-4-hydrogen` (at `low` effort by default) abstracts each document. On a large job it also writes the partial segment summaries. `claude-sonnet-5-5` writes the final opinion and answers follow-up questions.
 
 There is no public hosted instance. Run it locally or deploy your own copy; the Google Cloud setup below is for your own project.
 
@@ -229,7 +229,7 @@ MODEL_PROVIDER=openrouter
 
 `shouldUseOpenRouter` in `api/_lib/openrouter-request.js` sends a call through OpenRouter when `MODEL_PROVIDER` is `openrouter`, or when the model id contains `/`. Any other value of `MODEL_PROVIDER`, or none, keeps direct Gemini and Anthropic routing. A missing `OPENROUTER_API_KEY` on an OpenRouter call fails with `OPENROUTER_API_KEY is required when the selected provider is OpenRouter.`
 
-`claude-sonnet-5-5` maps to `anthropic/claude-sonnet-5.5`. Other `claude-*` ids map to `anthropic/` plus the id. `gemini-*` ids map to `google/` plus the id. An id that already contains `/` is sent unchanged.
+`claude-sonnet-5-5` maps to `anthropic/claude-sonnet-5.5`. Other `claude-*` ids map to `anthropic/` plus the id. `gemini-*` ids map to `google/` plus the id. An id that already contains `/` is sent unchanged. `gemini-4-hydrogen` abstraction and partial synthesis calls send their default `low` effort (or an accepted `GEMINI_THINKING_LEVEL` override) as `reasoning: { effort }`.
 
 Server abstraction uses that routing. `serverAbstractionSetupError` asks `abstractionApiKeyError` for the abstract model, so an OpenRouter setup can start abstraction without `GEMINI_API_KEY`.
 
@@ -259,12 +259,12 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | Name | If unset |
 |---|---|
 | `SYNTHESIS_MODEL` | `claude-sonnet-5-5`. A Gemini id or a Haiku id is ignored and the default is used. Other ids are kept. |
-| `SYNTHESIS_PARTIAL_MODEL` | `gemini-3.1-flash-lite`. Any id that does not start with `gemini-` is ignored, including Claude and Haiku. |
-| `ABSTRACT_MODEL` | `gemini-3.1-flash-lite`. A Haiku id is replaced with that default. Other ids are kept. |
+| `SYNTHESIS_PARTIAL_MODEL` | `gemini-4-hydrogen`. Any id that does not start with `gemini-` is ignored, including Claude and Haiku. |
+| `ABSTRACT_MODEL` | `gemini-4-hydrogen`. A Haiku id is replaced with that default. Other ids are kept. |
 | `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5-5`. Used when a low-confidence abstract is re-read. |
-| `GEMINI_THINKING_LEVEL` | Omitted. Accepted values are `minimal`, `low`, `medium`, and `high` for a `gemini-3` model, and `low`, `medium`, `high`, and `xhigh` for a `gemini-4` model. Any other value is ignored. |
+| `GEMINI_THINKING_LEVEL` | `low` for `gemini-4` models in abstraction, partial synthesis, and `POST /api/analyze`; omitted for `gemini-3` models and outside those workflows. Accepted values are `minimal`, `low`, `medium`, and `high` for a `gemini-3` model; `low`, `medium`, and `high` for other `gemini-4` models; and `low`, `medium`, `high`, and `xhigh` for `gemini-4-hydrogen`. Any other value is ignored and falls back to the default. |
 | `GEMINI_THINKING_BUDGET` | `0` for a Gemini model that is not a `gemini-3` or `gemini-4` model. Those models use the level above instead. |
-| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for a Gemini 3 or Gemini 4 model that also has an accepted `GEMINI_THINKING_LEVEL`. Any other call ignores the flag. |
+| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for a Gemini 3 or Gemini 4 model that has a resolved thinking level. Any other call ignores the flag. |
 
 ### Abstraction settings
 
@@ -418,7 +418,7 @@ The server code does not call the Anthropic message-batches endpoint or a Gemini
 - A job accepts at most 400 files. `MAX_TOTAL_DOCUMENTS` in `api/_lib/jobs.js` and `MAX_FILES` in `public/index.html` both say 400.
 - Accepted types are PDF, CSV, JPEG, PNG, GIF, and WEBP.
 - The browser uploads with a signed PUT. The signature always sets `Content-Type` and `Content-Length`. A missing size returns 400, `sizeBytes is required for signed uploads.`
-- The worker abstracts with `gemini-3.1-flash-lite` and can batch up to `ABSTRACTION_BATCH_MAX_DOCS` small chunks.
+- The worker abstracts with `gemini-4-hydrogen` (`low` effort by default) and can batch up to `ABSTRACTION_BATCH_MAX_DOCS` small chunks.
 - If server abstraction is unavailable, the page groups up to 24 small documents per call and splits an oversized single PDF.
 - The final opinion and follow-up answers use `claude-sonnet-5-5`.
 - A job reopens at `#/job/<id>`. Recent jobs are `#/jobs`.

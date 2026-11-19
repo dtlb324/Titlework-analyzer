@@ -1733,20 +1733,28 @@ test('getSynthesisConfig uses Sonnet for final merge model', () => {
   assert(config.model === 'claude-sonnet-5-5', `Expected Sonnet 5.5 final model, got ${config.model}`);
 });
 
-test('resolvePartialSynthesisModel uses Gemini Flash for segment work', () => {
+test('resolvePartialSynthesisModel uses Gemini 4 Hydrogen by default for segment work', () => {
   const previous = process.env.SYNTHESIS_PARTIAL_MODEL;
   process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-haiku-4-5';
-  assert(resolvePartialSynthesisModel() === 'gemini-3.1-flash-lite', 'Haiku partial override must fall back to Gemini Flash Lite');
+  assert(resolvePartialSynthesisModel() === 'gemini-4-hydrogen', 'Haiku partial override must fall back to Gemini 4 Hydrogen');
   process.env.SYNTHESIS_PARTIAL_MODEL = 'claude-sonnet-5';
-  assert(resolvePartialSynthesisModel() === 'gemini-3.1-flash-lite', 'Sonnet partial override must fall back to Gemini Flash Lite');
+  assert(resolvePartialSynthesisModel() === 'gemini-4-hydrogen', 'Sonnet partial override must fall back to Gemini 4 Hydrogen');
   if (previous) process.env.SYNTHESIS_PARTIAL_MODEL = previous;
   else delete process.env.SYNTHESIS_PARTIAL_MODEL;
 });
 
-test('getPartialSynthesisConfig defaults to Gemini Flash for segment work', () => {
-  const partial = getPartialSynthesisConfig();
-  assert(partial.model === 'gemini-3.1-flash-lite', `Expected Gemini Flash Lite partial model, got ${partial.model}`);
-  assert(partial.maxTokens === 5000, 'Partial synthesis should use the configured partial output cap');
+test('getPartialSynthesisConfig defaults to Gemini 4 Hydrogen at low effort for segment work', () => {
+  const previousLevel = process.env.GEMINI_THINKING_LEVEL;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  try {
+    const partial = getPartialSynthesisConfig();
+    assert(partial.model === 'gemini-4-hydrogen', `Expected Gemini 4 Hydrogen partial model, got ${partial.model}`);
+    assert(partial.thinkingLevel === 'low', `Expected low default effort, got ${partial.thinkingLevel}`);
+    assert(partial.maxTokens === 5000, 'Partial synthesis should use the configured partial output cap');
+  } finally {
+    if (previousLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = previousLevel;
+  }
 });
 
 test('Synthesis status lightweight poll omits full title opinion payload', async () => {
@@ -2283,6 +2291,83 @@ test('planSynthesisSegments uses configured chunk size for all forced multi-segm
   else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulk;
   if (previousBulkSize === undefined) delete process.env.BULK_SYNTHESIS_CHUNK_SIZE;
   else process.env.BULK_SYNTHESIS_CHUNK_SIZE = previousBulkSize;
+});
+
+test('partial synthesis and compaction default to Gemini 4 Hydrogen at low effort while Sonnet final/follow-up calls omit thinkingLevel', async () => {
+  const prevLevel = process.env.GEMINI_THINKING_LEVEL;
+  const prevCompaction = process.env.SYNTHESIS_COMPACTION_ENABLED;
+  const prevMinSegments = process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS;
+  const prevBulkMin = process.env.BULK_JOB_MIN_ABSTRACTS;
+  delete process.env.GEMINI_THINKING_LEVEL;
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'true';
+  process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS = '3';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+
+  try {
+    const partialRequests = [];
+    const compactionRequests = [];
+    const finalRequests = [];
+    const followupRequests = [];
+    const store = createMemoryPhase5Store({ abstracts: manyAbstracts(24) });
+    globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      if (request.system === COMPACTION_SYNTHESIS_PROMPT) {
+        compactionRequests.push(request);
+        return { text: goodSegmentSummary(0), model: request.model, usage: { input_tokens: 1, output_tokens: 1 } };
+      }
+      if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+        partialRequests.push(request);
+        return { text: goodSegmentSummary(0), model: request.model, usage: { input_tokens: 1, output_tokens: 1 } };
+      }
+      if (JSON.stringify(request.messages).includes('## Follow-up Question')) {
+        followupRequests.push(request);
+        return { text: 'Direct answer.', model: request.model, usage: { input_tokens: 1, output_tokens: 1 } };
+      }
+      finalRequests.push(request);
+      return { text: goodFinalOpinion(), model: request.model, usage: { input_tokens: 1, output_tokens: 1 } };
+    };
+
+    const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 120_000, batchLimit: 8 });
+    assert(batch.result?.status === 'complete', `Expected complete synthesis, got ${batch.result?.status}`);
+    assert(partialRequests.length === 3, `Expected 3 partial segments, got ${partialRequests.length}`);
+    for (const req of [...partialRequests, ...compactionRequests]) {
+      assert(req.model === 'gemini-4-hydrogen', `Expected gemini-4-hydrogen, got ${req.model}`);
+      assert(req.thinkingLevel === 'low', `Expected default low thinkingLevel, got ${req.thinkingLevel}`);
+    }
+    assert(compactionRequests.length === 1, `Expected 1 compaction call, got ${compactionRequests.length}`);
+    assert(finalRequests.length === 1, `Expected 1 final merge call, got ${finalRequests.length}`);
+    assert(finalRequests[0].model === 'claude-sonnet-5-5', `Expected Sonnet final merge, got ${finalRequests[0].model}`);
+    assert(!('thinkingLevel' in finalRequests[0]), 'Final merge on Sonnet must omit thinkingLevel');
+
+    const followupRes = mockRes();
+    await jobsRouteHandler(mockReq('POST', { question: 'Who owns the minerals?' }, {}, { id: 'job_test_1' }, '/api/jobs/job_test_1/followup'), followupRes);
+    assert(followupRes.statusCode === 200, `Expected 200 followup, got ${followupRes.statusCode}`);
+    assert(followupRequests.length === 1 && followupRequests[0].model === 'claude-sonnet-5-5', 'Followup should use Sonnet 5.5');
+    assert(!('thinkingLevel' in followupRequests[0]), 'Followup on Sonnet must omit thinkingLevel');
+
+    process.env.GEMINI_THINKING_LEVEL = 'medium';
+    const overridePartial = getPartialSynthesisConfig();
+    assert(overridePartial.model === 'gemini-4-hydrogen' && overridePartial.thinkingLevel === 'medium', `Expected GEMINI_THINKING_LEVEL override, got ${JSON.stringify(overridePartial)}`);
+
+    const singleStore = createMemoryPhase5Store({ abstracts: manyAbstracts(2) });
+    const singleRequests = [];
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      singleRequests.push(request);
+      return { text: goodFinalOpinion(), model: request.model, usage: {} };
+    };
+    await processSynthesisJob('job_test_1', { store: singleStore, budgetMs: 120_000 });
+    assert(singleRequests.length === 1 && singleRequests[0].model === 'claude-sonnet-5-5', 'Single-pass synthesis should use Sonnet 5.5');
+    assert(!('thinkingLevel' in singleRequests[0]), 'Single-pass Sonnet must omit thinkingLevel');
+  } finally {
+    if (prevLevel === undefined) delete process.env.GEMINI_THINKING_LEVEL;
+    else process.env.GEMINI_THINKING_LEVEL = prevLevel;
+    if (prevCompaction === undefined) delete process.env.SYNTHESIS_COMPACTION_ENABLED;
+    else process.env.SYNTHESIS_COMPACTION_ENABLED = prevCompaction;
+    if (prevMinSegments === undefined) delete process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS;
+    else process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS = prevMinSegments;
+    if (prevBulkMin === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+    else process.env.BULK_JOB_MIN_ABSTRACTS = prevBulkMin;
+  }
 });
 
 
