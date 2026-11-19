@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
+import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
 import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
 import { messagesHaveVisualMedia, resolveGeminiMediaResolution } from './gemini-request.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
@@ -94,6 +95,7 @@ export function getAbstractionConfig() {
     escalationModel: ABSTRACT_ESCALATION_MODEL,
     escalationMaxTokens: ABSTRACT_ESCALATION_MAX_TOKENS,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
   };
 }
 
@@ -643,6 +645,9 @@ export async function runModelAbstraction({
   const mediaResolutionForModel = isGeminiModel(model) && !shouldUseOpenRouter(model) && hasVisualMedia
     ? resolveGeminiMediaResolution(mediaResolution)
     : null;
+  // Awaited before every billable call. A guard error (lost lease) propagates and is never swallowed.
+  const guard = typeof options.modelCallGuard === 'function' ? options.modelCallGuard : null;
+  if (guard) await guard();
   let response = await modelClient({
     model,
     maxTokens,
@@ -663,6 +668,7 @@ export async function runModelAbstraction({
     const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && hasVisualMedia
       ? resolveGeminiMediaResolution(mediaResolution)
       : null;
+    if (guard) await guard();
     try {
       const escalatedResponse = await modelClient({
         model: escalationModel,
@@ -942,6 +948,15 @@ export async function processChunkAbstraction(chunk, options = {}) {
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
   const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';
 
+  // Renew this chunk's lease before every billable call; stop before paying if another worker owns it now.
+  const renewLeaseMs = callLeaseMs(leaseMs, UPSTREAM_TIMEOUT_MS);
+  const modelCallGuard = async () => {
+    const outcome = await renewChunkLease(store, processingChunk, { workerId, leaseMs: renewLeaseMs });
+    if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
+    // Renews the other chunks the batch caller still holds. It never throws for them.
+    if (typeof options.chunkLeaseGuard === 'function') await options.chunkLeaseGuard();
+  };
+
   let loadedPayload = null;
   try {
     const reuse = await tryReuseExistingAbstract(store, claimedChunk, workerId);
@@ -1024,7 +1039,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       escalationModel: options.escalationModel || ABSTRACT_ESCALATION_MODEL,
       escalationMaxTokens: options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS,
       mediaResolution: options.mediaResolution,
-      options,
+      options: { ...options, modelCallGuard },
     });
     logChunkStage('model_response', processingChunk, {
       workerId,
@@ -1052,6 +1067,8 @@ export async function processChunkAbstraction(chunk, options = {}) {
     }
     return saved;
   } catch (err) {
+    // Lease lost: the new owner's row is not ours to mark failed, retry_wait or split.
+    if (isChunkLeaseLostError(err)) return { status: 'stale', chunkId: processingChunk.id };
     const errorType = classifyError(err);
     logChunkStage('error', processingChunk, {
       workerId,

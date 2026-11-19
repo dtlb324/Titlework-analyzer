@@ -210,6 +210,18 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       chunks.set(chunkId, updated);
       return updated;
     },
+    async renewChunkAbstractionLease(jobId, chunkId, renewOptions = {}) {
+      const chunk = chunks.get(chunkId);
+      if (!chunk || chunk.jobId !== jobId) return null;
+      if (chunk.abstractionStatus !== 'processing' || !renewOptions.workerId || chunk.abstractionWorkerId !== renewOptions.workerId) return null;
+      const updated = {
+        ...chunk,
+        abstractionLeaseExpiresAt: new Date(Date.now() + (renewOptions.leaseMs || 90_000)).toISOString(),
+        updatedAt: now,
+      };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
     async markChunkAbstractionFailed(jobId, chunkId, failure) {
       const chunk = chunks.get(chunkId);
       if (options.enforceWorkerLease && (!failure.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== failure.workerId)) {
@@ -1445,6 +1457,59 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
   assert(saved.modelUsed === 'claude-sonnet-5-5', `Expected Sonnet 5.5 saved, got ${saved.modelUsed}`);
   assert(saved.abstractText.includes('Sonnet verified'), 'Expected escalated abstract text saved');
   assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash Lite and Sonnet calls');
+});
+
+test('processChunkAbstraction stops before the escalation call when its lease was taken, and marks nothing', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_lease_lost' })]);
+  const models = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_lease_lost'), {
+    store,
+    workerId: 'wkr_first',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => {
+      models.push(request.model);
+      // Another worker takes the chunk while the first call is in flight.
+      store.chunks.set('chk_lease_lost', {
+        ...store.chunks.get('chk_lease_lost'),
+        abstractionWorkerId: 'wkr_thief',
+        abstractionLeaseExpiresAt: new Date(Date.now() + 300_000).toISOString(),
+      });
+      return {
+        text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
+        model: 'gemini-3.1-flash-lite',
+        usage: { input_tokens: 10, output_tokens: 15 },
+      };
+    },
+  });
+  const row = store.chunks.get('chk_lease_lost');
+  assert(result.status === 'stale', `Expected stale, got ${result.status}`);
+  assert(models.length === 1, `Escalation must not be paid after the lease is lost, got ${models.join(',')}`);
+  assert(row.abstractionStatus === 'processing' && row.abstractionWorkerId === 'wkr_thief', `New owner's row must be untouched, got ${row.abstractionStatus}/${row.abstractionWorkerId}`);
+  assert(!store.abstracts.has('chk_lease_lost'), 'No abstract may be saved');
+});
+
+test('processChunkAbstraction renews its own lease before each paid call (primary and escalation)', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_renew_each' })]);
+  let renewals = 0;
+  const renewMs = [];
+  const renew = store.renewChunkAbstractionLease;
+  store.renewChunkAbstractionLease = async (...args) => { renewals += 1; renewMs.push(args[2].leaseMs); return renew(...args); };
+  const result = await processChunkAbstraction(store.chunks.get('chk_renew_each'), {
+    store,
+    workerId: 'wkr_renew',
+    leaseMs: 1000,
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => ({
+      text: request.model === 'claude-sonnet-5-5'
+        ? 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nCONFIDENCE: Sonnet verified.'
+        : 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
+      model: request.model,
+      usage: { input_tokens: 10, output_tokens: 15 },
+    }),
+  });
+  assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+  assert(renewals === 2, `Expected one renewal per paid call (2), got ${renewals}`);
+  assert(renewMs.every(ms => ms >= 300_000), `Renewal must cover upstream timeout + 60s, not the 1s claim lease, got ${renewMs}`);
 });
 
 test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {

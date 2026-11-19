@@ -9,6 +9,7 @@ import {
 import {
   BATCH_ABSTRACT_RESPONSE_SCHEMA,
   buildAbstractMessagesForChunks,
+  getAbstractionConfig,
   parseBatchAbstracts,
 } from '../api/_lib/abstraction.js';
 
@@ -348,6 +349,386 @@ test('processMultiChunkAbstraction falls back cleanly to solo processing when ba
   assert(results.every(r => r.status === 'completed'), `Expected clean solo fallback completions, got ${JSON.stringify(results)}`);
   assert(store.abstracts.get('chk_10').abstractText.includes('Solo A'), 'Expected chk_10 recovered via solo fallback');
   assert(store.abstracts.get('chk_11').abstractText.includes('Solo B'), 'Expected chk_11 recovered via solo fallback');
+});
+
+// In-memory store with the real lease rules: a claim by another worker is admitted only after the lease expired,
+// renew and save are owner-checked, and a save by anyone but the current owner is rejected.
+function createLeasedBatchStore(initialChunks, hooks = {}) {
+  const chunks = new Map(initialChunks.map(c => [c.id, { ...c }]));
+  const abstracts = new Map();
+  const marks = [];
+  const renewCalls = [];
+  const claims = [];
+  const store = {
+    chunks,
+    abstracts,
+    marks,
+    renewCalls,
+    claims,
+    async claimChunkForAbstraction(jobId, chunkId, opts = {}) {
+      const chunk = chunks.get(chunkId);
+      if (!chunk) return null;
+      const expired = !chunk.abstractionLeaseExpiresAt || chunk.abstractionLeaseExpiresAt <= Date.now();
+      const sameWorker = chunk.abstractionStatus === 'processing' && chunk.abstractionWorkerId === opts.workerId;
+      const claimable = chunk.abstractionStatus === 'pending' || sameWorker
+        || (chunk.abstractionStatus === 'processing' && expired);
+      if (!claimable) return null;
+      const updated = {
+        ...chunk,
+        abstractionStatus: 'processing',
+        abstractionWorkerId: opts.workerId,
+        abstractionLeaseExpiresAt: Date.now() + (opts.leaseMs || 90_000),
+        abstractionAttempts: sameWorker ? chunk.abstractionAttempts : (chunk.abstractionAttempts || 0) + 1,
+      };
+      chunks.set(chunkId, updated);
+      claims.push({ chunkId, workerId: opts.workerId });
+      return updated;
+    },
+    async getChunk(jobId, chunkId) {
+      return chunks.get(chunkId) || null;
+    },
+    async getDocumentAbstractByChunkId(jobId, chunkId) {
+      return abstracts.get(chunkId) || null;
+    },
+    async saveDocumentAbstract(record) {
+      const chunk = chunks.get(record.chunkId);
+      if (!chunk || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== record.workerId) return null;
+      chunks.set(record.chunkId, { ...chunk, abstractionStatus: 'completed', abstractionLeaseExpiresAt: null });
+      abstracts.set(record.chunkId, { ...record });
+      return record;
+    },
+    async markChunkAbstractionFailed(jobId, chunkId, failure) {
+      marks.push({ chunkId, to: 'failed' });
+      const chunk = chunks.get(chunkId);
+      const updated = { ...chunk, abstractionStatus: 'failed', abstractionErrorType: failure.errorType };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
+    async markChunkAbstractionRetryWait(jobId, chunkId, failure) {
+      marks.push({ chunkId, to: 'retry_wait' });
+      const chunk = chunks.get(chunkId);
+      const updated = { ...chunk, abstractionStatus: 'retry_wait', abstractionErrorType: failure.errorType };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
+    async renewChunkAbstractionLease(jobId, chunkId, opts = {}) {
+      renewCalls.push(chunkId);
+      if (hooks.onRenew) {
+        const outcome = await hooks.onRenew(chunkId, renewCalls.filter(id => id === chunkId).length, store);
+        if (outcome === 'stolen') return null;
+      }
+      const chunk = chunks.get(chunkId);
+      if (!chunk || chunk.abstractionStatus !== 'processing' || !opts.workerId || chunk.abstractionWorkerId !== opts.workerId) return null;
+      const updated = { ...chunk, abstractionLeaseExpiresAt: Date.now() + (opts.leaseMs || 90_000) };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
+  };
+  return store;
+}
+
+// A second worker takes over any chunk whose lease has expired (or that we force-expire).
+async function workerBSweep(store, ids, leaseMs = 300_000) {
+  for (const id of ids) {
+    await store.claimChunkForAbstraction('job_1', id, { workerId: 'wkr_B', leaseMs });
+  }
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// csvBytes: make the text chunks CSVs of about that size (to push a batch over a small request envelope).
+// batchReply(count): override the batch model reply text.
+async function makeLeaseFixture({ visualCount = 2, textCount = 3, callMs = 120, leaseMs = 150, storeHooks = {}, storeWrap = null, onCall = null, csvBytes = 0, batchReply = null } = {}) {
+  const chunks = [];
+  const blobs = new Map();
+  const scan = await makeScannedPdfBytes();
+  for (let i = 1; i <= visualCount; i++) {
+    const id = `chk_${i}`;
+    chunks.push(makeChunk(id, scan.byteLength, { chunkOrder: i - 1, originalFilename: `scan_${i}.pdf` }));
+    blobs.set(id, { bytes: scan, mediaType: 'application/pdf' });
+  }
+  for (let j = 1; j <= textCount; j++) {
+    const id = `chk_${visualCount + j}`;
+    if (csvBytes) {
+      const bytes = Buffer.from(`owner,Digital ${visualCount + j}\n${'grantor,grantee,acres\n'.repeat(Math.ceil(csvBytes / 22))}`);
+      chunks.push(makeChunk(id, bytes.byteLength, { chunkOrder: visualCount + j - 1, mediaType: 'text/csv', originalFilename: `t_${j}.csv` }));
+      blobs.set(id, { bytes, mediaType: 'text/csv' });
+      continue;
+    }
+    const bytes = await makeDigitalPdfBytes(`Digital ${visualCount + j}`);
+    chunks.push(makeChunk(id, bytes.byteLength, { chunkOrder: visualCount + j - 1, originalFilename: `t_${j}.pdf` }));
+    blobs.set(id, { bytes, mediaType: 'application/pdf' });
+  }
+  const textIds = chunks.slice(visualCount).map(c => c.id);
+  const allIds = chunks.map(c => c.id);
+  let store = createLeasedBatchStore(chunks, storeHooks);
+  if (storeWrap) store = storeWrap(store);
+  const calls = [];
+  const modelClient = async req => {
+    const prompt = JSON.stringify(req.messages);
+    const call = { schema: Boolean(req.responseSchema), prompt, includes: id => prompt.includes(`Digital ${id.replace('chk_', '')}`) };
+    calls.push(call);
+    await sleep(callMs);
+    if (onCall) await onCall(calls.length, store, call);
+    if (req.responseSchema) {
+      const count = (prompt.match(/START DOCUMENT #/g) || []).length;
+      return {
+        text: batchReply ? batchReply(count) : JSON.stringify(Array.from({ length: count }, (_, i) => ({ docIndex: i + 1, abstract: `DOC TYPE: Deed\nGRANTOR: Batch ${i + 1}` }))),
+        model: 'gemini-3.1-flash-lite',
+        usage: { input_tokens: 90, output_tokens: 30 },
+      };
+    }
+    return { text: 'DOC TYPE: Deed\nGRANTOR: Solo', model: 'gemini-3.1-flash-lite', usage: { input_tokens: 40, output_tokens: 12 } };
+  };
+  const run = (processFn = processMultiChunkAbstraction) => processFn(chunks, {
+    store,
+    workerId: 'wkr_A',
+    leaseMs,
+    escalationEnabled: false,
+    blobLoader: async chunk => blobs.get(chunk.id),
+    modelClient,
+  });
+  return { chunks, store, calls, run, textIds, allIds };
+}
+
+test('lease: slow visual solos do not let the held text chunks expire before the batch call (renewal per paid call)', async () => {
+  const fx = await makeLeaseFixture({
+    onCall: async (_n, store) => { await workerBSweep(store, fx.allIds); },
+  });
+  const results = await fx.run();
+  const stolen = fx.store.claims.filter(c => c.workerId === 'wkr_B');
+  assert(stolen.length === 0, `Worker B must never claim a chunk A still holds, got ${JSON.stringify(stolen)}`);
+  assert(results.length === 5 && results.every(r => r.status === 'completed'), `Expected 5 completed, got ${JSON.stringify(results.map(r => [r.chunkId, r.status]))}`);
+  assert(fx.calls.length === 3, `Expected 2 solo + 1 batch call, got ${fx.calls.length}`);
+  assert(fx.textIds.every(id => fx.store.abstracts.has(id)), 'Batched text chunks must be saved');
+});
+
+test('lease: a held text chunk taken by another worker mid-flight is stale and never sent to the model', async () => {
+  const fx = await makeLeaseFixture({
+    callMs: 5,
+    onCall: async (n, store) => {
+      if (n !== 1) return;
+      store.chunks.set('chk_4', { ...store.chunks.get('chk_4'), abstractionLeaseExpiresAt: Date.now() - 1 });
+      await workerBSweep(store, ['chk_4']);
+    },
+  });
+  const results = await fx.run();
+  const byId = Object.fromEntries(results.map(r => [r.chunkId, r.status]));
+  assert(results.length === 5, `Expected one result per chunk, got ${results.length}`);
+  assert(byId.chk_4 === 'stale', `Stolen chunk must be stale, got ${byId.chk_4}`);
+  assert(['chk_1', 'chk_2', 'chk_3', 'chk_5'].every(id => byId[id] === 'completed'), `Others must complete, got ${JSON.stringify(byId)}`);
+  assert(fx.calls.every(call => !call.includes('chk_4')), 'No model call may include the stolen chunk');
+  assert(fx.calls.filter(call => call.schema).length === 1, 'The remaining two text chunks still batch once');
+  assert(fx.store.marks.length === 0, `Nothing may be marked failed/retry_wait, got ${JSON.stringify(fx.store.marks)}`);
+  assert(fx.store.chunks.get('chk_4').abstractionWorkerId === 'wkr_B', 'The new owner keeps its claim');
+});
+
+test('lease: a chunk lost between the last renewal and the batch call stops the batch before it is paid', async () => {
+  const fx = await makeLeaseFixture({
+    visualCount: 0,
+    textCount: 3,
+    callMs: 5,
+    // renewal round 1 runs before the messages are built, round 2 is the guard right before the paid call
+    storeHooks: { onRenew: async (id, n) => (id === 'chk_2' && n === 2 ? 'stolen' : null) },
+  });
+  const results = await fx.run();
+  const byId = Object.fromEntries(results.map(r => [r.chunkId, r.status]));
+  assert(results.length === 3, `Expected one result per chunk, got ${results.length}`);
+  assert(byId.chk_2 === 'stale', `Lost chunk must be stale, got ${byId.chk_2}`);
+  assert(byId.chk_1 === 'completed' && byId.chk_3 === 'completed', `Others complete as singles, got ${JSON.stringify(byId)}`);
+  assert(fx.calls.every(call => !call.schema), 'The batch call must not be paid once a member is lost');
+  assert(fx.calls.every(call => !call.includes('chk_2')), 'No call may include the lost chunk');
+});
+
+test('lease: a renewal that throws is logged and the work proceeds', async () => {
+  const fx = await makeLeaseFixture({
+    callMs: 5,
+    storeHooks: { onRenew: async () => { throw new Error('neon blip'); } },
+  });
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = line => warnings.push(String(line));
+  let results;
+  try {
+    results = await fx.run();
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert(results.length === 5 && results.every(r => r.status === 'completed'), `Expected 5 completed, got ${JSON.stringify(results.map(r => [r.chunkId, r.status]))}`);
+  assert(fx.calls.length === 3, `Expected 3 model calls, got ${fx.calls.length}`);
+  assert(warnings.some(line => line.includes('abstraction_chunk_lease_renew_failed')), 'Expected a renew-failed warning');
+  assert(!warnings.some(line => line.includes('neon blip')), 'The store error message must not be logged');
+});
+
+test('lease: a store without renewChunkAbstractionLease behaves as before', async () => {
+  const fx = await makeLeaseFixture({
+    callMs: 5,
+    storeWrap: store => {
+      const { renewChunkAbstractionLease, ...rest } = store;
+      return Object.assign(rest, { chunks: store.chunks, abstracts: store.abstracts, marks: store.marks, renewCalls: store.renewCalls, claims: store.claims });
+    },
+  });
+  assert(typeof fx.store.renewChunkAbstractionLease === 'undefined', 'Fixture store must lack the method');
+  const results = await fx.run();
+  assert(results.length === 5 && results.every(r => r.status === 'completed'), `Expected 5 completed, got ${JSON.stringify(results.map(r => [r.chunkId, r.status]))}`);
+  assert(fx.calls.length === 3, `Expected 3 model calls, got ${fx.calls.length}`);
+});
+
+// Logs every renewal the store receives: the chunk, the lease length asked for, and how many paid calls had started.
+function recordRenewals(log, paidCalls) {
+  return store => {
+    const renew = store.renewChunkAbstractionLease;
+    store.renewChunkAbstractionLease = async (jobId, chunkId, opts = {}) => {
+      log.push({ chunkId, leaseMs: opts.leaseMs, paidCalls: paidCalls() });
+      return renew(jobId, chunkId, opts);
+    };
+    return store;
+  };
+}
+
+// Worker B takes the chunk: its lease is expired, then B claims it (the same steal the other lease tests use).
+async function stealChunk(store, chunkId) {
+  store.chunks.set(chunkId, { ...store.chunks.get(chunkId), abstractionLeaseExpiresAt: Date.now() - 1 });
+  await workerBSweep(store, [chunkId]);
+}
+
+async function withWarnings(fn) {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = line => warnings.push(String(line));
+  try {
+    return { result: await fn(), warnings };
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
+const statusById = results => Object.fromEntries(results.map(r => [r.chunkId, r.status]));
+
+test('lease: batch-level renewals ask for upstream timeout + 60s, not the bare queue lease', async () => {
+  const leaseMs = 150;
+  const needed = getAbstractionConfig().upstreamTimeoutMs + 60_000;
+  assert(needed > leaseMs, 'The per-call lease must be longer than the queue lease for this test to mean anything');
+  const log = [];
+  const fx = await makeLeaseFixture({ callMs: 5, leaseMs, storeWrap: recordRenewals(log, () => fx.calls.length) });
+  const results = await fx.run();
+  assert(results.length === 5 && results.every(r => r.status === 'completed'), `Expected 5 completed, got ${JSON.stringify(statusById(results))}`);
+  // The waiting second visual and the text chunks are only ever renewed by the batch-level renewal, so their
+  // lease length is the batch's renewMs. paidCalls 0 = before the first visual solo, 2 = before the text batch call.
+  const beforeVisualSolo = log.filter(r => r.paidCalls === 0 && (r.chunkId === 'chk_2' || fx.textIds.includes(r.chunkId)));
+  const beforeTextBatch = log.filter(r => r.paidCalls === 2 && fx.textIds.includes(r.chunkId));
+  assert(beforeVisualSolo.length > 0 && beforeTextBatch.length > 0, `Expected renewals in both phases, got ${beforeVisualSolo.length} and ${beforeTextBatch.length}`);
+  const short = [...beforeVisualSolo, ...beforeTextBatch].filter(r => !(r.leaseMs >= needed));
+  assert(short.length === 0, `Every batch-level renewal must ask for >= ${needed}ms, got ${JSON.stringify(short.slice(0, 3))}`);
+});
+
+test('lease: a fallback to singles skips a chunk another worker took and returns stale without a model call', async () => {
+  const fx = await makeLeaseFixture({
+    visualCount: 0,
+    textCount: 3,
+    callMs: 5,
+    // The reply is missing one doc, so parseBatchAbstracts fails closed and every text chunk falls back to singles.
+    batchReply: count => JSON.stringify(Array.from({ length: count - 1 }, (_, i) => ({ docIndex: i + 1, abstract: 'DOC TYPE: Deed\nGRANTOR: Short' }))),
+    // B takes chk_2 while the batch call is in flight. The first single's renewal is what tells A.
+    onCall: async (n, store) => { if (n === 1) await stealChunk(store, 'chk_2'); },
+  });
+  const { result: results, warnings } = await withWarnings(() => fx.run());
+  const byId = statusById(results);
+  assert(warnings.some(line => line.includes('abstraction_batch_fallback') && line.includes('batch_parse_partial:3/3')), 'The fallback must come from the short batch reply');
+  assert(results.length === 3, `Expected one result per chunk, got ${results.length}`);
+  assert(byId.chk_2 === 'stale', `The taken chunk must be stale, got ${byId.chk_2}`);
+  assert(byId.chk_1 === 'completed' && byId.chk_3 === 'completed', `The others must complete as singles, got ${JSON.stringify(byId)}`);
+  const singles = fx.calls.filter(call => !call.schema);
+  assert(fx.calls.length === 3 && singles.length === 2, `Expected 1 batch + 2 singles, got ${fx.calls.length} calls`);
+  assert(singles.every(call => !call.includes('chk_2')), 'No single call may include the taken chunk');
+  assert(singles.some(call => call.includes('chk_1')) && singles.some(call => call.includes('chk_3')), 'The singles must be chk_1 and chk_3');
+  assert(fx.store.marks.length === 0, `Nothing may be marked failed/retry_wait, got ${JSON.stringify(fx.store.marks)}`);
+  assert(fx.store.chunks.get('chk_2').abstractionWorkerId === 'wkr_B', 'The new owner keeps its claim');
+});
+
+// REQUEST_ENVELOPE_SAFE_BYTES is read once when abstraction-batch.js loads. A distinct URL gives this test its own
+// copy of the module with the small envelope; abstraction.js and the rest stay shared. The env var is restored after.
+async function importBatchWithEnvelope(bytes) {
+  const previous = process.env.REQUEST_ENVELOPE_SAFE_BYTES;
+  process.env.REQUEST_ENVELOPE_SAFE_BYTES = String(bytes);
+  try {
+    return await import(`../api/_lib/abstraction-batch.js?envelope=${bytes}`);
+  } finally {
+    if (previous === undefined) delete process.env.REQUEST_ENVELOPE_SAFE_BYTES;
+    else process.env.REQUEST_ENVELOPE_SAFE_BYTES = previous;
+  }
+}
+
+test('lease: a payload-too-large split reports a right-half chunk taken during the left half once, as stale, and never re-sends it', async () => {
+  const { processMultiChunkAbstraction: splitting } = await importBatchWithEnvelope(100_000);
+  const fx = await makeLeaseFixture({
+    visualCount: 0,
+    textCount: 4,
+    csvBytes: 30_000,
+    callMs: 5,
+    // call 1 is the left half's batch; B takes chk_4 (right half) while it runs
+    onCall: async (n, store) => { if (n === 1) await stealChunk(store, 'chk_4'); },
+  });
+  const { result: results } = await withWarnings(() => fx.run(splitting));
+  const ids = results.map(r => r.chunkId).sort();
+  const byId = statusById(results);
+  assert(results.length === 4 && ids.join(',') === 'chk_1,chk_2,chk_3,chk_4', `Expected exactly one result per chunk, got ${JSON.stringify(results.map(r => [r.chunkId, r.status]))}`);
+  assert(byId.chk_4 === 'stale', `The taken right-half chunk must be stale, got ${byId.chk_4}`);
+  assert(['chk_1', 'chk_2', 'chk_3'].every(id => byId[id] === 'completed'), `The others must complete, got ${JSON.stringify(byId)}`);
+  const batches = fx.calls.filter(call => call.schema);
+  const singles = fx.calls.filter(call => !call.schema);
+  assert(fx.calls.length === 2 && batches.length === 1 && singles.length === 1, `Expected the left batch + one right single, got ${fx.calls.length} calls`);
+  assert(batches[0].includes('chk_1') && batches[0].includes('chk_2') && !batches[0].includes('chk_3'), 'The first call must be the left half only');
+  assert(singles[0].includes('chk_3'), 'The right half single must be chk_3');
+  assert(fx.calls.every(call => !call.includes('chk_4')), 'No model call may include the taken chunk');
+  assert(fx.store.marks.length === 0, `Nothing may be marked failed/retry_wait, got ${JSON.stringify(fx.store.marks)}`);
+  assert(fx.store.chunks.get('chk_4').abstractionWorkerId === 'wkr_B', 'The new owner keeps its claim');
+});
+
+test('lease: a chunk taken at the batch guard is stale and left out of the fallback; the rest finish as singles', async () => {
+  const fx = await makeLeaseFixture({
+    visualCount: 0,
+    textCount: 3,
+    callMs: 5,
+    // renewal 1 of chk_2 is before the messages are built, renewal 2 is the guard right before the paid batch call
+    storeHooks: { onRenew: async (id, n, store) => { if (id === 'chk_2' && n === 2) await stealChunk(store, 'chk_2'); } },
+  });
+  const { result: results, warnings } = await withWarnings(() => fx.run());
+  const byId = statusById(results);
+  assert(results.length === 3, `Expected one result per chunk, got ${results.length}`);
+  assert(byId.chk_2 === 'stale', `The taken chunk must be stale, got ${byId.chk_2}`);
+  assert(byId.chk_1 === 'completed' && byId.chk_3 === 'completed', `The others must complete as singles, got ${JSON.stringify(byId)}`);
+  assert(fx.calls.length === 2 && fx.calls.every(call => !call.schema), `The batch must not be paid; expected 2 singles, got ${fx.calls.length} calls`);
+  assert(fx.calls.every(call => !call.includes('chk_2')), 'No call may include the taken chunk');
+  assert(fx.store.marks.length === 0, `Nothing may be marked failed/retry_wait, got ${JSON.stringify(fx.store.marks)}`);
+  assert(fx.store.chunks.get('chk_2').abstractionWorkerId === 'wkr_B', 'The new owner keeps its claim');
+  // The batch catch sorts the taken chunk out before the fallback. The fallback's own skip would also return stale,
+  // so the fallback log (which chunks it was handed, and why) is what shows the catch did its job.
+  const fallbacks = warnings.map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(entry => entry?.event === 'abstraction_batch_fallback');
+  assert(fallbacks.length === 1, `Expected one fallback, got ${fallbacks.length}`);
+  assert(fallbacks[0].chunkIds.join(',') === 'chk_1,chk_3', `The fallback must only get the chunks still ours, got ${fallbacks[0].chunkIds}`);
+  assert(/lease was taken/.test(fallbacks[0].reason), `The fallback reason must be the lost lease, got ${fallbacks[0].reason}`);
+});
+
+test('lease: a visual solo that finished leaves the held set and is not renewed on later paid calls', async () => {
+  const atCall = {};
+  const fx = await makeLeaseFixture({
+    callMs: 5,
+    // When paid call n starts, chk_n has been renewed for it and not saved yet. Anything after that is a late renewal.
+    onCall: async (n, store) => {
+      const count = id => store.renewCalls.filter(x => x === id).length;
+      if (n <= 2) atCall[`chk_${n}`] = count(`chk_${n}`);
+      if (n === 2) atCall.chk_3 = count('chk_3');
+    },
+  });
+  const results = await fx.run();
+  assert(results.length === 5 && results.every(r => r.status === 'completed'), `Expected 5 completed, got ${JSON.stringify(statusById(results))}`);
+  const renewals = id => fx.store.renewCalls.filter(x => x === id).length;
+  for (const id of ['chk_1', 'chk_2']) {
+    assert(atCall[id] > 0, `${id} must be renewed before its own paid call`);
+    assert(renewals(id) === atCall[id], `${id} finished its solo and must not be renewed again: ${atCall[id]} renewals at its call, ${renewals(id)} at the end`);
+  }
+  assert(renewals('chk_3') > atCall.chk_3, 'Control: a text chunk still held keeps being renewed through the later paid calls');
 });
 
 test('isAbstractionBatchingEnabled defaults to true', () => {
