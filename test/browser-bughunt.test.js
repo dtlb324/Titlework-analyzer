@@ -913,6 +913,73 @@ test('priority 7: raw PDF failure renders #highDpiRetryBtn and retry skips GCS u
   assert.match(app.getEl('results').innerHTML, /Recovered Alice/);
 });
 
+test('priority 6/7: secondary-field ILLEGIBLE markers, CSVs, and opinion prose do not false-positive escalate or show high-DPI reread', async () => {
+  const secondaryOnlyAbstract = [
+    'DOC TYPE: Warranty Deed',
+    'DATE EXECUTED: April 7, 1923',
+    'DATE RECORDED: unrecorded',
+    'RECORDING REF: unrecorded',
+    'GRANTOR: Ada Owner',
+    'GRANTEE: Bea Buyer',
+    'LEGAL DESC: NW/4 of Section 12, Block C-9',
+    'SURFACE: ILLEGIBLE - VERIFY MANUALLY',
+    'MINERALS: yes - 1/2',
+    'ROYALTY/NPRI: no',
+    'TERM: ILLEGIBLE - VERIFY MANUALLY',
+    'AFTER-ACQUIRED TITLE: ILLEGIBLE - VERIFY MANUALLY',
+    'FRACTION CONVEYED: an undivided 1/2 mineral interest',
+    'RESERVATIONS: none stated',
+    'WARRANTY: ILLEGIBLE - VERIFY MANUALLY',
+    'ACKNOWLEDGMENT: ILLEGIBLE - VERIFY MANUALLY',
+    'ISSUES: Notary seal is ILLEGIBLE - VERIFY MANUALLY',
+    'CONFIDENCE: High confidence across key identity fields.',
+  ].join('\n');
+
+  const server = makeJobServer({
+    hooks: browserOnlyStorage,
+    analyzeReply: body => {
+      if (hasVisualBlock(body)) return secondaryOnlyAbstract;
+      return '## FINAL OWNERSHIP DETERMINATION\nNo illegible key fields found. Bea Buyer owns 1/2 minerals.';
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  app.ctx.PDFLib = { PDFDocument: { load: async () => ({ getPageCount: () => 2 }) } };
+
+  await app.ctx.handleFiles([makePdfFile('secondary-only.pdf')]);
+  await app.run('analyze()');
+  await tick(30);
+
+  // Only 1 Gemini abstraction + 1 Sonnet synthesis; no Sonnet escalation call.
+  assert.equal(server.analyze.length, 2);
+  assert.equal(server.analyze[0].model.startsWith('gemini'), true);
+  assert.equal(server.analyze[1].model, 'claude-sonnet-5-5');
+  assert.equal(parseBlocks(server.analyze[1]), null);
+  assert.equal(app.getEl('highDpiRereadBar').innerHTML, '');
+
+  // Key-field ILLEGIBLE still triggers both escalation and high-DPI candidate detection.
+  const keyFieldAbstract = secondaryOnlyAbstract.replace('GRANTOR: Ada Owner', 'GRANTOR: ILLEGIBLE - VERIFY MANUALLY');
+  assert.equal(app.ctx.shouldEscalateAbstractText(secondaryOnlyAbstract), false);
+  assert.equal(app.ctx.shouldEscalateAbstractText(keyFieldAbstract), true);
+  assert.equal(app.ctx.shouldEscalateAbstractText(keyFieldAbstract, { isCsv: true }), false);
+
+  // jobHasHighDpiCandidates must not match prose like "No illegible fields" and must honor clean cached abstracts.
+  app.ctx.__testPdf = makePdfFile('clean-job.pdf');
+  app.ctx.__testCleanAbstract = secondaryOnlyAbstract;
+  app.run(`
+    sessionSourceFilesByJob.set('job_prose', [__testPdf]);
+    rdLatestJob.jobId = 'job_prose';
+    rdLatestJob.result = { finalTitleOpinion: 'All instruments are clear; no illegible entries noted.' };
+  `);
+  assert.equal(app.ctx.jobHasHighDpiCandidates({ id: 'job_prose', status: 'completed' }), false);
+
+  app.run(`rdLatestJob.result = { finalTitleOpinion: '| #1 | Deed | Vol 1 Pg 2 | ILLEGIBLE |' };`);
+  assert.equal(app.ctx.jobHasHighDpiCandidates({ id: 'job_prose', status: 'completed' }), true);
+
+  // Cached clean abstracts take precedence over opinion text.
+  app.run(`sessionAbstractsByJob.set('job_prose', [{ filename: 'clean-job.pdf', abstract: __testCleanAbstract }]);`);
+  assert.equal(app.ctx.jobHasHighDpiCandidates({ id: 'job_prose', status: 'completed' }), false);
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

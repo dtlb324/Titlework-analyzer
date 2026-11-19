@@ -1127,11 +1127,11 @@ const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstractin
 Respond in this exact format - no extra commentary:
 
 DOC TYPE: [type]
-DATE EXECUTED: [date or ILLEGIBLE - VERIFY MANUALLY]
-DATE RECORDED: [date or ILLEGIBLE - VERIFY MANUALLY]
-RECORDING REF: [Vol/Page or instrument number, or ILLEGIBLE - VERIFY MANUALLY]
-GRANTOR: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY]
-GRANTEE: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY, or "not applicable" only if this instrument type has no grantee]
+DATE EXECUTED: [date, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+DATE RECORDED: [date, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+RECORDING REF: [Vol/Page or instrument number, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTOR: [exact name(s) as written, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTEE: [exact name(s) as written, "not applicable" if this instrument type has no grantee, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
 LEGAL DESC: [quoted description, abbreviated if long - note survey type]
 SURFACE: [yes/no/unclear]
 MINERALS: [yes/no/unclear - fraction if stated]
@@ -1145,7 +1145,7 @@ ACKNOWLEDGMENT: [yes/no/unclear]
 ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities - or "none noted"]
 CONFIDENCE: [one sentence]
 
-Write ILLEGIBLE - VERIFY MANUALLY for any text you cannot read or any field whose value is not visible on the document. Never write "not visible", "N/A", or leave a field blank as a substitute — use ILLEGIBLE - VERIFY MANUALLY. Only use "not applicable" when a field genuinely does not exist for this instrument type. DO NOT GUESS or fill in missing information.`;
+Write ILLEGIBLE - VERIFY MANUALLY only for text that is present (or clipped/obscured) on the document but cannot be read clearly. Never write "not visible", "N/A", or leave a field blank as a substitute for unreadable text — use ILLEGIBLE - VERIFY MANUALLY. When the document is legible and a field is genuinely omitted, write "not stated" (or "unrecorded" for an unrecorded instrument's recording date/reference, or "not applicable" when a field genuinely does not exist for this instrument type). DO NOT GUESS or fill in missing information.`;
 
 const SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions.
 
@@ -5997,28 +5997,75 @@ function isTimeoutError(err) {
     || name.includes('Timeout');
 }
 
-function shouldEscalateAbstractText(text) {
+const ILLEGIBLE_MARKER_RE = /ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i;
+const KEY_ILLEGIBLE_FIELDS = new Set([
+  'DOC TYPE',
+  'GRANTOR',
+  'GRANTEE',
+  'DATE EXECUTED',
+  'DATE RECORDED',
+  'RECORDING REF',
+  'LEGAL DESC',
+  'MINERALS',
+  'ROYALTY/NPRI',
+  'FRACTION CONVEYED',
+  'RESERVATIONS',
+]);
+
+function hasKeyIllegibleMarker(text) {
+  const value = String(text || '').trim();
+  if (!value || !ILLEGIBLE_MARKER_RE.test(value)) return false;
+
+  let sawTemplateField = false;
+  let currentField = null;
+  for (const rawLine of value.replace(/\r\n?/g, '\n').split('\n')) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || /^```/.test(trimmed)) continue;
+    if (/^DOCUMENT\s*#\d+(?:\s*\([^)]*\))?\s*:?/i.test(trimmed) || /^\[[^\]]+\]$/.test(trimmed)) {
+      currentField = null;
+      continue;
+    }
+    const candidate = trimmed
+      .replace(/^(?:[-*•]\s+)/, '')
+      .replace(/^\*\*([^*:]+?)\*\*:/, '$1:')
+      .replace(/^\*\*([^*:]+?:)\*\*\s*/, '$1 ');
+    const match = candidate.match(/^([A-Z][A-Z /-]*[A-Z]):\s*(.*)$/);
+    if (match) {
+      sawTemplateField = true;
+      currentField = match[1].trim();
+      if (KEY_ILLEGIBLE_FIELDS.has(currentField) && ILLEGIBLE_MARKER_RE.test(match[2])) {
+        return true;
+      }
+    } else if (currentField && KEY_ILLEGIBLE_FIELDS.has(currentField) && ILLEGIBLE_MARKER_RE.test(trimmed)) {
+      return true;
+    }
+  }
+  return !sawTemplateField;
+}
+
+function shouldEscalateAbstractText(text, options = {}) {
   const value = String(text || '').trim();
   if (!value) return true;
-  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(value)) return true;
+  if (!options?.isCsv && hasKeyIllegibleMarker(value)) return true;
   return /CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value);
 }
 
 async function callAbstractionWithEscalation(messages, options) {
+  const { isCsv = false, ...requestOptions } = options || {};
   const initial = await callBackend(messages, ABSTRACT_PROMPT, {
-    ...options,
+    ...requestOptions,
     model: ABSTRACT_MODEL,
     max_tokens: ABSTRACT_MAX_TOKENS,
   });
-  if (!shouldEscalateAbstractText(initial)) return initial;
+  if (!shouldEscalateAbstractText(initial, { isCsv })) return initial;
 
   try {
     return await callBackend(messages, ABSTRACT_PROMPT, {
-      ...options,
+      ...requestOptions,
       model: ABSTRACT_ESCALATION_MODEL,
       max_tokens: ABSTRACT_ESCALATION_MAX_TOKENS,
-      phase: `${options.phase || 'abstraction'}-escalation`,
-      label: `${options.label || 'Abstraction'} escalation`,
+      phase: `${requestOptions.phase || 'abstraction'}-escalation`,
+      label: `${requestOptions.label || 'Abstraction'} escalation`,
     });
   } catch (err) {
     console.warn('Abstraction escalation failed; keeping initial abstract.', err);
@@ -6427,8 +6474,6 @@ async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
   );
 }
 
-const ILLEGIBLE_MARKER_RE = /ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i;
-
 function normalizeSourceFilename(name) {
   return String(name || '').trim().toLowerCase();
 }
@@ -6525,7 +6570,7 @@ function findHighDpiRereadCandidates(abstractList, fileList, { includeMissing = 
       usedIndices.add(idx);
       const item = abstracts[idx];
       const text = String(item.abstract || item.abstractText || '');
-      if (ILLEGIBLE_MARKER_RE.test(text)) {
+      if (hasKeyIllegibleMarker(text)) {
         candidates.push({
           file,
           abstractIndex: idx,
@@ -6571,10 +6616,13 @@ function jobHasHighDpiCandidates(job) {
   }
   const cachedAbstracts = sessionAbstractsByJob.get(job.id);
   if (Array.isArray(cachedAbstracts) && cachedAbstracts.length) {
-    if (findHighDpiRereadCandidates(cachedAbstracts, sourceFiles, { includeMissing: true }).length > 0) return true;
+    return findHighDpiRereadCandidates(cachedAbstracts, sourceFiles, { includeMissing: true }).length > 0;
   }
-  if (rdLatestJob.jobId === job.id && /ILLEGIBLE/i.test(rdLatestJob.result?.finalTitleOpinion || '')) {
-    return true;
+  if (rdLatestJob.jobId === job.id) {
+    const opinion = String(rdLatestJob.result?.finalTitleOpinion || '');
+    if (ILLEGIBLE_MARKER_RE.test(opinion) || /\|\s*(?:[A-Z-]+\s*,\s*)*ILLEGIBLE(?:\s*,\s*[A-Z-]+)*\s*\|/.test(opinion)) {
+      return true;
+    }
   }
   return false;
 }
@@ -6902,6 +6950,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       phase: 'abstraction',
       docCount: batchFiles.length,
       label: 'Abstraction batch',
+      isCsv: batchFiles.length > 0 && batchFiles.every(isCsvFile),
     });
     recordBatchLatency(batchFiles, Date.now() - startedAt);
     return result;

@@ -55,11 +55,11 @@ export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney 
 Respond in this exact format - no extra commentary:
 
 DOC TYPE: [type]
-DATE EXECUTED: [date or ILLEGIBLE - VERIFY MANUALLY]
-DATE RECORDED: [date or ILLEGIBLE - VERIFY MANUALLY]
-RECORDING REF: [Vol/Page or instrument number, or ILLEGIBLE - VERIFY MANUALLY]
-GRANTOR: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY]
-GRANTEE: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY, or "not applicable" only if this instrument type has no grantee]
+DATE EXECUTED: [date, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+DATE RECORDED: [date, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+RECORDING REF: [Vol/Page or instrument number, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTOR: [exact name(s) as written, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTEE: [exact name(s) as written, "not applicable" if this instrument type has no grantee, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
 LEGAL DESC: [quoted description, abbreviated if long - note survey type]
 SURFACE: [yes/no/unclear]
 MINERALS: [yes/no/unclear - fraction if stated]
@@ -73,7 +73,7 @@ ACKNOWLEDGMENT: [yes/no/unclear]
 ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities - or "none noted"]
 CONFIDENCE: [one sentence]
 
-Write ILLEGIBLE - VERIFY MANUALLY for any text you cannot read or any field whose value is not visible on the document. Never write "not visible", "N/A", or leave a field blank as a substitute — use ILLEGIBLE - VERIFY MANUALLY. Only use "not applicable" when a field genuinely does not exist for this instrument type. DO NOT GUESS or fill in missing information.`;
+Write ILLEGIBLE - VERIFY MANUALLY only for text that is present (or clipped/obscured) on the document but cannot be read clearly. Never write "not visible", "N/A", or leave a field blank as a substitute for unreadable text — use ILLEGIBLE - VERIFY MANUALLY. When the document is legible and a field is genuinely omitted, write "not stated" (or "unrecorded" for an unrecorded instrument's recording date/reference, or "not applicable" when a field genuinely does not exist for this instrument type). DO NOT GUESS or fill in missing information.`;
 
 export function getAbstractionConfig() {
   return {

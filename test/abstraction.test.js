@@ -1714,6 +1714,7 @@ test('Priority 6: browser ABSTRACT_PROMPT matches server ABSTRACTION_PROMPT verb
   assert(!match[1].includes('or "not visible"'), 'Browser prompt must not instruct writing "not visible"');
   assert(match[1].includes('Never write "not visible"'), 'Browser prompt must explicitly forbid "not visible"');
   assert(match[1].includes('ILLEGIBLE - VERIFY MANUALLY'), 'Browser prompt must instruct ILLEGIBLE - VERIFY MANUALLY');
+  assert(match[1].includes('"not stated"') && match[1].includes('"unrecorded"'), 'Prompt must separate omitted/unrecorded fields from ILLEGIBLE - VERIFY MANUALLY');
 });
 
 test('Priority 6: computePdfSplitRanges and splitPdfChunk add 1-page overlap for >=4 pages without infinite recursion on 2-page PDFs', async () => {
