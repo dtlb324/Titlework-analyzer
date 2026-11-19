@@ -1,6 +1,6 @@
 
 import { isInvalidJobStatusTransition } from './jobs.js';
-import { abstractionReadLimit, defaultBlobLoader, processChunkAbstraction } from './abstraction.js';
+import { ABSTRACTION_WAVE_RAW_BYTES, abstractionReadLimit, defaultBlobLoader, processChunkAbstraction } from './abstraction.js';
 import {
   isAbstractionBatchingEnabled,
   planAbstractionWork,
@@ -157,7 +157,7 @@ function planAbstractionWave(chunks) {
   let bytes = 0;
   for (const chunk of chunks) {
     const limit = abstractionReadLimit(chunk);
-    if (bytes + limit > 128_000_000) break;
+    if (bytes + limit > ABSTRACTION_WAVE_RAW_BYTES) break;
     wave.push(chunk);
     bytes += limit;
   }

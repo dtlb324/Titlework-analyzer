@@ -1,8 +1,8 @@
 import { createHash } from 'crypto';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
-import { shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
-import { isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
+import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
@@ -23,6 +23,7 @@ const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'clau
 const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
 const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
+export const ABSTRACTION_WAVE_RAW_BYTES = 128_000_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const STALE_PROCESSING_MS = 2 * 60 * 1000;
 const DEFAULT_LEASE_MS = 90_000;
@@ -120,11 +121,36 @@ function isCsvChunk(chunk) {
   return !chunk.renderedImages && (chunk.mediaType === 'text/csv' || /\.csv$/i.test(chunk.originalFilename || ''));
 }
 
+function inlineRawBytesLimit() {
+  return Math.floor(Math.max(1, REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES) * 0.70);
+}
+
+function geminiFilesCanCarryAbstraction() {
+  return getGeminiFileApiConfig().enabled && isGeminiModel(ABSTRACT_MODEL) && !shouldUseOpenRouter(ABSTRACT_MODEL);
+}
+
+// A multi-page PDF of any uploadable size can be split by page range, but one chunk must fit in a queue
+// wave or planAbstractionWave never admits it.
 function maxRawBlobBytesForChunk(chunk) {
-  const available = Math.max(1, REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES);
-  if (isPotentiallySplittablePdfChunk(chunk)) return Math.max(Math.floor(available * 0.70), SPLITTABLE_PDF_FETCH_MAX_BYTES);
-  if (isCsvChunk(chunk)) return available;
-  return Math.floor(available * 0.70);
+  if (isPotentiallySplittablePdfChunk(chunk)) {
+    return Math.max(inlineRawBytesLimit(), SPLITTABLE_PDF_FETCH_MAX_BYTES, Math.min(getStorageConfig().maxUploadBytes, ABSTRACTION_WAVE_RAW_BYTES));
+  }
+  if (isCsvChunk(chunk)) return Math.max(1, REQUEST_ENVELOPE_SAFE_BYTES - REQUEST_OVERHEAD_BYTES);
+  if (geminiFilesCanCarryAbstraction()) return Math.max(inlineRawBytesLimit(), getGeminiFileApiConfig().maxBytes);
+  return inlineRawBytesLimit();
+}
+
+// Building a base64 request that cannot fit the envelope costs about five times the file in memory.
+function assertInlineVisualCanFit(chunk, payloadBytes, delivery) {
+  if (!(isPdfChunk(chunk) || isImageChunk(chunk)) || delivery.fileUri) return;
+  if (delivery.mode !== 'visual' && delivery.mode !== 'hybrid') return;
+  const visual = delivery.mode === 'hybrid' && delivery.visualBytes ? delivery.visualBytes : payloadBytes;
+  const base64Bytes = Math.ceil(visual.byteLength / 3) * 4;
+  if (base64Bytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+    const error = new Error(`Chunk is too large to send inline (${(visual.byteLength / 1024 / 1024).toFixed(1)} MB).`);
+    error.status = 413;
+    throw error;
+  }
 }
 
 function assertBlobSizeWithinBudget(chunk, sizeBytes) {
@@ -891,6 +917,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       payload.bytes,
       model,
     );
+    assertInlineVisualCanFit(processingChunk, payload.bytes, delivery);
     const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex, delivery);
     const payloadBytes = estimateRequestBytes(model, maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {

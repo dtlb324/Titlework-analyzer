@@ -286,7 +286,7 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `ABSTRACTION_BATCH_LARGE_BYTES` | `2000000`, range 100000 to 8000000. |
 | `ABSTRACTION_BATCH_FETCH_MULTIPLIER` | `4`, range 1 to 16. |
 | `ABSTRACTION_MAX_ATTEMPTS` | `5`, capped at 12. |
-| `ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES` | `25000000`, range 1000000 to 100000000. Floor for a PDF chunk that spans more than one page, or that has no page range. The fetch cap is the larger of this value and 70% of (`REQUEST_ENVELOPE_SAFE_BYTES` minus a fixed 350000). |
+| `ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES` | `25000000`, range 1000000 to 100000000. Floor for the fetch cap of a PDF chunk that spans more than one page, or has no page range. The cap is the largest of this value, 70% of (`REQUEST_ENVELOPE_SAFE_BYTES` minus a fixed 350000), and `STORAGE_MAX_UPLOAD_BYTES` capped at 128000000. A chunk too large to send inline is split by page range unless it goes as extracted text or through the Gemini Files API. A single-page PDF or image is fetched up to `GEMINI_FILE_API_MAX_BYTES` when the Files API carries abstraction, otherwise up to the 70% inline cap. |
 | `GEMINI_FILE_API_ENABLED` | On, unless the value is `false`. |
 | `GEMINI_FILE_API_MIN_BYTES` | `1500000`. The Files API clamps a set value from 100000 to 50000000. The abstraction size estimate uses the raw number, or 1500000 when the value is missing or 0. |
 | `GEMINI_FILE_API_MAX_BYTES` | `48000000`, range 1000000 to 50000000. |
