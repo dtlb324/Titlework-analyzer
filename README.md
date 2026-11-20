@@ -1,3 +1,12 @@
+<p align="center">
+  <img src="docs/assets/titlework-banner.jpg" alt="Titlework Analyzer — Mineral Ownership Builder" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/badge-macos.svg" alt="Works on macOS">
+  <img src="docs/assets/badge-windows.svg" alt="Works on Windows">
+</p>
+
 # Titlework Analyzer
 
 Titlework Analyzer is a web app for oil and gas landmen. It reads courthouse PDFs and images, builds a chain of title, and drafts a mineral ownership opinion. The page heading is Mineral Ownership Builder. The browser tab title is Mineral Title Analyzer. The npm package name is `title-analyzer`.
