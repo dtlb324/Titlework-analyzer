@@ -100,13 +100,27 @@ async function writeBackend(scope, ip, entry, generation) {
 function rememberCache(scope, ip, entry, generation, now, extra = {}) {
   const key = cacheKey(scope, ip);
   const prev = readCache.get(key) || {};
+  const pendingCount = extra.pendingCount ?? 0;
   readCache.set(key, {
     entry: cloneEntry(entry),
     generation: Number(generation) || 0,
     at: now,
-    flushedAt: extra.flushedAt ?? prev.flushedAt ?? now,
-    pendingCount: extra.pendingCount ?? 0,
+    flushedAt: extra.flushedAt ?? prev.flushedAt ?? 0,
+    pendingCount,
+    pendingWindowStart: pendingCount > 0
+      ? (extra.pendingWindowStart ?? prev.pendingWindowStart ?? entry.windowStart)
+      : null,
   });
+}
+
+function pruneReadCache(now, windowMs) {
+  const maxAge = Math.max(windowMs * 2, RATE_LIMIT_READ_TTL_MS * 2);
+  for (const [storedKey, cached] of readCache.entries()) {
+    if (cached.pendingCount > 0 && (now - (cached.pendingWindowStart ?? cached.entry.windowStart)) <= windowMs) {
+      continue;
+    }
+    if ((now - cached.at) > maxAge) readCache.delete(storedKey);
+  }
 }
 
 function mutateMemory(scope, ip, windowMs, update) {
@@ -135,6 +149,15 @@ function previewUpdate(entry, now, windowMs, update) {
   };
 }
 
+function failSharedRateLimit(scope, err) {
+  console.warn(JSON.stringify({
+    event: 'shared_rate_limit_unavailable',
+    scope,
+    message: String(err?.message || err).slice(0, 300),
+  }));
+  throw err instanceof SharedRateLimitError ? err : new SharedRateLimitError();
+}
+
 async function rmwShared(scope, ip, windowMs, update) {
   const key = cacheKey(scope, ip);
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -144,30 +167,36 @@ async function rmwShared(scope, ip, windowMs, update) {
       const now = Date.now();
       const cached = readCache.get(key);
       const entry = normalizeEntry(record?.data, now, windowMs);
-      if (cached?.pendingCount) entry.count += cached.pendingCount;
+      if (
+        cached?.pendingCount > 0
+        && (now - (cached.pendingWindowStart ?? cached.entry.windowStart)) <= windowMs
+      ) {
+        entry.count += cached.pendingCount;
+      }
       const result = update(entry, now);
       await writeBackend(scope, ip, entry, generation);
       rememberCache(scope, ip, entry, generation + 1, now, { flushedAt: now, pendingCount: 0 });
+      pruneReadCache(now, windowMs);
       return result;
     } catch (err) {
       if (isPreconditionFailure(err)) continue;
-      console.warn(JSON.stringify({
-        event: 'shared_rate_limit_unavailable',
-        scope,
-        message: String(err?.message || err).slice(0, 300),
-      }));
-      throw err instanceof SharedRateLimitError ? err : new SharedRateLimitError();
+      failSharedRateLimit(scope, err);
     }
   }
   throw new SharedRateLimitError();
 }
 
 async function refreshShared(scope, ip, windowMs) {
-  const now = Date.now();
-  const record = await readBackend(scope, ip);
-  const entry = normalizeEntry(record?.data, now, windowMs);
-  rememberCache(scope, ip, entry, Number(record?.generation) || 0, now, { flushedAt: now, pendingCount: 0 });
-  return entry;
+  try {
+    const now = Date.now();
+    const record = await readBackend(scope, ip);
+    const entry = normalizeEntry(record?.data, now, windowMs);
+    rememberCache(scope, ip, entry, Number(record?.generation) || 0, now, { flushedAt: 0, pendingCount: 0 });
+    pruneReadCache(now, windowMs);
+    return entry;
+  } catch (err) {
+    failSharedRateLimit(scope, err);
+  }
 }
 
 /**
@@ -190,6 +219,9 @@ export async function mutateSharedRateLimit({ scope, ip, windowMs, update }) {
     let cached = readCache.get(key);
     const fresh = cached && (now - cached.at) <= RATE_LIMIT_READ_TTL_MS;
     if (!fresh) {
+      if (cached?.pendingCount > 0) {
+        return await rmwShared(scope, keyIp, windowMs, update);
+      }
       await refreshShared(scope, keyIp, windowMs);
       cached = readCache.get(key);
     }
@@ -198,9 +230,11 @@ export async function mutateSharedRateLimit({ scope, ip, windowMs, update }) {
       return preview.result;
     }
     if (!preview.strikeChanged && !preview.windowChanged && preview.countDelta > 0
+      && cached.flushedAt > 0
       && (Date.now() - cached.flushedAt) <= RATE_LIMIT_READ_TTL_MS) {
       cached.entry = preview.next;
       cached.pendingCount = (cached.pendingCount || 0) + preview.countDelta;
+      cached.pendingWindowStart = cached.pendingWindowStart ?? preview.next.windowStart;
       cached.at = Date.now();
       return preview.result;
     }

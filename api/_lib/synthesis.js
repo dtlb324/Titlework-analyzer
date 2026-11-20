@@ -115,8 +115,8 @@ export function shouldForceMultiSegmentPlanning(abstractCount) {
   return abstractCount >= bulkMin;
 }
 
-export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeInputTokens } = {}) {
-  if (!synthesisCompactionEnabled()) return false;
+export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeInputTokens, compactionEnabled } = {}) {
+  if (!synthesisCompactionEnabled({ compactionEnabled })) return false;
   if ((segmentCount || 0) >= resolveCompactionMinSegments()) return true;
   const tokens = Number.isFinite(Number(mergeInputTokens))
     ? Number(mergeInputTokens)
@@ -1185,9 +1185,24 @@ async function mergeSegmentsIntoOpinion({
   let fit = fitsRequestBudget(mergeAbstractsPreview, tract, contextNotes, preamble, SYNTHESIS_PROMPT, finalConfig, {
     cacheMergeSegments: true,
   });
-  if (shouldCompactBeforeMerge({
+  const compactionConfig = {
+    ...partial,
+    maxTokens: Math.max(partial.maxTokens, finalConfig.maxTokens),
+  };
+  const compactionPreamble = `Below are ${workingSummaries.length} partial chain-of-title segments covering all ${totalAbstracts} documents. Compact them into one dense scaffold for final title opinion merge.`;
+  const compactionFits = fit.fits && fitsRequestBudget(
+    mergeAbstractsPreview,
+    tract,
+    contextNotes,
+    compactionPreamble,
+    COMPACTION_SYNTHESIS_PROMPT,
+    compactionConfig,
+    { cacheMergeSegments: false },
+  ).fits;
+  if (compactionFits && shouldCompactBeforeMerge({
     segmentCount: workingSummaries.length,
     mergeInputBytes: fit.bytes,
+    compactionEnabled: options?.compactionEnabled,
   })) {
     warningsAccum.push('merge_compaction_applied');
     logSynthesisMetrics({

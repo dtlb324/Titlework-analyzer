@@ -437,6 +437,7 @@ function publicSynthesisStatusBody(snapshot) {
   if (!snapshot) return null;
   const raw = snapshot.raw || snapshot;
   const status = snapshot.status || {};
+  const isCanceled = (raw?.job?.status ?? status.job?.status) === 'canceled';
   return {
     total: status.total ?? raw?.total ?? 0,
     pending: status.pending ?? raw?.pending ?? 0,
@@ -451,8 +452,10 @@ function publicSynthesisStatusBody(snapshot) {
     segments: (raw?.segments || []).map(publicSynthesisSegment),
     warnings: raw?.result?.warnings || [],
     failedDocuments: raw?.result?.failedDocuments || [],
-    hasMore: Boolean(status.mergeInProgress ?? raw?.mergeInProgress)
-      || ((status.pending ?? 0) + (status.processing ?? 0) + (status.retry_wait ?? 0)) > 0,
+    hasMore: !isCanceled && (
+      Boolean(status.mergeInProgress ?? raw?.mergeInProgress)
+      || ((status.pending ?? 0) + (status.processing ?? 0) + (status.retry_wait ?? 0)) > 0
+    ),
   };
 }
 

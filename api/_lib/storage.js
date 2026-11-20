@@ -363,26 +363,39 @@ export async function readOpsJson(objectKey, options = {}) {
   }
   const config = options.config || getStorageConfig();
   const bucket = options.bucket || await getBucket(config);
-  const file = bucket.file(objectKey);
-  try {
-    const [bytes] = await file.download();
-    const [metadata] = await file.getMetadata().catch(() => [{}]);
-    let data = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let metadata;
     try {
-      data = JSON.parse(Buffer.from(bytes).toString('utf8'));
-    } catch {
-      data = null;
+      [metadata] = await bucket.file(objectKey).getMetadata();
+    } catch (err) {
+      if (Number(err?.code) === 404 || err?.statusCode === 404) {
+        return { data: null, generation: 0 };
+      }
+      throw err;
     }
-    return {
-      data,
-      generation: Number(metadata.generation) || 0,
-    };
-  } catch (err) {
-    if (Number(err?.code) === 404 || err?.statusCode === 404) {
-      return { data: null, generation: 0 };
+    const generation = Number(metadata?.generation);
+    if (!Number.isSafeInteger(generation) || generation <= 0) {
+      throw new Error('Rate-limit object metadata is missing a valid generation.');
     }
-    throw err;
+    try {
+      const [bytes] = await bucket.file(objectKey, { generation }).download();
+      let data = null;
+      try {
+        data = JSON.parse(Buffer.from(bytes).toString('utf8'));
+      } catch {
+        data = null;
+      }
+      return { data, generation };
+    } catch (err) {
+      if (Number(err?.code) === 404 || err?.statusCode === 404) {
+        continue;
+      }
+      throw err;
+    }
   }
+  const conflict = new Error('Precondition failed while reading rate-limit object.');
+  conflict.code = 412;
+  throw conflict;
 }
 
 export async function writeOpsJson(objectKey, data, options = {}) {
