@@ -4285,16 +4285,18 @@ async function maybeKickStalledJobWorkflow(state, job) {
     if (needsSynthesis) {
       const payload = await fetchServerSynthesisStatus(job.id);
       if (!jobPollerOwnsWork(state)) return;
-      const status = payload?.status || {};
+      const status = payload?.status || null;
+      const isActiveBrowserRun = Boolean(activeAnalysisRun && activeAnalysisRun.jobId === job.id && activeAnalysisRun.driver === 'browser');
+      const unplanned = Boolean(status) && (status.total || 0) === 0 && !status.hasResult && !isActiveBrowserRun;
       signature = synthesisWorkflowSignature(status);
-      const pending = (status.pending || 0) + (status.processing || 0) + (status.retry_wait || 0);
+      const pending = (status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0);
       if (signature === state.workflowSignature) state.workflowStallPolls += 1;
       else {
         state.workflowStallPolls = 0;
         state.workflowSignature = signature;
       }
       shouldKick = state.workflowStallPolls >= WORKFLOW_STALL_THRESHOLD
-        && (pending > 0 || (status.mergeInProgress && !status.mergeLeaseHeld));
+        && (pending > 0 || (status?.mergeInProgress && !status?.mergeLeaseHeld) || unplanned);
     } else {
       const payload = await fetchServerAbstractionStatus(job.id);
       if (!jobPollerOwnsWork(state)) return;
@@ -4485,6 +4487,14 @@ function startJobPolling(jobId) {
   startJobPoller(jobId, job => renderPolledJobStatus(job), null, 'run');
 }
 function stopJobPolling() { stopJobPoller(); clearKeepOpenNotice(); }
+async function refreshJobViewIfCurrent(jobId) {
+  if (!jobId || !isCurrentJobRoute(jobId)) return;
+  try {
+    await loadJobView(jobId);
+  } catch (err) {
+    console.warn('Could not refresh job view', err);
+  }
+}
 
 function getJobStorageKey() {
   return 'title-analyzer:last-job';
@@ -7139,6 +7149,7 @@ async function runStagedAnalysis(files, runOptions = {}) {
       }
       clearProgressTimer();
       stopJobPolling();
+      await refreshJobViewIfCurrent(job.id);
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('uploadSection').style.display = 'block';
       document.getElementById('analyzeBtn').disabled = false;
@@ -7230,6 +7241,7 @@ async function runStagedAnalysis(files, runOptions = {}) {
     if (isAnalysisCanceled(run)) return;
     clearProgressTimer();
     stopJobPolling();
+    await refreshJobViewIfCurrent(job.id);
     files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)`, kind: 'analysis-input' },
@@ -7256,6 +7268,7 @@ async function runStagedAnalysis(files, runOptions = {}) {
     showError('Synthesis failed: ' + e.message);
     clearProgressTimer();
     stopJobPolling();
+    await refreshJobViewIfCurrent(job.id);
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
@@ -7707,6 +7720,7 @@ async function analyzeAdditional(additionalOptions = {}) {
       }
       clearProgressTimer();
       stopJobPolling();
+      await refreshJobViewIfCurrent(job.id);
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('addDocsSection').style.display = 'block';
       document.getElementById('addDocsBtn').disabled = false;
@@ -7801,6 +7815,7 @@ async function analyzeAdditional(additionalOptions = {}) {
     updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
     clearProgressTimer();
     stopJobPolling();
+    await refreshJobViewIfCurrent(job.id);
 
     documentAbstracts = allAbstracts;
     newFiles.forEach(freeFileMemory);
@@ -7839,6 +7854,7 @@ async function analyzeAdditional(additionalOptions = {}) {
     showError('Update failed: ' + e.message);
     clearProgressTimer();
     stopJobPolling();
+    await refreshJobViewIfCurrent(job.id);
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('addDocsSection').style.display = 'block';
     document.getElementById('addDocsBtn').disabled = false;
