@@ -126,6 +126,44 @@ function normalizeBytes(payload) {
   return Buffer.from(String(payload || ''), 'utf8');
 }
 
+const ALLOWED_RENDERED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+export function getRenderedImagePages(chunk, delivery = null) {
+  if (Array.isArray(delivery?.pages) && delivery.pages.length) return delivery.pages;
+  if (Array.isArray(chunk?.renderedImages) && chunk.renderedImages.length) return chunk.renderedImages;
+  return null;
+}
+
+export function buildRenderedImageBlocks(pages) {
+  return pages.map((page, index) => {
+    const mediaType = String(page?.mediaType || '').toLowerCase();
+    if (!ALLOWED_RENDERED_IMAGE_TYPES.has(mediaType)) {
+      const error = new Error(`Unsupported rendered page image type at page ${index + 1}: ${page?.mediaType || 'unknown'}`);
+      error.status = 400;
+      throw error;
+    }
+    let data = '';
+    if (typeof page?.data === 'string' && page.data.trim()) {
+      data = page.data.trim();
+    } else if (page?.bytes != null) {
+      data = normalizeBytes(page.bytes).toString('base64');
+    }
+    if (!data) {
+      const error = new Error(`Rendered page ${index + 1} is missing image data.`);
+      error.status = 400;
+      throw error;
+    }
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mediaType,
+        data,
+      },
+    };
+  });
+}
+
 function isPdfChunk(chunk) {
   return !chunk.renderedImages && (chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || ''));
 }
@@ -163,6 +201,20 @@ function maxRawBlobBytesForChunk(chunk) {
 
 // Building a base64 request that cannot fit the envelope costs about five times the file in memory.
 function assertInlineVisualCanFit(chunk, payloadBytes, delivery) {
+  const renderedPages = getRenderedImagePages(chunk, delivery);
+  if (renderedPages) {
+    const base64Bytes = renderedPages.reduce((sum, page) => {
+      if (typeof page?.data === 'string') return sum + page.data.length;
+      if (page?.bytes != null) return sum + Math.ceil(normalizeBytes(page.bytes).byteLength / 3) * 4;
+      return sum;
+    }, 0);
+    if (base64Bytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+      const error = new Error(`Rendered page images are too large to send inline (${(base64Bytes / 1024 / 1024).toFixed(1)} MB).`);
+      error.status = 413;
+      throw error;
+    }
+    return;
+  }
   if (!(isPdfChunk(chunk) || isImageChunk(chunk)) || delivery.fileUri) return;
   if (delivery.mode !== 'visual' && delivery.mode !== 'hybrid') return;
   const visual = delivery.mode === 'hybrid' && delivery.visualBytes ? delivery.visualBytes : payloadBytes;
@@ -204,7 +256,13 @@ export function buildAbstractMessagesForChunk(chunk, payloadBytes, sequenceIndex
     textPrompt += ' This file is a page range from a larger PDF. Abstract this part fully and note the source document/page range.';
   }
 
-  if (isCsvChunk(chunk)) {
+  const renderedPages = getRenderedImagePages(chunk, delivery);
+  if (renderedPages) {
+    content.push(...buildRenderedImageBlocks(renderedPages));
+    if (renderedPages.length > 1) {
+      textPrompt += ' This document is provided as high-DPI rendered page images in page order.';
+    }
+  } else if (isCsvChunk(chunk)) {
     const csvText = bytes.toString('utf8');
     textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
   } else if (isPdfChunk(chunk)) {
@@ -311,8 +369,17 @@ Extract every relevant fact. Do not guess at anything illegible.`;
     const endMarker = `--- END DOCUMENT #${docNum} (${name}) ---`;
     const bytes = normalizeBytes(item.payloadBytes);
     const delivery = item.delivery || null;
+    const renderedPages = getRenderedImagePages(item.chunk, delivery);
 
-    if (isCsvChunk(item.chunk)) {
+    if (renderedPages) {
+      hasVisualBlock = true;
+      const pageNote = renderedPages.length > 1
+        ? `\nDOCUMENT #${docNum} (${name}) is provided as ${renderedPages.length} high-DPI rendered page images in page order.`
+        : '';
+      interleavedContent.push({ type: 'text', text: `${startMarker}${pageNote}` });
+      interleavedContent.push(...buildRenderedImageBlocks(renderedPages));
+      interleavedContent.push({ type: 'text', text: endMarker });
+    } else if (isCsvChunk(item.chunk)) {
       const csvText = bytes.toString('utf8');
       const sectionText = `${startMarker}\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.\n${endMarker}`;
       textSections.push(`\n\n${sectionText}`);
@@ -547,6 +614,9 @@ function getModelClient(options) {
 }
 
 export async function resolveChunkDelivery(chunk, payloadBytes) {
+  if (Array.isArray(chunk?.renderedImages) && chunk.renderedImages.length) {
+    return { mode: 'rendered_images', pages: chunk.renderedImages };
+  }
   if (isPdfChunk(chunk)) {
     return await resolvePdfTextDelivery(payloadBytes, {
       pageStart: chunk.pageStart,
@@ -557,6 +627,9 @@ export async function resolveChunkDelivery(chunk, payloadBytes) {
 }
 
 export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model) {
+  if (getRenderedImagePages(chunk, delivery)) {
+    return delivery;
+  }
   if (!delivery || !isGeminiModel(model)) {
     return delivery;
   }
@@ -605,6 +678,15 @@ export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes
 }
 
 export function estimateAbstractPayloadBytes(chunk, payloadBytes = null, delivery = null) {
+  const renderedPages = getRenderedImagePages(chunk, delivery);
+  if (renderedPages) {
+    const imageBytes = renderedPages.reduce((sum, page) => {
+      if (typeof page?.data === 'string') return sum + page.data.length;
+      if (page?.bytes != null) return sum + Math.ceil(normalizeBytes(page.bytes).byteLength * 1.37);
+      return sum;
+    }, 0);
+    return imageBytes + 2_000;
+  }
   if (delivery?.mode === 'text') {
     return Math.min(
       REQUEST_ENVELOPE_SAFE_BYTES,
@@ -1058,6 +1140,21 @@ function sha256Hex(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+export function computePdfSplitRanges(pageCount, sourcePageStart = 1, sourcePageEnd = null) {
+  if (!Number.isInteger(pageCount) || pageCount <= 1) return [];
+  const start = Number.isInteger(sourcePageStart) && sourcePageStart >= 1 ? sourcePageStart : 1;
+  const end = Number.isInteger(sourcePageEnd) && sourcePageEnd >= start ? sourcePageEnd : start + pageCount - 1;
+  if (end <= start) return [];
+
+  const overlap = pageCount >= 4 ? 1 : 0;
+  const leftCount = Math.ceil(pageCount / 2);
+  const rightStartIndex = leftCount - overlap;
+  return [
+    { startPageIndex: 0, endPageIndex: leftCount - 1, pageStart: start, pageEnd: start + leftCount - 1 },
+    { startPageIndex: rightStartIndex, endPageIndex: pageCount - 1, pageStart: start + rightStartIndex, pageEnd: end },
+  ];
+}
+
 async function splitPdfChunk(parentChunk, bytes, reason, options) {
   if (!isPdfChunk(parentChunk)) {
     return false;
@@ -1072,13 +1169,8 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
   const sourcePageEnd = parentChunk.pageEnd && parentChunk.pageEnd >= sourcePageStart
     ? parentChunk.pageEnd
     : sourcePageStart + pageCount - 1;
-  if (sourcePageEnd <= sourcePageStart) return false;
-
-  const leftCount = Math.ceil(pageCount / 2);
-  const ranges = [
-    { startPageIndex: 0, endPageIndex: leftCount - 1, pageStart: sourcePageStart, pageEnd: sourcePageStart + leftCount - 1 },
-    { startPageIndex: leftCount, endPageIndex: pageCount - 1, pageStart: sourcePageStart + leftCount, pageEnd: sourcePageEnd },
-  ];
+  const ranges = computePdfSplitRanges(pageCount, sourcePageStart, sourcePageEnd);
+  if (!ranges.length) return false;
   const baseName = String(parentChunk.originalFilename || 'document.pdf').replace(/\.pdf$/i, '');
   const createdChildIds = [];
   const splitFailure = {

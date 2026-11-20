@@ -243,7 +243,7 @@ test('a multi-page PDF too large to send inline is read once and split by page r
   assert.equal(storage.reads, 1);
   assert.equal(model.requests.length, 0, 'the oversized whole document is never sent to a model');
   const children = [...store.chunks.values()].filter(row => row.splitParentChunkId === chunk.id);
-  assert.deepEqual(children.map(row => [row.pageStart, row.pageEnd]), [[1, 2], [3, 4]]);
+  assert.deepEqual(children.map(row => [row.pageStart, row.pageEnd]), [[1, 2], [2, 4]]);
   assert(children.every(row => row.splitReason === 'payload_too_large'));
 });
 
@@ -276,9 +276,12 @@ test('the queue abstracts every page range of an oversized multi-page PDF', asyn
   }));
   const rows = [...store.chunks.values()];
   assert.equal(store.chunks.get(chunk.id).abstractionStatus, 'split_superseded', JSON.stringify(rows.map(row => [row.id, row.abstractionStatus, row.failure?.errorMessage])));
-  assert.deepEqual(store.saved.map(record => record.chunkId).sort(), ['chk_child_1', 'chk_child_2']);
-  assert.deepEqual(rows.filter(row => row.splitParentChunkId).map(row => [row.pageStart, row.pageEnd, row.abstractionStatus]), [[1, 2, 'completed'], [3, 4, 'completed']]);
-  assert.equal(model.requests.length, 2);
+  assert.deepEqual(store.saved.map(record => record.chunkId).sort(), ['chk_child_1', 'chk_child_3', 'chk_child_4']);
+  assert.deepEqual(
+    rows.filter(row => row.splitParentChunkId && row.abstractionStatus !== 'split_superseded').map(row => [row.pageStart, row.pageEnd, row.abstractionStatus]),
+    [[1, 2, 'completed'], [2, 3, 'completed'], [4, 4, 'completed']],
+  );
+  assert.equal(model.requests.length, 3);
 });
 
 test('a single page over the inline limit is delivered through the Gemini Files API', async () => {

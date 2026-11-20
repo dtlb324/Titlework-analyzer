@@ -2285,6 +2285,93 @@ test('planSynthesisSegments uses configured chunk size for all forced multi-segm
   else process.env.BULK_SYNTHESIS_CHUNK_SIZE = previousBulkSize;
 });
 
+test('priority 8: production synthesis caps default to 8000 / 5000 and 50- vs 60-doc runs log clean synthesis_merge_complete metrics', async () => {
+  const { getSynthesisConfig } = await import('../api/_lib/synthesis.js');
+  const defaults = getSynthesisConfig();
+  assert(defaults.maxTokens === 8000, `Expected default maxTokens 8000, got ${defaults.maxTokens}`);
+  assert(defaults.partialMaxTokens === 5000, `Expected default partialMaxTokens 5000, got ${defaults.partialMaxTokens}`);
+
+  const envKeys = [
+    'SYNTHESIS_LARGE_JOB_MULTI_SEGMENT',
+    'BULK_JOB_MIN_ABSTRACTS',
+    'SYNTHESIS_CHUNK_SIZE',
+    'BULK_SYNTHESIS_CHUNK_SIZE',
+    'SYNTHESIS_STREAM_ENABLED',
+  ];
+  const prevEnv = Object.fromEntries(envKeys.map(k => [k, process.env[k]]));
+  const prevClient = globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__;
+  const prevLog = console.log;
+
+  const parseMergeCompleteLogs = lines =>
+    lines
+      .map(line => {
+        try { return JSON.parse(line); } catch { return null; }
+      })
+      .filter(entry => entry && entry.event === 'synthesis_merge_complete');
+
+  try {
+    process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = 'true';
+    process.env.BULK_JOB_MIN_ABSTRACTS = '50';
+    process.env.SYNTHESIS_CHUNK_SIZE = '50';
+    process.env.BULK_SYNTHESIS_CHUNK_SIZE = '50';
+    process.env.SYNTHESIS_STREAM_ENABLED = 'false';
+
+    // Representative 50-document job fits one 50-doc segment with production 8000 single-pass cap
+    const singleLogs = [];
+    const singleRequests = [];
+    console.log = (...args) => { singleLogs.push(args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')); };
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      singleRequests.push(request);
+      return { text: goodFinalOpinion('50-doc single pass complete.'), model: 'claude-sonnet-5-5', usage: { input_tokens: 100, output_tokens: 200 } };
+    };
+    const store50 = createMemoryPhase5Store({ abstracts: manyAbstracts(50) });
+    const res50 = await processSynthesisJob('job_test_1', { store: store50, budgetMs: 120_000, batchLimit: 20, config: { chunkSize: 50 } });
+    assert(res50.result?.status === 'complete', `Expected 50-doc job complete, got ${res50.result?.status}`);
+    assert(singleRequests.length === 1, `Expected 1 Sonnet call for 50 docs, got ${singleRequests.length}`);
+    assert(singleRequests[0].maxTokens === 8000, `Expected single-pass maxTokens 8000, got ${singleRequests[0].maxTokens}`);
+    const merge50 = parseMergeCompleteLogs(singleLogs);
+    assert(merge50.length === 1, `Expected 1 synthesis_merge_complete log for 50 docs, got ${merge50.length}`);
+    assert(merge50[0].singlePass === true, `Expected singlePass=true, got ${merge50[0].singlePass}`);
+    assert(merge50[0].status === 'complete', `Expected status=complete, got ${merge50[0].status}`);
+    assert(Array.isArray(merge50[0].warningFlags) && merge50[0].warningFlags.length === 0, `Expected empty warningFlags, got ${JSON.stringify(merge50[0].warningFlags)}`);
+
+    // 60-document multi-segment job (50 + 10) uses production 5000 partial cap and merges cleanly
+    const multiLogs = [];
+    const partialRequests = [];
+    console.log = (...args) => { multiLogs.push(args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')); };
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+        partialRequests.push(request);
+        return { text: goodSegmentSummary(partialRequests.length - 1), model: 'gemini-3.1-flash-lite', usage: { input_tokens: 50, output_tokens: 100 } };
+      }
+      return { text: goodFinalOpinion('60-doc merge complete.'), model: 'claude-sonnet-5-5', usage: { input_tokens: 200, output_tokens: 400 } };
+    };
+    const store60 = createMemoryPhase5Store({ abstracts: manyAbstracts(60) });
+    let batch60 = null;
+    for (let i = 0; i < 20; i++) {
+      batch60 = await processSynthesisJob('job_test_1', { store: store60, budgetMs: 120_000, batchLimit: 20, config: { chunkSize: 50 } });
+      if (batch60.result) break;
+    }
+    assert(batch60?.result?.status === 'complete', `Expected 60-doc job complete, got ${batch60?.result?.status}`);
+    assert(partialRequests.length === 2, `Expected 2 partial segment calls for 60 docs, got ${partialRequests.length}`);
+    assert(partialRequests.every(req => req.maxTokens === 5000), `Expected every partial call maxTokens=5000, got ${partialRequests.map(r => r.maxTokens)}`);
+    const merge60 = parseMergeCompleteLogs(multiLogs);
+    assert(merge60.length === 1, `Expected 1 synthesis_merge_complete log for 60 docs, got ${merge60.length}`);
+    assert(merge60[0].singlePass === false, `Expected singlePass=false, got ${merge60[0].singlePass}`);
+    assert(merge60[0].segmentCount === 2, `Expected segmentCount=2, got ${merge60[0].segmentCount}`);
+    assert(merge60[0].status === 'complete', `Expected status=complete, got ${merge60[0].status}`);
+    assert(Array.isArray(merge60[0].warningFlags) && merge60[0].warningFlags.length === 0, `Expected empty warningFlags, got ${JSON.stringify(merge60[0].warningFlags)}`);
+  } finally {
+    console.log = prevLog;
+    if (prevClient === undefined) delete globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__;
+    else globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = prevClient;
+    for (const k of envKeys) {
+      if (prevEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = prevEnv[k];
+    }
+  }
+});
+
 
 let passed = 0;
 let failed = 0;

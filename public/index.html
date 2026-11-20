@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'">
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -761,6 +761,7 @@
 
     <div id="results"></div>
 
+    <div id="highDpiRereadBar"></div>
     <div id="exportNotice"></div>
     <div id="followupSection" style="display:none">
       <p id="followupStatus" class="rd-sr" role="status" aria-live="polite"></p>
@@ -863,6 +864,7 @@ const CLIENT_MAX_REQUESTS_PER_MIN = 120;
 const MIN_REQUEST_GAP_MS = 500;
 const MAX_RETRIES = 8;
 const MAX_PDF_CHUNK_RAW_BYTES = 7_500_000;
+const LONG_PDF_PAGE_THRESHOLD = 15;
 
 const ABSTRACT_MODEL = 'gemini-3.1-flash-lite';
 const ABSTRACT_ESCALATION_MODEL = 'claude-sonnet-5-5';
@@ -1122,28 +1124,28 @@ function clearProgressTimer() {
 
 const ABSTRACT_PROMPT = `You are an expert oil and gas title attorney abstracting a single courthouse instrument. Be accurate, concise, and cautious. Extract only what is clearly visible.
 
-Respond in this exact format — no extra commentary:
+Respond in this exact format - no extra commentary:
 
 DOC TYPE: [type]
-DATE EXECUTED: [date or "not visible"]
-DATE RECORDED: [date or "not visible"]
-RECORDING REF: [Vol/Page or instrument number, or "not visible"]
-GRANTOR: [exact name(s) as written]
-GRANTEE: [exact name(s) as written]
-LEGAL DESC: [quoted description, abbreviated if long — note survey type]
+DATE EXECUTED: [date, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+DATE RECORDED: [date, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+RECORDING REF: [Vol/Page or instrument number, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTOR: [exact name(s) as written, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTEE: [exact name(s) as written, "not applicable" if this instrument type has no grantee, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+LEGAL DESC: [quoted description, abbreviated if long - note survey type]
 SURFACE: [yes/no/unclear]
-MINERALS: [yes/no/unclear — fraction if stated]
-ROYALTY/NPRI: [yes/no — fraction if stated]
-TERM: [perpetual/term — specify if term]
+MINERALS: [yes/no/unclear - fraction if stated]
+ROYALTY/NPRI: [yes/no - fraction if stated]
+TERM: [perpetual/term - specify if term]
 AFTER-ACQUIRED TITLE: [yes/no]
 FRACTION CONVEYED: [exact wording]
-RESERVATIONS: [quote verbatim — if none, write "none stated"]
+RESERVATIONS: [quote verbatim - if none, write "none stated"]
 WARRANTY: [full/special/quitclaim]
 ACKNOWLEDGMENT: [yes/no/unclear]
-ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities — or "none noted"]
+ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities - or "none noted"]
 CONFIDENCE: [one sentence]
 
-Write ILLEGIBLE — VERIFY MANUALLY for anything you cannot read. DO NOT GUESS or fill in missing information.`;
+Write ILLEGIBLE - VERIFY MANUALLY only for text that is present (or clipped/obscured) on the document but cannot be read clearly. Never write "not visible", "N/A", or leave a field blank as a substitute for unreadable text — use ILLEGIBLE - VERIFY MANUALLY. When the document is legible and a field is genuinely omitted, write "not stated" (or "unrecorded" for an unrecorded instrument's recording date/reference, or "not applicable" when a field genuinely does not exist for this instrument type). DO NOT GUESS or fill in missing information.`;
 
 const SYNTHESIS_PROMPT = `You are a Texas-licensed oil and gas title attorney with 30+ years of experience rendering Drilling Title Opinions and Division Order Title Opinions.
 
@@ -1222,9 +1224,15 @@ function clearStoredPassword() {
 
 let appPassword = loadStoredPassword();
 let files = [];
+let lastCompletedSourceFiles = [];
 let conversationHistory = [];
 let documentAbstracts = [];
 let activeAnalysisRun = null;
+let pdfRasterModulePromise = null;
+let highDpiRereadInFlight = false;
+let lastFailedAbstractionContext = null;
+const sessionSourceFilesByJob = new Map();
+const sessionAbstractsByJob = new Map();
 // Intake runs as a serialized queue per drop zone ("lane"). Build is enabled only when the home lane is idle.
 let nextStageId = 1;
 let buildStarting = false;
@@ -1658,7 +1666,7 @@ async function hasPdfHeader(file) {
 // Shared intake core for both drop zones. Validates each file, stages what fits, and never stops on one
 // bad file. Returns one summary per selection: { offered, accepted, rejected:[{name,reason}], duplicates, overCap }.
 async function ingestUploadedFiles(newFiles, targetArray, onProgress) {
-  const result = { offered: newFiles.length, accepted: [], rejected: [], duplicates: [], overCap: [] };
+  const result = { offered: newFiles.length, accepted: [], rejected: [], duplicates: [], overCap: [], longPdfs: [] };
   const seen = new Set(targetArray.map(entry => intakeKey(entry.sourceFile || entry)));
   for (let i = 0; i < newFiles.length; i++) {
     const file = newFiles[i];
@@ -1690,6 +1698,12 @@ async function ingestUploadedFiles(newFiles, targetArray, onProgress) {
         entry.duplicate = duplicate;
         targetArray.push(entry);
         result.accepted.push(entry.name);
+        if (isPdfFile(entry) && Array.isArray(entry.pageRange)) {
+          const pages = entry.pageRange[1] - entry.pageRange[0] + 1;
+          if (pages >= LONG_PDF_PAGE_THRESHOLD) {
+            result.longPdfs.push({ name: entry.name, pages });
+          }
+        }
       }
       if (duplicate) result.duplicates.push(file.name);
     } catch (err) {
@@ -1750,6 +1764,7 @@ async function ensureFileData(entry) {
 function freeFileMemory(file) {
   file.data = null;
   file.csvText = null;
+  file.renderedPages = null;
 }
 
 function getStorage() {
@@ -1775,12 +1790,13 @@ function getFileFingerprint(file) {
   const modified = source?.lastModified || file.lastModified || '';
   const range = file.pageRange ? file.pageRange.join('-') : '';
   const split = file.splitFrom || '';
+  const highDpi = Array.isArray(file.renderedPages) && file.renderedPages.length ? `:highdpi:${file.renderedPages.length}` : '';
   const contentHash = file.csvText
     ? hashStringSample(file.csvText)
     : typeof file.data === 'string'
       ? hashStringSample(file.data)
       : '';
-  return `${file.name}:${file.size}:${file.type || ''}:${modified}:${split}:${range}:${contentHash}`;
+  return `${file.name}:${file.size}:${file.type || ''}:${modified}:${split}:${range}${highDpi}:${contentHash}`;
 }
 
 function getFileSignature(fileList, indexOffset, label) {
@@ -2114,8 +2130,11 @@ function endAnalysisRun(run) {
 
 function prepareHomeForAnalysisRun() {
   document.getElementById('results').innerHTML = '';
+  const highDpiBar = document.getElementById('highDpiRereadBar');
+  if (highDpiBar) highDpiBar.innerHTML = '';
   document.getElementById('followupSection').style.display = 'none';
   document.getElementById('addDocsSection').style.display = 'none';
+  lastFailedAbstractionContext = null;
   clearKeepOpenNotice();
   clearSynthesisPreview();
 }
@@ -2126,8 +2145,11 @@ function resetHomeForNewJob() {
   cancelAllAnalysisRuns();
   activeAnalysisRun = null;
   buildStarting = false;
+  highDpiRereadInFlight = false;
+  lastFailedAbstractionContext = null;
   files.forEach(freeFileMemory);
   files = [];
+  lastCompletedSourceFiles = [];
   additionalFiles = [];
   documentAbstracts = [];
   conversationHistory = [];
@@ -2137,7 +2159,7 @@ function resetHomeForNewJob() {
   const storage = getStorage();
   try { storage?.removeItem(getJobStorageKey()); } catch {}
 
-  const idsToClear = ['fileList', 'fileList2', 'results', 'progressList', 'jobMeta', 'progressStatus'];
+  const idsToClear = ['fileList', 'fileList2', 'results', 'highDpiRereadBar', 'progressList', 'jobMeta', 'progressStatus'];
   idsToClear.forEach(id => {
     const node = document.getElementById(id);
     if (node) node.innerHTML = '';
@@ -2465,6 +2487,13 @@ function renderJobActions(job) {
       label: 'Retry synthesis',
       class: failedDocs > 0 ? 'btn-secondary' : 'btn-primary',
       onClick: () => runJobAction(job, '/synthesis/start'),
+    });
+  }
+  if (isTerminal && job.status !== 'canceled' && jobHasHighDpiCandidates(job)) {
+    buttons.push({
+      label: 'Re-read as high-DPI page images',
+      class: 'btn-secondary',
+      onClick: () => rereadJobPdfsAsHighDpi(job),
     });
   }
   if (!isTerminal) {
@@ -5438,6 +5467,11 @@ function intakeNoteHtml(result, laneKey) {
     const show = laneKey === 'home' ? ' <button type="button" class="link-btn" onclick="showNeedsAttention()">Show duplicates</button>' : '';
     body.push(`<p>${result.duplicates.length} ${one ? 'has' : 'have'} the same name, size and date as another staged file. ${one ? 'It is' : 'They are'} staged and marked Duplicate; remove any you added by mistake.${show}</p>`);
   }
+  if (result.longPdfs?.length) {
+    const one = result.longPdfs.length === 1;
+    body.push(`<p>${one ? '1 PDF is' : `${result.longPdfs.length} PDFs are`} ${LONG_PDF_PAGE_THRESHOLD} pages or longer. If ${one ? 'it bundles' : 'they bundle'} multiple recorded instruments, split ${one ? 'it' : 'them'} into one instrument per PDF for best accuracy:</p>`
+      + intakeNameList(result.longPdfs.map(item => `<strong>${esc(item.name)}</strong> <span class="why">(${item.pages} pages)</span>`), 'long PDFs'));
+  }
   return `<div class="intake-note${problems ? ' intake-note--warn' : ''}">
     <strong class="intake-lead">${lead}</strong>
     ${body.join('')}
@@ -5746,11 +5780,11 @@ function splitErrorMessage(msg) {
   }
   return { title, detail };
 }
-function showError(msg) {
+function showError(msg, actionHtml = '') {
   const { title, detail } = splitErrorMessage(msg);
   document.getElementById('errorBox').innerHTML = `
     <div class="error-msg">
-      <strong>${esc(title)}</strong><br>${esc(detail)}
+      <strong>${esc(title)}</strong><br>${esc(detail)}${actionHtml || ''}
     </div>`;
 }
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
@@ -5933,6 +5967,9 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
 
 
 function estimateFilePayload(file) {
+  if (Array.isArray(file.renderedPages) && file.renderedPages.length) {
+    return file.renderedPages.reduce((sum, page) => sum + (page?.data?.length || 0), 0);
+  }
   if (file.csvText) return file.csvText.length + 500;
   if (typeof file.data === 'string' && file.data.length) return file.data.length;
   return Math.ceil((file.size || 0) * 1.37);
@@ -5960,28 +5997,75 @@ function isTimeoutError(err) {
     || name.includes('Timeout');
 }
 
-function shouldEscalateAbstractText(text) {
+const ILLEGIBLE_MARKER_RE = /ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i;
+const KEY_ILLEGIBLE_FIELDS = new Set([
+  'DOC TYPE',
+  'GRANTOR',
+  'GRANTEE',
+  'DATE EXECUTED',
+  'DATE RECORDED',
+  'RECORDING REF',
+  'LEGAL DESC',
+  'MINERALS',
+  'ROYALTY/NPRI',
+  'FRACTION CONVEYED',
+  'RESERVATIONS',
+]);
+
+function hasKeyIllegibleMarker(text) {
+  const value = String(text || '').trim();
+  if (!value || !ILLEGIBLE_MARKER_RE.test(value)) return false;
+
+  let sawTemplateField = false;
+  let currentField = null;
+  for (const rawLine of value.replace(/\r\n?/g, '\n').split('\n')) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || /^```/.test(trimmed)) continue;
+    if (/^DOCUMENT\s*#\d+(?:\s*\([^)]*\))?\s*:?/i.test(trimmed) || /^\[[^\]]+\]$/.test(trimmed)) {
+      currentField = null;
+      continue;
+    }
+    const candidate = trimmed
+      .replace(/^(?:[-*•]\s+)/, '')
+      .replace(/^\*\*([^*:]+?)\*\*:/, '$1:')
+      .replace(/^\*\*([^*:]+?:)\*\*\s*/, '$1 ');
+    const match = candidate.match(/^([A-Z][A-Z /-]*[A-Z]):\s*(.*)$/);
+    if (match) {
+      sawTemplateField = true;
+      currentField = match[1].trim();
+      if (KEY_ILLEGIBLE_FIELDS.has(currentField) && ILLEGIBLE_MARKER_RE.test(match[2])) {
+        return true;
+      }
+    } else if (currentField && KEY_ILLEGIBLE_FIELDS.has(currentField) && ILLEGIBLE_MARKER_RE.test(trimmed)) {
+      return true;
+    }
+  }
+  return !sawTemplateField;
+}
+
+function shouldEscalateAbstractText(text, options = {}) {
   const value = String(text || '').trim();
   if (!value) return true;
-  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(value)) return true;
+  if (!options?.isCsv && hasKeyIllegibleMarker(value)) return true;
   return /CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value);
 }
 
 async function callAbstractionWithEscalation(messages, options) {
+  const { isCsv = false, ...requestOptions } = options || {};
   const initial = await callBackend(messages, ABSTRACT_PROMPT, {
-    ...options,
+    ...requestOptions,
     model: ABSTRACT_MODEL,
     max_tokens: ABSTRACT_MAX_TOKENS,
   });
-  if (!shouldEscalateAbstractText(initial)) return initial;
+  if (!shouldEscalateAbstractText(initial, { isCsv })) return initial;
 
   try {
     return await callBackend(messages, ABSTRACT_PROMPT, {
-      ...options,
+      ...requestOptions,
       model: ABSTRACT_ESCALATION_MODEL,
       max_tokens: ABSTRACT_ESCALATION_MAX_TOKENS,
-      phase: `${options.phase || 'abstraction'}-escalation`,
-      label: `${options.label || 'Abstraction'} escalation`,
+      phase: `${requestOptions.phase || 'abstraction'}-escalation`,
+      label: `${requestOptions.label || 'Abstraction'} escalation`,
     });
   } catch (err) {
     console.warn('Abstraction escalation failed; keeping initial abstract.', err);
@@ -6025,8 +6109,9 @@ function buildAdaptiveBatches(fileList) {
 
   for (const file of fileList) {
     const filePayload = estimateFilePayload(file);
-    const oversized = filePayload > LARGE_FILE_BYTES;
-    const timeoutRisk = filePayload > TIMEOUT_SAFE_FILE_BYTES;
+    const hasRenderedPages = Array.isArray(file.renderedPages) && file.renderedPages.length > 0;
+    const oversized = hasRenderedPages || filePayload > LARGE_FILE_BYTES;
+    const timeoutRisk = hasRenderedPages || filePayload > TIMEOUT_SAFE_FILE_BYTES;
     const docLimit = maxDocsForPayload(filePayload);
 
     if ((oversized || timeoutRisk) && !current.length) {
@@ -6389,11 +6474,401 @@ async function hierarchicalSynthesis(abstracts, tract, ctx, onProgress) {
   );
 }
 
+function normalizeSourceFilename(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+async function loadPdfRasterizer() {
+  if (typeof window !== 'undefined' && window.__TITLE_ANALYZER_PDF_RASTER__) {
+    return window.__TITLE_ANALYZER_PDF_RASTER__;
+  }
+  if (!pdfRasterModulePromise) {
+    pdfRasterModulePromise = import('/pdf-raster.js').catch(err => {
+      pdfRasterModulePromise = null;
+      throw err;
+    });
+  }
+  return await pdfRasterModulePromise;
+}
+
+async function renderPdfToHighDpiPages(file) {
+  const source = file?.sourceOriginalFile || file?.sourceFile || file;
+  if (!source || typeof source.arrayBuffer !== 'function') {
+    throw new Error(`${file?.name || 'PDF'}: original PDF file is no longer available in this browser tab.`);
+  }
+  const raster = await loadPdfRasterizer();
+  const pdfInput = source.type === 'application/pdf'
+    ? source
+    : new File([await source.arrayBuffer()], source.name || file?.name || 'document.pdf', { type: 'application/pdf' });
+  const pages = await raster.prepareDocument(pdfInput);
+  if (!Array.isArray(pages) || !pages.length) {
+    throw new Error(`${file?.name || 'PDF'}: no page images were produced.`);
+  }
+  return pages.map(page => ({
+    mediaType: page.mediaType,
+    data: page.data,
+    width: page.width,
+    height: page.height,
+  }));
+}
+
+async function abstractPdfAsHighDpiImages(file, globalStartIdx = 0) {
+  const pages = await renderPdfToHighDpiPages(file);
+  const renderedEntry = {
+    ...file,
+    data: null,
+    renderedPages: pages,
+  };
+  const messages = await buildAbstractMessages([renderedEntry], globalStartIdx);
+  const requestBytes = estimateRequestBytes(ABSTRACT_MODEL, ABSTRACT_MAX_TOKENS, ABSTRACT_PROMPT, messages);
+  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+    throw new Error(`${file.name}: rendered high-DPI page images (${formatMegabytes(requestBytes)} MB) exceed the ${formatMegabytes(REQUEST_ENVELOPE_SAFE_BYTES)} MB request limit.`);
+  }
+  const result = await callBackend(messages, ABSTRACT_PROMPT, {
+    model: ABSTRACT_MODEL,
+    max_tokens: ABSTRACT_MAX_TOKENS,
+    phase: 'abstraction-high-dpi',
+    docCount: 1,
+    label: `High-DPI page image read (${file.name})`,
+  });
+  const parsed = parseBatchResult(result, [renderedEntry], globalStartIdx);
+  return {
+    abstract: parsed[0]?.abstract || '',
+    pageCount: pages.length,
+    entry: renderedEntry,
+  };
+}
+
+function findHighDpiRereadCandidates(abstractList, fileList, { includeMissing = false } = {}) {
+  const sourcePdfs = [];
+  const seenKeys = new Set();
+  for (const file of fileList || []) {
+    if (!file || !isPdfFile(file)) continue;
+    if (!(file.sourceOriginalFile || file.sourceFile || typeof file.arrayBuffer === 'function')) continue;
+    const key = file.documentId || file.sourceDocumentKey || file.splitFrom || file.sourceOriginalFile?.name || file.name;
+    if (!key || seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    sourcePdfs.push(file);
+  }
+  if (!sourcePdfs.length) return [];
+
+  const abstracts = Array.isArray(abstractList) ? abstractList : [];
+  const usedIndices = new Set();
+  const candidates = [];
+
+  for (const file of sourcePdfs) {
+    const fileName = normalizeSourceFilename(file.splitFrom || file.sourceOriginalFile?.name || file.name);
+    let idx = abstracts.findIndex((item, i) => !usedIndices.has(i) && (
+      (item.documentId && file.documentId && item.documentId === file.documentId)
+      || (item.sourceDocumentKey && file.sourceDocumentKey && item.sourceDocumentKey === file.sourceDocumentKey)
+    ));
+    if (idx < 0) {
+      idx = abstracts.findIndex((item, i) => !usedIndices.has(i)
+        && normalizeSourceFilename(item.sourceFilename || item.splitFrom || item.filename || item.originalFilename) === fileName);
+    }
+    if (idx >= 0) {
+      usedIndices.add(idx);
+      const item = abstracts[idx];
+      const text = String(item.abstract || item.abstractText || '');
+      if (hasKeyIllegibleMarker(text)) {
+        candidates.push({
+          file,
+          abstractIndex: idx,
+          filename: item.sourceFilename || item.filename || file.name,
+        });
+      }
+    } else if (includeMissing) {
+      candidates.push({
+        file,
+        abstractIndex: -1,
+        filename: file.splitFrom || file.sourceOriginalFile?.name || file.name,
+      });
+    }
+  }
+  return candidates;
+}
+
+function renderHighDpiRereadBar() {
+  const bar = document.getElementById('highDpiRereadBar');
+  if (!bar) return;
+  const hasOpinion = conversationHistory.some(m => m.role === 'assistant' && m.kind === 'title-opinion');
+  const sourceList = lastCompletedSourceFiles.length ? lastCompletedSourceFiles : files;
+  const candidates = hasOpinion ? findHighDpiRereadCandidates(documentAbstracts, sourceList) : [];
+  if (!candidates.length) {
+    bar.innerHTML = '';
+    return;
+  }
+  const count = candidates.length;
+  bar.innerHTML = `<div class="info-msg" role="status" style="display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap">
+    <span>${count} PDF ${count === 1 ? 'document still has' : 'documents still have'} illegible fields. Re-read ${count === 1 ? 'it' : 'them'} locally at high DPI and rebuild the opinion?</span>
+    <button type="button" class="btn-secondary" id="highDpiRereadBtn" onclick="rereadFlaggedPdfsAsHighDpi()"${highDpiRereadInFlight ? ' disabled' : ''}>${highDpiRereadInFlight ? 'Re-reading at high DPI…' : 'Re-read as high-DPI page images'}</button>
+  </div>`;
+}
+
+function jobHasHighDpiCandidates(job) {
+  if (!job?.id) return false;
+  const sourceFiles = sessionSourceFilesByJob.get(job.id);
+  if (!Array.isArray(sourceFiles) || !sourceFiles.some(f => isPdfFile(f) && (f.sourceOriginalFile || f.sourceFile || typeof f.arrayBuffer === 'function'))) {
+    return false;
+  }
+  if (failedDocumentCount(job.failedDocuments) > 0 || (job.failedChunks || 0) > 0 || (job.status === 'failed' && jobStoppedPhaseIndex(job) === 1)) {
+    return true;
+  }
+  const cachedAbstracts = sessionAbstractsByJob.get(job.id);
+  if (Array.isArray(cachedAbstracts) && cachedAbstracts.length) {
+    return findHighDpiRereadCandidates(cachedAbstracts, sourceFiles, { includeMissing: true }).length > 0;
+  }
+  if (rdLatestJob.jobId === job.id) {
+    const opinion = String(rdLatestJob.result?.finalTitleOpinion || '');
+    if (ILLEGIBLE_MARKER_RE.test(opinion) || /\|\s*(?:[A-Z-]+\s*,\s*)*ILLEGIBLE(?:\s*,\s*[A-Z-]+)*\s*\|/.test(opinion)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function rereadFlaggedPdfsAsHighDpi() {
+  if (highDpiRereadInFlight || activeAnalysisRun || buildStarting) return;
+  const sourceList = lastCompletedSourceFiles.length ? lastCompletedSourceFiles : files;
+  const candidates = findHighDpiRereadCandidates(documentAbstracts, sourceList);
+  if (!candidates.length) {
+    renderHighDpiRereadBar();
+    return;
+  }
+  highDpiRereadInFlight = true;
+  renderHighDpiRereadBar();
+  clearError();
+  const jobId = activeJobId || getContinuationSourceJobId();
+  const run = beginAnalysisRun(jobId);
+  const progressSection = document.getElementById('progressSection');
+  if (progressSection) progressSection.style.display = 'block';
+  try {
+    for (let i = 0; i < candidates.length; i++) {
+      if (isAnalysisCanceled(run)) return;
+      const candidate = candidates[i];
+      updateProgress(
+        Math.round(10 + (i / candidates.length) * 70),
+        `Re-reading ${candidate.filename} at high DPI (${i + 1} of ${candidates.length})...`,
+        null
+      );
+      const reread = await abstractPdfAsHighDpiImages(candidate.file, candidate.abstractIndex >= 0 ? candidate.abstractIndex : 0);
+      if (isAnalysisCanceled(run)) return;
+      documentAbstracts[candidate.abstractIndex] = {
+        ...documentAbstracts[candidate.abstractIndex],
+        abstract: reread.abstract,
+      };
+    }
+    if (jobId) sessionAbstractsByJob.set(jobId, documentAbstracts.slice());
+    const tract = document.getElementById('tractDescription')?.value || '';
+    const ctx = document.getElementById('contextNotes')?.value || '';
+    updateProgress(88, 'Re-synthesizing chain of title after high-DPI re-read...', null);
+    const synthesis = await hierarchicalSynthesis(documentAbstracts, tract, ctx, status => {
+      updateProgress(92, status, null);
+    });
+    if (isAnalysisCanceled(run)) return;
+    const totalDocs = sourceList.length || documentAbstracts.length;
+    const exportResult = {
+      status: 'complete',
+      finalTitleOpinion: synthesis,
+      warnings: [],
+      failedDocuments: [],
+      modelUsed: SYNTHESIS_MODEL,
+      synthesisDriver: 'browser',
+    };
+    let savedResultOk = false;
+    if (jobId) {
+      try {
+        const currentJob = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
+        const currentStatus = currentJob.kind === 'ok' ? currentJob.data.job.status : null;
+        if (currentStatus === 'failed' || currentStatus === 'partial_failed') {
+          await safePatchAnalysisJob(jobId, {
+            status: 'synthesizing',
+            completedDocuments: completedDocumentsForJob(documentAbstracts.length, totalDocs),
+            failedDocuments: 0,
+            currentPhase: 'Re-synthesizing after high-DPI page read',
+          });
+        }
+        await saveBrowserJobResult(jobId, exportResult);
+        savedResultOk = true;
+      } catch (saveErr) {
+        console.warn('Could not save high-DPI re-read job result', saveErr);
+      }
+    }
+    const opinionIdx = conversationHistory
+      .map((m, i) => (m.role === 'assistant' && (m.kind === 'title-opinion' || i === 1) ? i : -1))
+      .filter(i => i >= 0)
+      .pop();
+    const synthesisInput = buildAbstractInput(
+      documentAbstracts,
+      tract,
+      ctx,
+      `Below are ${documentAbstracts.length} document abstracts. Synthesize into a complete title opinion.`
+    );
+    if (opinionIdx > 0 && conversationHistory[opinionIdx - 1]?.role === 'user') {
+      conversationHistory[opinionIdx - 1].content = synthesisInput;
+    }
+    const nextOpinionMsg = {
+      role: 'assistant',
+      content: synthesis,
+      kind: 'title-opinion',
+      sourceJobId: savedResultOk ? jobId : null,
+      exportContext: homeRunExportContext(jobId, totalDocs, completedDocumentsForJob(documentAbstracts.length, totalDocs), 0, exportResult),
+    };
+    if (opinionIdx >= 0) conversationHistory[opinionIdx] = nextOpinionMsg;
+    else conversationHistory.push(nextOpinionMsg);
+    updateProgress(100, 'High-DPI re-read complete.', null);
+    if (progressSection) progressSection.style.display = 'none';
+    renderResults();
+  } catch (err) {
+    if (!isAnalysisCanceled(run)) showError('High-DPI re-read failed: ' + err.message);
+    if (progressSection) progressSection.style.display = 'none';
+  } finally {
+    highDpiRereadInFlight = false;
+    endAnalysisRun(run);
+    renderHighDpiRereadBar();
+  }
+}
+
+async function rereadJobPdfsAsHighDpi(job) {
+  if (!job?.id || highDpiRereadInFlight || actionInFlight || activeAnalysisRun || buildStarting) return;
+  const sourceFiles = sessionSourceFilesByJob.get(job.id) || [];
+  if (!sourceFiles.length) return;
+  highDpiRereadInFlight = true;
+  actionInFlight = true;
+  const buttons = document.querySelectorAll('#jobActions button');
+  buttons.forEach(b => { b.disabled = true; });
+  jobActionError = { jobId: null, text: '' };
+  renderJobActionError(job.id);
+  try {
+    let rawAbstracts = [];
+    try {
+      rawAbstracts = await fetchServerAbstracts(job.id);
+    } catch {
+      rawAbstracts = sessionAbstractsByJob.get(job.id) || [];
+    }
+    const mergedAbstracts = groupAbstractsBySourceDocument(rawAbstracts);
+    const candidates = findHighDpiRereadCandidates(mergedAbstracts, sourceFiles, { includeMissing: true });
+    if (!candidates.length) {
+      jobActionError = { jobId: job.id, text: 'No illegible or failed PDF documents were found to re-read.' };
+      renderJobActionError(job.id);
+      return;
+    }
+    for (const candidate of candidates) {
+      const idx = candidate.abstractIndex >= 0 ? candidate.abstractIndex : mergedAbstracts.length;
+      const reread = await abstractPdfAsHighDpiImages(candidate.file, idx);
+      const updatedEntry = {
+        filename: candidate.filename,
+        sourceFilename: candidate.filename,
+        sourceDocumentKey: candidate.file.sourceDocumentKey || null,
+        documentId: candidate.file.documentId || null,
+        abstract: reread.abstract,
+      };
+      if (candidate.abstractIndex >= 0) {
+        mergedAbstracts[candidate.abstractIndex] = { ...mergedAbstracts[candidate.abstractIndex], ...updatedEntry };
+      } else {
+        mergedAbstracts.push(updatedEntry);
+      }
+    }
+    sessionAbstractsByJob.set(job.id, mergedAbstracts.slice());
+    if (isHomeRunJob(job.id)) {
+      documentAbstracts = mergedAbstracts.slice();
+    }
+    const tract = job.subjectTract || job.tractDescription || document.getElementById('tractDescription')?.value || '';
+    const ctx = job.contextNotes || document.getElementById('contextNotes')?.value || '';
+    const synthesis = await hierarchicalSynthesis(mergedAbstracts, tract, ctx, () => {});
+    const totalDocs = job.totalDocuments || sourceFiles.length || mergedAbstracts.length;
+    const remainingFailed = Math.max(0, totalDocs - mergedAbstracts.length);
+    if (job.status === 'failed' || job.status === 'partial_failed') {
+      await safePatchAnalysisJob(job.id, {
+        status: 'synthesizing',
+        completedDocuments: completedDocumentsForJob(mergedAbstracts.length, totalDocs),
+        failedDocuments: remainingFailed,
+        currentPhase: 'Re-synthesizing after high-DPI page read',
+      });
+    }
+    await saveBrowserJobResult(job.id, {
+      status: remainingFailed ? 'partial_failed' : 'complete',
+      finalTitleOpinion: synthesis,
+      warnings: remainingFailed
+        ? [`${remainingFailed} document(s) failed and were omitted from browser synthesis.`]
+        : [],
+      failedDocuments: [],
+      modelUsed: SYNTHESIS_MODEL,
+      synthesisDriver: 'browser',
+    });
+    if (isCurrentJobRoute(job.id)) {
+      await loadJobView(job.id);
+    }
+  } catch (err) {
+    if (Number(err?.status) === 401) handleUnauthorized('high-dpi-reread');
+    jobActionError = { jobId: job.id, text: `Could not re-read PDFs at high DPI: ${err.message}` };
+    renderJobActionError(job.id);
+  } finally {
+    highDpiRereadInFlight = false;
+    actionInFlight = false;
+    buttons.forEach(b => { b.disabled = false; });
+  }
+}
+
+async function retryFailedWithHighDpiImages() {
+  if (highDpiRereadInFlight || activeAnalysisRun || buildStarting) return;
+  const ctx = lastFailedAbstractionContext;
+  if (!ctx?.files?.length) return;
+  highDpiRereadInFlight = true;
+  const btn = document.getElementById('highDpiRetryBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Rendering high-DPI pages…';
+  }
+  try {
+    const preparedFiles = [];
+    for (const entry of ctx.files) {
+      if (isPdfFile(entry) && (entry.sourceOriginalFile || entry.sourceFile)) {
+        const pages = await renderPdfToHighDpiPages(entry);
+        preparedFiles.push({
+          ...entry,
+          data: null,
+          renderedPages: pages,
+        });
+      } else {
+        preparedFiles.push(entry);
+      }
+    }
+    lastFailedAbstractionContext = null;
+    if (ctx.mode === 'additional') {
+      additionalFiles = preparedFiles;
+      highDpiRereadInFlight = false;
+      return await analyzeAdditional({ skipDurableUpload: true });
+    }
+    files = preparedFiles;
+    highDpiRereadInFlight = false;
+    return await runStagedAnalysis(preparedFiles, { skipDurableUpload: true });
+  } catch (err) {
+    showError('High-DPI page rendering failed: ' + err.message);
+  } finally {
+    highDpiRereadInFlight = false;
+    const currentBtn = document.getElementById('highDpiRetryBtn');
+    if (currentBtn) {
+      currentBtn.disabled = false;
+      currentBtn.textContent = 'Re-read as high-DPI page images';
+    }
+  }
+}
+
 async function buildAbstractMessages(batchFiles, globalStartIdx) {
   const content = [];
   const csvFiles = [];
 
   for (const file of batchFiles) {
+    if (Array.isArray(file.renderedPages) && file.renderedPages.length) {
+      for (const page of file.renderedPages) {
+        if (!page?.data || !page?.mediaType) {
+          throw new Error(`${file.name}: missing rendered page image data.`);
+        }
+        content.push({ type: 'image', source: { type: 'base64', media_type: page.mediaType, data: page.data } });
+      }
+      continue;
+    }
     await ensureFileData(file);
     if (isCsvFile(file)) {
       csvFiles.push(file);
@@ -6412,8 +6887,14 @@ async function buildAbstractMessages(batchFiles, globalStartIdx) {
     }
   }
 
-  const docList = batchFiles.map((f, i) => 'Document #' + (globalStartIdx + i + 1) + ' (' + f.name + ')').join(', ');
+  const docList = batchFiles.map((f, i) => {
+    const label = Array.isArray(f.renderedPages) && f.renderedPages.length ? `${f.name} (rendered pages)` : f.name;
+    return `Document #${globalStartIdx + i + 1} (${label})`;
+  }).join(', ');
   let textPrompt = 'Abstract each of the following documents in order: ' + docList + '. Label each section clearly as DOCUMENT #' + (globalStartIdx + 1) + ':, DOCUMENT #' + (globalStartIdx + 2) + ':, etc. Extract every relevant fact. Do not guess at anything illegible.';
+  if (batchFiles.some(f => Array.isArray(f.renderedPages) && f.renderedPages.length)) {
+    textPrompt += ' Rendered page images are provided in page order for high-DPI reading.';
+  }
   if (batchFiles.some(f => f.splitFrom || /\(pp\s+\d+/i.test(f.name))) {
     textPrompt += ' Some files are consecutive page ranges from the same original PDF (names include pp X-Y). Abstract each part fully; note they belong to the same source document.';
   }
@@ -6432,6 +6913,8 @@ async function buildAbstractMessages(batchFiles, globalStartIdx) {
 async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
   if (!batchFiles.length) return '';
 
+  const isRenderedBatch = batchFiles.length === 1 && Array.isArray(batchFiles[0].renderedPages) && batchFiles[0].renderedPages.length > 0;
+
   if (allowSplit && batchExceedsTimeoutLimit(batchFiles)) {
     if (batchFiles.length > 1) {
       const mid = Math.ceil(batchFiles.length / 2);
@@ -6439,7 +6922,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
       return part1 + '\n\n' + part2;
     }
-    if (batchFiles.length === 1 && isPdfFile(batchFiles[0])) {
+    if (batchFiles.length === 1 && isPdfFile(batchFiles[0]) && !isRenderedBatch) {
       return await abstractSinglePdfOnTimeout(batchFiles[0], globalStartIdx);
     }
   }
@@ -6454,7 +6937,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
       return part1 + '\n\n' + part2;
     }
-    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0])) {
+    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0]) && !isRenderedBatch) {
       return await abstractSinglePdfOnTimeout(batchFiles[0], globalStartIdx);
     }
     const names = batchFiles.map(f => f.name).join(', ');
@@ -6467,6 +6950,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       phase: 'abstraction',
       docCount: batchFiles.length,
       label: 'Abstraction batch',
+      isCsv: batchFiles.length > 0 && batchFiles.every(isCsvFile),
     });
     recordBatchLatency(batchFiles, Date.now() - startedAt);
     return result;
@@ -6478,7 +6962,7 @@ async function abstractBatch(batchFiles, globalStartIdx, allowSplit = true) {
       const part2 = await abstractBatch(batchFiles.slice(mid), globalStartIdx + mid, true);
       return part1 + '\n\n' + part2;
     }
-    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0]) && (isEnvelopeError(e) || isTimeoutError(e))) {
+    if (allowSplit && batchFiles.length === 1 && isPdfFile(batchFiles[0]) && !isRenderedBatch && (isEnvelopeError(e) || isTimeoutError(e))) {
       return await abstractSinglePdfOnTimeout(batchFiles[0], globalStartIdx);
     }
     throw e;
@@ -6527,7 +7011,7 @@ async function analyze() {
 
 // `files` here is the frozen snapshot taken when Build was clicked, so later drops or removals cannot change
 // what this run submits; totalDocuments always equals the documents processed.
-async function runStagedAnalysis(files) {
+async function runStagedAnalysis(files, runOptions = {}) {
   buildEpoch += 1;
   clearError();
   prepareHomeForAnalysisRun();
@@ -6541,6 +7025,8 @@ async function runStagedAnalysis(files) {
 
   const tract = document.getElementById('tractDescription').value;
   const ctx = document.getElementById('contextNotes').value;
+  const hasRenderedPages = files.some(f => Array.isArray(f.renderedPages) && f.renderedPages.length);
+  const skipDurableUpload = Boolean(runOptions.skipDurableUpload || hasRenderedPages);
 
   let job;
   try {
@@ -6560,15 +7046,19 @@ async function runStagedAnalysis(files) {
     return;
   }
   buildStarting = false;
+  sessionSourceFilesByJob.set(job.id, files.slice());
+  lastCompletedSourceFiles = files.slice();
 
   const run = beginAnalysisRun(job.id);
   saveActiveJob(job, 'browser');
   try {
-  updateProgress(0, 'Checking durable file storage...', null);
-  const uploadRegistration = await registerJobUploads(job.id, files).catch(err => ({
-    durable: false,
-    warning: durableUploadWarning(err.message),
-  }));
+  updateProgress(0, skipDurableUpload ? 'Preparing high-DPI page images...' : 'Checking durable file storage...', null);
+  const uploadRegistration = skipDurableUpload
+    ? { durable: false }
+    : await registerJobUploads(job.id, files).catch(err => ({
+      durable: false,
+      warning: durableUploadWarning(err.message),
+    }));
   if (isAnalysisCanceled(run)) return;
   if (uploadRegistration.warning) {
     showError(uploadRegistration.warning);
@@ -6603,6 +7093,7 @@ async function runStagedAnalysis(files) {
       const serverAbstraction = await runServerDocumentAbstraction(job.id, files, items, run);
       if (isAnalysisCanceled(run)) return;
       documentAbstracts = groupAbstractsBySourceDocument(serverAbstraction.abstracts);
+      sessionAbstractsByJob.set(job.id, documentAbstracts.slice());
       usedServerAbstraction = true;
       serverAbstractionFailedCount = serverAbstraction.failedChunkCount;
     } catch (serverErr) {
@@ -6625,6 +7116,7 @@ async function runStagedAnalysis(files) {
       const browserAbstracts = groupAbstractsBySourceDocument(await runDocumentAbstraction(files, 0, items, showAllProgress, 'initial', job.id));
       if (isAnalysisCanceled(run)) return;
       documentAbstracts = browserAbstracts;
+      sessionAbstractsByJob.set(job.id, documentAbstracts.slice());
     } catch (e) {
       if (isAnalysisCanceled(run)) return;
       await safePatchAnalysisJob(job.id, {
@@ -6634,7 +7126,17 @@ async function runStagedAnalysis(files) {
         currentPhase: 'abstracting',
         errorMessage: e.message,
       });
-      showError(e.message);
+      const hasRetryablePdf = files.some(f => isPdfFile(f) && (f.sourceOriginalFile || f.sourceFile));
+      if (hasRetryablePdf && !hasRenderedPages) {
+        lastFailedAbstractionContext = { mode: 'home', files: files.slice(), priorAbstracts: [] };
+        showError(
+          e.message,
+          '<div style="margin-top:.55rem"><button type="button" class="btn-secondary" id="highDpiRetryBtn" onclick="retryFailedWithHighDpiImages()">Re-read as high-DPI page images</button></div>'
+        );
+      } else {
+        lastFailedAbstractionContext = null;
+        showError(e.message);
+      }
       clearProgressTimer();
       stopJobPolling();
       document.getElementById('progressSection').style.display = 'none';
@@ -6964,6 +7466,7 @@ function renderResults() {
   };
   resultsEl.oninput = rdHandleInput;
   if (animateRoot) rdAnimateCounts(resultsEl);
+  renderHighDpiRereadBar();
   renderHomeSubtitle();
 }
 
@@ -7067,7 +7570,7 @@ function removeAdditionalFile(stageId) {
   focusAfterRemoval(neighbor ? `#fileList2 [data-stage-id="${neighbor.stageId}"] .file-remove` : null, 'uploadZone2');
 }
 
-async function analyzeAdditional() {
+async function analyzeAdditional(additionalOptions = {}) {
   if (!additionalFiles.length || intakeLanes.additional.pending > 0) return;
   buildEpoch += 1;
   clearError();
@@ -7084,6 +7587,8 @@ async function analyzeAdditional() {
   const priorCount = priorAbstracts.length;
   const newFiles = additionalFiles.slice();
   const totalAfter = priorCount + newFiles.length;
+  const hasRenderedPages = newFiles.some(f => Array.isArray(f.renderedPages) && f.renderedPages.length);
+  const skipDurableUpload = Boolean(additionalOptions.skipDurableUpload || hasRenderedPages);
 
   const showAllProgress = newFiles.length <= 50;
   const items = showAllProgress
@@ -7106,12 +7611,17 @@ async function analyzeAdditional() {
     return;
   }
 
+  const priorSourceFiles = (sourceJobId && sessionSourceFilesByJob.get(sourceJobId)) || lastCompletedSourceFiles || [];
+  const combinedSourceFiles = [...priorSourceFiles, ...newFiles];
+  sessionSourceFilesByJob.set(job.id, combinedSourceFiles);
+  lastCompletedSourceFiles = combinedSourceFiles;
+
   const run = beginAnalysisRun(job.id);
   try {
-  updateProgress(0, 'Checking durable file storage...', null);
+  updateProgress(0, skipDurableUpload ? 'Preparing high-DPI page images...' : 'Checking durable file storage...', null);
   let importedContinuation = false;
   let chunkOrderOffset = 0;
-  if (sourceJobId && sourceJobId !== job.id) {
+  if (!skipDurableUpload && sourceJobId && sourceJobId !== job.id) {
     try {
       const imported = await importContinuationAbstracts(job.id, sourceJobId);
       importedContinuation = (imported.imported || 0) > 0;
@@ -7122,10 +7632,12 @@ async function analyzeAdditional() {
       showError(`Could not import prior job abstracts (${importErr.message}); combining in-browser for synthesis.`);
     }
   }
-  const uploadRegistration = await registerJobUploads(job.id, newFiles, { chunkOrderOffset }).catch(err => ({
-    durable: false,
-    warning: durableUploadWarning(err.message),
-  }));
+  const uploadRegistration = skipDurableUpload
+    ? { durable: false }
+    : await registerJobUploads(job.id, newFiles, { chunkOrderOffset }).catch(err => ({
+      durable: false,
+      warning: durableUploadWarning(err.message),
+    }));
   if (isAnalysisCanceled(run)) return;
   if (uploadRegistration.warning) {
     showError(uploadRegistration.warning);
@@ -7182,7 +7694,17 @@ async function analyzeAdditional() {
         currentPhase: 'abstracting',
         errorMessage: e.message,
       });
-      showError(e.message);
+      const hasRetryablePdf = newFiles.some(f => isPdfFile(f) && (f.sourceOriginalFile || f.sourceFile));
+      if (hasRetryablePdf && !hasRenderedPages) {
+        lastFailedAbstractionContext = { mode: 'additional', files: newFiles.slice(), priorAbstracts };
+        showError(
+          e.message,
+          '<div style="margin-top:.55rem"><button type="button" class="btn-secondary" id="highDpiRetryBtn" onclick="retryFailedWithHighDpiImages()">Re-read as high-DPI page images</button></div>'
+        );
+      } else {
+        lastFailedAbstractionContext = null;
+        showError(e.message);
+      }
       clearProgressTimer();
       stopJobPolling();
       document.getElementById('progressSection').style.display = 'none';
@@ -7199,6 +7721,7 @@ async function analyzeAdditional() {
   } else {
     allAbstracts = groupAbstractsBySourceDocument([...priorAbstracts, ...newAbstracts]);
   }
+  sessionAbstractsByJob.set(job.id, allAbstracts.slice());
 
   if (activeProgressTimer) activeProgressTimer.phase = 'synthesis';
   items[items.length - 1].status = 'active';
@@ -7834,9 +8357,12 @@ function downloadPDF(options = {}) {
 }
 
 function resetAll() {
-  files = []; conversationHistory = []; documentAbstracts = []; additionalFiles = [];
+  files = []; lastCompletedSourceFiles = []; conversationHistory = []; documentAbstracts = []; additionalFiles = [];
+  lastFailedAbstractionContext = null; highDpiRereadInFlight = false;
   ['tractDescription','contextNotes','followupInput'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('results').innerHTML = '';
+  const highDpiBar = document.getElementById('highDpiRereadBar');
+  if (highDpiBar) highDpiBar.innerHTML = '';
   document.getElementById('fileList').innerHTML = '';
   document.getElementById('fileList2').innerHTML = '';
   document.getElementById('followupSection').style.display = 'none';

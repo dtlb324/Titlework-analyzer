@@ -266,7 +266,7 @@ test('index.html serves pinned jsPDF and pdf-lib locally with verified SRI hashe
     const html = await home.text();
     assert.doesNotMatch(html, /cdnjs\.cloudflare\.com/);
     assert.doesNotMatch(html, /<script\b[^>]*\bsrc=["']https?:/i);
-    assert.match(html, /http-equiv="Content-Security-Policy"[^>]*script-src 'self' 'unsafe-inline'(?=;|")/);
+    assert.match(html, /http-equiv="Content-Security-Policy"[^>]*script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'(?=;|")/);
 
     const externalScripts = [...html.matchAll(/<script\b([^>]*\bsrc="([^"]+)"[^>]*)><\/script>/g)];
     assert.deepEqual(externalScripts.map(m => m[2]), ['/vendor/jspdf/jspdf.umd.min.js', '/vendor/pdf-lib/pdf-lib.min.js']);
