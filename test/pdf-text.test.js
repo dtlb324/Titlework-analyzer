@@ -1,4 +1,5 @@
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFNumber, PDFOperator, StandardFonts } from 'pdf-lib';
+import { deflateSync } from 'zlib';
 import {
   assessExtractedPdfText,
   estimatePdfPlanningPayloadBytes,
@@ -6,6 +7,36 @@ import {
   getPdfTextConfig,
   resolvePdfTextDelivery,
 } from '../api/_lib/pdf-text.js';
+
+function makePng(width = 4, height = 4) {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  function crc32(buf) {
+    let crc = 0xffffffff;
+    for (const byte of buf) {
+      crc ^= byte;
+      for (let k = 0; k < 8; k++) {
+        crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+      }
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+  function chunk(type, data) {
+    const out = Buffer.alloc(12 + data.length);
+    out.writeUInt32BE(data.length, 0);
+    out.write(type, 4, 4, 'ascii');
+    data.copy(out, 8);
+    out.writeUInt32BE(crc32(out.subarray(4, 8 + data.length)), 8 + data.length);
+    return out;
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const raw = Buffer.alloc((width * 3 + 1) * height, 128);
+  for (let y = 0; y < height; y++) raw[y * (width * 3 + 1)] = 0;
+  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -126,22 +157,133 @@ test('buildAbstractMessagesForChunk uses extracted text without document block',
   assert(textBytes < visualBytes, `Expected smaller request for text path (${textBytes} vs ${visualBytes})`);
 });
 
-test('estimatePdfPlanningPayloadBytes favors text-first and file-api heuristics', () => {
+test('estimatePdfPlanningPayloadBytes treats >= 1.5 MB PDFs as full visual payload while keeping smaller PDFs text-first', () => {
   const textLike = estimatePdfPlanningPayloadBytes(800_000);
   const inline = estimatePdfPlanningPayloadBytes(800_000, { textFirstEnabled: false });
-  const fileRef = estimatePdfPlanningPayloadBytes(2_000_000);
+  const thresholdPdf = estimatePdfPlanningPayloadBytes(1_500_000);
+  const largePdf = estimatePdfPlanningPayloadBytes(2_000_000);
   assert(textLike < 200_000, `Expected small planning estimate for text-like PDF, got ${textLike}`);
   assert(inline > textLike, 'Expected larger inline estimate when text-first is off');
-  assert(fileRef < 10_000, `Expected tiny planning estimate for Files API PDF, got ${fileRef}`);
+  assert(thresholdPdf > 2_000_000, `Expected 1.5 MB PDF planning estimate > 2 MB for solo scheduling, got ${thresholdPdf}`);
+  assert(largePdf > 2_000_000, `Expected 2 MB PDF planning estimate > 2 MB for solo scheduling, got ${largePdf}`);
 });
 
-test('getPdfTextConfig defaults enable text-first', () => {
-  const previous = process.env.ABSTRACTION_PDF_TEXT_FIRST;
+test('getPdfTextConfig defaults enable text-first and strict mode', () => {
+  const prevFirst = process.env.ABSTRACTION_PDF_TEXT_FIRST;
+  const prevStrict = process.env.ABSTRACTION_PDF_TEXT_STRICT;
   delete process.env.ABSTRACTION_PDF_TEXT_FIRST;
-  const config = getPdfTextConfig();
-  if (previous === undefined) delete process.env.ABSTRACTION_PDF_TEXT_FIRST;
-  else process.env.ABSTRACTION_PDF_TEXT_FIRST = previous;
-  assert(config.enabled === true, 'Expected text-first enabled by default');
+  delete process.env.ABSTRACTION_PDF_TEXT_STRICT;
+  try {
+    const config = getPdfTextConfig();
+    assert(config.enabled === true, 'Expected text-first enabled by default');
+    assert(config.strict === true, 'Expected strict mode enabled by default');
+
+    process.env.ABSTRACTION_PDF_TEXT_STRICT = 'false';
+    const relaxed = getPdfTextConfig();
+    assert(relaxed.strict === false, 'Expected ABSTRACTION_PDF_TEXT_STRICT=false to disable strict mode');
+  } finally {
+    if (prevFirst === undefined) delete process.env.ABSTRACTION_PDF_TEXT_FIRST;
+    else process.env.ABSTRACTION_PDF_TEXT_FIRST = prevFirst;
+    if (prevStrict === undefined) delete process.env.ABSTRACTION_PDF_TEXT_STRICT;
+    else process.env.ABSTRACTION_PDF_TEXT_STRICT = prevStrict;
+  }
+});
+
+test('assessExtractedPdfText rejects high bytesPerChar even when charsPerPage >= 500', () => {
+  const denseText = 'STATE OF TEXAS COUNTY OF REEVES GRANTOR: JOHN DOE GRANTEE: JANE DOE '.repeat(12);
+  assert(denseText.length >= 700, 'Expected >= 700 chars per page');
+  const result = assessExtractedPdfText({
+    text: denseText,
+    pageCount: 1,
+    fileSizeBytes: 1_200_000,
+  });
+  assert(result.suitable === false, 'Expected dense scanned PDF with high bytesPerChar to be rejected');
+  assert(result.reason === 'likely_scanned_image', `Expected likely_scanned_image, got ${result.reason}`);
+});
+
+test('assessExtractedPdfText rejects garbled OCR ASCII and replacement characters', () => {
+  const garbled = 'GRANTOR: J0hn D0e; GRANTEE: Jane Doe; conveys l/8th mineral interest per Vol. lO4 Page 2O8 recorded in 195l. '.repeat(5);
+  assert(garbled.length >= 450, 'Expected >= 450 chars per page of garbled OCR text');
+  const noisy = assessExtractedPdfText({
+    text: garbled,
+    pageCount: 1,
+    fileSizeBytes: 50_000,
+  });
+  assert(noisy.suitable === false, 'Expected garbled OCR text to be rejected');
+  assert(noisy.reason === 'noisy_ocr_text', `Expected noisy_ocr_text, got ${noisy.reason}`);
+
+  const withReplacement = assessExtractedPdfText({
+    text: `${'GRANTOR: JOHN DOE\nGRANTEE: JANE DOE\n'.repeat(12)}\uFFFD`,
+    pageCount: 1,
+    fileSizeBytes: 20_000,
+  });
+  assert(withReplacement.suitable === false, 'Expected U+FFFD replacement char text to be rejected');
+  assert(withReplacement.reason === 'ocr_replacement_chars', `Expected ocr_replacement_chars, got ${withReplacement.reason}`);
+});
+
+test('resolvePdfTextDelivery routes full-page scanned PDF with invisible OCR text (>= 400 chars/page) to visual', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const img = await doc.embedPng(makePng());
+  const page = doc.addPage([612, 792]);
+  page.drawImage(img, { x: 0, y: 0, width: 612, height: 792 });
+  page.pushOperators(PDFOperator.of('Tr', [PDFNumber.of(3)]));
+  const ocrText = 'STATE OF TEXAS COUNTY OF REEVES GRANTOR: JOHN DOE GRANTEE: JANE DOE VOL 104 PAGE 208 '.repeat(8);
+  page.drawText(ocrText, { x: 72, y: 700, size: 11, font, lineHeight: 14, maxWidth: 460 });
+  const bytes = Buffer.from(await doc.save());
+
+  const delivery = await resolvePdfTextDelivery(bytes);
+  assert(delivery.mode === 'visual', `Expected visual delivery for scanned PDF with invisible OCR layer, got ${delivery.mode} (${delivery.reason || ''})`);
+});
+
+test('resolvePdfTextDelivery keeps clean born-digital PDF with legal fractions and references on text mode', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([612, 792]);
+  const deedBody = [
+    'WARRANTY DEED - STATE OF TEXAS, COUNTY OF REEVES.',
+    'GRANTOR: J. R. Smith, et ux. GRANTEE: Permian Basin Minerals LLC (attorney@lawfirm.com).',
+    'CONVEYANCE: An undivided 1/8th and 3/16ths mineral interest in the NW/4 of Section 12, Block C-8, T2S, R4W, Abstract A-1234.',
+    'RECORDING REF: Vol. 104, Page 208, Deed Records, recorded May 14, 1951.',
+    'RESERVATIONS: (a) Prior royalty reservation; (b) Existing oil and gas lease.',
+  ].join('\n');
+  page.drawText(`${deedBody}\n${deedBody}`, { x: 72, y: 700, size: 10, font, lineHeight: 13, maxWidth: 460 });
+  const bytes = Buffer.from(await doc.save());
+
+  const delivery = await resolvePdfTextDelivery(bytes);
+  assert(delivery.mode === 'text', `Expected clean born-digital deed to stay text mode, got ${delivery.mode} (${delivery.reason || ''})`);
+  assert(delivery.extractedText.includes('1/8th') && delivery.extractedText.includes('Vol. 104'), 'Expected extracted legal terms preserved');
+});
+
+test('resolvePdfTextDelivery routes stamped digital PDF to visual and mixed clean+stamped PDF to hybrid', async () => {
+  const single = await PDFDocument.create();
+  const singleFont = await single.embedFont(StandardFonts.Helvetica);
+  const stampImg1 = await single.embedPng(makePng());
+  const singlePage = single.addPage([612, 792]);
+  const body = 'STATE OF TEXAS\nCOUNTY OF REEVES\nGRANTOR: JOHN DOE\nGRANTEE: JANE DOE\nLEGAL DESC: Section 1\n'.repeat(6);
+  singlePage.drawText(body, { x: 72, y: 700, size: 11, font: singleFont, lineHeight: 14, maxWidth: 460 });
+  singlePage.drawImage(stampImg1, { x: 400, y: 650, width: 140, height: 80 });
+  const stampedBytes = Buffer.from(await single.save());
+
+  const singleDelivery = await resolvePdfTextDelivery(stampedBytes);
+  assert(singleDelivery.mode === 'visual', `Expected stamped single-page PDF to route to visual, got ${singleDelivery.mode} (${singleDelivery.reason || ''})`);
+
+  const mixed = await PDFDocument.create();
+  const mixedFont = await mixed.embedFont(StandardFonts.Helvetica);
+  const stampImg2 = await mixed.embedPng(makePng());
+  const p1 = mixed.addPage([612, 792]);
+  p1.drawText(body, { x: 72, y: 700, size: 11, font: mixedFont, lineHeight: 14, maxWidth: 460 });
+  const p2 = mixed.addPage([612, 792]);
+  p2.drawText(body, { x: 72, y: 700, size: 11, font: mixedFont, lineHeight: 14, maxWidth: 460 });
+  p2.drawImage(stampImg2, { x: 400, y: 650, width: 140, height: 80 });
+  const mixedBytes = Buffer.from(await mixed.save());
+
+  const mixedDelivery = await resolvePdfTextDelivery(mixedBytes);
+  assert(mixedDelivery.mode === 'hybrid', `Expected mixed clean+stamped PDF to route to hybrid, got ${mixedDelivery.mode} (${mixedDelivery.reason || ''})`);
+  assert(Array.isArray(mixedDelivery.densePages) && mixedDelivery.densePages.join(',') === '1', `Expected page 1 dense, got ${mixedDelivery.densePages}`);
+  assert(Array.isArray(mixedDelivery.visualPages) && mixedDelivery.visualPages.join(',') === '2', `Expected page 2 visual, got ${mixedDelivery.visualPages}`);
+  assert(Array.isArray(mixedDelivery.sparsePages) && mixedDelivery.sparsePages.join(',') === '2', `Expected sparsePages backward-compat [2], got ${mixedDelivery.sparsePages}`);
+  assert(Buffer.isBuffer(mixedDelivery.visualBytes) && mixedDelivery.visualBytes.length > 0, 'Expected visual subset PDF bytes');
 });
 
 let passed = 0;

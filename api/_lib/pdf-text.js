@@ -6,7 +6,7 @@ function clampInt(raw, fallback, min, max) {
 }
 
 export function getPdfTextConfig() {
-  const strict = process.env.ABSTRACTION_PDF_TEXT_STRICT === 'true';
+  const strict = process.env.ABSTRACTION_PDF_TEXT_STRICT !== 'false';
   return {
     enabled: process.env.ABSTRACTION_PDF_TEXT_FIRST !== 'false',
     strict,
@@ -34,6 +34,18 @@ export function getPdfTextConfig() {
       100,
       5000,
     ),
+    minImagePageCoverage: clampNumber(
+      process.env.ABSTRACTION_PDF_MIN_IMAGE_COVERAGE,
+      0.01,
+      0.001,
+      1,
+    ),
+    minInvisibleOcrRatio: clampNumber(
+      process.env.ABSTRACTION_PDF_MIN_INVISIBLE_OCR_RATIO,
+      0.35,
+      0.05,
+      1,
+    ),
     maxExtractedChars: clampInt(process.env.ABSTRACTION_PDF_TEXT_MAX_CHARS, 500_000, 10_000, 2_000_000),
   };
 }
@@ -57,15 +69,24 @@ export async function extractPdfText(payloadBytes) {
     return { text: '', totalPages: 0, error: 'empty_pdf' };
   }
   try {
-    const { extractText, getDocumentProxy } = await import('unpdf');
+    const { extractText, getDocumentProxy, inspectPages } = await import('unpdf');
     const pdf = await getDocumentProxy(new Uint8Array(bytes));
-    const { totalPages, text } = await extractText(pdf, { mergePages: false });
-    const pageTexts = (Array.isArray(text) ? text : [text]).map(page => String(page || '').trim());
-    return {
-      text: pageTexts.filter(Boolean).join('\n\n'),
-      pageTexts,
-      totalPages: Math.max(0, Number(totalPages) || pageTexts.length || 0),
-    };
+    try {
+      const [extracted, inspected] = await Promise.all([
+        extractText(pdf, { mergePages: false }),
+        inspectPages(pdf).catch(err => ({ error: err?.message || String(err) })),
+      ]);
+      const pageTexts = (Array.isArray(extracted.text) ? extracted.text : [extracted.text]).map(page => String(page || '').trim());
+      return {
+        text: pageTexts.filter(Boolean).join('\n\n'),
+        pageTexts,
+        pageInspections: Array.isArray(inspected?.pages) ? inspected.pages : null,
+        ...(inspected?.error ? { inspectionError: inspected.error } : {}),
+        totalPages: Math.max(0, Number(extracted.totalPages) || pageTexts.length || 0),
+      };
+    } finally {
+      await pdf.loadingTask.destroy().catch(() => {});
+    }
   } catch (err) {
     return {
       text: '',
@@ -75,13 +96,95 @@ export async function extractPdfText(payloadBytes) {
   }
 }
 
-export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTexts }, configOverrides = {}) {
+export function analyzeOcrNoise(text, configOverrides = {}) {
+  const config = { ...getPdfTextConfig(), ...configOverrides };
+  const trimmed = String(text || '').trim();
+  const replacementCount = (trimmed.match(/\uFFFD/g) || []).length;
+  if (replacementCount >= 1) {
+    return { noisy: true, reason: 'ocr_replacement_chars', replacementCount };
+  }
+  const rawTokens = trimmed ? trimmed.split(/\s+/).filter(Boolean) : [];
+  if (!rawTokens.length) {
+    return { noisy: false, garbledTokens: 0, garbledRatio: 0, fragmentedTokens: 0, weirdSymbolRatio: 0 };
+  }
+
+  let fragmentedTokens = 0;
+  let garbledTokens = 0;
+  for (const rawToken of rawTokens) {
+    if (/^[b-z]$/.test(rawToken) || /^[~`^|\\]$/.test(rawToken)) {
+      fragmentedTokens += 1;
+    }
+    const clean = rawToken.replace(/^[\s"'`“”‘’()\[\]{}<>.,;:!?—–\-]+|[\s"'`“”‘’()\[\]{}<>.,;:!?—–\-]+$/g, '');
+    if (!clean) continue;
+    if (
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)
+      || /^https?:\/\//i.test(clean)
+      || /^[TR]\d{1,2}[NSEW]$/i.test(clean)
+      || /^(?:H2S|CO2|W2|B2B|2D|3D|4G|5G)$/i.test(clean)
+    ) {
+      continue;
+    }
+    if (
+      /^[lIoO]\/\d+(?:st|nd|rd|th|ths)?$/.test(clean)
+      || /^\d+\/[lIoO]\d*(?:st|nd|rd|th|ths)?$/.test(clean)
+      || /^l\d+(?:st|nd|rd|th|ths)?$/.test(clean)
+      || /^\d+l\d*$/.test(clean)
+      || /^\d+I\d*$/.test(clean)
+      || /^I\d{3,}$/.test(clean)
+      || /^\d+[Oo]\d+$/.test(clean)
+      || /^[lI][Oo]\d+$/.test(clean)
+      || /^[Oo]\d{2,}$/.test(clean)
+      || /^\d{2,}[Oo]$/.test(clean)
+      || (clean.length >= 3 && /^[A-Za-z]+[013456789][A-Za-z]+$/.test(clean))
+      || /[A-Za-z][~`^|@*\\][A-Za-z]/.test(clean)
+    ) {
+      garbledTokens += 1;
+    }
+  }
+
+  const nonWs = trimmed.replace(/\s+/g, '');
+  const weirdSymbols = (nonWs.match(/[~`^|\\{}<>]/g) || []).length;
+  const weirdSymbolRatio = nonWs.length ? weirdSymbols / nonWs.length : 0;
+
+  const totalTokens = rawTokens.length;
+  const garbledRatio = garbledTokens / totalTokens;
+  const fragmentedRatio = fragmentedTokens / totalTokens;
+  const minGarbledTokens = config.strict ? 2 : 3;
+  const minGarbledRatio = config.strict ? 0.005 : 0.01;
+
+  if (
+    (garbledTokens >= minGarbledTokens && garbledRatio >= minGarbledRatio)
+    || garbledTokens >= 5
+    || (fragmentedTokens >= 12 && fragmentedRatio >= 0.12)
+    || weirdSymbolRatio > (config.strict ? 0.03 : 0.05)
+  ) {
+    return {
+      noisy: true,
+      reason: 'noisy_ocr_text',
+      garbledTokens,
+      garbledRatio,
+      fragmentedTokens,
+      weirdSymbolRatio,
+    };
+  }
+
+  return {
+    noisy: false,
+    garbledTokens,
+    garbledRatio,
+    fragmentedTokens,
+    weirdSymbolRatio,
+  };
+}
+
+export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTexts, pageInspections }, configOverrides = {}) {
   const config = { ...getPdfTextConfig(), ...configOverrides };
   const pagesFromExtract = Array.isArray(pageTexts)
     ? pageTexts.map(page => String(page || '').trim())
     : null;
+  const inspections = Array.isArray(pageInspections) ? pageInspections : null;
   const trimmed = String(text || '').trim();
-  const pages = Math.max(1, pagesFromExtract?.length || Number(pageCount) || 1);
+  const pages = Math.max(1, pagesFromExtract?.length || inspections?.length || Number(pageCount) || 1);
   const sizeBytes = Math.max(0, Number(fileSizeBytes) || 0);
 
   if (!trimmed.length) {
@@ -93,21 +196,70 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTex
 
   const densePageIndexes = [];
   const sparsePageIndexes = [];
-  if (pagesFromExtract?.length) {
-    pagesFromExtract.forEach((page, index) => {
-      if (page.length >= config.minCharsPerPage) densePageIndexes.push(index);
-      else sparsePageIndexes.push(index);
-    });
-    if (sparsePageIndexes.length > 0) {
+  const imageBackedPageIndexes = [];
+  const invisibleOcrPageIndexes = [];
+  const noisyOcrPageIndexes = [];
+  const lowPrintablePageIndexes = [];
+  const visualPageIndexes = [];
+  let firstNoisyReason = null;
+
+  const totalInspectPages = Math.max(pagesFromExtract?.length || 0, inspections?.length || 0);
+  if (totalInspectPages > 0) {
+    for (let index = 0; index < totalInspectPages; index++) {
+      const page = pagesFromExtract ? (pagesFromExtract[index] ?? '') : null;
+      const insp = inspections ? inspections[index] : null;
+      const isSparse = page !== null && page.length < config.minCharsPerPage;
+      const invisibleLength = Number(insp?.invisibleTextLength) || 0;
+      const inspTextLength = Number(insp?.textLength) || 0;
+      const invisibleRatio = inspTextLength > 0 ? Math.min(1, invisibleLength / inspTextLength) : 0;
+      const hasInvisibleOcr = Boolean(insp && invisibleLength >= 20 && invisibleRatio >= config.minInvisibleOcrRatio);
+      const hasVisualImage = Boolean(insp && (Number(insp.imageCount) || 0) > 0 && (Number(insp.imageCoverage) || 0) >= config.minImagePageCoverage);
+      const pagePrintableRatio = page && page.length
+        ? ((page.match(/[\x09\x0a\x0d\x20-\x7e]/g) || []).length / page.length)
+        : 1;
+      const hasLowPrintable = page !== null && page.length > 0 && pagePrintableRatio < config.minPrintableRatio;
+      const pageNoise = page && page.length >= config.minCharsPerPage ? analyzeOcrNoise(page, config) : null;
+      const hasNoisyOcr = Boolean(pageNoise?.noisy);
+
+      if (isSparse) {
+        sparsePageIndexes.push(index);
+        visualPageIndexes.push(index);
+      } else if (hasInvisibleOcr || hasVisualImage) {
+        if (hasInvisibleOcr) invisibleOcrPageIndexes.push(index);
+        if (hasVisualImage) imageBackedPageIndexes.push(index);
+        visualPageIndexes.push(index);
+      } else if (hasLowPrintable) {
+        lowPrintablePageIndexes.push(index);
+        visualPageIndexes.push(index);
+      } else if (hasNoisyOcr) {
+        if (!firstNoisyReason) firstNoisyReason = pageNoise.reason;
+        noisyOcrPageIndexes.push(index);
+        visualPageIndexes.push(index);
+      } else {
+        densePageIndexes.push(index);
+      }
+    }
+
+    if (visualPageIndexes.length > 0) {
+      let reason = firstNoisyReason || 'noisy_ocr_text';
+      if (imageBackedPageIndexes.length > 0) reason = 'image_backed_pages';
+      else if (invisibleOcrPageIndexes.length > 0) reason = 'invisible_ocr_layer';
+      else if (sparsePageIndexes.length > 0) reason = 'blank_or_sparse_pages';
+      else if (lowPrintablePageIndexes.length > 0) reason = 'low_printable_ratio';
       return {
         suitable: false,
-        reason: 'blank_or_sparse_pages',
+        reason,
         sparsePages: sparsePageIndexes.length,
         densePages: densePageIndexes.length,
+        visualPages: visualPageIndexes.length,
         sparsePageIndexes,
         densePageIndexes,
-        pageCount: pagesFromExtract.length,
-        coverage: densePageIndexes.length / pagesFromExtract.length,
+        imageBackedPageIndexes,
+        invisibleOcrPageIndexes,
+        noisyOcrPageIndexes,
+        visualPageIndexes,
+        pageCount: totalInspectPages,
+        coverage: densePageIndexes.length / totalInspectPages,
       };
     }
   }
@@ -123,8 +275,13 @@ export function assessExtractedPdfText({ text, pageCount, fileSizeBytes, pageTex
     return { suitable: false, reason: 'low_printable_ratio', printableRatio };
   }
 
+  const ocrNoise = analyzeOcrNoise(trimmed, config);
+  if (ocrNoise.noisy) {
+    return { suitable: false, ...ocrNoise };
+  }
+
   const bytesPerChar = sizeBytes > 0 ? sizeBytes / trimmed.length : 0;
-  if (bytesPerChar > config.maxBytesPerChar && charsPerPage < config.minSparseCharsPerPage) {
+  if (bytesPerChar > config.maxBytesPerChar) {
     return { suitable: false, reason: 'likely_scanned_image', bytesPerChar, charsPerPage };
   }
 
@@ -174,17 +331,11 @@ export function estimatePdfPlanningPayloadBytes(sizeBytes, options = {}) {
   if (!size) return 500;
   const textFirstEnabled = options.textFirstEnabled !== false
     && (options.textFirstEnabled === true || getPdfTextConfig().enabled);
-  const fileMin = options.geminiFileMinBytes ?? 1_500_000;
-  if (size >= fileMin) {
-    return 6_000;
-  }
-  if (!textFirstEnabled) {
+  const largePdfMin = options.largePdfMinBytes ?? options.geminiFileMinBytes ?? 1_500_000;
+  if (!textFirstEnabled || size >= largePdfMin) {
     return Math.ceil(size * 1.37);
   }
-  if (size < 2_500_000) {
-    return Math.min(Math.floor(size * 0.12) + 8_000, 400_000);
-  }
-  return Math.ceil(size * 1.37);
+  return Math.min(Math.floor(size * 0.12) + 8_000, 400_000);
 }
 
 export async function resolvePdfTextDelivery(payloadBytes, options = {}) {
@@ -197,11 +348,20 @@ export async function resolvePdfTextDelivery(payloadBytes, options = {}) {
   if (extracted.error) {
     return { mode: 'visual', reason: 'extract_failed', error: extracted.error };
   }
+  if (extracted.inspectionError) {
+    return {
+      mode: 'visual',
+      reason: 'page_inspection_failed',
+      error: extracted.inspectionError,
+      totalPages: extracted.totalPages,
+    };
+  }
   const quality = assessExtractedPdfText({
     text: extracted.text,
     pageCount: extracted.totalPages || 1,
     fileSizeBytes: bytes.byteLength,
     pageTexts: extracted.pageTexts,
+    pageInspections: extracted.pageInspections,
   }, config);
   if (quality.suitable) {
     return {
@@ -213,18 +373,19 @@ export async function resolvePdfTextDelivery(payloadBytes, options = {}) {
   }
 
   const densePageIndexes = quality.densePageIndexes || [];
-  const sparsePageIndexes = quality.sparsePageIndexes || [];
-  if (quality.reason === 'blank_or_sparse_pages' && densePageIndexes.length && sparsePageIndexes.length) {
+  const visualPageIndexes = quality.visualPageIndexes || quality.sparsePageIndexes || [];
+  if (densePageIndexes.length > 0 && visualPageIndexes.length > 0 && Array.isArray(extracted.pageTexts) && extracted.pageTexts.length) {
     try {
-      const visualBytes = await extractPdfPageSubset(bytes, sparsePageIndexes);
+      const visualBytes = await extractPdfPageSubset(bytes, visualPageIndexes);
       const pageStart = Math.max(1, Number(options.pageStart) || 1);
-      const sparsePages = sparsePageIndexes.map(index => pageStart + index);
+      const visualPages = visualPageIndexes.map(index => pageStart + index);
       return {
         mode: 'hybrid',
-        reason: 'blank_or_sparse_pages',
+        reason: quality.reason,
         extractedText: labeledExtractedPages(extracted.pageTexts, densePageIndexes, pageStart),
         visualBytes,
-        sparsePages,
+        visualPages,
+        sparsePages: visualPages,
         densePages: densePageIndexes.map(index => pageStart + index),
         totalPages: extracted.totalPages,
         quality,

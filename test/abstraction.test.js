@@ -210,6 +210,18 @@ function createMemoryPhase3Store(chunksInput = [makeChunk()], options = {}) {
       chunks.set(chunkId, updated);
       return updated;
     },
+    async renewChunkAbstractionLease(jobId, chunkId, renewOptions = {}) {
+      const chunk = chunks.get(chunkId);
+      if (!chunk || chunk.jobId !== jobId) return null;
+      if (chunk.abstractionStatus !== 'processing' || !renewOptions.workerId || chunk.abstractionWorkerId !== renewOptions.workerId) return null;
+      const updated = {
+        ...chunk,
+        abstractionLeaseExpiresAt: new Date(Date.now() + (renewOptions.leaseMs || 90_000)).toISOString(),
+        updatedAt: now,
+      };
+      chunks.set(chunkId, updated);
+      return updated;
+    },
     async markChunkAbstractionFailed(jobId, chunkId, failure) {
       const chunk = chunks.get(chunkId);
       if (options.enforceWorkerLease && (!failure.workerId || chunk.abstractionStatus !== 'processing' || chunk.abstractionWorkerId !== failure.workerId)) {
@@ -767,18 +779,28 @@ test('frontend contains server-abstraction start, poll, fetch, and fallback hook
 
 
 test('Phase 4: worker claims pending chunks under a lease', async () => {
+  const { PDFDocument, StandardFonts } = await import('pdf-lib');
+  async function makeTextPdf(label) {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([612, 792]);
+    page.drawText(`STATE OF TEXAS\nCOUNTY OF REEVES\nDOCUMENT: ${label}\nGRANTOR: A\nGRANTEE: B\n`.repeat(6), { x: 72, y: 700, size: 11, font, lineHeight: 14, maxWidth: 460 });
+    return Buffer.from(await doc.save());
+  }
+  const pdfA = await makeTextPdf('A');
+  const pdfB = await makeTextPdf('B');
   const store = createMemoryPhase3Store([
-    makeChunk({ id: 'chk_a', chunkOrder: 0, originalFilename: 'a.pdf' }),
-    makeChunk({ id: 'chk_b', chunkOrder: 1, originalFilename: 'b.pdf' }),
+    makeChunk({ id: 'chk_a', chunkOrder: 0, originalFilename: 'a.pdf', sizeBytes: pdfA.byteLength }),
+    makeChunk({ id: 'chk_b', chunkOrder: 1, originalFilename: 'b.pdf', sizeBytes: pdfB.byteLength }),
   ]);
   let modelCalls = 0;
   const result = await processAbstractionBatch('job_test_1', {
     store,
-    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    blobLoader: async chunk => ({ bytes: chunk.id === 'chk_a' ? pdfA : pdfB, mediaType: chunk.mediaType }),
     modelClient: async () => {
       modelCalls += 1;
       return {
-        text: '["Claim test A.","Claim test B."]',
+        text: '[{"docIndex":1,"abstract":"Claim test A."},{"docIndex":2,"abstract":"Claim test B."}]',
         model: 'gemini-2.5-flash',
         usage: {},
       };
@@ -1437,6 +1459,96 @@ test('processChunkAbstraction escalates flagged abstracts to Sonnet and saves th
   assert(saved.inputTokens === 30 && saved.outputTokens === 45, 'Expected token usage summed across Gemini Flash Lite and Sonnet calls');
 });
 
+test('processChunkAbstraction stops before the escalation call when its lease was taken, and marks nothing', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_lease_lost' })]);
+  const models = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_lease_lost'), {
+    store,
+    workerId: 'wkr_first',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => {
+      models.push(request.model);
+      // Another worker takes the chunk while the first call is in flight.
+      store.chunks.set('chk_lease_lost', {
+        ...store.chunks.get('chk_lease_lost'),
+        abstractionWorkerId: 'wkr_thief',
+        abstractionLeaseExpiresAt: new Date(Date.now() + 300_000).toISOString(),
+      });
+      return {
+        text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
+        model: 'gemini-3.1-flash-lite',
+        usage: { input_tokens: 10, output_tokens: 15 },
+      };
+    },
+  });
+  const row = store.chunks.get('chk_lease_lost');
+  assert(result.status === 'stale', `Expected stale, got ${result.status}`);
+  assert(models.length === 1, `Escalation must not be paid after the lease is lost, got ${models.join(',')}`);
+  assert(row.abstractionStatus === 'processing' && row.abstractionWorkerId === 'wkr_thief', `New owner's row must be untouched, got ${row.abstractionStatus}/${row.abstractionWorkerId}`);
+  assert(!store.abstracts.has('chk_lease_lost'), 'No abstract may be saved');
+});
+
+test('processChunkAbstraction renews its own lease before each paid call (primary and escalation)', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_renew_each' })]);
+  let renewals = 0;
+  const renewMs = [];
+  const renew = store.renewChunkAbstractionLease;
+  store.renewChunkAbstractionLease = async (...args) => { renewals += 1; renewMs.push(args[2].leaseMs); return renew(...args); };
+  const result = await processChunkAbstraction(store.chunks.get('chk_renew_each'), {
+    store,
+    workerId: 'wkr_renew',
+    leaseMs: 1000,
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async request => ({
+      text: request.model === 'claude-sonnet-5-5'
+        ? 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nCONFIDENCE: Sonnet verified.'
+        : 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low',
+      model: request.model,
+      usage: { input_tokens: 10, output_tokens: 15 },
+    }),
+  });
+  assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+  assert(renewals === 2, `Expected one renewal per paid call (2), got ${renewals}`);
+  assert(renewMs.every(ms => ms >= 300_000), `Renewal must cover upstream timeout + 60s, not the 1s claim lease, got ${renewMs}`);
+});
+
+test('processChunkAbstraction delegates renewal to chunkLeaseGuard without duplicate singular renewal', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_delegate_guard' })]);
+  let singularRenewals = 0;
+  const origRenew = store.renewChunkAbstractionLease;
+  store.renewChunkAbstractionLease = async (...args) => { singularRenewals += 1; return origRenew(...args); };
+  const guardArgs = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_delegate_guard'), {
+    store,
+    workerId: 'wkr_guard',
+    leaseMs: 1000,
+    chunkLeaseGuard: async (chunk, ms) => {
+      guardArgs.push({ id: chunk.id, ms });
+      return 'renewed';
+    },
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => ({
+      text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nGRANTOR: A\nGRANTEE: B\nISSUES: none noted\nCONFIDENCE: Clear.',
+      model: 'gemini-3.1-flash-lite',
+      usage: { input_tokens: 10, output_tokens: 15 },
+    }),
+  });
+  assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+  assert(guardArgs.length === 1 && guardArgs[0].id === 'chk_delegate_guard' && guardArgs[0].ms >= 300_000, `Expected chunkLeaseGuard called with chunk and call leaseMs, got ${JSON.stringify(guardArgs)}`);
+  assert(singularRenewals === 0, `Expected 0 singular renewals when chunkLeaseGuard returns outcome, got ${singularRenewals}`);
+
+  const lostStore = createMemoryPhase3Store([makeChunk({ id: 'chk_delegate_lost' })]);
+  let calls = 0;
+  const lostResult = await processChunkAbstraction(lostStore.chunks.get('chk_delegate_lost'), {
+    store: lostStore,
+    workerId: 'wkr_guard',
+    chunkLeaseGuard: async () => 'lost',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => { calls += 1; return { text: 'should not pay', model: 'gemini-3.1-flash-lite', usage: {} }; },
+  });
+  assert(lostResult.status === 'stale' && calls === 0, `Expected stale with 0 paid calls, got ${lostResult.status}/${calls}`);
+});
+
 test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {
   const store = createMemoryPhase3Store([makeChunk({ id: 'chk_clean' })]);
   const models = [];
@@ -1701,6 +1813,120 @@ test('Phase 4: /abstraction/process drains another batch when /abstraction/start
   assert(res.statusCode === 200, `Expected 200, got ${res.statusCode}`);
   assert(res.body.completedInBatch === 3, `Expected three completions in process batch, got ${res.body.completedInBatch}`);
   assert(res.body.hasMore === false, 'Expected no more work after draining batch');
+});
+
+test('processChunkAbstraction sets MEDIA_RESOLUTION_HIGH on direct Gemini visual, hybrid, image, and gemini_file calls only', async () => {
+  const { PDFDocument, StandardFonts } = await import('pdf-lib');
+
+  const cleanDoc = await PDFDocument.create();
+  const cleanFont = await cleanDoc.embedFont(StandardFonts.Helvetica);
+  const cleanPage = cleanDoc.addPage([612, 792]);
+  cleanPage.drawText('STATE OF TEXAS\nCOUNTY OF REEVES\nGRANTOR: JOHN DOE\nGRANTEE: JANE DOE\n'.repeat(8), {
+    x: 72, y: 700, size: 11, font: cleanFont, lineHeight: 14, maxWidth: 460,
+  });
+  const cleanPdfBytes = Buffer.from(await cleanDoc.save());
+
+  const hybridDoc = await PDFDocument.create();
+  const hybridFont = await hybridDoc.embedFont(StandardFonts.Helvetica);
+  const hybridPage1 = hybridDoc.addPage([612, 792]);
+  hybridPage1.drawText('STATE OF TEXAS\nCOUNTY OF REEVES\nGRANTOR: JOHN DOE\nGRANTEE: JANE DOE\n'.repeat(8), {
+    x: 72, y: 700, size: 11, font: hybridFont, lineHeight: 14, maxWidth: 460,
+  });
+  hybridDoc.addPage([612, 792]);
+  const hybridPdfBytes = Buffer.from(await hybridDoc.save());
+
+  const visualDoc = await PDFDocument.create();
+  visualDoc.addPage([612, 792]);
+  const visualPdfBytes = Buffer.from(await visualDoc.save());
+
+  const prevRes = process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+  const prevProvider = process.env.MODEL_PROVIDER;
+  const prevEscalation = process.env.ABSTRACTION_ESCALATION_ENABLED;
+  delete process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+  delete process.env.MODEL_PROVIDER;
+  delete process.env.ABSTRACTION_ESCALATION_ENABLED;
+
+  try {
+    const capture = async (chunk, bytes, extraOptions = {}) => {
+      const requests = [];
+      const store = createMemoryPhase3Store([chunk]);
+      await processChunkAbstraction(chunk, {
+        store,
+        workerId: 'wkr_media_res',
+        escalationEnabled: false,
+        blobLoader: async () => ({ bytes, mediaType: chunk.mediaType }),
+        modelClient: async req => {
+          requests.push(req);
+          if (extraOptions.escalate && req.model === 'gemini-3.1-flash-lite') {
+            return { text: 'DOC TYPE: Deed\nISSUES: ILLEGIBLE - VERIFY MANUALLY\nCONFIDENCE: low', model: req.model, usage: {} };
+          }
+          return { text: 'DOC TYPE: Deed\nGRANTOR: John Doe\nCONFIDENCE: clear', model: req.model, usage: {} };
+        },
+        ...extraOptions,
+      });
+      return requests;
+    };
+
+    const visualReqs = await capture(makeChunk({ id: 'chk_vis', sizeBytes: visualPdfBytes.byteLength }), visualPdfBytes);
+    assert(visualReqs[0].mediaResolution === 'MEDIA_RESOLUTION_HIGH', `Expected MEDIA_RESOLUTION_HIGH for visual PDF, got ${visualReqs[0].mediaResolution}`);
+
+    const hybridReqs = await capture(makeChunk({ id: 'chk_hyb', pageEnd: 2, sizeBytes: hybridPdfBytes.byteLength }), hybridPdfBytes);
+    assert(hybridReqs[0].mediaResolution === 'MEDIA_RESOLUTION_HIGH', `Expected MEDIA_RESOLUTION_HIGH for hybrid PDF, got ${hybridReqs[0].mediaResolution}`);
+
+    const imgBytes = Buffer.from('png-image-bytes');
+    const imgReqs = await capture(makeChunk({ id: 'chk_img', mediaType: 'image/png', originalFilename: 'scan.png', sizeBytes: imgBytes.byteLength }), imgBytes);
+    assert(imgReqs[0].mediaResolution === 'MEDIA_RESOLUTION_HIGH', `Expected MEDIA_RESOLUTION_HIGH for image chunk, got ${imgReqs[0].mediaResolution}`);
+
+    const geminiFileChunk = makeChunk({ id: 'chk_gfile', sizeBytes: 100 });
+    const gfileReqs = await capture(geminiFileChunk, visualPdfBytes, {
+      preloadedDelivery: {
+        chunkId: 'chk_gfile',
+        delivery: {
+          mode: 'gemini_file',
+          fileUri: 'https://generativelanguage.googleapis.com/v1beta/files/test_file',
+          geminiFileName: 'files/test_file',
+          mimeType: 'application/pdf',
+        },
+      },
+    });
+    assert(gfileReqs[0].mediaResolution === 'MEDIA_RESOLUTION_HIGH', `Expected MEDIA_RESOLUTION_HIGH for gemini_file chunk, got ${gfileReqs[0].mediaResolution}`);
+
+    const textReqs = await capture(makeChunk({ id: 'chk_txt', sizeBytes: cleanPdfBytes.byteLength }), cleanPdfBytes);
+    assert(!('mediaResolution' in textReqs[0]), 'Clean text-mode PDF must omit mediaResolution');
+
+    const csvBytes = Buffer.from('owner,interest\nAlice,1/2\n');
+    const csvReqs = await capture(makeChunk({ id: 'chk_csv', mediaType: 'text/csv', originalFilename: 'owners.csv', sizeBytes: csvBytes.byteLength }), csvBytes);
+    assert(!('mediaResolution' in csvReqs[0]), 'CSV chunk must omit mediaResolution');
+
+    process.env.GEMINI_PDF_MEDIA_RESOLUTION = 'false';
+    const disabledReqs = await capture(makeChunk({ id: 'chk_off', sizeBytes: visualPdfBytes.byteLength }), visualPdfBytes);
+    assert(!('mediaResolution' in disabledReqs[0]), 'GEMINI_PDF_MEDIA_RESOLUTION=false must omit mediaResolution');
+
+    process.env.GEMINI_PDF_MEDIA_RESOLUTION = 'medium';
+    const mediumReqs = await capture(makeChunk({ id: 'chk_med', sizeBytes: visualPdfBytes.byteLength }), visualPdfBytes);
+    assert(mediumReqs[0].mediaResolution === 'MEDIA_RESOLUTION_MEDIUM', `Expected MEDIA_RESOLUTION_MEDIUM, got ${mediumReqs[0].mediaResolution}`);
+
+    delete process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+    process.env.MODEL_PROVIDER = 'openrouter';
+    const openrouterReqs = await capture(makeChunk({ id: 'chk_or', sizeBytes: visualPdfBytes.byteLength }), visualPdfBytes);
+    assert(!('mediaResolution' in openrouterReqs[0]), 'OpenRouter-routed Gemini must omit mediaResolution');
+    delete process.env.MODEL_PROVIDER;
+
+    const escalationReqs = await capture(makeChunk({ id: 'chk_esc', sizeBytes: visualPdfBytes.byteLength }), visualPdfBytes, {
+      escalationEnabled: true,
+      escalate: true,
+    });
+    assert(escalationReqs.length === 2, `Expected 2 calls on escalation, got ${escalationReqs.length}`);
+    assert(escalationReqs[0].mediaResolution === 'MEDIA_RESOLUTION_HIGH', 'Primary Gemini visual call should set MEDIA_RESOLUTION_HIGH');
+    assert(!('mediaResolution' in escalationReqs[1]), 'Claude escalation call must not receive mediaResolution');
+  } finally {
+    if (prevRes === undefined) delete process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+    else process.env.GEMINI_PDF_MEDIA_RESOLUTION = prevRes;
+    if (prevProvider === undefined) delete process.env.MODEL_PROVIDER;
+    else process.env.MODEL_PROVIDER = prevProvider;
+    if (prevEscalation === undefined) delete process.env.ABSTRACTION_ESCALATION_ENABLED;
+    else process.env.ABSTRACTION_ESCALATION_ENABLED = prevEscalation;
+  }
 });
 
 for (const { name, fn } of tests) {

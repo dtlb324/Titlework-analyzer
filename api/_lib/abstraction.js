@@ -1,6 +1,8 @@
 import { createHash } from 'crypto';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
+import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
 import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { messagesHaveVisualMedia, resolveGeminiMediaResolution } from './gemini-request.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
@@ -42,7 +44,17 @@ const RAW_PERSISTENCE_KEYS = new Set([
   'sourceBytes',
 ]);
 
-export const BATCH_ABSTRACT_RESPONSE_SCHEMA = { type: 'array', items: { type: 'string' } };
+export const BATCH_ABSTRACT_RESPONSE_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: {
+      docIndex: { type: 'integer' },
+      abstract: { type: 'string' },
+    },
+    required: ['docIndex', 'abstract'],
+  },
+};
 
 function clampInt(raw, fallback, min, max) {
   const value = Number(raw);
@@ -83,6 +95,7 @@ export function getAbstractionConfig() {
     escalationModel: ABSTRACT_ESCALATION_MODEL,
     escalationMaxTokens: ABSTRACT_ESCALATION_MAX_TOKENS,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
   };
 }
 
@@ -248,11 +261,12 @@ function pdfDeliveryParts(bytes, delivery, docNum, name) {
     };
   }
   if (delivery?.mode === 'hybrid' && delivery.extractedText) {
-    const sparse = Array.isArray(delivery.sparsePages) && delivery.sparsePages.length
-      ? delivery.sparsePages.join(', ')
-      : 'sparse/blank pages';
+    const visualPageList = Array.isArray(delivery.visualPages) && delivery.visualPages.length
+      ? delivery.visualPages
+      : (Array.isArray(delivery.sparsePages) && delivery.sparsePages.length ? delivery.sparsePages : null);
+    const pagesLabel = visualPageList ? visualPageList.join(', ') : 'scanned, stamped, or sparse pages';
     return {
-      promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - HYBRID PDF:\nText-extracted pages:\n${delivery.extractedText}\n\nSparse or blank pages (${sparse}) are attached as a visual PDF in that original page order. Abstract those pages from the attached PDF. Stay coverage-complete across extracted text and attached pages.`,
+      promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - HYBRID PDF:\nText-extracted pages:\n${delivery.extractedText}\n\nPages (${pagesLabel}) contain visual content (scans, stamps, signatures, or sparse/noisy text) and are attached as a visual PDF in that original page order. Abstract those pages — including any recording stamps, handwritten notes, signatures, or marginalia — from the attached PDF. Stay coverage-complete across extracted text and attached pages.`,
       documentBlock: visualPdfDocumentBlock(delivery, bytes),
     };
   }
@@ -263,35 +277,54 @@ function pdfDeliveryParts(bytes, delivery, docNum, name) {
 }
 
 export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
-  const content = [];
   const labels = items.map((item, index) => {
     const docNum = globalStartIdx + index + 1;
     return `Document #${docNum} (${chunkDisplayName(item.chunk)})`;
   });
-  let textPrompt = `Abstract each of the following ${items.length} document${items.length === 1 ? '' : 's'} in order: ${labels.join(', ')}.
+  const docNums = items.map((_, index) => globalStartIdx + index + 1);
+  let instructionsPrompt = `Abstract each of the following ${items.length} document${items.length === 1 ? '' : 's'} in order: ${labels.join(', ')}.
 
-Return a JSON array of exactly ${items.length} string${items.length === 1 ? '' : 's'}. Index 0 is the complete abstract for ${labels[0]}, index 1 for ${labels[1] ?? 'the next document'}, and so on. Each element must follow the output format from your instructions. If a document has no abstractable content, use the string "No abstractable content."
+Return a JSON array of exactly ${items.length} object${items.length === 1 ? '' : 's'}, each with {"docIndex": <number>, "abstract": "<string>"}, matching the exact document numbers above (${docNums.join(', ')}). Each "abstract" must follow the output format from your instructions. If a document has no abstractable content, use the string "No abstractable content."
 
 Extract every relevant fact. Do not guess at anything illegible.`;
   if (items.some(item => item.chunk.splitFrom || (item.chunk.pageStart && item.chunk.pageEnd))) {
-    textPrompt += ' Some files are page ranges from a larger PDF. Abstract each part fully and note the source document/page range.';
+    instructionsPrompt += ' Some files are page ranges from a larger PDF. Abstract each part fully and note the source document/page range.';
   }
+
+  let hasVisualBlock = false;
+  const interleavedContent = [];
+  const textSections = [];
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
     const docNum = globalStartIdx + index + 1;
     const name = chunkDisplayName(item.chunk);
+    const startMarker = `--- START DOCUMENT #${docNum} (${name}) ---`;
+    const endMarker = `--- END DOCUMENT #${docNum} (${name}) ---`;
     const bytes = normalizeBytes(item.payloadBytes);
     const delivery = item.delivery || null;
+
     if (isCsvChunk(item.chunk)) {
       const csvText = bytes.toString('utf8');
-      textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
+      const sectionText = `${startMarker}\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.\n${endMarker}`;
+      textSections.push(`\n\n${sectionText}`);
+      interleavedContent.push({ type: 'text', text: sectionText });
     } else if (isPdfChunk(item.chunk)) {
       const pdf = pdfDeliveryParts(bytes, delivery, docNum, name);
-      textPrompt += pdf.promptSuffix;
-      if (pdf.documentBlock) content.push(pdf.documentBlock);
+      if (pdf.documentBlock) {
+        hasVisualBlock = true;
+        interleavedContent.push({ type: 'text', text: `${startMarker}${pdf.promptSuffix}` });
+        interleavedContent.push(pdf.documentBlock);
+        interleavedContent.push({ type: 'text', text: endMarker });
+      } else {
+        const sectionText = `${startMarker}${pdf.promptSuffix}\n${endMarker}`;
+        textSections.push(`\n\n${sectionText}`);
+        interleavedContent.push({ type: 'text', text: sectionText });
+      }
     } else if (isImageChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
-      content.push({
+      hasVisualBlock = true;
+      interleavedContent.push({ type: 'text', text: startMarker });
+      interleavedContent.push({
         type: 'image',
         source: {
           type: 'file_uri',
@@ -300,8 +333,11 @@ Extract every relevant fact. Do not guess at anything illegible.`;
           geminiFileName: delivery.geminiFileName || null,
         },
       });
+      interleavedContent.push({ type: 'text', text: endMarker });
     } else if (isImageChunk(item.chunk)) {
-      content.push({
+      hasVisualBlock = true;
+      interleavedContent.push({ type: 'text', text: startMarker });
+      interleavedContent.push({
         type: 'image',
         source: {
           type: 'base64',
@@ -309,26 +345,60 @@ Extract every relevant fact. Do not guess at anything illegible.`;
           data: bytes.toString('base64'),
         },
       });
+      interleavedContent.push({ type: 'text', text: endMarker });
     } else {
       throw new Error(`Unsupported chunk media type: ${item.chunk.mediaType || 'unknown'}`);
     }
   }
 
-  content.push({ type: 'text', text: textPrompt });
+  const content = hasVisualBlock
+    ? [...interleavedContent, { type: 'text', text: instructionsPrompt }]
+    : [{ type: 'text', text: `${instructionsPrompt}${textSections.join('')}` }];
   return [{ role: 'user', content }];
 }
 
 export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
   const trimmed = String(result || '').trim();
+  const cleaned = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   let parsed = null;
   try {
-    parsed = JSON.parse(trimmed);
+    parsed = JSON.parse(cleaned);
   } catch (_) {
   }
-  const positional = Array.isArray(parsed) && parsed.length === items.length;
+
+  const expectedDocNums = new Set(items.map((_, index) => globalStartIdx + index + 1));
+  const byDocIndex = new Map();
+  let valid = Array.isArray(parsed) && parsed.length === items.length;
+  if (valid) {
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        valid = false;
+        break;
+      }
+      if (!Number.isInteger(entry.docIndex) || !expectedDocNums.has(entry.docIndex) || byDocIndex.has(entry.docIndex)) {
+        valid = false;
+        break;
+      }
+      if (typeof entry.abstract !== 'string') {
+        valid = false;
+        break;
+      }
+      const abstractText = entry.abstract.trim();
+      const headerMatch = abstractText.match(/^DOCUMENT\s*#(\d+)\s*:?/i);
+      if (headerMatch && Number(headerMatch[1]) !== entry.docIndex) {
+        valid = false;
+        break;
+      }
+      byDocIndex.set(entry.docIndex, abstractText);
+    }
+  }
+  if (byDocIndex.size !== items.length) {
+    valid = false;
+  }
+
   return items.map((item, index) => ({
     chunk: item.chunk,
-    abstractText: positional ? String(parsed[index] ?? '').trim() : '',
+    abstractText: valid ? (byDocIndex.get(globalStartIdx + index + 1) ?? '') : '',
     sequenceIndex: globalStartIdx + index,
   }));
 }
@@ -566,10 +636,18 @@ export async function runModelAbstraction({
   escalationModel = ABSTRACT_ESCALATION_MODEL,
   escalationMaxTokens = ABSTRACT_ESCALATION_MAX_TOKENS,
   responseSchema = null,
+  mediaResolution = undefined,
   options = {},
 }) {
   const modelClient = getModelClient(options);
   const schemaForModel = responseSchema && isGeminiModel(model) ? responseSchema : null;
+  const hasVisualMedia = messagesHaveVisualMedia(messages);
+  const mediaResolutionForModel = isGeminiModel(model) && !shouldUseOpenRouter(model) && hasVisualMedia
+    ? resolveGeminiMediaResolution(mediaResolution)
+    : null;
+  // Awaited before every billable call. A guard error (lost lease) propagates and is never swallowed.
+  const guard = typeof options.modelCallGuard === 'function' ? options.modelCallGuard : null;
+  if (guard) await guard();
   let response = await modelClient({
     model,
     maxTokens,
@@ -577,6 +655,7 @@ export async function runModelAbstraction({
     messages,
     payloadBytes,
     ...(schemaForModel ? { responseSchema: schemaForModel } : {}),
+    ...(mediaResolutionForModel ? { mediaResolution: mediaResolutionForModel } : {}),
   });
   let usage = extractUsage(response.usage);
   const escalationEnabled = !responseSchema
@@ -586,6 +665,10 @@ export async function runModelAbstraction({
     && escalationModel !== model;
   let escalated = false;
   if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
+    const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && hasVisualMedia
+      ? resolveGeminiMediaResolution(mediaResolution)
+      : null;
+    if (guard) await guard();
     try {
       const escalatedResponse = await modelClient({
         model: escalationModel,
@@ -594,6 +677,7 @@ export async function runModelAbstraction({
         messages,
         payloadBytes,
         escalation: true,
+        ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
       });
       usage = addUsage(usage, extractUsage(escalatedResponse.usage));
       response = escalatedResponse;
@@ -864,6 +948,18 @@ export async function processChunkAbstraction(chunk, options = {}) {
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
   const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';
 
+  // Renew this chunk's lease before every billable call; stop before paying if another worker owns it now.
+  const renewLeaseMs = callLeaseMs(leaseMs, UPSTREAM_TIMEOUT_MS);
+  const modelCallGuard = async () => {
+    if (typeof options.chunkLeaseGuard === 'function') {
+      const outcome = await options.chunkLeaseGuard(processingChunk, renewLeaseMs);
+      if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
+      if (outcome !== undefined) return;
+    }
+    const outcome = await renewChunkLease(store, processingChunk, { workerId, leaseMs: renewLeaseMs });
+    if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
+  };
+
   let loadedPayload = null;
   try {
     const reuse = await tryReuseExistingAbstract(store, claimedChunk, workerId);
@@ -902,7 +998,9 @@ export async function processChunkAbstraction(chunk, options = {}) {
       return { status: 'completed', chunkId: processingChunk.id, abstract: record, reused: true };
     }
     logChunkStage('claimed', processingChunk, { workerId, attemptCount }, stageLoggingEnabled);
-    const payload = await getBlobLoader(options)(processingChunk);
+    const payload = options.preloadedPayload?.chunkId === processingChunk.id
+      ? options.preloadedPayload.payload
+      : await getBlobLoader(options)(processingChunk);
     loadedPayload = payload;
     logChunkStage('loaded', processingChunk, {
       workerId,
@@ -911,8 +1009,11 @@ export async function processChunkAbstraction(chunk, options = {}) {
       loadedMediaType: payload.mediaType || processingChunk.mediaType || null,
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
+    const resolvedDelivery = options.preloadedDelivery?.chunkId === processingChunk.id
+      ? options.preloadedDelivery.delivery
+      : await resolveChunkDelivery(processingChunk, payload.bytes);
     const delivery = await enrichVisualDeliveryForModel(
-      await resolveChunkDelivery(processingChunk, payload.bytes),
+      resolvedDelivery,
       processingChunk,
       payload.bytes,
       model,
@@ -940,7 +1041,8 @@ export async function processChunkAbstraction(chunk, options = {}) {
       payloadBytes,
       escalationModel: options.escalationModel || ABSTRACT_ESCALATION_MODEL,
       escalationMaxTokens: options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS,
-      options,
+      mediaResolution: options.mediaResolution,
+      options: { ...options, modelCallGuard },
     });
     logChunkStage('model_response', processingChunk, {
       workerId,
@@ -968,6 +1070,8 @@ export async function processChunkAbstraction(chunk, options = {}) {
     }
     return saved;
   } catch (err) {
+    // Lease lost: the new owner's row is not ours to mark failed, retry_wait or split.
+    if (isChunkLeaseLostError(err)) return { status: 'stale', chunkId: processingChunk.id };
     const errorType = classifyError(err);
     logChunkStage('error', processingChunk, {
       workerId,

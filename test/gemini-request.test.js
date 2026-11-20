@@ -3,11 +3,15 @@ import {
   buildGeminiGenerateContentBody,
   extractGeminiText,
   extractGeminiThoughtSummaries,
+  invokeGeminiGenerateContent,
   isGemini3SeriesModel,
   isGemini4HydrogenModel,
   isGemini4SeriesModel,
   isGeminiModel,
+  messagesHaveVisualMedia,
+  normalizeGeminiMediaResolution,
   normalizeGeminiUsage,
+  resolveGeminiMediaResolution,
   resolveGeminiThinkingConfig,
 } from '../api/_lib/gemini-request.js';
 
@@ -259,10 +263,143 @@ test('extractGeminiText joins candidate parts', () => {
   assert(text.includes('GRANTOR: Smith'), 'Expected second part text');
 });
 
+test('normalizeGeminiMediaResolution and resolveGeminiMediaResolution default to MEDIA_RESOLUTION_HIGH and honor env overrides', () => {
+  const prev = process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+  delete process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+  try {
+    assert(resolveGeminiMediaResolution() === 'MEDIA_RESOLUTION_HIGH', 'Expected default MEDIA_RESOLUTION_HIGH');
+    assert(normalizeGeminiMediaResolution('low') === 'MEDIA_RESOLUTION_LOW', 'Expected short low normalization');
+    assert(normalizeGeminiMediaResolution('Medium') === 'MEDIA_RESOLUTION_MEDIUM', 'Expected case-insensitive medium normalization');
+    assert(normalizeGeminiMediaResolution('MEDIA_RESOLUTION_HIGH') === 'MEDIA_RESOLUTION_HIGH', 'Expected full enum normalization');
+    for (const offValue of ['off', 'false', 'none', 'invalid']) {
+      assert(normalizeGeminiMediaResolution(offValue) === null, `Expected null for ${offValue}`);
+      process.env.GEMINI_PDF_MEDIA_RESOLUTION = offValue;
+      assert(resolveGeminiMediaResolution() === null, `Expected env ${offValue} to resolve null`);
+    }
+    process.env.GEMINI_PDF_MEDIA_RESOLUTION = 'medium';
+    assert(resolveGeminiMediaResolution() === 'MEDIA_RESOLUTION_MEDIUM', 'Expected env medium to resolve');
+    assert(resolveGeminiMediaResolution('low') === 'MEDIA_RESOLUTION_LOW', 'Expected explicit override to win over env');
+  } finally {
+    if (prev === undefined) delete process.env.GEMINI_PDF_MEDIA_RESOLUTION;
+    else process.env.GEMINI_PDF_MEDIA_RESOLUTION = prev;
+  }
+});
+
+test('buildGeminiGenerateContentBody sets mediaResolution only when visual media is present', () => {
+  const base64PdfMessages = [{
+    role: 'user',
+    content: [
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' } },
+      { type: 'text', text: 'Abstract this deed.' },
+    ],
+  }];
+  const fileUriPdfMessages = [{
+    role: 'user',
+    content: [
+      { type: 'document', source: { type: 'file_uri', media_type: 'application/pdf', uri: 'https://generativelanguage.googleapis.com/v1beta/files/abc' } },
+      { type: 'text', text: 'Abstract this deed.' },
+    ],
+  }];
+  const imageMessages = [{
+    role: 'user',
+    content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw==' } },
+      { type: 'text', text: 'Abstract this image.' },
+    ],
+  }];
+  const textOnlyMessages = [{
+    role: 'user',
+    content: [{ type: 'text', text: 'Abstract extracted text.' }],
+  }];
+
+  assert(messagesHaveVisualMedia(base64PdfMessages) === true, 'Expected base64 PDF to count as visual');
+  assert(messagesHaveVisualMedia(fileUriPdfMessages) === true, 'Expected file_uri PDF to count as visual');
+  assert(messagesHaveVisualMedia(imageMessages) === true, 'Expected image to count as visual');
+  assert(messagesHaveVisualMedia(textOnlyMessages) === false, 'Expected text-only messages not to count as visual');
+
+  for (const messages of [base64PdfMessages, fileUriPdfMessages, imageMessages]) {
+    const body = buildGeminiGenerateContentBody({
+      model: 'gemini-3.1-flash-lite',
+      maxTokens: 2000,
+      system: 'System',
+      messages,
+      mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+    });
+    assert(body.generationConfig.mediaResolution === 'MEDIA_RESOLUTION_HIGH', 'Expected mediaResolution on visual body');
+    const omitted = buildGeminiGenerateContentBody({
+      model: 'gemini-3.1-flash-lite',
+      maxTokens: 2000,
+      system: 'System',
+      messages,
+    });
+    assert(!('mediaResolution' in omitted.generationConfig), 'Expected mediaResolution omitted when not requested');
+  }
+
+  const textBody = buildGeminiGenerateContentBody({
+    model: 'gemini-3.1-flash-lite',
+    maxTokens: 2000,
+    system: 'System',
+    messages: textOnlyMessages,
+    mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+  });
+  assert(!('mediaResolution' in textBody.generationConfig), 'Text-only body must omit mediaResolution even when passed');
+});
+
+test('invokeGeminiGenerateContent includes mediaResolution on visual PDF requests and omits it on text-only requests', async () => {
+  const prevKey = process.env.GEMINI_API_KEY;
+  const prevFetch = global.fetch;
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  const sentBodies = [];
+  global.fetch = async (_url, init) => {
+    sentBodies.push(JSON.parse(init.body));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: 'DOC TYPE: Deed' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20 },
+        modelVersion: 'gemini-3.1-flash-lite',
+      }),
+    };
+  };
+
+  try {
+    await invokeGeminiGenerateContent({
+      model: 'gemini-3.1-flash-lite',
+      maxTokens: 2000,
+      system: 'System',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' } },
+          { type: 'text', text: 'Abstract visual deed.' },
+        ],
+      }],
+      mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+    });
+
+    await invokeGeminiGenerateContent({
+      model: 'gemini-3.1-flash-lite',
+      maxTokens: 2000,
+      system: 'System',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Abstract text-only deed.' }] }],
+      mediaResolution: 'MEDIA_RESOLUTION_HIGH',
+    });
+  } finally {
+    global.fetch = prevFetch;
+    if (prevKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = prevKey;
+  }
+
+  assert(sentBodies.length === 2, `Expected 2 requests, got ${sentBodies.length}`);
+  assert(sentBodies[0].generationConfig.mediaResolution === 'MEDIA_RESOLUTION_HIGH', 'Visual request must send mediaResolution');
+  assert(!('mediaResolution' in sentBodies[1].generationConfig), 'Text-only request must omit mediaResolution');
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {
-    fn();
+    await fn();
     console.log(`ok - ${name}`);
   } catch (err) {
     failed++;
