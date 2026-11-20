@@ -12,14 +12,14 @@
 Titlework Analyzer is a self-hosted web app for oil and gas landmen. Upload courthouse PDFs, CSVs, and scanned document images to extract structured abstracts, assemble a chain of title, and draft a mineral ownership opinion with follow-up Q&A.
 
 - **Naming:** The page heading is **Mineral Ownership Builder**, the browser tab title is **Mineral Title Analyzer**, and the npm package name is `title-analyzer`.
-- **Self-hosted only:** There is no public hosted instance. Clone the repo to run locally or deploy your own copy to Google Cloud Run.
+- **Self-hosted only:** There is no public hosted instance. Run it locally or deploy your own copy to Google Cloud Run.
 - **Analytical aid only:** Output is an analytical aid, not a formal title opinion. Verify all conclusions against the source instruments before drilling, leasing, or division order decisions.
 - **Runtime:** Node.js 26.x (`package.json` engines; CI and `Dockerfile` pin Node.js 26.13.0; no `.nvmrc`).
 
 ## Contents
 
 - [Architecture & how it works](#architecture--how-it-works)
-- [Quick start: clone and run tests](#quick-start-clone-and-run-tests)
+- [Quick start](#quick-start)
 - [Run locally (full app)](#run-locally-full-app)
 - [Route models through OpenRouter](#route-models-through-openrouter)
 - [Deploy to Google Cloud Run (optional)](#deploy-to-google-cloud-run-optional)
@@ -79,9 +79,9 @@ flowchart LR
 
 ---
 
-## Quick start: clone and run tests
+## Quick start
 
-You can clone the repo and run the entire automated test suite without API keys, a database, a GCS bucket, or `.env.local`.
+Install dependencies and run the automated test suite — no API keys, database, GCS bucket, or `.env.local` required:
 
 ```bash
 git clone https://github.com/dtlb324/Titlework-analyzer.git
@@ -205,7 +205,7 @@ MODEL_PROVIDER=openrouter
 
 ## Deploy to Google Cloud Run (optional)
 
-Cloud Run deployment is **optional and off by default**. Pushing a `vX.Y.Z` tag always runs `.github/workflows/release.yml` to validate the tag, run `npm test`, and publish a GitHub Release. The Docker build, Cloud Run deploy, and post-deploy verification steps run **only** when the repository variable `DEPLOY_TO_CLOUD_RUN` is set to `true`. A fork or clone without that variable never touches Google Cloud.
+Cloud Run deployment is **optional and off by default**. Pushing a `vX.Y.Z` tag always runs `.github/workflows/release.yml` to validate the tag, run `npm test`, and publish a GitHub Release. The Docker build, Cloud Run deploy, and post-deploy verification steps run **only** when the repository variable `DEPLOY_TO_CLOUD_RUN` is set to `true`. Without that variable set, the workflow never touches Google Cloud.
 
 Do not attach Cloud Build or Cloud Run source-deploy triggers to `Main` or `main` — they can deploy a different image than the tag workflow. This repo's default branch is `Main`; CI also listens on `main`.
 
