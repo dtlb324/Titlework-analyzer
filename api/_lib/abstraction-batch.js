@@ -3,14 +3,21 @@ import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLeas
 import {
   ABSTRACTION_PROMPT,
   BATCH_ABSTRACT_RESPONSE_SCHEMA,
+  addUsage,
   buildAbstractMessagesForChunks,
+  buildEscalationQualityContext,
   estimateAbstractPayloadBytes,
   estimateRequestBytes,
+  evaluateAbstractEscalation,
   getAbstractionConfig,
+  isAbstractionEscalationEnabled,
   parseBatchAbstracts,
   persistCompletedAbstract,
   processChunkAbstraction,
   resolveChunkDelivery,
+  resolveEscalationMaxTokens,
+  resolveEscalationModel,
+  runChunkEscalation,
   runModelAbstraction,
   getBlobLoader,
   stripDocumentLabel,
@@ -203,11 +210,17 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     return [...finished, await processChunkAbstraction(ready[0].chunk, { ...options, workerId, leaseMs, maxAttempts })];
   }
 
+  const model = options.model || config.model;
+  const escalationModel = options.escalationModel ?? resolveEscalationModel();
+  const escalationMaxTokens = options.escalationMaxTokens ?? resolveEscalationMaxTokens();
+  const escalationEnabled = isAbstractionEscalationEnabled({ model, escalationModel, options });
+
   // Chunks this worker claimed and has not finished. Their leases only live as long as the last renewal, so
   // renew them before every billable call. A 'lost' answer is final: never pay for that chunk again.
   const held = new Map(ready.map(entry => [entry.chunk.id, entry.chunk]));
   const lostIds = new Set();
-  const renewMs = callLeaseMs(leaseMs, config.upstreamTimeoutMs);
+  const renewState = new Map();
+  const renewMs = callLeaseMs(leaseMs, options.upstreamTimeoutMs ?? config.upstreamTimeoutMs);
   const renewHeld = async (activeChunk = null, activeLeaseMs = null) => {
     if (activeChunk && lostIds.has(activeChunk.id)) return 'lost';
     const targets = activeChunk && !held.has(activeChunk.id)
@@ -217,13 +230,14 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       workerId,
       leaseMs: Math.max(renewMs, Number(activeLeaseMs) || 0),
     });
-    for (const [id, outcome] of outcomes) {
-      if (outcome === 'lost' && held.has(id)) {
+    for (const [id, state] of outcomes) {
+      renewState.set(id, state);
+      if (state === 'lost' && held.has(id)) {
         lostIds.add(id);
         held.delete(id);
       }
     }
-    if (typeof options.chunkLeaseGuard === 'function') await options.chunkLeaseGuard();
+    await options.chunkLeaseGuard?.();
     return activeChunk ? outcomes.get(activeChunk.id) : undefined;
   };
   const stale = chunk => ({ status: 'stale', chunkId: chunk.id });
@@ -232,6 +246,28 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     return results;
   };
   const soloOptions = { ...options, chunkLeaseGuard: renewHeld };
+  const escalationGuard = chunk => async () => {
+    if (lostIds.has(chunk.id)) throw chunkLeaseLostError(chunk.id);
+    await renewHeld();
+    if (lostIds.has(chunk.id)) throw chunkLeaseLostError(chunk.id);
+    if (renewState.get(chunk.id) === 'unavailable') {
+      // No renewal available on this store: fall back to the status/worker check.
+      let latestChunk = chunk;
+      try {
+        if (store.getChunk) latestChunk = await store.getChunk(chunk.jobId, chunk.id);
+      } catch (_) {
+        latestChunk = chunk;
+      }
+      if (
+        !latestChunk
+        || latestChunk.abstractionStatus !== 'processing'
+        || (latestChunk.abstractionWorkerId && latestChunk.abstractionWorkerId !== workerId)
+      ) {
+        throw chunkLeaseLostError(chunk.id);
+      }
+    }
+    await options.modelCallGuard?.();
+  };
 
   let preparedItems;
   try {
@@ -254,7 +290,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     preparedItems = preparations.map(result => result.value);
     preparations.length = 0;
   } catch (err) {
-    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds })];
+    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds, renewHeld })];
   }
 
   const textItems = [];
@@ -295,7 +331,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
 
   try {
     const messages = buildAbstractMessagesForChunks(textItems, globalStart);
-    const payloadBytes = estimateRequestBytes(config.model, config.maxTokens, ABSTRACTION_PROMPT, messages);
+    const payloadBytes = estimateRequestBytes(model, config.maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
       if (textItems.length > 2) {
         const mid = Math.ceil(textItems.length / 2);
@@ -320,17 +356,17 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
           : [];
         return [...finished, ...visualResults, ...lostTextResults, ...leftResults, ...rightResults.filter(Boolean), ...rightDone];
       }
-      return [...finished, ...visualResults, ...lostTextResults, ...await fallbackToSingles(textItems.map(item => item.chunk), { ...soloOptions, workerId, leaseMs, maxAttempts }, 'payload_too_large', { held, lostIds })];
+      return [...finished, ...visualResults, ...lostTextResults, ...await fallbackToSingles(textItems.map(item => item.chunk), { ...soloOptions, workerId, leaseMs, maxAttempts }, 'payload_too_large', { held, lostIds, renewHeld })];
     }
 
     const batchMaxTokens = Math.min(config.maxTokens * textItems.length, 65536);
     const modelResult = await runModelAbstraction({
       messages,
-      model: config.model,
+      model,
       maxTokens: batchMaxTokens,
       payloadBytes,
-      escalationModel: config.escalationModel,
-      escalationMaxTokens: config.escalationMaxTokens,
+      escalationModel,
+      escalationMaxTokens,
       responseSchema: BATCH_ABSTRACT_RESPONSE_SCHEMA,
       options: {
         ...options,
@@ -339,6 +375,8 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
           await renewHeld();
           const lost = textItems.find(item => lostIds.has(item.chunk.id));
           if (lost) throw chunkLeaseLostError(lost.chunk.id);
+          if (!held.size) throw chunkLeaseLostError(null);
+          await options.modelCallGuard?.();
         },
       },
     });
@@ -346,38 +384,86 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     const perChunkPayload = Math.floor(payloadBytes / textItems.length);
     const batchResults = [];
     const fallbackChunks = [];
+    const noEscalateFallbackChunks = [];
     for (let i = 0; i < textItems.length; i++) {
       const item = textItems[i];
       const parsedItem = parsed[i];
       const text = String(parsedItem?.abstractText || '').trim();
       if (!text) {
+        item.payloadBytes = null;
         fallbackChunks.push(item.chunk);
         continue;
       }
+      const perChunkUsage = {
+        inputTokens: modelResult.usage.inputTokens != null
+          ? Math.floor(modelResult.usage.inputTokens / textItems.length)
+          : null,
+        outputTokens: modelResult.usage.outputTokens != null
+          ? Math.floor(modelResult.usage.outputTokens / textItems.length)
+          : null,
+      };
+      let finalText = text;
+      let finalModel = modelResult.model;
+      let finalPayloadBytes = perChunkPayload;
+      let finalUsage = perChunkUsage;
+      let escalationAttempted = false;
       try {
+        if (escalationEnabled) {
+          const assessment = evaluateAbstractEscalation(
+            text,
+            perChunkUsage,
+            config.maxTokens,
+            buildEscalationQualityContext(item.chunk, item.delivery),
+          );
+          if (assessment.shouldEscalate) {
+            escalationAttempted = true;
+            const escalated = await runChunkEscalation({
+              chunk: item.chunk,
+              payloadBytes: item.payloadBytes,
+              sequenceIndex: globalStart + i,
+              escalationModel,
+              escalationMaxTokens,
+              reasons: assessment.reasons,
+              mediaResolution: options.mediaResolution,
+              options: { ...options, modelCallGuard: escalationGuard(item.chunk) },
+            });
+            if (escalated.usage) {
+              finalUsage = addUsage(perChunkUsage, escalated.usage);
+            }
+            if (escalated.ok) {
+              finalText = escalated.text;
+              finalModel = escalated.model;
+              finalPayloadBytes = escalated.payloadBytes ?? finalPayloadBytes;
+            }
+          }
+        }
+        item.payloadBytes = null;
         const saved = await persistCompletedAbstract({
           store,
           chunk: item.chunk,
           workerId,
           sequenceIndex: globalStart + i,
-          abstractText: text,
-          modelUsed: modelResult.model,
-          payloadBytes: perChunkPayload,
-          usage: {
-            inputTokens: modelResult.usage.inputTokens != null
-              ? Math.floor(modelResult.usage.inputTokens / textItems.length)
-              : null,
-            outputTokens: modelResult.usage.outputTokens != null
-              ? Math.floor(modelResult.usage.outputTokens / textItems.length)
-              : null,
-          },
+          abstractText: finalText,
+          modelUsed: finalModel,
+          payloadBytes: finalPayloadBytes,
+          usage: finalUsage,
           latencyMs: Date.now() - startedAt,
           attemptCount: Math.max(1, Number(item.chunk.abstractionAttempts) || 1),
         });
         batchResults.push(saved);
         held.delete(item.chunk.id);
       } catch (err) {
-        fallbackChunks.push(item.chunk);
+        item.payloadBytes = null;
+        if (isChunkLeaseLostError(err)) {
+          held.delete(item.chunk.id);
+          batchResults.push({ status: 'stale', chunkId: item.chunk.id });
+          continue;
+        }
+        if (escalationAttempted) {
+          noEscalateFallbackChunks.push(item.chunk);
+        } else {
+          fallbackChunks.push(item.chunk);
+        }
       }
     }
     if (fallbackChunks.length) {
@@ -385,7 +471,16 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         fallbackChunks,
         { ...soloOptions, workerId, leaseMs, maxAttempts },
         `batch_parse_partial:${fallbackChunks.length}/${textItems.length}`,
-        { held, lostIds },
+        { held, lostIds, renewHeld },
+      );
+      batchResults.push(...partialResults);
+    }
+    if (noEscalateFallbackChunks.length) {
+      const partialResults = await fallbackToSingles(
+        noEscalateFallbackChunks,
+        { ...soloOptions, escalationEnabled: false, workerId, leaseMs, maxAttempts },
+        `batch_persist_partial:${noEscalateFallbackChunks.length}/${textItems.length}`,
+        { held, lostIds, renewHeld },
       );
       batchResults.push(...partialResults);
     }
@@ -399,7 +494,9 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       if (lostNow && lostIds.has(item.chunk.id)) results.push(stale(item.chunk));
       else rest.push(item.chunk);
     }
-    results.push(...await fallbackToSingles(rest, { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds }));
+    if (rest.length) {
+      results.push(...await fallbackToSingles(rest, { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds, renewHeld }));
+    }
     return [...finished, ...visualResults, ...lostTextResults, ...results];
   }
 }
@@ -431,15 +528,28 @@ async function fallbackToSingles(chunks, options, reason, lease = null) {
     reason,
   }));
   const results = [];
+  const pending = lease?.held || new Map(chunks.map(chunk => [chunk.id, chunk]));
+  const renewMs = callLeaseMs(options.leaseMs, options.upstreamTimeoutMs ?? getAbstractionConfig().upstreamTimeoutMs);
+  const guard = lease?.renewHeld || (async (activeChunk = null, activeLeaseMs = null) => {
+    const targets = activeChunk && !pending.has(activeChunk.id)
+      ? [...pending.values(), activeChunk]
+      : [...pending.values()];
+    const outcomes = await renewChunkLeases(options.store, targets, {
+      workerId: options.workerId,
+      leaseMs: Math.max(renewMs, Number(activeLeaseMs) || 0),
+    });
+    await options.chunkLeaseGuard?.();
+    return activeChunk ? outcomes.get(activeChunk.id) : undefined;
+  });
   for (const chunk of chunks) {
-    if (lease?.lostIds.has(chunk.id)) {
+    if (lease?.lostIds?.has(chunk.id)) {
       results.push({ status: 'stale', chunkId: chunk.id });
       continue;
     }
     try {
-      results.push(await processChunkAbstraction(chunk, options));
+      results.push(await processChunkAbstraction(chunk, { ...options, chunkLeaseGuard: guard }));
     } finally {
-      lease?.held.delete(chunk.id);
+      pending.delete(chunk.id);
     }
   }
   return results;

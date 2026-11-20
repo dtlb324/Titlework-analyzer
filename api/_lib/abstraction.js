@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { hasKeyIllegibleMarker, validateAbstractQuality } from '../../public/ocr-accuracy.js';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
 import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
 import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
@@ -9,6 +10,7 @@ import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured,
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const DEFAULT_ABSTRACT_MODEL = 'gemini-3.1-flash-lite';
+const DEFAULT_ESCALATION_MODEL = 'claude-sonnet-5-5';
 const REMOVED_ABSTRACT_MODELS = new Set(['claude-haiku-4-5', 'claude-3-5-haiku-20241022', 'claude-3-5-haiku-latest']);
 
 export function resolveAbstractModel() {
@@ -19,10 +21,16 @@ export function resolveAbstractModel() {
   return configured;
 }
 
+export function resolveEscalationModel() {
+  return String(process.env.ABSTRACT_ESCALATION_MODEL || DEFAULT_ESCALATION_MODEL).trim() || DEFAULT_ESCALATION_MODEL;
+}
+
+export function resolveEscalationMaxTokens() {
+  return clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
+}
+
 const ABSTRACT_MODEL = resolveAbstractModel();
 const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 2000, 512, 4096);
-const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'claude-sonnet-5-5';
-const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
 const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
 export const ABSTRACTION_WAVE_RAW_BYTES = 128_000_000;
@@ -67,11 +75,11 @@ export const ABSTRACTION_PROMPT = `You are an expert oil and gas title attorney 
 Respond in this exact format - no extra commentary:
 
 DOC TYPE: [type]
-DATE EXECUTED: [date or ILLEGIBLE - VERIFY MANUALLY]
-DATE RECORDED: [date or ILLEGIBLE - VERIFY MANUALLY]
-RECORDING REF: [Vol/Page or instrument number, or ILLEGIBLE - VERIFY MANUALLY]
-GRANTOR: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY]
-GRANTEE: [exact name(s) as written, or ILLEGIBLE - VERIFY MANUALLY, or "not applicable" only if this instrument type has no grantee]
+DATE EXECUTED: [date, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+DATE RECORDED: [date, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+RECORDING REF: [Vol/Page or instrument number, "unrecorded", "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTOR: [exact name(s) as written, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
+GRANTEE: [exact name(s) as written, "not applicable" if this instrument type has no grantee, "not stated", or ILLEGIBLE - VERIFY MANUALLY]
 LEGAL DESC: [quoted description, abbreviated if long - note survey type]
 SURFACE: [yes/no/unclear]
 MINERALS: [yes/no/unclear - fraction if stated]
@@ -85,15 +93,15 @@ ACKNOWLEDGMENT: [yes/no/unclear]
 ISSUES: [list any illegible text, marital property concerns, execution defects, ambiguities - or "none noted"]
 CONFIDENCE: [one sentence]
 
-Write ILLEGIBLE - VERIFY MANUALLY for any text you cannot read or any field whose value is not visible on the document. Never write "not visible", "N/A", or leave a field blank as a substitute — use ILLEGIBLE - VERIFY MANUALLY. Only use "not applicable" when a field genuinely does not exist for this instrument type. DO NOT GUESS or fill in missing information.`;
+Write ILLEGIBLE - VERIFY MANUALLY only for text that is present (or clipped/obscured) on the document but cannot be read clearly. Never write "not visible", "N/A", or leave a field blank as a substitute for unreadable text — use ILLEGIBLE - VERIFY MANUALLY. When the document is legible and a field is genuinely omitted, write "not stated" (or "unrecorded" for an unrecorded instrument's recording date/reference, or "not applicable" when a field genuinely does not exist for this instrument type). DO NOT GUESS or fill in missing information.`;
 
 export function getAbstractionConfig() {
   return {
     requestEnvelopeSafeBytes: REQUEST_ENVELOPE_SAFE_BYTES,
     model: ABSTRACT_MODEL,
     maxTokens: ABSTRACT_MAX_TOKENS,
-    escalationModel: ABSTRACT_ESCALATION_MODEL,
-    escalationMaxTokens: ABSTRACT_ESCALATION_MAX_TOKENS,
+    escalationModel: resolveEscalationModel(),
+    escalationMaxTokens: resolveEscalationMaxTokens(),
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
     upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
   };
@@ -628,14 +636,179 @@ export function estimateAbstractPayloadBytes(chunk, payloadBytes = null, deliver
   return Math.ceil(size * 1.37);
 }
 
+function sanitizeEscalationWarningMessage(message) {
+  let sanitized = sanitizeModelClientError(message);
+  for (const envKey of ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY']) {
+    const secret = process.env[envKey];
+    if (typeof secret === 'string' && secret.length >= 8) {
+      sanitized = sanitized.split(secret).join('[REDACTED]');
+    }
+  }
+  return sanitized.slice(0, 500);
+}
+
+function logEscalationFailure({ chunk = null, model, reasons = [], errorType, message }) {
+  try {
+    console.warn(JSON.stringify({
+      event: 'abstraction_escalation_failed',
+      jobId: chunk?.jobId ?? null,
+      chunkId: chunk?.id ?? null,
+      model,
+      reasons,
+      errorType,
+      message: sanitizeEscalationWarningMessage(message),
+    }));
+  } catch {
+  }
+}
+
+export function isAbstractionEscalationEnabled({ model, escalationModel, options = {}, responseSchema = null } = {}) {
+  return !responseSchema
+    && options?.escalationEnabled !== false
+    && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
+    && Boolean(escalationModel)
+    && escalationModel !== model;
+}
+
+export function buildEscalationQualityContext(chunk, delivery = null) {
+  const isCsv = chunk ? isCsvChunk(chunk) : false;
+  return {
+    isCsv,
+    documentText: !isCsv && delivery?.mode === 'text' ? (delivery.extractedText || null) : null,
+  };
+}
+
+export async function buildEscalationRequestForChunk({
+  chunk,
+  payloadBytes,
+  sequenceIndex = 0,
+  escalationModel = resolveEscalationModel(),
+  escalationMaxTokens = resolveEscalationMaxTokens(),
+}) {
+  const rawBytes = normalizeBytes(payloadBytes);
+  const delivery = await enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, rawBytes, escalationModel);
+  assertInlineVisualCanFit(chunk, rawBytes, delivery);
+  const messages = buildAbstractMessagesForChunk(chunk, rawBytes, sequenceIndex, delivery);
+  const requestBytes = estimateRequestBytes(escalationModel, escalationMaxTokens, ABSTRACTION_PROMPT, messages);
+  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+    const error = new Error(`Escalation request too large (${(requestBytes / 1024 / 1024).toFixed(1)} MB).`);
+    error.status = 413;
+    throw error;
+  }
+  return { messages, payloadBytes: requestBytes, delivery };
+}
+
+export async function runChunkEscalation({
+  chunk,
+  payloadBytes,
+  sequenceIndex = 0,
+  escalationModel = resolveEscalationModel(),
+  escalationMaxTokens = resolveEscalationMaxTokens(),
+  reasons = [],
+  mediaResolution = undefined,
+  options = {},
+}) {
+  const modelClient = getModelClient(options);
+  let guardError = null;
+  try {
+    const request = await buildEscalationRequestForChunk({
+      chunk,
+      payloadBytes,
+      sequenceIndex,
+      escalationModel,
+      escalationMaxTokens,
+    });
+    const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && messagesHaveVisualMedia(request.messages)
+      ? resolveGeminiMediaResolution(mediaResolution)
+      : null;
+    try {
+      await options.modelCallGuard?.();
+    } catch (err) {
+      guardError = err;
+      throw err;
+    }
+    const escalatedResponse = await modelClient({
+      model: escalationModel,
+      maxTokens: escalationMaxTokens,
+      system: ABSTRACTION_PROMPT,
+      messages: request.messages,
+      payloadBytes: request.payloadBytes,
+      escalation: true,
+      ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
+    });
+    const usage = extractUsage(escalatedResponse?.usage);
+    if (escalatedResponse?.stopReason === 'max_tokens') {
+      logEscalationFailure({
+        chunk,
+        model: escalationModel,
+        reasons,
+        errorType: 'output_truncated',
+        message: 'Escalated model output was truncated at the token limit (max_tokens).',
+      });
+      return {
+        ok: false,
+        truncated: true,
+        usage,
+        response: escalatedResponse,
+        payloadBytes: request.payloadBytes,
+      };
+    }
+    const text = String(escalatedResponse?.text || '').trim();
+    if (!text) {
+      logEscalationFailure({
+        chunk,
+        model: escalationModel,
+        reasons,
+        errorType: 'empty_output',
+        message: 'Escalated model returned empty output.',
+      });
+      return {
+        ok: false,
+        truncated: false,
+        usage,
+        response: escalatedResponse,
+        payloadBytes: request.payloadBytes,
+      };
+    }
+    return {
+      ok: true,
+      text: escalatedResponse.text || '',
+      model: escalatedResponse.model || escalationModel,
+      usage,
+      payloadBytes: request.payloadBytes,
+      deliveryMode: request.delivery.mode,
+      stopReason: escalatedResponse.stopReason || null,
+    };
+  } catch (err) {
+    if (guardError) throw guardError;
+    logEscalationFailure({
+      chunk,
+      model: escalationModel,
+      reasons,
+      errorType: classifyError(err),
+      message: err?.message || String(err),
+    });
+    return {
+      ok: false,
+      truncated: false,
+      usage: null,
+      error: err,
+    };
+  }
+}
+
 export async function runModelAbstraction({
   messages,
   model,
   maxTokens,
   payloadBytes,
-  escalationModel = ABSTRACT_ESCALATION_MODEL,
-  escalationMaxTokens = ABSTRACT_ESCALATION_MAX_TOKENS,
+  escalationModel = resolveEscalationModel(),
+  escalationMaxTokens = resolveEscalationMaxTokens(),
   responseSchema = null,
+  chunk = null,
+  rawPayloadBytes = null,
+  sequenceIndex = 0,
+  escalationContext = {},
   mediaResolution = undefined,
   options = {},
 }) {
@@ -658,31 +831,95 @@ export async function runModelAbstraction({
     ...(mediaResolutionForModel ? { mediaResolution: mediaResolutionForModel } : {}),
   });
   let usage = extractUsage(response.usage);
-  const escalationEnabled = !responseSchema
-    && options.escalationEnabled !== false
-    && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
-    && escalationModel
-    && escalationModel !== model;
+  let finalPayloadBytes = payloadBytes;
+  const escalationEnabled = isAbstractionEscalationEnabled({ model, escalationModel, options, responseSchema });
+  const assessment = escalationEnabled
+    ? evaluateAbstractEscalation(response.text, usage, maxTokens, escalationContext)
+    : { shouldEscalate: false, reasons: [], quality: null };
   let escalated = false;
-  if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
-    const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && hasVisualMedia
-      ? resolveGeminiMediaResolution(mediaResolution)
-      : null;
-    if (guard) await guard();
-    try {
-      const escalatedResponse = await modelClient({
-        model: escalationModel,
-        maxTokens: escalationMaxTokens,
-        system: ABSTRACTION_PROMPT,
-        messages,
-        payloadBytes,
-        escalation: true,
-        ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
+
+  if (escalationEnabled && assessment.shouldEscalate) {
+    if (chunk && rawPayloadBytes != null) {
+      const escalatedResult = await runChunkEscalation({
+        chunk,
+        payloadBytes: rawPayloadBytes,
+        sequenceIndex,
+        escalationModel,
+        escalationMaxTokens,
+        reasons: assessment.reasons,
+        mediaResolution,
+        options,
       });
-      usage = addUsage(usage, extractUsage(escalatedResponse.usage));
-      response = escalatedResponse;
-      escalated = true;
-    } catch (_) {
+      if (escalatedResult.usage) {
+        usage = addUsage(usage, escalatedResult.usage);
+      }
+      if (escalatedResult.ok) {
+        response = {
+          text: escalatedResult.text,
+          model: escalatedResult.model,
+          stopReason: escalatedResult.stopReason,
+        };
+        finalPayloadBytes = escalatedResult.payloadBytes ?? finalPayloadBytes;
+        escalated = true;
+      } else if (escalatedResult.truncated) {
+        response = escalatedResult.response;
+        finalPayloadBytes = escalatedResult.payloadBytes ?? finalPayloadBytes;
+        escalated = true;
+      }
+    } else {
+      const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && hasVisualMedia
+        ? resolveGeminiMediaResolution(mediaResolution)
+        : null;
+      let guardError = null;
+      try {
+        try {
+          if (guard) await guard();
+        } catch (err) {
+          guardError = err;
+          throw err;
+        }
+        const escalatedResponse = await modelClient({
+          model: escalationModel,
+          maxTokens: escalationMaxTokens,
+          system: ABSTRACTION_PROMPT,
+          messages,
+          payloadBytes,
+          escalation: true,
+          ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
+        });
+        usage = addUsage(usage, extractUsage(escalatedResponse.usage));
+        if (escalatedResponse?.stopReason === 'max_tokens') {
+          logEscalationFailure({
+            chunk,
+            model: escalationModel,
+            reasons: assessment.reasons,
+            errorType: 'output_truncated',
+            message: 'Escalated model output was truncated at the token limit (max_tokens).',
+          });
+          response = escalatedResponse;
+          escalated = true;
+        } else if (String(escalatedResponse?.text || '').trim()) {
+          response = escalatedResponse;
+          escalated = true;
+        } else {
+          logEscalationFailure({
+            chunk,
+            model: escalationModel,
+            reasons: assessment.reasons,
+            errorType: 'empty_output',
+            message: 'Escalated model returned empty output.',
+          });
+        }
+      } catch (err) {
+        if (guardError) throw guardError;
+        logEscalationFailure({
+          chunk,
+          model: escalationModel,
+          reasons: assessment.reasons,
+          errorType: classifyError(err),
+          message: err?.message || String(err),
+        });
+      }
     }
   }
   if (response.stopReason === 'max_tokens') {
@@ -695,6 +932,8 @@ export async function runModelAbstraction({
     model: response.model || model,
     usage,
     escalated,
+    escalationReasons: escalated ? assessment.reasons : [],
+    payloadBytes: finalPayloadBytes,
   };
 }
 
@@ -767,20 +1006,46 @@ function sumNullableTokenCounts(a, b) {
   return (a || 0) + (b || 0);
 }
 
-function addUsage(left, right) {
+export function addUsage(left, right) {
   return {
     inputTokens: sumNullableTokenCounts(left?.inputTokens, right?.inputTokens),
     outputTokens: sumNullableTokenCounts(left?.outputTokens, right?.outputTokens),
   };
 }
 
-export function shouldEscalateAbstract(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS) {
+export function evaluateAbstractEscalation(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS, context = {}) {
   const value = String(text || '').trim();
-  if (!value) return true;
-  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(value)) return true;
-  if (/CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value)) return true;
-  const outputTokens = Number(usage.outputTokens ?? usage.output_tokens ?? 0);
-  return Number.isFinite(outputTokens) && maxTokens > 0 && outputTokens >= Math.floor(maxTokens * 0.9);
+  const reasons = [];
+  if (!value) {
+    reasons.push('empty_output');
+  } else {
+    if (!context?.isCsv && hasKeyIllegibleMarker(value)) {
+      reasons.push('illegible_marker');
+    }
+    if (/CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value)) {
+      reasons.push('low_confidence');
+    }
+  }
+  const outputTokens = Number(usage?.outputTokens ?? usage?.output_tokens ?? 0);
+  if (Number.isFinite(outputTokens) && maxTokens > 0 && outputTokens >= Math.floor(maxTokens * 0.9)) {
+    reasons.push('near_token_limit');
+  }
+  let quality = null;
+  if (value && context?.checkStructure !== false && !context?.isCsv) {
+    quality = validateAbstractQuality(value, { documentText: context?.documentText ?? null });
+    for (const reason of quality.reasons) {
+      reasons.push(reason);
+    }
+  }
+  return {
+    shouldEscalate: reasons.length > 0,
+    reasons,
+    quality,
+  };
+}
+
+export function shouldEscalateAbstract(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS, context = {}) {
+  return evaluateAbstractEscalation(text, usage, maxTokens, context).shouldEscalate;
 }
 
 export function stripDocumentLabel(text, docNum) {
@@ -945,11 +1210,12 @@ export async function processChunkAbstraction(chunk, options = {}) {
     };
   }
   const processingChunk = claimedChunk;
+  const upstreamTimeoutMs = options.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS;
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
   const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';
 
   // Renew this chunk's lease before every billable call; stop before paying if another worker owns it now.
-  const renewLeaseMs = callLeaseMs(leaseMs, UPSTREAM_TIMEOUT_MS);
+  const renewLeaseMs = callLeaseMs(leaseMs, upstreamTimeoutMs);
   const modelCallGuard = async () => {
     if (typeof options.chunkLeaseGuard === 'function') {
       const outcome = await options.chunkLeaseGuard(processingChunk, renewLeaseMs);
@@ -1039,18 +1305,24 @@ export async function processChunkAbstraction(chunk, options = {}) {
       model,
       maxTokens,
       payloadBytes,
-      escalationModel: options.escalationModel || ABSTRACT_ESCALATION_MODEL,
-      escalationMaxTokens: options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS,
+      escalationModel: options.escalationModel ?? resolveEscalationModel(),
+      escalationMaxTokens: options.escalationMaxTokens ?? resolveEscalationMaxTokens(),
+      chunk: processingChunk,
+      rawPayloadBytes: payload.bytes,
+      sequenceIndex,
+      escalationContext: buildEscalationQualityContext(processingChunk, delivery),
       mediaResolution: options.mediaResolution,
       options: { ...options, modelCallGuard },
     });
+    const finalPayloadBytes = modelResult.payloadBytes ?? payloadBytes;
     logChunkStage('model_response', processingChunk, {
       workerId,
       attemptCount,
       modelUsed: modelResult.model,
-      payloadBytes,
+      payloadBytes: finalPayloadBytes,
       deliveryMode: delivery.mode,
       escalated: modelResult.escalated,
+      ...(modelResult.escalated ? { escalationReasons: modelResult.escalationReasons } : {}),
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
     const saved = await persistCompletedAbstract({
@@ -1060,13 +1332,13 @@ export async function processChunkAbstraction(chunk, options = {}) {
       sequenceIndex,
       abstractText: modelResult.text,
       modelUsed: modelResult.model,
-      payloadBytes,
+      payloadBytes: finalPayloadBytes,
       usage: modelResult.usage,
       latencyMs: Date.now() - startedAt,
       attemptCount,
     });
     if (saved.status === 'completed') {
-      logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
+      logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes: finalPayloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
     }
     return saved;
   } catch (err) {
