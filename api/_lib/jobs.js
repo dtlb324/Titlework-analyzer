@@ -1675,6 +1675,25 @@ function createPostgresJobStore() {
       return rowToChunk(rows[0]);
     },
 
+    async renewChunkAbstractionLeases(jobId, chunkIds, options = {}) {
+      const ids = Array.from(new Set((chunkIds || []).filter(Boolean))).sort();
+      if (!ids.length) return [];
+      await ensureSchema();
+      const leaseSeconds = Math.max(1, Math.ceil(Number(options.leaseMs || 90000) / 1000));
+      const rows = await sql`
+        UPDATE document_chunks
+        SET
+          abstraction_lease_expires_at = now() + make_interval(secs => ${leaseSeconds}),
+          updated_at = now()
+        WHERE job_id = ${jobId}
+          AND id = ANY(${ids}::text[])
+          AND abstraction_status = 'processing'
+          AND abstraction_worker_id = ${options.workerId ?? null}::text
+        RETURNING *
+      `;
+      return rows.map(rowToChunk);
+    },
+
     async markChunkAbstractionRetryWait(jobId, chunkId, failure) {
       await ensureSchema();
       const retryAt = failure?.retryAtIso ? new Date(failure.retryAtIso) : null;

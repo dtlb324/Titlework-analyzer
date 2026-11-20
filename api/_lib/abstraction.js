@@ -1125,13 +1125,18 @@ export async function processChunkAbstraction(chunk, options = {}) {
   }
   const processingChunk = claimedChunk;
   const upstreamTimeoutMs = options.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS;
+  const renewLeaseMs = callLeaseMs(leaseMs, upstreamTimeoutMs);
   const ownGuard = async () => {
+    if (typeof options.chunkLeaseGuard === 'function') {
+      const state = await options.chunkLeaseGuard(processingChunk, renewLeaseMs);
+      if (state === 'lost') throw chunkLeaseLostError(processingChunk.id);
+      if (state !== undefined) return;
+    }
     const state = await renewChunkLease(store, processingChunk, {
       workerId,
-      leaseMs: callLeaseMs(leaseMs, upstreamTimeoutMs),
+      leaseMs: renewLeaseMs,
     });
     if (state === 'lost') throw chunkLeaseLostError(processingChunk.id);
-    await options.chunkLeaseGuard?.();
   };
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
   const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';

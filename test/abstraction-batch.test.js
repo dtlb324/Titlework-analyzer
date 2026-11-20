@@ -725,7 +725,7 @@ function stealChunk(store, clock, id, leaseMs = 3_600_000) {
 // Records every claim, renewal, save and paid model call of one processMultiChunkAbstraction run in `events`.
 async function runLeaseBatch({
   count = 3, flagged = [], renew = true, firstLeaseMs = 150, tier1Throws = false, tier1Ms = 200, soloMs = 0, sonnetMs = 0,
-  storeOpts = {}, prepareStore = null, onLoad = null, onModelCall = null, workerBPolls = false,
+  soloFlagged = false, storeOpts = {}, prepareStore = null, onLoad = null, onModelCall = null, workerBPolls = false,
 } = {}) {
   const pdf = await makeBatchTextPdf('WARRANTY DEED: Grantor Alice One conveys to Grantee Mary Jones.');
   const flaggedIdx = new Set(flagged);
@@ -752,7 +752,7 @@ async function runLeaseBatch({
       return renewFn(jobId, id, opts);
     };
   }
-  prepareStore?.(store, events);
+  prepareStore?.(store, events, clock);
   const bClaims = new Set();
   const workerBPoll = async () => {
     if (!workerBPolls) return;
@@ -795,7 +795,12 @@ async function runLeaseBatch({
       await onModelCall?.({ phase: 'solo', id, store, clock });
       clock.t += soloMs;
       await workerBPoll();
-      return { text: cleanBatchAbstract(`Solo ${id}`), model: 'gemini-3.1-flash-lite', usage: {} };
+      const soloText = cleanBatchAbstract(`Solo ${id}`);
+      return {
+        text: soloFlagged ? soloText.replace('RECORDING REF: Vol 1, Page 2', LEASE_FLAG) : soloText,
+        model: 'gemini-3.1-flash-lite',
+        usage: {},
+      };
     },
   });
   const paidCalls = events.filter(e => LEASE_COUNTED.some(prefix => e.startsWith(prefix)));
@@ -952,6 +957,171 @@ test('lease: a pending chunk stolen during whole-batch fallback is skipped, not 
   assert(!events.includes('solo:chk_2') && !events.includes('sonnet:chk_2'), 'No paid call may be made for the stolen chunk');
   assert(!store.abstracts.has('chk_2') && store.chunks.get('chk_2').abstractionWorkerId === 'wkr_B', 'B keeps the stolen chunk and nothing is persisted for it');
   assert(events.indexOf('renew:chk_2') !== -1 && events.indexOf('renew:chk_2') < events.indexOf('solo:chk_1'), 'The pending chunk was still renewed before the next solo');
+});
+
+function attachBulkLeaseRenewal(store, clock, bulkCalls = [], events = null) {
+  store.renewChunkAbstractionLeases = async (_jobId, chunkIds, opts = {}) => {
+    bulkCalls.push({ chunkIds: [...chunkIds], leaseMs: opts.leaseMs });
+    events?.push(`bulkRenew:${chunkIds.join(',')}`);
+    const renewed = [];
+    for (const id of chunkIds) {
+      const c = store.chunks.get(id);
+      if (!c || c.abstractionStatus !== 'processing' || c.abstractionWorkerId !== opts.workerId) continue;
+      const updated = { ...c, abstractionLeaseExpiresAt: clock.t + opts.leaseMs };
+      store.chunks.set(id, updated);
+      renewed.push(updated);
+    }
+    return renewed;
+  };
+  store.renewChunkAbstractionLease = async () => {
+    throw new Error('singular renewChunkAbstractionLease must not be called when bulk renewal exists');
+  };
+}
+
+test('lease (#150 double-bill edge): persist-failed escalated chunk stays renewed during first fallback list and never double-bills Sonnet', async () => {
+  const pdf = await makeBatchTextPdf('WARRANTY DEED: Grantor Alice One conveys to Grantee Mary Jones.');
+  const chunks = Array.from({ length: 4 }, (_, i) => makeChunk(`chk_${i}`, pdf.byteLength, { chunkOrder: i, abstractionAttempts: 0 }));
+  const clock = { t: 1_000_000 };
+  const store = createLeaseStore(chunks, clock, { renew: false });
+  const bulkCalls = [];
+  const events = [];
+  attachBulkLeaseRenewal(store, clock, bulkCalls, events);
+
+  let chk1PersistThrows = 0;
+  const realSave = store.saveDocumentAbstract;
+  store.saveDocumentAbstract = async record => {
+    if (record.chunkId === 'chk_1' && chk1PersistThrows === 0) {
+      chk1PersistThrows += 1;
+      events.push('saveFail:chk_1');
+      throw new Error('transient persist error');
+    }
+    const saved = await realSave(record);
+    events.push(`save:${record.chunkId}:${saved ? 'ok' : 'null'}`);
+    return saved;
+  };
+
+  const bClaims = new Set();
+  const workerBPoll = async () => {
+    for (const c of chunks) {
+      if (bClaims.has(c.id)) continue;
+      const got = await store.claimChunkForAbstraction('job_1', c.id, { workerId: 'wkr_B', leaseMs: 90_000 });
+      if (got) bClaims.add(c.id);
+    }
+  };
+
+  let tier1Calls = 0;
+  const sonnetCalls = [];
+  const results = await quietWarnings(() => processMultiChunkAbstraction(chunks, {
+    store,
+    workerId: 'wkr_A',
+    leaseMs: 150,
+    blobLoader: async () => ({ bytes: pdf, mediaType: 'application/pdf' }),
+    modelClient: async req => {
+      if (req.escalation) {
+        const id = currentEscChunk(req, chunks);
+        sonnetCalls.push(id);
+        events.push(`sonnet:${id}`);
+        clock.t += 45_000;
+        await workerBPoll();
+        return { text: cleanBatchAbstract('Sonnet Owner', 'Sonnet verified.'), model: 'claude-sonnet-5-5', usage: {} };
+      }
+      tier1Calls += 1;
+      if (tier1Calls === 1) {
+        events.push('tier1');
+        clock.t += 200;
+        await workerBPoll();
+        // chk_0 and chk_3 fail parse (fallbackChunks); chk_1 escalates then fails persist once (noEscalateFallbackChunks); chk_2 persists.
+        return {
+          text: JSON.stringify([
+            '',
+            cleanBatchAbstract('Owner 1').replace('RECORDING REF: Vol 1, Page 2', LEASE_FLAG),
+            cleanBatchAbstract('Owner 2'),
+            '',
+          ]),
+          model: 'gemini-3.1-flash-lite',
+          usage: {},
+        };
+      }
+      const id = currentEscChunk(req, chunks);
+      events.push(`solo:${id}`);
+      // Two slow 200s solos total 400s (> 300s callLeaseMs), so chk_1 in the second fallback list would expire without renewal.
+      clock.t += 200_000;
+      await workerBPoll();
+      return { text: cleanBatchAbstract(`Solo ${id}`), model: 'gemini-3.1-flash-lite', usage: {} };
+    },
+  }));
+
+  assert(chk1PersistThrows === 1, 'Expected chk_1 persist failure to push it into noEscalateFallbackChunks');
+  assert(bClaims.size === 0, `Worker B must never reclaim waiting noEscalateFallbackChunks, stole: ${[...bClaims].join(',')}`);
+  assertOneResultPerChunk(results, chunks);
+  assert(results.every(r => r.status === 'completed'), `Expected all completed, got ${JSON.stringify(results.map(r => [r.chunkId, r.status]))}`);
+  assert(sonnetCalls.filter(id => id === 'chk_1').length === 1, `Expected Sonnet billed exactly once for chk_1, got ${JSON.stringify(sonnetCalls)}`);
+  const idxSolo0 = events.indexOf('solo:chk_0');
+  const idxSolo3 = events.indexOf('solo:chk_3');
+  const renewsDuringFirstList = bulkCalls.slice(2, 4).filter(c => c.chunkIds.includes('chk_1'));
+  assert(idxSolo0 !== -1 && idxSolo3 > idxSolo0 && renewsDuringFirstList.length === 2, `Expected chk_1 renewed during both fallbackChunks solos, got ${JSON.stringify(bulkCalls)}`);
+  assert(store.abstracts.size === 4 && [...store.abstracts.values()].every(a => a.workerId === 'wkr_A'), 'All abstracts saved by wkr_A');
+});
+
+test('lease: bulk renewal keeps 24-chunk flagged batch linear (25 DB calls, 0 singular) and prevents steals', async () => {
+  const bulkCalls = [];
+  const { results, store, events, bClaims, chunks } = await runLeaseBatch({
+    count: 24,
+    flagged: Array.from({ length: 24 }, (_, i) => i),
+    firstLeaseMs: 150,
+    sonnetMs: 45_000,
+    workerBPolls: true,
+    renew: false,
+    prepareStore: (st, ev, clock) => attachBulkLeaseRenewal(st, clock, bulkCalls, ev),
+  });
+  assert(bClaims.size === 0, `Worker B must never steal a chunk, reclaimed: ${[...bClaims].join(',')}`);
+  assertOneResultPerChunk(results, chunks);
+  assert(results.every(r => r.status === 'completed'), 'Expected all 24 chunks completed');
+  assert(bulkCalls.length === 25, `Expected 25 bulk renewals (1 Tier-1 + 24 escalations), got ${bulkCalls.length}`);
+  assert(events.filter(e => e.startsWith('sonnet:')).length === 24, 'Expected 24 Sonnet escalations');
+  assert(store.abstracts.size === 24, 'All 24 abstracts persisted');
+});
+
+test('lease: bulk renewal keeps 48-chunk fallback with escalations linear (97 DB calls, 0 steals)', async () => {
+  const bulkCalls = [];
+  const { results, store, events, bClaims, chunks } = await quietWarnings(() => runLeaseBatch({
+    count: 48,
+    firstLeaseMs: 150,
+    tier1Throws: true,
+    soloFlagged: true,
+    soloMs: 45_000,
+    sonnetMs: 45_000,
+    workerBPolls: true,
+    renew: false,
+    prepareStore: (st, ev, clock) => attachBulkLeaseRenewal(st, clock, bulkCalls, ev),
+  }));
+  assert(bClaims.size === 0, `Worker B must never steal a chunk, reclaimed: ${[...bClaims].join(',')}`);
+  assertOneResultPerChunk(results, chunks);
+  assert(results.every(r => r.status === 'completed'), 'Expected all 48 chunks completed');
+  assert(bulkCalls.length === 97, `Expected 97 bulk renewals (1 batch + 48*2 solo/escalation), got ${bulkCalls.length}`);
+  assert(events.filter(e => e.startsWith('sonnet:')).length === 48, 'Expected 48 Sonnet escalations');
+  assert(store.abstracts.size === 48, 'All 48 abstracts persisted');
+});
+
+test('lease: bulk renewal detects a stolen chunk and returns stale without a Sonnet call', async () => {
+  const bulkCalls = [];
+  const { results, store, events, chunks } = await runLeaseBatch({
+    count: 3,
+    flagged: [1],
+    firstLeaseMs: 90_000,
+    renew: false,
+    prepareStore: (st, ev, clock) => attachBulkLeaseRenewal(st, clock, bulkCalls, ev),
+    onModelCall: ({ phase, store: st, clock }) => {
+      if (phase === 'tier1') stealChunk(st, clock, 'chk_1');
+    },
+  });
+  assertOneResultPerChunk(results, chunks);
+  const status = Object.fromEntries(results.map(r => [r.chunkId, r.status]));
+  assert(status.chk_1 === 'stale', `Stolen chunk must be stale, got ${status.chk_1}`);
+  assert(status.chk_0 === 'completed' && status.chk_2 === 'completed', `Other chunks must complete, got ${JSON.stringify(status)}`);
+  assert(!events.includes('sonnet:chk_1'), 'Stolen chunk must not be escalated to Sonnet');
+  assert(!store.abstracts.has('chk_1') && store.chunks.get('chk_1').abstractionWorkerId === 'wkr_B', 'wkr_B keeps chk_1');
+  assert(bulkCalls.length > 0, 'Expected bulk renewal calls');
 });
 
 let passed = 0;

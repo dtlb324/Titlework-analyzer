@@ -1,5 +1,5 @@
 
-import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
+import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLeases } from './abstraction-lease.js';
 import {
   ABSTRACTION_PROMPT,
   BATCH_ABSTRACT_RESPONSE_SCHEMA,
@@ -196,22 +196,29 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   const escalationMaxTokens = options.escalationMaxTokens ?? resolveEscalationMaxTokens();
   const escalationEnabled = isAbstractionEscalationEnabled({ model, escalationModel, options });
 
-  // Leases this worker still holds. Every paid call renews all of them: a flagged chunk's Sonnet call can run
-  // for minutes while the other chunks wait in the loop.
-  const held = new Set(ready.map(entry => entry.chunk.id));
+  // Leases this worker still holds. Every paid call renews all of them in one batch: a flagged chunk's
+  // Sonnet call or an earlier fallback solo can run for minutes while other chunks wait their turn.
+  const held = new Map(ready.map(entry => [entry.chunk.id, entry.chunk]));
   const lostIds = new Set();
   const renewState = new Map();
   const renewMs = callLeaseMs(leaseMs, options.upstreamTimeoutMs ?? config.upstreamTimeoutMs);
-  const renewHeld = async () => {
-    for (const entry of ready) {
-      if (!held.has(entry.chunk.id)) continue;
-      const state = await renewChunkLease(store, entry.chunk, { workerId, leaseMs: renewMs });
-      renewState.set(entry.chunk.id, state);
-      if (state === 'lost') {
-        lostIds.add(entry.chunk.id);
-        held.delete(entry.chunk.id);
+  const renewHeld = async (activeChunk = null, activeLeaseMs = null) => {
+    const targets = activeChunk && !held.has(activeChunk.id)
+      ? [...held.values(), activeChunk]
+      : [...held.values()];
+    const outcomes = await renewChunkLeases(store, targets, {
+      workerId,
+      leaseMs: Math.max(renewMs, Number(activeLeaseMs) || 0),
+    });
+    for (const [id, state] of outcomes) {
+      renewState.set(id, state);
+      if (state === 'lost' && held.has(id)) {
+        lostIds.add(id);
+        held.delete(id);
       }
     }
+    await options.chunkLeaseGuard?.();
+    return activeChunk ? outcomes.get(activeChunk.id) : undefined;
   };
   const tier1Guard = async () => {
     await renewHeld();
@@ -219,6 +226,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     await options.modelCallGuard?.();
   };
   const escalationGuard = chunk => async () => {
+    if (lostIds.has(chunk.id)) throw chunkLeaseLostError(chunk.id);
     await renewHeld();
     if (lostIds.has(chunk.id)) throw chunkLeaseLostError(chunk.id);
     if (renewState.get(chunk.id) === 'unavailable') {
@@ -268,17 +276,21 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
       if (ready.length > 2) {
         const mid = Math.ceil(ready.length / 2);
+        const leftChunks = ready.slice(0, mid).map(entry => entry.chunk);
+        const rightChunks = ready.slice(mid).map(entry => entry.chunk);
+        for (const chunk of leftChunks) held.delete(chunk.id);
         const leftResults = await processMultiChunkAbstraction(
-          ready.slice(0, mid).map(entry => entry.chunk),
-          { ...options, globalStart, workerId, leaseMs, maxAttempts },
+          leftChunks,
+          { ...options, chunkLeaseGuard: renewHeld, globalStart, workerId, leaseMs, maxAttempts },
         );
+        for (const chunk of rightChunks) held.delete(chunk.id);
         const rightResults = await processMultiChunkAbstraction(
-          ready.slice(mid).map(entry => entry.chunk),
+          rightChunks,
           { ...options, globalStart: globalStart + mid, workerId, leaseMs, maxAttempts },
         );
         return [...finished, ...leftResults, ...rightResults];
       }
-      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, 'payload_too_large')];
+      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, 'payload_too_large', { held, renewHeld })];
     }
 
     const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
@@ -382,6 +394,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         fallbackChunks,
         { ...options, workerId, leaseMs, maxAttempts },
         `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
+        { held, renewHeld },
       );
       batchResults.push(...partialResults);
     }
@@ -390,6 +403,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         noEscalateFallbackChunks,
         { ...options, escalationEnabled: false, workerId, leaseMs, maxAttempts },
         `batch_persist_partial:${noEscalateFallbackChunks.length}/${preparedItems.length}`,
+        { held, renewHeld },
       );
       batchResults.push(...partialResults);
     }
@@ -399,31 +413,37 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       // Every chunk of this batch was reclaimed before the first paid call. Nothing was billed.
       return [...finished, ...ready.map(entry => ({ status: 'stale', chunkId: entry.chunk.id }))];
     }
-    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err))];
+    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, renewHeld })];
   }
 }
 
-async function fallbackToSingles(chunks, options, reason) {
+async function fallbackToSingles(chunks, options, reason, lease = null) {
   console.warn(JSON.stringify({
     event: 'abstraction_batch_fallback',
     chunkIds: chunks.map(chunk => chunk.id),
     reason,
   }));
   const results = [];
-  const pending = new Set(chunks.map(chunk => chunk.id));
+  const pending = lease?.held || new Map(chunks.map(chunk => [chunk.id, chunk]));
   const renewMs = callLeaseMs(options.leaseMs, options.upstreamTimeoutMs ?? getAbstractionConfig().upstreamTimeoutMs);
+  const guard = lease?.renewHeld || (async (activeChunk = null, activeLeaseMs = null) => {
+    const targets = activeChunk && !pending.has(activeChunk.id)
+      ? [...pending.values(), activeChunk]
+      : [...pending.values()];
+    const outcomes = await renewChunkLeases(options.store, targets, {
+      workerId: options.workerId,
+      leaseMs: Math.max(renewMs, Number(activeLeaseMs) || 0),
+    });
+    await options.chunkLeaseGuard?.();
+    return activeChunk ? outcomes.get(activeChunk.id) : undefined;
+  });
   for (const chunk of chunks) {
-    pending.delete(chunk.id);
-    // Keep the leases of the chunks still waiting their turn alive while this one is paid for. A lost lease here is
-    // ignored: that chunk's own claim returns null later and it is reported skipped.
-    const chunkLeaseGuard = async () => {
-      for (const other of chunks) {
-        if (!pending.has(other.id)) continue;
-        await renewChunkLease(options.store, other, { workerId: options.workerId, leaseMs: renewMs });
-      }
-      await options.chunkLeaseGuard?.();
-    };
-    results.push(await processChunkAbstraction(chunk, { ...options, chunkLeaseGuard }));
+    // Keep all waiting fallback chunks (including those queued in a later fallback list) alive while this one runs.
+    try {
+      results.push(await processChunkAbstraction(chunk, { ...options, chunkLeaseGuard: guard }));
+    } finally {
+      pending.delete(chunk.id);
+    }
   }
   return results;
 }
