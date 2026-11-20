@@ -9,17 +9,79 @@
 
 # Titlework Analyzer
 
-Titlework Analyzer is a web app for oil and gas landmen. It reads courthouse PDFs and images, builds a chain of title, and drafts a mineral ownership opinion. The page heading is Mineral Ownership Builder. The browser tab title is Mineral Title Analyzer. The npm package name is `title-analyzer`.
+Titlework Analyzer is a self-hosted web app for oil and gas landmen. Upload courthouse PDFs, CSVs, and scanned document images to extract structured abstracts, assemble a chain of title, and draft a mineral ownership opinion with follow-up Q&A.
 
-`gemini-3.1-flash-lite` abstracts each document. On a large job it also writes the partial segment summaries. `claude-sonnet-5-5` writes the final opinion and answers follow-up questions.
+- **Naming:** The page heading is **Mineral Ownership Builder**, the browser tab title is **Mineral Title Analyzer**, and the npm package name is `title-analyzer`.
+- **Self-hosted only:** There is no public hosted instance. Clone the repo to run locally or deploy your own copy to Google Cloud Run.
+- **Analytical aid only:** Output is an analytical aid, not a formal title opinion. Verify all conclusions against the source instruments before drilling, leasing, or division order decisions.
+- **Runtime:** Node.js 26.x (`package.json` engines; CI and `Dockerfile` pin Node.js 26.13.0; no `.nvmrc`).
 
-There is no public hosted instance. Run it locally or deploy your own copy; the Google Cloud setup below is for your own project.
+## Contents
 
-The page calls the result an analytical aid, not a formal title opinion. Check it against the source documents before a drilling, leasing, or division order decision.
+- [Architecture & how it works](#architecture--how-it-works)
+- [Quick start: clone and run tests](#quick-start-clone-and-run-tests)
+- [Run locally (full app)](#run-locally-full-app)
+- [Route models through OpenRouter](#route-models-through-openrouter)
+- [Deploy to Google Cloud Run (optional)](#deploy-to-google-cloud-run-optional)
+- [Environment variables](#environment-variables)
+- [Troubleshooting](#troubleshooting)
+- [Cost and spend controls](#cost-and-spend-controls)
+- [Security](#security)
+- [Repository layout](#repository-layout)
+- [License](#license)
 
-`package.json` accepts Node.js 26.x. There is no `.nvmrc`. CI and `Dockerfile` pin Node.js 26.13.0.
+---
 
-## Clone and test
+## Architecture & how it works
+
+Titlework Analyzer is built with **Node.js 26 ESM and zero web framework** (`node:http`). Two services share one container image and coordinate through Neon Postgres and a private Google Cloud Storage (GCS) bucket:
+
+```mermaid
+flowchart LR
+  Browser["Browser UI (public/index.html)"]
+  API["API & Static Server (server.js)"]
+  Worker["Background Worker (worker.js)"]
+  GCS["Private GCS Bucket"]
+  Neon["Neon Postgres"]
+  Gemini["Gemini 3.1 Flash-Lite"]
+  Claude["Claude Sonnet 5.5"]
+
+  Browser -->|"1. Create job & request signed PUT"| API
+  Browser -->|"2. Upload raw PDFs / images / CSVs"| GCS
+  API <-->|"Job state, chunks, abstracts, results"| Neon
+  Worker <-->|"Lease-guarded chunk & segment claims"| Neon
+  Worker -->|"Read source bytes"| GCS
+  API -.->|"Optional bounded kick when tab is open"| Neon
+  Worker -->|"Abstracts & partial synthesis"| Gemini
+  Worker -->|"Escalation re-reads, final merge & follow-ups"| Claude
+```
+
+### Services and storage
+
+- **`server.js` (API & frontend):** Serves the single-page app (`public/index.html`), locally vendored browser libraries (`jsPDF`, `pdf-lib`, `pdfjs-dist`), `/api/*` endpoints, and `/healthz`.
+- **`worker.js` (Queue processor):** Claims pending abstraction chunks and synthesis segments from Postgres. Exposes `GET /healthz` and `POST /internal/drain` (for scale-to-zero Cloud Scheduler triggers).
+- **Neon Postgres (`api/_lib/jobs.js`):** Stores all durable state across seven tables: `analysis_jobs`, `job_documents`, `document_chunks`, `document_abstracts`, `synthesis_segments`, `job_results`, and `followup_messages`. Tables and columns are created and migrated automatically on first use via `ensureSchema` — there is no separate migration CLI or migration directory.
+- **Google Cloud Storage (`api/_lib/storage.js`):** Holds uploaded source files in a private bucket. Browsers upload directly via short-lived signed `PUT` URLs so raw file bytes do not pass through the API server.
+
+### End-to-end job pipeline
+
+1. **Direct-to-GCS upload:** The browser creates a job record in Neon, requests a signed `PUT` URL (signing `Content-Type` and `Content-Length`), and uploads each file directly to GCS. Up to 400 files are accepted per job (`PDF`, `CSV`, `JPEG`, `PNG`, `GIF`, `WEBP`). Intake warns when a PDF has 15+ pages and may bundle multiple instruments.
+2. **Document abstraction (`gemini-3.1-flash-lite`):**
+   - Workers claim chunks with an atomic, lease-guarded `UPDATE ... RETURNING` query and renew leases before each paid model call. If no worker is running, leaving the browser tab open lets the API run bounded batches (`WORKFLOW_KICK_ON_START`, on by default).
+   - **Text vs. visual routing:** Clean text-extracted PDFs and CSVs can be packed into multi-document batches (default up to 6 docs, keyed by document index). Scanned, stamped, image-backed, or large PDFs and images run solo with Gemini `MEDIA_RESOLUTION_HIGH`. Oversized visual PDFs upload through the Gemini Files API or split by page range with one-page overlap.
+   - **Quality checks & escalation:** Deterministic quality checks (`validateAbstractQuality`) inspect abstracts for missing key fields or defects. When `ABSTRACTION_ESCALATION_ENABLED` is on, flagged chunks get a single visual re-read on `claude-sonnet-5-5`. If unreadable values remain marked `ILLEGIBLE - VERIFY MANUALLY`, the UI offers a **Re-read as high-DPI page images** action that renders pages locally in the browser (`public/pdf-raster.js` via `pdfjs-dist`).
+   - If server-side abstraction is unavailable, the browser can fall back to client-driven batching (up to 24 small docs per call) and client-side PDF splitting.
+3. **Synthesis & follow-ups (`claude-sonnet-5-5` + `gemini-3.1-flash-lite`):**
+   - Small jobs synthesize in a single `claude-sonnet-5-5` pass.
+   - Large jobs split abstracts into parallel segments summarized by `gemini-3.1-flash-lite`, optionally compact large merge inputs, and merge into a final ownership opinion with `claude-sonnet-5-5` (optionally streamed to `GET /api/jobs/:id/synthesis/preview`).
+   - Follow-up questions run against `claude-sonnet-5-5` with conversation history stored in `followup_messages`.
+4. **Resumability & export:** Every job is bookmarkable at `#/job/<id>` (recent jobs at `#/jobs`). Users can cancel jobs, retry single or failed chunks, and export the final opinion to PDF in the browser with `jsPDF`.
+
+---
+
+## Quick start: clone and run tests
+
+You can clone the repo and run the entire automated test suite without API keys, a database, a GCS bucket, or `.env.local`.
 
 ```bash
 git clone https://github.com/dtlb324/Titlework-analyzer.git
@@ -28,74 +90,128 @@ npm ci
 npm test
 ```
 
-`npm test` runs the files named in the `test` script in `package.json`, in that order, and stops at the first failure. It does not need API keys, a database, or `.env.local`. There is no coverage script and no `npm run build`.
+- `npm test` runs the explicit chain of test scripts in `package.json` in order and stops at the first failure. There is no `npm run build` step and no coverage script.
+- `node test/smoke-server.js` starts a manual local server on `127.0.0.1:3456` (`npm test` does not start it).
+- `npm run audit:ui` runs the Playwright UI audit harness (`scripts/audit/run.mjs`).
+- CI (`.github/workflows/test.yml`) runs `npm ci`, `npm test`, and `docker build -t titlework-analyzer:test .` on Node.js 26.13.0 for pull requests and pushes to `Main` and `main`. `.github/workflows/secret-scan.yml` runs gitleaks on the same events.
 
-`.github/workflows/test.yml` runs `npm ci`, `npm test`, and `docker build -t titlework-analyzer:test .` on Node.js 26.13.0. It runs for pull requests and for pushes to `Main` and `main`. `.github/workflows/secret-scan.yml` runs gitleaks on those same events.
+---
 
-`node test/smoke-server.js` listens on port 3456. `npm test` does not start it.
+## Run locally (full app)
 
-## Run locally
+Running real jobs locally requires **four external resources** (a Neon database, Gemini and Anthropic API keys, and a GCS bucket) plus a local password in `.env.local`. You do **not** need Cloud Run, Artifact Registry, or IAM service accounts to run on your laptop.
 
-Copy the placeholder file and fill in real values. Do not commit `.env.local`. Git ignores `.env*` and keeps `.env.example`.
+### 1. Create a Neon Postgres database
+
+1. Create a project at [neon.tech](https://neon.tech).
+2. On the connection screen, enable **Pooled connection** (the hostname will include `-pooler`).
+3. Copy the connection string for `DATABASE_URL` (`api/_lib/jobs.js` also accepts `POSTGRES_URL` or `POSTGRES_PRISMA_URL`).
+
+### 2. Create model API keys
+
+1. Create a Gemini API key at [Google AI Studio](https://aistudio.google.com/apikey) for `GEMINI_API_KEY` (`GOOGLE_API_KEY` is also accepted).
+2. Create an Anthropic API key in the [Anthropic console](https://console.anthropic.com) for `ANTHROPIC_API_KEY`.
+
+*(Want to route model calls through OpenRouter instead? See [Route models through OpenRouter](#route-models-through-openrouter) — note that synthesis start still checks for both direct key names.)*
+
+### 3. Create a private GCS bucket for local uploads
+
+Install the [`gcloud` CLI](https://cloud.google.com/sdk/docs/install) in a Google Cloud project with billing enabled, then enable Cloud Storage and create a private bucket:
+
+```bash
+gcloud services enable storage.googleapis.com
+
+gcloud storage buckets create gs://my-titlework-bucket \
+  --location=US \
+  --uniform-bucket-level-access
+```
+
+Allow direct browser `PUT` uploads from `http://localhost:8080`. Save this as `cors.json`:
+
+```json
+[
+  {
+    "origin": ["http://localhost:8080"],
+    "method": ["PUT"],
+    "responseHeader": ["content-type"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+Apply the CORS policy and authenticate Application Default Credentials so `api/_lib/storage.js` (`new Storage()`) can mint signed URLs without a key file:
+
+```bash
+gcloud storage buckets update gs://my-titlework-bucket --cors-file=cors.json
+gcloud auth application-default login
+```
+
+### 4. Configure `.env.local`
+
+Copy the placeholder template and fill in your values. Git ignores `.env*` and tracks only `.env.example` — never commit `.env.local`.
 
 ```bash
 cp .env.example .env.local
 ```
 
-`.env.example` names `DATABASE_URL`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `GCS_BUCKET`, `APP_PASSWORD`, and `INTERNAL_DRAIN_TOKEN`. The tables below say which ones you can skip on a laptop.
+Minimal `.env.local` for local development:
+
+```bash
+DATABASE_URL=postgresql://USER:PASSWORD@ep-xxxx-pooler.REGION.aws.neon.tech/neondb?sslmode=require
+GCS_BUCKET=my-titlework-bucket
+GEMINI_API_KEY=your-gemini-key
+ANTHROPIC_API_KEY=your-anthropic-key
+APP_PASSWORD=pick-a-local-password
+```
+
+- **Why `APP_PASSWORD` is needed locally:** Server-side abstraction, synthesis, retry, follow-up, and abstract-list endpoints return `401` until `APP_PASSWORD` is set, even outside production. Enter the same password in the browser UI.
+- **`INTERNAL_DRAIN_TOKEN` is optional locally:** Only needed in production on the worker service.
+
+### 5. Start the app
 
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:8080`. `npm run dev` is `node --env-file=.env.local server.js`. If `.env.local` is missing, Node prints `.env.local: not found` and exits before the server listens. The listen port is `PORT`, or 8080 when `PORT` is unset.
+Open `http://localhost:8080`.
 
-To process the queue in the background, run this in a second terminal.
+- `npm run dev` runs `node --env-file=.env.local server.js`. If `.env.local` is missing, Node prints `.env.local: not found` and exits before listening. Override the port with `PORT` (default `8080`).
+- **Processing jobs locally — two options:**
+  - **Single terminal (browser-driven):** Leave the browser tab open. `WORKFLOW_KICK_ON_START` defaults to on, so the API processes bounded batches of abstraction and synthesis work as the page polls.
+  - **Two terminals (background worker):** Run `npm run dev:worker` in a second terminal to drain the queue continuously in the background.
+- `npm start` and `npm run start:worker` do not read `.env.local`; use them when environment variables are already injected (such as in Docker or Cloud Run).
+
+---
+
+## Route models through OpenRouter
+
+To route model calls through OpenRouter, set these on both the API and the worker:
 
 ```bash
-npm run dev:worker
+OPENROUTER_API_KEY=your-openrouter-key
+MODEL_PROVIDER=openrouter
 ```
 
-`npm start` and `npm run start:worker` do not load a file. Use them when the variables are already in the process environment. The container command is one of those two scripts.
+- `shouldUseOpenRouter` in `api/_lib/openrouter-request.js` routes a call through OpenRouter when `MODEL_PROVIDER=openrouter` or when a configured model ID contains `/`. Any other value (or unset) uses direct Gemini and Anthropic routing.
+- Model ID mapping: `claude-sonnet-5-5` maps to `anthropic/claude-sonnet-5.5`; other `claude-*` IDs map to `anthropic/<id>`; `gemini-*` IDs map to `google/<id>`; IDs already containing `/` are sent unchanged.
+- A missing `OPENROUTER_API_KEY` on an OpenRouter call fails with `OPENROUTER_API_KEY is required when the selected provider is OpenRouter.`
+- **Important caveats:**
+  - Server abstraction checks `abstractionApiKeyError`, so abstraction can start on OpenRouter without `GEMINI_API_KEY`.
+  - **Synthesis start (`synthesisSetupError`) still requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and `ANTHROPIC_API_KEY`.** If either is missing, `POST /api/jobs/:id/synthesis/start` returns `503` with `fallback: "browser_synthesis"`.
+  - **Release verification (`scripts/verify-release.mjs`)** also checks for the Gemini and Anthropic env var names on both services and does not check `OPENROUTER_API_KEY`.
+- Optional headers: `OPENROUTER_REFERER` is sent as `HTTP-Referer` when set; `OPENROUTER_TITLE` is sent as `X-Title` (defaults to `Titlework Analyzer`).
 
-`api/_lib/storage.js` calls `new Storage()` with no key file. On a laptop, sign in once so signed upload URLs work.
+---
 
-```bash
-gcloud auth application-default login
-```
+## Deploy to Google Cloud Run (optional)
 
-If you only run the API, leave the browser tab open. `WORKFLOW_KICK_ON_START` defaults to on, and the API then runs a bounded batch of abstraction or synthesis work.
+Cloud Run deployment is **optional and off by default**. Pushing a `vX.Y.Z` tag always runs `.github/workflows/release.yml` to validate the tag, run `npm test`, and publish a GitHub Release. The Docker build, Cloud Run deploy, and post-deploy verification steps run **only** when the repository variable `DEPLOY_TO_CLOUD_RUN` is set to `true`. A fork or clone without that variable never touches Google Cloud.
 
-The release workflow sets `WORKER_DISABLED=true` on the worker so the loop can scale-to-zero. It does not create a Cloud Scheduler job. The optional scheduler is `docs/worker-synthesis-scheduler-runbook.md`. Set `INTERNAL_DRAIN_TOKEN` on the worker before that scheduler calls `POST /internal/drain`.
+Do not attach Cloud Build or Cloud Run source-deploy triggers to `Main` or `main` — they can deploy a different image than the tag workflow. This repo's default branch is `Main`; CI also listens on `main`.
 
-## How a job moves
+### 1. Provision Google Cloud resources
 
-`server.js` serves `public/index.html` and the `/api` routes. `worker.js` claims abstraction and synthesis rows from Neon. The browser creates a job, PUTs file bytes to a signed GCS URL, then starts abstraction and synthesis.
-
-`api/_lib/jobs.js` creates the tables on first use. There is no migration directory. The tables are `analysis_jobs`, `job_documents`, `document_chunks`, `document_abstracts`, `synthesis_segments`, `job_results`, and `followup_messages`.
-
-## Create the database, the keys, and the bucket
-
-A local job on the direct providers needs `DATABASE_URL`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `GCS_BUCKET`. Server abstraction and synthesis also need `APP_PASSWORD`. The service account and the GitHub variables below are only for a hosted deploy.
-
-### Neon Postgres
-
-1. Create a project at [neon.tech](https://neon.tech).
-2. On the connection screen, turn on **Pooled connection**. The host then contains `-pooler`.
-3. Copy that string into `DATABASE_URL`.
-
-`getDatabaseUrl` in `api/_lib/jobs.js` also accepts `POSTGRES_URL` and `POSTGRES_PRISMA_URL`.
-
-### Model keys
-
-1. Create a Gemini key at [Google AI Studio](https://aistudio.google.com/apikey). Put it in `GEMINI_API_KEY`. `GOOGLE_API_KEY` is the other name the Gemini client reads.
-2. Create an Anthropic key in the [Anthropic console](https://console.anthropic.com). Put it in `ANTHROPIC_API_KEY`.
-
-Direct calls use those keys. The OpenRouter section says what still has to be set when model calls go through OpenRouter.
-
-### Google Cloud
-
-Install the `gcloud` CLI in a project with billing. Enable the APIs the deploy uses.
+Enable the remaining APIs needed for Cloud Run and Workload Identity Federation:
 
 ```bash
 gcloud services enable \
@@ -106,15 +222,28 @@ gcloud services enable \
   sts.googleapis.com
 ```
 
-Create a private bucket. The bucket name is `GCS_BUCKET`.
+Create an Artifact Registry Docker repository once:
 
 ```bash
-gcloud storage buckets create gs://my-titlework-bucket \
-  --location=US \
-  --uniform-bucket-level-access
+gcloud artifacts repositories create YOUR_GAR_REPOSITORY \
+  --repository-format=docker \
+  --location=YOUR_REGION
 ```
 
-Allow browser uploads. Save this as `cors.json`. After the API is deployed, replace the first origin with the Cloud Run API URL.
+Create the runtime service account that both Cloud Run services use, and grant it access to your GCS bucket:
+
+```bash
+gcloud iam service-accounts create titlework-runtime \
+  --display-name="Titlework Cloud Run runtime"
+
+gcloud storage buckets add-iam-policy-binding gs://my-titlework-bucket \
+  --member="serviceAccount:titlework-runtime@my-titlework-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectAdmin"
+```
+
+If your API keys live in Secret Manager, also grant this runtime account `roles/secretmanager.secretAccessor`.
+
+Update your GCS CORS policy (`cors.json`) to include your deployed Cloud Run API URL alongside `http://localhost:8080`:
 
 ```json
 [
@@ -131,70 +260,43 @@ Allow browser uploads. Save this as `cors.json`. After the API is deployed, repl
 gcloud storage buckets update gs://my-titlework-bucket --cors-file=cors.json
 ```
 
-Create the runtime service account the Cloud Run services use.
+### 2. Authenticate GitHub Actions (Workload Identity Federation)
 
-```bash
-gcloud iam service-accounts create titlework-runtime \
-  --display-name="Titlework Cloud Run runtime"
+The release workflow authenticates with Workload Identity Federation (OIDC) instead of storing long-lived Google keys in GitHub:
 
-gcloud storage buckets add-iam-policy-binding gs://my-titlework-bucket \
-  --member="serviceAccount:titlework-runtime@my-titlework-project.iam.gserviceaccount.com" \
-  --role="roles/storage.objectAdmin"
-```
-
-If the API keys live in Secret Manager, also grant this account `roles/secretmanager.secretAccessor`.
-
-## Deploy
-
-Deployment is optional and off by default. A pushed `vX.Y.Z` tag always runs `.github/workflows/release.yml`: it validates the tag, runs the tests, and creates the GitHub Release. The Cloud Run build, deploy, and verify steps run only when the repository variable `DEPLOY_TO_CLOUD_RUN` is `true`. A fork or clone without that variable never touches Google Cloud.
-
-To deploy your own copy, finish the Google Cloud setup above, then the steps below, then set `DEPLOY_TO_CLOUD_RUN=true`. From then on a release tag builds one image and deploys it. You do not run `gcloud run deploy` yourself for that release.
-
-Do not attach Cloud Build or Cloud Run source-deploy triggers to `Main` or `main`. They can deploy a different image than the tag workflow. This repo's default branch is `Main`. CI also listens on `main`.
-
-### Authenticate GitHub Actions
-
-The workflow signs in with Workload Identity Federation. It does not store a long-lived Google key in GitHub. Set this up once.
-
-1. Create a deploy service account, separate from the runtime account. Grant it Artifact Registry writer, Cloud Run admin, `roles/iam.serviceAccountTokenCreator`, and `roles/iam.serviceAccountUser` on the runtime account.
-2. Create a Workload Identity pool and a provider scoped to this GitHub repository.
+1. Create a separate **deploy** service account. Grant it Artifact Registry Writer, Cloud Run Admin, `roles/iam.serviceAccountTokenCreator`, and `roles/iam.serviceAccountUser` on the runtime account.
+2. Create a Workload Identity Pool and Provider scoped to your GitHub repository.
 3. Bind the deploy service account to that repository's principal.
 
-Google documents the service-account setup in [google-github-actions/auth](https://github.com/google-github-actions/auth#indirect-wif).
+See [google-github-actions/auth](https://github.com/google-github-actions/auth#indirect-wif) for the full Google setup guide.
 
-### Set repository variables
+### 3. Configure GitHub Actions repository variables
 
-Create the Artifact Registry repository once.
-
-```bash
-gcloud artifacts repositories create YOUR_GAR_REPOSITORY \
-  --repository-format=docker \
-  --location=YOUR_REGION
-```
-
-Add these under **Settings**, **Secrets and variables**, **Actions**, **Variables**. They are GitHub Actions variables. They are not the Cloud Run environment.
+Add these under **Settings → Secrets and variables → Actions → Variables** (these are GitHub Actions variables, not Cloud Run runtime secrets):
 
 | Variable | Value |
 |---|---|
-| `GCP_PROJECT_ID` | Google Cloud project id. |
+| `GCP_PROJECT_ID` | Google Cloud project ID. |
 | `GCP_REGION` | Region for Cloud Run and Artifact Registry. |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Provider resource name from the previous step. |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Workload Identity Provider resource name from step 2. |
 | `GCP_SERVICE_ACCOUNT` | Deploy service account email. |
-| `GCP_RUNTIME_SERVICE_ACCOUNT` | Runtime service account email. Optional. The workflow omits `--service-account` when this is empty. |
+| `GCP_RUNTIME_SERVICE_ACCOUNT` | Runtime service account email (optional; omits `--service-account` when empty). |
 | `GAR_REPOSITORY` | Artifact Registry repository name. |
 | `API_SERVICE` | Cloud Run service name for the API. |
 | `WORKER_SERVICE` | Cloud Run service name for the worker. |
-| `DEPLOY_TO_CLOUD_RUN` | `true` turns on the build, deploy, and verify steps. Any other value, or none, skips it and publishes the GitHub Release only. |
+| `DEPLOY_TO_CLOUD_RUN` | Set to `true` to enable build, deploy, and verify. Any other value (or unset) publishes the GitHub Release only. |
 
-Set `DATABASE_URL`, `GCS_BUCKET`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `APP_PASSWORD` on both Cloud Run services before you tag a release. The workflow does not write those values. `scripts/verify-release.mjs` reads the deployed service env names after deploy and fails the release if any of those five groups is missing or blank. Accepted aliases are in the required settings table. The workflow never copies the secret values into GitHub.
+### 4. Set runtime secrets on both Cloud Run services
 
-Set `INTERNAL_DRAIN_TOKEN` on the worker yourself. The workflow does not set it.
+Before tagging a release, configure `DATABASE_URL`, `GCS_BUCKET`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and `APP_PASSWORD` directly on **both** Cloud Run services (or mount them from Secret Manager). The workflow never writes or copies secret values into GitHub. `scripts/verify-release.mjs` inspects both services after deploy and fails the release if any of those five groups is missing or blank.
 
-### Cut a release
+Also set `INTERNAL_DRAIN_TOKEN` on the **worker** service. The release workflow sets `WORKER_DISABLED=true` so the worker can scale-to-zero (`--min-instances 0`) and does not create a Cloud Scheduler job. To trigger scheduled drains against `POST /internal/drain`, see `docs/worker-synthesis-scheduler-runbook.md` and send `INTERNAL_DRAIN_TOKEN` in the `X-Internal-Drain-Token` header.
 
-Set `version` in `package.json` and the same version in both root fields of `package-lock.json`. The fields are the top-level `"version"` and `packages[""].version`. Add `docs/releases/vX.Y.Z.md` for the in-repo note. The workflow does not read that file. It creates the GitHub Release with `gh release create --generate-notes`.
+### 5. Cut a release
 
-Push the commit to `Main`. Push a lowercase `vX.Y.Z` tag that matches `package.json`.
+1. Bump `"version"` in `package.json` and both root version fields in `package-lock.json` (top-level `"version"` and `packages[""].version`).
+2. Add release notes at `docs/releases/vX.Y.Z.md` (in-repo record; the workflow generates GitHub Release notes via `gh release create --generate-notes`).
+3. Push the commit to `Main`. Push a lowercase `vX.Y.Z` tag matching `package.json`:
 
 ```bash
 VERSION="v$(node -p "require('./package.json').version")"
@@ -202,20 +304,24 @@ git tag "$VERSION"
 git push origin "$VERSION"
 ```
 
-Without `DEPLOY_TO_CLOUD_RUN=true`, the workflow validates the tag, runs the tests on Node.js 26.13.0, and creates the GitHub Release. A failed test blocks the release.
+What `.github/workflows/release.yml` does:
 
-With `DEPLOY_TO_CLOUD_RUN=true`, the workflow also builds one Docker image and pushes it to Artifact Registry. `scripts/resolve-image-digest.mjs` selects the linux/amd64 image from the pushed manifest. The worker deploy and the API deploy use that same immutable image digest. The worker command is `npm run start:worker`. That deploy also passes `--no-allow-unauthenticated`, `--min-instances 0`, 2Gi of memory, and a 3600 second timeout. The API allows unauthenticated HTTP, uses 1Gi of memory, and has a 1800 second timeout. `scripts/verify-release.mjs` then checks both services. The last job creates or updates the GitHub Release and requires it to be Latest. A failed deploy or verification blocks the release.
+- **Without `DEPLOY_TO_CLOUD_RUN=true`:** Validates the tag, runs `npm test` on Node.js 26.13.0, and creates or updates the GitHub Release. A failed test blocks the release.
+- **With `DEPLOY_TO_CLOUD_RUN=true`:** Builds one Docker image, pushes it to Artifact Registry, and runs `scripts/resolve-image-digest.mjs` to resolve the `linux/amd64` digest. Both the worker and API deploy from that same immutable image digest:
+  - **Worker:** `npm run start:worker`, `--no-allow-unauthenticated`, `--min-instances 0`, `2Gi` memory, `3600s` timeout, `WORKER_DISABLED=true`.
+  - **API:** `--allow-unauthenticated`, `1Gi` memory, `1800s` timeout.
+  - `scripts/verify-release.mjs` verifies image digest parity, required env vars, and API `/api/healthz` version before creating or updating the GitHub Release as Latest. A failed deploy or verification blocks the release.
 
-After a deployed release, check these points.
+Post-release checks:
 
-- `GET /api/healthz` and `GET /healthz` return `release.version`. The worker's `GET /healthz` returns it too.
-- The latest ready revisions of the API and the worker use the same image digest.
+- `GET /api/healthz` and `GET /healthz` (and worker `GET /healthz`) return `release.version`.
+- The latest ready revisions of API and worker run the same image digest.
 - Both services have the database, bucket, model, and `APP_PASSWORD` settings.
 - `gh release list --limit 3` shows the new version as Latest.
 
-### Roll back
+### 6. Roll back
 
-Rollback API and worker together. Redeploy one previously verified image digest to both services, then confirm both report that digest. Take `PREVIOUS_IMAGE_DIGEST_REF` from `gcloud run revisions describe REVISION --format='value(status.imageDigest)'` or from the release log line `deploying linux/amd64 image`. Do not take it from the tag. The tag can point at an image index. Database changes only move forward.
+Rollback API and worker together. Redeploy a previously verified image digest to both services, then confirm both report that digest. Get `PREVIOUS_IMAGE_DIGEST_REF` from `gcloud run revisions describe REVISION --format='value(status.imageDigest)'` or from the release log line `deploying linux/amd64 image` — do not use a mutable tag, which can point to a multi-platform index. Database schema changes only move forward.
 
 ```bash
 gcloud run deploy WORKER_SERVICE \
@@ -227,30 +333,13 @@ gcloud run deploy API_SERVICE \
   --allow-unauthenticated
 ```
 
-## Route models through OpenRouter
-
-Set these on the API and the worker when you want one key for the model calls.
-
-```bash
-OPENROUTER_API_KEY=your-openrouter-key
-MODEL_PROVIDER=openrouter
-```
-
-`shouldUseOpenRouter` in `api/_lib/openrouter-request.js` sends a call through OpenRouter when `MODEL_PROVIDER` is `openrouter`, or when the model id contains `/`. Any other value of `MODEL_PROVIDER`, or none, keeps direct Gemini and Anthropic routing. A missing `OPENROUTER_API_KEY` on an OpenRouter call fails with `OPENROUTER_API_KEY is required when the selected provider is OpenRouter.`
-
-`claude-sonnet-5-5` maps to `anthropic/claude-sonnet-5.5`. Other `claude-*` ids map to `anthropic/` plus the id. `gemini-*` ids map to `google/` plus the id. An id that already contains `/` is sent unchanged.
-
-Server abstraction uses that routing. `serverAbstractionSetupError` asks `abstractionApiKeyError` for the abstract model, so an OpenRouter setup can start abstraction without `GEMINI_API_KEY`.
-
-Synthesis start does not use that shortcut. `synthesisSetupError` still requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`, and it still requires `ANTHROPIC_API_KEY`. If either check fails, `POST /api/jobs/:id/synthesis/start` returns 503 and `fallback` is `browser_synthesis`. Release verification also still requires the Gemini and Anthropic names on both services. It does not look for `OPENROUTER_API_KEY`.
-
-`OPENROUTER_REFERER` is sent as `HTTP-Referer` when set. `OPENROUTER_TITLE` is sent as `X-Title`. If unset, the title is `Titlework Analyzer`.
+---
 
 ## Environment variables
 
-Set runtime variables on both Cloud Run services unless the row says API only or worker only. Numeric settings below use the default when the value is missing or not a finite number. A finite number outside the listed range is clamped into that range.
+Set runtime variables on both Cloud Run services unless a row says API only or worker only. Numeric settings fall back to their default when missing or non-finite, and clamp finite out-of-range values into the listed bounds.
 
-Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Dockerfile` sets `NODE_ENV=production`. Cloud Run sets `K_SERVICE`.
+**Production** means `NODE_ENV=production` (`Dockerfile` sets this) or a non-empty `K_SERVICE` (Cloud Run sets this).
 
 ### Required settings
 
@@ -259,218 +348,212 @@ Production means `NODE_ENV` is `production`, or `K_SERVICE` is non-empty. `Docke
 | `DATABASE_URL` | Yes, for durable jobs | `getDatabaseUrl` also reads `POSTGRES_URL` and `POSTGRES_PRISMA_URL`. If all three are empty, job and upload routes fail with `DATABASE_URL or POSTGRES_URL is required`. |
 | `GCS_BUCKET` | Yes, for uploads and server abstraction | `GOOGLE_CLOUD_STORAGE_BUCKET` and `STORAGE_BUCKET` are aliases. Storage errors start with `Google Cloud Storage is not configured`. |
 | `GEMINI_API_KEY` | Yes, for direct Gemini calls | `GOOGLE_API_KEY` is the alias. A direct Gemini call fails with `GEMINI_API_KEY is required for Gemini models.` |
-| `ANTHROPIC_API_KEY` | Yes, for direct Claude calls and for synthesis start | A direct Claude call fails with `ANTHROPIC_API_KEY is required for Claude models.` Synthesis start also fails when this is empty. See the OpenRouter section. |
-| `APP_PASSWORD` | Yes for production | Outside production, job routes and `POST /api/analyze` allow the request. Server abstraction, synthesis, follow-up, retry, and the abstract list still return 401 with `APP_PASSWORD is required for server-side abstraction endpoints.` Production returns 401 from the job gate and from `/api/analyze` until it is set. The browser sends it as `x-app-password`. |
-| `INTERNAL_DRAIN_TOKEN` | Yes for production, worker only | `POST /internal/drain` compares header `x-internal-drain-token` with `secureCompare`. Production returns 401 `INTERNAL_DRAIN_TOKEN is required.` Outside production, an unset token allows the request with no header. `/healthz` on the worker stays unauthenticated. |
+| `ANTHROPIC_API_KEY` | Yes, for direct Claude calls and for synthesis start | A direct Claude call fails with `ANTHROPIC_API_KEY is required for Claude models.` Synthesis start also fails when this is empty. See [Route models through OpenRouter](#route-models-through-openrouter). |
+| `APP_PASSWORD` | Yes for production | Outside production, job routes and `POST /api/analyze` allow the request, but server abstraction, synthesis, follow-up, retry, and the abstract list still return 401 with `APP_PASSWORD is required for server-side abstraction endpoints.` Production returns 401 from the job gate and `/api/analyze` until set. The browser sends it as `x-app-password`. |
+| `INTERNAL_DRAIN_TOKEN` | Yes for production, worker only | `POST /internal/drain` compares header `x-internal-drain-token` with `secureCompare`. Production returns 401 `INTERNAL_DRAIN_TOKEN is required.` Outside production, an unset token allows the request with no header. Worker `/healthz` stays unauthenticated. |
 
 ### Model settings
 
-| Name | If unset |
+| Name | Default / behavior if unset |
 |---|---|
-| `SYNTHESIS_MODEL` | `claude-sonnet-5-5`. A Gemini id or a Haiku id is ignored and the default is used. Other ids are kept. |
-| `SYNTHESIS_PARTIAL_MODEL` | `gemini-3.1-flash-lite`. Any id that does not start with `gemini-` is ignored, including Claude and Haiku. |
-| `ABSTRACT_MODEL` | `gemini-3.1-flash-lite`. A Haiku id is replaced with that default. Other ids are kept. |
-| `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5-5`. Used when a low-confidence abstract is re-read. |
-| `GEMINI_THINKING_LEVEL` | Omitted. Accepted values are `minimal`, `low`, `medium`, and `high` for a `gemini-3` model, and `low`, `medium`, `high`, and `xhigh` for a `gemini-4` model. Any other value is ignored. |
-| `GEMINI_THINKING_BUDGET` | `0` for a Gemini model that is not a `gemini-3` or `gemini-4` model. Those models use the level above instead. |
-| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for a Gemini 3 or Gemini 4 model that also has an accepted `GEMINI_THINKING_LEVEL`. Any other call ignores the flag. |
+| `SYNTHESIS_MODEL` | `claude-sonnet-5-5`. A Gemini ID or Haiku ID is ignored and replaced with the default. |
+| `SYNTHESIS_PARTIAL_MODEL` | `gemini-3.1-flash-lite`. Any ID not starting with `gemini-` is ignored (including Claude and Haiku). |
+| `ABSTRACT_MODEL` | `gemini-3.1-flash-lite`. A Haiku ID is replaced with the default. |
+| `ABSTRACT_ESCALATION_MODEL` | `claude-sonnet-5-5`. Used when a low-confidence or defective abstract is re-read. |
+| `GEMINI_THINKING_LEVEL` | Omitted. Accepts `minimal`, `low`, `medium`, `high` for `gemini-3` models, and `low`, `medium`, `high`, `xhigh` for `gemini-4` models. Other values are ignored. |
+| `GEMINI_THINKING_BUDGET` | `0` for Gemini models other than `gemini-3` / `gemini-4` (which use `GEMINI_THINKING_LEVEL`). |
+| `GEMINI_INCLUDE_THOUGHTS` | Off. `true` adds thought summaries only for `gemini-3` / `gemini-4` models with an accepted `GEMINI_THINKING_LEVEL`. |
 
 ### Abstraction settings
 
-| Name | If unset |
+| Name | Default / behavior if unset |
 |---|---|
 | `ABSTRACT_MAX_TOKENS` | `2000`, range 512 to 4096. |
 | `ABSTRACT_ESCALATION_MAX_TOKENS` | `4096`, range 512 to 8192. |
-| `ABSTRACTION_ESCALATION_ENABLED` | On, unless the value is `false`. The release workflow sets `false` on the API. |
-| `ABSTRACTION_PDF_TEXT_FIRST` | On, unless the value is `false`. A text PDF can be sent as extracted text. |
-| `ABSTRACTION_PDF_TEXT_STRICT` | On, unless the value is `false`. Uses the stricter text-quality floors. |
+| `ABSTRACTION_ESCALATION_ENABLED` | On, unless `false`. The release workflow sets `false` on the API. |
+| `ABSTRACTION_PDF_TEXT_FIRST` | On, unless `false`. Allows clean text PDFs to be sent as extracted text. |
+| `ABSTRACTION_PDF_TEXT_STRICT` | On, unless `false`. Uses the stricter text-quality floors below. |
 | `ABSTRACTION_PDF_TEXT_MIN_CHARS_PER_PAGE` | `80`, or `100` when strict. Range 20 to 2000. |
 | `ABSTRACTION_PDF_TEXT_MIN_PRINTABLE_RATIO` | `0.82`, or `0.88` when strict. Range 0.5 to 1. |
 | `ABSTRACTION_PDF_TEXT_MAX_BYTES_PER_CHAR` | `800`, or `600` when strict. Range 50 to 5000. |
 | `ABSTRACTION_PDF_TEXT_MIN_SPARSE_CHARS_PER_PAGE` | `400`, or `500` when strict. Range 100 to 5000. |
+| `ABSTRACTION_PDF_MIN_IMAGE_COVERAGE` | `0.01`, range 0.001 to 1. Minimum embedded-image coverage that marks a PDF page as visual. |
+| `ABSTRACTION_PDF_MIN_INVISIBLE_OCR_RATIO` | `0.35`, range 0.05 to 1. Ratio of invisible OCR text above which a PDF routes visually. |
 | `ABSTRACTION_PDF_TEXT_MAX_CHARS` | `500000`, range 10000 to 2000000. |
-| `ABSTRACTION_BATCH_ENABLED` | On, unless the value is `false`. |
-| `ABSTRACTION_BATCH_MAX_DOCS` | `6`, range 1 to 48 (visual PDFs and images run solo). |
-| `ABSTRACTION_BATCH_MAX_PAGE_SPAN` | `32`, range 4 to 120. A wider chunk runs alone. |
+| `ABSTRACTION_BATCH_ENABLED` | On, unless `false`. |
+| `ABSTRACTION_BATCH_MAX_DOCS` | `6`, range 1 to 48 (visual PDFs and images always run solo). |
+| `ABSTRACTION_BATCH_MAX_PAGE_SPAN` | `32`, range 4 to 120. Wider chunks run alone. |
 | `ABSTRACTION_BATCH_LARGE_BYTES` | `2000000`, range 100000 to 8000000. |
 | `ABSTRACTION_BATCH_FETCH_MULTIPLIER` | `4`, range 1 to 16. |
 | `ABSTRACTION_MAX_ATTEMPTS` | `5`, capped at 12. |
-| `ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES` | `25000000`, range 1000000 to 100000000. Floor for the fetch cap of a PDF chunk that spans more than one page, or has no page range. The cap is the largest of this value, 70% of (`REQUEST_ENVELOPE_SAFE_BYTES` minus a fixed 350000), and `STORAGE_MAX_UPLOAD_BYTES` capped at 128000000. A chunk too large to send inline is split by page range unless it goes as extracted text or through the Gemini Files API. A single-page PDF or image is fetched up to `GEMINI_FILE_API_MAX_BYTES` when the Files API carries abstraction, otherwise up to the 70% inline cap. |
-| `GEMINI_FILE_API_ENABLED` | On, unless the value is `false`. |
-| `GEMINI_FILE_API_MIN_BYTES` | `1500000`. The Files API clamps a set value from 100000 to 50000000. The abstraction size estimate uses the raw number, or 1500000 when the value is missing or 0. |
+| `ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES` | `25000000`, range 1000000 to 100000000. Floor for the fetch cap of a multi-page (or unranged) PDF chunk. The cap is the max of this value, 70% of (`REQUEST_ENVELOPE_SAFE_BYTES` − 350000), and `STORAGE_MAX_UPLOAD_BYTES` capped at 128000000. Chunks too large for inline delivery split by page range unless sent as extracted text or via Gemini Files API. Single-page PDFs/images fetch up to `GEMINI_FILE_API_MAX_BYTES` when Files API is used, otherwise the 70% inline cap. |
+| `GEMINI_FILE_API_ENABLED` | On, unless `false`. |
+| `GEMINI_FILE_API_MIN_BYTES` | `1500000`. Files API clamps set values to 100000–50000000; abstraction size estimation uses the raw number (or `1500000` when missing/0). |
 | `GEMINI_FILE_API_MAX_BYTES` | `48000000`, range 1000000 to 50000000. |
 | `GEMINI_FILE_API_POLL_MS` | `500`, range 100 to 5000. |
 | `GEMINI_FILE_API_POLL_MAX_MS` | `60000`, range 1000 to 120000. |
-| `GEMINI_PDF_MEDIA_RESOLUTION` | `MEDIA_RESOLUTION_HIGH` on direct Gemini visual, hybrid, and image abstraction requests (omitted on text-only requests). Accepts `low`, `medium`, `high`, the full `MEDIA_RESOLUTION_*` names, or `off`/`false` to omit. |
-| `ABSTRACTION_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` is the fallback. |
+| `GEMINI_PDF_MEDIA_RESOLUTION` | `MEDIA_RESOLUTION_HIGH` on direct Gemini visual, hybrid, and image abstraction calls (omitted on text-only calls). Accepts `low`, `medium`, `high`, full `MEDIA_RESOLUTION_*` names, or `off`/`false` to omit. |
+| `ABSTRACTION_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. Falls back to `CLOUD_RUN_UPSTREAM_TIMEOUT_MS`. |
 
 ### Synthesis settings
 
-| Name | If unset |
+| Name | Default / behavior if unset |
 |---|---|
-| `SYNTHESIS_MAX_TOKENS` | `8000`, range 256 to 32000. Caps a single-pass opinion and a follow-up. A multi-segment merge uses `SYNTHESIS_MERGE_MAX_TOKENS`. |
+| `SYNTHESIS_MAX_TOKENS` | `8000`, range 256 to 32000. Caps single-pass opinions and follow-ups. Multi-segment merges use `SYNTHESIS_MERGE_MAX_TOKENS`. |
 | `SYNTHESIS_PARTIAL_MAX_TOKENS` | `5000`, range 512 to 32000. Caps one partial segment. |
-| `SYNTHESIS_MERGE_MAX_TOKENS` | `16000`, range 1024 to 32000. Caps the multi-segment merge, and the larger retry after a truncated single-pass opinion. |
-| `SYNTHESIS_CHUNK_SIZE` | The planner does not use 120 unless this variable is set. With it unset, `effectiveSynthesisChunkSize` uses `floor(SYNTHESIS_MAX_TOKENS / 1000)`. At the 8000 token default, that is 8. A job with at least `BULK_JOB_MIN_ABSTRACTS` abstracts then uses at least `BULK_SYNTHESIS_CHUNK_SIZE`. When this variable is set, the value is clamped from 1 to 250, and a bulk job still raises it to the bulk size when that size is larger. |
+| `SYNTHESIS_MERGE_MAX_TOKENS` | `16000`, range 1024 to 32000. Caps multi-segment merges and the larger retry after a truncated single-pass opinion. |
+| `SYNTHESIS_CHUNK_SIZE` | Unset uses `floor(SYNTHESIS_MAX_TOKENS / 1000)` (`8` at the 8000-token default); jobs with at least `BULK_JOB_MIN_ABSTRACTS` abstracts use at least `BULK_SYNTHESIS_CHUNK_SIZE`. When set, clamped to 1–250 (bulk jobs still raise to bulk size if larger). |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | `200`, range 10 to 250. |
 | `BULK_JOB_MIN_ABSTRACTS` | `100`, range 2 to 400. |
-| `SYNTHESIS_BATCH_LIMIT` | `4`, and never above `WORKFLOW_BATCH_LIMIT`. Range 1 to 16. |
-| `SYNTHESIS_CONCURRENCY` | `WORKFLOW_CONCURRENCY` when that is set, otherwise `4`. Range 1 to 16. |
-| `SYNTHESIS_MERGE_CONCURRENCY` | `WORKFLOW_CONCURRENCY` when that is set, otherwise `4`. Range 1 to 8. |
+| `SYNTHESIS_BATCH_LIMIT` | `4` (never above `WORKFLOW_BATCH_LIMIT`), range 1 to 16. |
+| `SYNTHESIS_CONCURRENCY` | `WORKFLOW_CONCURRENCY` if set, else `4`. Range 1 to 16. |
+| `SYNTHESIS_MERGE_CONCURRENCY` | `WORKFLOW_CONCURRENCY` if set, else `4`. Range 1 to 8. |
 | `SYNTHESIS_MAX_ATTEMPTS` | `3`, range 1 to 10. |
 | `SYNTHESIS_FOLLOWUP_HISTORY_TURNS` | `4`, range 0 to 20. |
-| `SYNTHESIS_STREAM_ENABLED` | Off. `true` streams the final merge to `GET /api/jobs/:id/synthesis/preview`. The opinion is saved after the stream ends. |
-| `SYNTHESIS_COMPACTION_ENABLED` | On, unless the value is `false`. Large merge input is compacted with Gemini before the Sonnet merge. |
+| `SYNTHESIS_STREAM_ENABLED` | Off. `true` streams the final merge to `GET /api/jobs/:id/synthesis/preview`; the opinion is persisted after the stream ends. |
+| `SYNTHESIS_COMPACTION_ENABLED` | On, unless `false`. Compacts large merge inputs with Gemini before the Sonnet merge. |
 | `SYNTHESIS_COMPACTION_MIN_SEGMENTS` | `6`, range 2 to 64. |
 | `SYNTHESIS_COMPACTION_MIN_MERGE_TOKENS` | `40000`, range 1024 to 500000. |
 | `SYNTHESIS_LARGE_JOB_MULTI_SEGMENT` | Off. `true` forces multi-segment Gemini synthesis at or above `BULK_JOB_MIN_ABSTRACTS`. |
-| `SYNTHESIS_FORCE_SINGLE_PASS` | Off. `true` turns that forcing off. |
-| `SYNTHESIS_REPAIR_ENABLED` | On, unless the value is `false`. |
-| `SYNTHESIS_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` is the fallback. A segment lease renewal uses the greater of the claim lease and this timeout plus 60 seconds. |
-| `SYNTHESIS_MERGE_LEASE_MS` | Read only when `processSynthesisJob` is called without `mergeLeaseMs`. The worker and the API kick pass the workflow lease instead. The fallback is `WORKFLOW_LEASE_MS` when that is set, otherwise the synthesis upstream timeout plus 60 seconds, clamped from 5000 to 600000. |
-| `SYNTHESIS_STALE_LEASE_MS` | Read only when the caller omits `staleLeaseMs`. The worker and the API kick pass `WORKFLOW_STALE_LEASE_MS`. The fallback is that workflow value when set, otherwise the merge-lease default plus 60 seconds, clamped from 5000 to 600000. |
-| `ANTHROPIC_PROMPT_CACHE` | On, unless the value is `false`. |
-| `SYNTHESIS_MERGE_CACHE_MIN_TOKENS` | `1024`, and at least 256. |
+| `SYNTHESIS_FORCE_SINGLE_PASS` | Off. `true` disables forced multi-segment synthesis. |
+| `SYNTHESIS_REPAIR_ENABLED` | On, unless `false`. |
+| `SYNTHESIS_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. Falls back to `CLOUD_RUN_UPSTREAM_TIMEOUT_MS`. Segment lease renewals use the greater of the claim lease and this timeout + 60s. |
+| `SYNTHESIS_MERGE_LEASE_MS` | Used only if `processSynthesisJob` omits `mergeLeaseMs` (worker and API kick pass `WORKFLOW_LEASE_MS`). Fallback: `WORKFLOW_LEASE_MS` or synthesis timeout + 60s, clamped 5000–600000. |
+| `SYNTHESIS_STALE_LEASE_MS` | Used only if caller omits `staleLeaseMs` (worker and API kick pass `WORKFLOW_STALE_LEASE_MS`). Fallback: `WORKFLOW_STALE_LEASE_MS` or merge-lease default + 60s, clamped 5000–600000. |
+| `ANTHROPIC_PROMPT_CACHE` | On, unless `false`. |
+| `SYNTHESIS_MERGE_CACHE_MIN_TOKENS` | `1024` (minimum 256). |
 
-### Worker and limits
+### Worker, limits, and OCR lab settings
 
-| Name | If unset |
+| Name | Default / behavior if unset |
 |---|---|
-| `PORT` | `8080` for `server.js` and for `worker.js`. |
-| `WORKER_DISABLED` | Off. Worker only. `true`, `1`, and `yes` leave the health server up and skip the queue loop. The release workflow sets `true`. |
-| `WORKER_POLL_IDLE_MS` | `2000`, range 100 to 60000. When this is unset, a set `WORKER_POLL_INTERVAL_MS` is the idle wait, clamped from 100 to 60000. When both are unset, the idle wait is 2000. |
+| `PORT` | `8080` for both `server.js` and `worker.js`. |
+| `WORKER_DISABLED` | Off. Worker only. `true`, `1`, or `yes` keeps the health server up and skips the queue loop. Release workflow sets `true`. |
+| `WORKER_POLL_IDLE_MS` | `2000`, range 100 to 60000. Falls back to `WORKER_POLL_INTERVAL_MS` if set. |
 | `WORKER_POLL_ACTIVE_MS` | `0`, range 0 to 5000. |
 | `WORKER_DRAIN_BUDGET_MS` | `1500000`, range 10000 to 3300000. |
 | `WORKER_STAGE_LOGS` | Off. `true` logs abstraction stages. |
-| `WORKFLOW_DRIVER` | `inprocess`. That is the only driver that runs. `inngest` returns 503 and says it is not implemented, even when `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` are set. Any other value is rejected. |
-| `WORKFLOW_KICK_ON_START` | On, unless the value is `false`. API only. |
+| `WORKFLOW_DRIVER` | `inprocess` (the only active driver; `inngest` returns 503 even if `INNGEST_*` keys are set; any other value is rejected). |
+| `WORKFLOW_KICK_ON_START` | On, unless `false`. API only. |
 | `WORKFLOW_KICK_BUDGET_MS` | `50000`, range 5000 to 55000. API only. |
 | `WORKFLOW_BATCH_LIMIT` | `12`, range 1 to 64. |
 | `WORKFLOW_CONCURRENCY` | `4`, range 1 to 16. |
 | `WORKFLOW_BUDGET_MS` | `1200000`, range 1000 to 3300000. |
-| `WORKFLOW_LEASE_MS` | The queue upstream timeout plus 60 seconds, clamped from 5000 to 600000. The queue timeout reads `ABSTRACTION_UPSTREAM_TIMEOUT_MS`, then `SYNTHESIS_UPSTREAM_TIMEOUT_MS`, then `CLOUD_RUN_UPSTREAM_TIMEOUT_MS`, and otherwise uses 240000. |
-| `WORKFLOW_STALE_LEASE_MS` | The workflow lease plus 60 seconds, clamped from 5000 to 600000. |
-| `ANALYZE_MAX_REQUEST_BYTES` | `20000000`, range 1 to 32000000. `CLOUD_RUN_MAX_REQUEST_BYTES` is the fallback. API only. |
+| `WORKFLOW_LEASE_MS` | Queue upstream timeout (`ABSTRACTION_UPSTREAM_TIMEOUT_MS` → `SYNTHESIS_UPSTREAM_TIMEOUT_MS` → `CLOUD_RUN_UPSTREAM_TIMEOUT_MS` → `240000`) + 60s, clamped 5000–600000. |
+| `WORKFLOW_STALE_LEASE_MS` | `WORKFLOW_LEASE_MS` + 60s, clamped 5000–600000. |
+| `ANALYZE_MAX_REQUEST_BYTES` | `20000000`, range 1 to 32000000. Falls back to `CLOUD_RUN_MAX_REQUEST_BYTES`. API only. |
 | `ANALYZE_UPSTREAM_TIMEOUT_MS` | `240000`, range 10000 to 300000. API only. |
-| `CLOUD_RUN_MAX_BODY_BYTES` | `26214400`. A non-positive value uses that same default. This caps request bodies read by the HTTP adapter. |
-| `STORAGE_MAX_UPLOAD_BYTES` | `104857600`. `GCS_MAX_UPLOAD_BYTES` is the alias. Range 1 to 1073741824. |
+| `CLOUD_RUN_MAX_BODY_BYTES` | `26214400` (caps HTTP adapter request bodies; non-positive uses default). |
+| `STORAGE_MAX_UPLOAD_BYTES` | `104857600` (`GCS_MAX_UPLOAD_BYTES` alias), range 1 to 1073741824. |
 | `GCS_SIGNED_URL_TTL_MS` | `900000`, range 60000 to 3600000. |
-| `ANALYZE_RATE_LIMIT_MAX` | `300` requests each minute for `POST /api/analyze`, then forced into 10 to 600. `0` is treated as unset. |
-| `REQUEST_ENVELOPE_SAFE_BYTES` | Abstraction and abstraction batching use `18000000`. Synthesis uses `12000000`. Both clamp from 100000 to 20000000. |
-| `REQUEST_OVERHEAD_BYTES` | `350000`, range 0 to 1000000. Copied onto the synthesis config and never read. Abstraction subtracts a fixed 350000 and ignores this variable. |
-| `VERIFY_GCS_OBJECTS` | Off. `true` makes chunk finalization check that the object exists. |
-| `OCR_COMPARE_ENABLED` | Off. `POST /api/ocr-compare` returns 404 unless this is `true`. In production it also returns 503 when `APP_PASSWORD` is unset; locally with `APP_PASSWORD` unset the lab needs no password. |
-| `OCR_COMPARE_MAX_TOKENS` | `16000` unless the value is an integer from 512 to 32000. |
-| `OCR_COMPARE_PROVIDER` | Unset or `direct`: the lab calls Gemini and Anthropic directly. `openrouter`: all three lab models go through OpenRouter with `OPENROUTER_API_KEY` (local testing; see `docs/ocr-comparison-lab.md`). Any other value returns 503. |
+| `ANALYZE_RATE_LIMIT_MAX` | `300` req/min for `POST /api/analyze`, clamped 10 to 600 (`0` treated as unset). |
+| `REQUEST_ENVELOPE_SAFE_BYTES` | `18000000` for abstraction/batching; `12000000` for synthesis. Both clamp 100000–20000000. |
+| `REQUEST_OVERHEAD_BYTES` | `350000`, range 0 to 1000000. Copied onto synthesis config (unused); abstraction subtracts a fixed `350000`. |
+| `VERIFY_GCS_OBJECTS` | Off. `true` verifies the GCS object exists during chunk finalization. |
+| `OCR_COMPARE_ENABLED` | Off. `POST /api/ocr-compare` returns 404 unless `true`. In production, also returns 503 if `APP_PASSWORD` is unset; locally with `APP_PASSWORD` unset, no password is required. |
+| `OCR_COMPARE_MAX_TOKENS` | `16000`, integer range 512 to 32000. |
+| `OCR_COMPARE_PROVIDER` | Unset or `direct` calls Gemini and Anthropic directly; `openrouter` routes all three lab models through OpenRouter with `OPENROUTER_API_KEY` (see `docs/ocr-comparison-lab.md`). Other values return 503. |
+| `OCR_COMPARE_OPENROUTER_MODELS` | Optional (openrouter mode only): comma-separated list of 3 OpenRouter model slugs to override the default lab columns. |
 | `GEMINI_API_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta`. |
 | `GEMINI_UPLOAD_BASE_URL` | `https://generativelanguage.googleapis.com/upload`. |
 
-`INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` do not turn on a second queue. Leave `WORKFLOW_DRIVER` unset.
+### Values set by the release workflow
 
-### Values the release workflow sets
-
-These are `--update-env-vars` on the API deploy, except `WORKER_DISABLED`. That one is set on the worker. They override the code defaults on that service.
+When `DEPLOY_TO_CLOUD_RUN=true`, `.github/workflows/release.yml` passes these via `--update-env-vars` (on the API unless noted), overriding code defaults:
 
 | Name | Value |
 |---|---|
-| `RELEASE_VERSION` | The release tag. Health uses `v` plus the `package.json` version when this is empty. |
-| `GIT_SHA` | The deployed commit. `COMMIT_SHA` is an alias `getRuntimeInfo` also reads. |
-| `IMAGE_DIGEST` | The container image digest. |
+| `RELEASE_VERSION` | Release tag (health falls back to `v` + `package.json` version). |
+| `GIT_SHA` | Deployed commit (`COMMIT_SHA` alias also read by `getRuntimeInfo`). |
+| `IMAGE_DIGEST` | Container image digest. |
 | `WORKER_DISABLED` | `true` on the worker. |
 | `SYNTHESIS_CONCURRENCY` | `8` on the API. |
 | `SYNTHESIS_BATCH_LIMIT` | `8` on the API. |
 | `BULK_JOB_MIN_ABSTRACTS` | `50` on the API. |
 | `SYNTHESIS_CHUNK_SIZE` | `50` on the API. |
 | `BULK_SYNTHESIS_CHUNK_SIZE` | `50` on the API. |
-| `SYNTHESIS_MAX_TOKENS` | `5000` on the API. That caps a single-pass opinion and a follow-up. The workflow does not set `SYNTHESIS_MERGE_MAX_TOKENS`, so the multi-segment merge stays at 16000. |
-| `SYNTHESIS_PARTIAL_MAX_TOKENS` | `4000` on the API. |
+| `SYNTHESIS_MAX_TOKENS` | `8000` on the API (caps single-pass opinions and follow-ups; `SYNTHESIS_MERGE_MAX_TOKENS` stays at `16000`). |
+| `SYNTHESIS_PARTIAL_MAX_TOKENS` | `5000` on the API. |
 | `SYNTHESIS_STREAM_ENABLED` | `true` on the API. |
 | `SYNTHESIS_COMPACTION_ENABLED` | `true` on the API. |
 | `SYNTHESIS_LARGE_JOB_MULTI_SEGMENT` | `true` on the API. |
 | `ABSTRACTION_ESCALATION_ENABLED` | `false` on the API. |
 
-`K_REVISION` and `CLOUD_RUN_REVISION` are read for the revision field in runtime info. Cloud Run sets `K_REVISION`. The app does not require you to set them.
+*Other script-only variables:* Cloud Run automatically sets `K_REVISION` (alias `CLOUD_RUN_REVISION`). `scripts/verify-release.mjs` accepts env fallbacks (`GCP_PROJECT_ID`, `GCP_REGION`, `API_SERVICE`, `WORKER_SERVICE`, `RELEASE_VERSION`, `GITHUB_REF_NAME`, `GITHUB_SHA`, `IMAGE_DIGEST`, `API_URL`) when CLI flags are omitted. Offline comparison scripts (`scripts/compare-final-opinion.mjs`, `scripts/compare-ocr-models.mjs`) read `DATABASE_URL`/`POSTGRES_URL`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `GEMINI_THINKING_LEVEL`, and `GEMINI_THINKING_BUDGET`.
 
-`scripts/verify-release.mjs` also reads `GCP_PROJECT_ID`, `GCP_REGION`, `API_SERVICE`, `WORKER_SERVICE`, `RELEASE_VERSION`, `GITHUB_REF_NAME`, `GITHUB_SHA`, `IMAGE_DIGEST`, and `API_URL` when the matching CLI flag is omitted. The release workflow passes the flags.
+---
 
-`scripts/compare-final-opinion.mjs` reads `DATABASE_URL` or `POSTGRES_URL`, plus `GEMINI_THINKING_LEVEL` and `GEMINI_THINKING_BUDGET`. `scripts/compare-ocr-models.mjs` reads `GEMINI_API_KEY` or `GOOGLE_API_KEY`. Neither script is part of `npm test` or the release workflow. `.cursor/skills/verify-titlework/verify.mjs` reads `CHROME_PATH` when it launches a browser.
+## Troubleshooting
 
-## When a job fails
+| Symptom | Cause & fix |
+|---|---|
+| `.env.local: not found` on `npm run dev` | Run `cp .env.example .env.local` and fill in your credentials, or use `npm start` if variables are already in your shell environment. |
+| `401` on abstraction or synthesis routes | `APP_PASSWORD` is unset or does not match what you entered in the UI. It is required for server-side abstraction and synthesis even locally. |
+| `Google Cloud Storage is not configured` | `GCS_BUCKET` is empty on that service, ADC is not logged in locally (`gcloud auth application-default login`), or the Cloud Run runtime service account lacks `roles/storage.objectAdmin`. |
+| `DATABASE_URL or POSTGRES_URL is required` | None of `DATABASE_URL`, `POSTGRES_URL`, or `POSTGRES_PRISMA_URL` is set. |
+| Browser uploads fail with CORS errors | Check your GCS CORS policy (`cors.json`). It must allow `PUT` and `content-type` from both your page origin (`http://localhost:8080` or your Cloud Run URL). |
+| Jobs stay `queued` or `abstracting` | Confirm the worker is running and can reach Neon, or if `WORKER_DISABLED=true` (or running only `npm run dev`), keep the browser tab open so the API kick drives batches. |
+| Model timeouts or rate limits | Lower `WORKFLOW_CONCURRENCY` or `WORKFLOW_BATCH_LIMIT`, or raise your provider quota. Retryable failures move to `retry_wait` and resume automatically. |
 
-`Google Cloud Storage is not configured` means `GCS_BUCKET` is empty on that service, or the runtime service account cannot use the bucket.
+---
 
-`DATABASE_URL or POSTGRES_URL is required` means none of `DATABASE_URL`, `POSTGRES_URL`, and `POSTGRES_PRISMA_URL` is set.
+## Cost and spend controls
 
-Uploads fail with CORS errors. Check the GCS CORS policy. It must allow `PUT` from the page origin and from the API origin.
+Each document chunk becomes an abstraction call unless worker batching packs multiple text-extracted chunks into one request. Partial synthesis runs one Gemini call per segment, and the final merge is a single Claude Sonnet 5.5 call. The server does not use Anthropic or Gemini async batch-job APIs; queue progress is tracked directly in Neon.
 
-Jobs stay queued or abstracting. Confirm the worker is deployed and can reach Neon. If `WORKER_DISABLED=true`, keep the browser tab open so the API kick runs, or set `WORKER_DISABLED=false` for an unattended worker loop. The worker still needs the database, the bucket, the model keys, and `APP_PASSWORD`.
+Defaults and flags that reduce token spend:
 
-Model timeouts or rate limits. Lower `WORKFLOW_CONCURRENCY` or `WORKFLOW_BATCH_LIMIT`, or raise the provider limit. Retryable failures are stored as `retry_wait` and picked up again.
+- Keep `ABSTRACTION_PDF_TEXT_FIRST` on (default) so clean text PDFs skip visual input.
+- Keep `ABSTRACTION_BATCH_ENABLED` on (default) so small text chunks share a request.
+- Keep `GEMINI_FILE_API_ENABLED` on (default) so large visual files upload via the Files API instead of inline base64.
+- Tune output caps: `ABSTRACT_MAX_TOKENS`, `SYNTHESIS_PARTIAL_MAX_TOKENS`, `SYNTHESIS_MAX_TOKENS`, and `SYNTHESIS_MERGE_MAX_TOKENS`.
+- Set `ABSTRACTION_ESCALATION_ENABLED=false` to skip Sonnet escalation re-reads (the release workflow sets this on the API).
 
-Server abstraction and synthesis routes return 401 until `APP_PASSWORD` is set, including on a laptop.
-
-## Spend
-
-Each kept chunk becomes an abstraction call, unless worker batching packs several small chunks into one call. Partial synthesis then runs one call per segment from `effectiveSynthesisChunkSize`. The final merge is one Sonnet call. This repository does not record a dollar price for a job. Provider prices change, and the prompts live in `public/index.html` and `api/_lib/synthesis.js`.
-
-These settings cut calls or output tokens.
-
-- Leave `ABSTRACTION_PDF_TEXT_FIRST` unset so text PDFs can skip visual input.
-- Leave `ABSTRACTION_BATCH_ENABLED` unset so small chunks share a call.
-- Leave `GEMINI_FILE_API_ENABLED` unset so a large visual file is uploaded through the Files API instead of inline base64.
-- `ABSTRACT_MAX_TOKENS` caps an abstract. `SYNTHESIS_PARTIAL_MAX_TOKENS` caps a partial segment. `SYNTHESIS_MAX_TOKENS` caps a single-pass opinion and a follow-up. `SYNTHESIS_MERGE_MAX_TOKENS` caps the final merge.
-- `ABSTRACTION_ESCALATION_ENABLED=false` skips the Sonnet re-read. The release workflow sets that on the API.
-
-The server code does not call the Anthropic message-batches endpoint or a Gemini batch-job endpoint. Queue progress is the worker and the Neon rows.
-
-## What the page can do
-
-- A job accepts at most 400 files. `MAX_TOTAL_DOCUMENTS` in `api/_lib/jobs.js` and `MAX_FILES` in `public/index.html` both say 400.
-- Accepted types are PDF, CSV, JPEG, PNG, GIF, and WEBP.
-- The browser uploads with a signed PUT. The signature always sets `Content-Type` and `Content-Length`. A missing size returns 400, `sizeBytes is required for signed uploads.`
-- The worker abstracts with `gemini-3.1-flash-lite` and can batch up to `ABSTRACTION_BATCH_MAX_DOCS` small chunks.
-- If server abstraction is unavailable, the page groups up to 24 small documents per call and splits an oversized single PDF.
-- The final opinion and follow-up answers use `claude-sonnet-5-5`.
-- A job reopens at `#/job/<id>`. Recent jobs are `#/jobs`.
-- The page can cancel a job, retry one chunk, and retry failed chunks.
-- **Download PDF** builds a PDF in the browser with jsPDF.
+---
 
 ## Security
 
-Report vulnerabilities as `SECURITY.md` describes.
+Report vulnerabilities as described in `SECURITY.md`.
 
-- The password stays in the page's `appPassword` variable for the tab. On load, the page deletes any saved `localStorage` or `sessionStorage` copy. It does not write a cookie.
-- `POST /internal/drain` checks `x-internal-drain-token` with the same `secureCompare` helper as the password. Cloud Run IAM still requires the caller's identity. The in-app check is a second gate, and it fails closed in production when the token is missing. Worker `/healthz` does not check it.
-- `POST /api/analyze` allows `ANALYZE_RATE_LIMIT_MAX` requests per minute per IP. Job routes and `POST /api/blob/upload` allow 1500 per minute per IP, including GET. Each of those two limiters locks the IP after 5 failed passwords and then returns 429 for 60 seconds. The client IP is the rightmost `X-Forwarded-For` hop only on Cloud Run, identified by a nonblank runtime `K_SERVICE`. Other deployments ignore forwarded headers and use the socket address, so a self-hosted reverse proxy shares one limiter key across its clients. When a bucket is configured, limiter state is stored in the bucket. Otherwise it stays in memory. A store error returns 503, `Rate limiter unavailable. Try again.`
-- Source files stay in a private bucket. Allow `PUT` only from your app origins.
-- Abstraction admits at most 128 MB (128,000,000 bytes) of raw source reservations per processing wave, independently of model-payload estimates. Unknown sizes reserve the full media-specific read limit. Reads stop at their admitted ceiling; understated positive sizes fail rather than grow the reservation. The read cache ends with the wave. This is not a process-wide memory ceiling: parser, encoding and concurrent-job overhead still require headroom.
-- The manual `node test/smoke-server.js` listener uses the normal server's path containment, password and body-size controls and binds only `127.0.0.1:3456`.
-- Job metadata routes reject base64 and raw document fields. The update check rejects raw documents, abstracts, CSV text, base64 payloads, and title opinions.
-- `public/index.html` sets `script-src 'self' 'unsafe-inline'` for the inline script and the locally served jsPDF and pdf-lib builds. `connect-src` allows this origin plus `https://storage.googleapis.com` and `https://*.storage.googleapis.com`.
+- **Password handling:** `APP_PASSWORD` is held only in the page's in-memory `appPassword` variable for the active tab. On load, the page clears any saved `localStorage` or `sessionStorage` copy and writes no cookies.
+- **Worker drain gate:** `POST /internal/drain` verifies `x-internal-drain-token` using `secureCompare` (failing closed in production when unset) on top of Cloud Run IAM (`--no-allow-unauthenticated`). Worker `/healthz` stays unauthenticated.
+- **Rate limiting & lockout:** `POST /api/analyze` allows `ANALYZE_RATE_LIMIT_MAX` requests/min/IP; job routes and `POST /api/blob/upload` allow 1,500/min/IP. Both lock an IP for 60 seconds (`429`) after 5 failed passwords. Client IP uses the rightmost `X-Forwarded-For` hop only on Cloud Run (non-blank `K_SERVICE`); elsewhere it uses the socket address. Limiter state is stored in GCS when configured (failing with `503` on store error) or in memory otherwise.
+- **Private files & raw-byte budget:** Source files remain in a private GCS bucket. Abstraction admits at most 128 MB (`128,000,000` bytes) of raw source reservations per processing wave; reads stop at their admitted ceiling and the read cache clears at wave end. (This is not a process-wide memory ceiling — leave headroom for parsing and concurrency.)
+- **Metadata validation:** Job metadata routes reject base64 payloads, raw documents, abstracts, CSV text, and title opinions.
+- **Browser CSP:** `public/index.html` enforces `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'` and `worker-src 'self' blob:` for the inline app and locally served `jsPDF`, `pdf-lib`, and `pdfjs-dist` builds. `connect-src` allows only `'self'`, `https://storage.googleapis.com`, and `https://*.storage.googleapis.com`.
+- **Smoke server:** `node test/smoke-server.js` reuses the main server's path-containment, password, and body-size guards and binds only `127.0.0.1:3456`.
+
+---
 
 ## Repository layout
 
 ```text
 api/
-  _lib/                 queue, jobs, storage, model clients
-  analyze.js
-  blob/upload.js
-  jobs.js
-  jobs/[...path].js
-  ocr-compare.js
-public/index.html
-scripts/                release checks and model comparison scripts
-test/
-docs/                   design notes and release notes
+  _lib/                 queue, jobs/schema, storage, abstraction, synthesis, model clients
+  analyze.js            direct browser-fallback analysis route
+  blob/upload.js        signed GCS upload URL minting
+  jobs.js               job creation & listing
+  jobs/[...path].js     chunk, abstraction, synthesis, preview, retry & follow-up routes
+  ocr-compare.js        optional OCR comparison lab endpoint
+public/
+  index.html            single-page Mineral Ownership Builder UI
+  ocr-accuracy.js       client-side abstract quality checks
+  pdf-raster.js         high-DPI browser PDF page renderer (pdfjs-dist)
+  ocr-compare.*         optional OCR comparison lab UI
+scripts/                release verification, digest resolution, UI audit, model & PDF test scripts
+test/                   unit, integration, security, and release tests
+docs/                   architecture notes, runbooks, and release notes
 .github/workflows/      test.yml, release.yml, secret-scan.yml
-server.js               web and API service
-worker.js               background worker
-Dockerfile
+server.js               web & API HTTP server
+worker.js               background queue worker
+Dockerfile              production container image (Node 26.13.0)
 package.json
 .env.example
 SECURITY.md
 LICENSE
 ```
+
+---
 
 ## License
 
