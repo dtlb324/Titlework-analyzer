@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/badge-macos.svg" alt="Works on macOS">
-  <img src="docs/assets/badge-windows.svg" alt="Works on Windows">
+  <img src="docs/assets/badge-macos.svg" alt="macOS">
+  <img src="docs/assets/badge-windows.svg" alt="Windows">
 </p>
 
 # Titlework Analyzer
