@@ -141,6 +141,6 @@ node .cursor/skills/verify-titlework/verify.mjs http GET --run-dir "$RUN_DIR" /a
 node .cursor/skills/verify-titlework/verify.mjs cleanup --run-dir "$RUN_DIR"
 ```
 
-`launch` accepts `--port`, `--run-dir`, `--password`, and `--keep-env`. `browser` accepts `open`, `goto`, `wait`, `fill`, `upload`, `click`, `text`, `prop`, `attr`, `screenshot`, and `snapshot`. `http` accepts a method and a path starting with `/`, plus `--json`, `--header Name:value`, `--expect`, and `--out`.
+`launch` accepts `--port`, `--run-dir`, `--password`, and `--keep-env`. `browser` accepts `open`, `goto`, `wait`, `fill`, `upload`, `click`, `text`, `prop`, `attr`, `screenshot`, and `snapshot`. `browser open` / `browser goto` finish on `Page.loadEventFired` or same-document hash navigation (`Page.navigatedWithinDocument` / no `loaderId`), so `#/jobs` and `#/job/<id>` work without a full reload. `http` accepts a method and a path starting with `/`, plus `--json`, `--header Name:value`, `--expect`, and `--out`.
 
 Keep the map current with `/maintain-verification-skill` when routes or controls change.

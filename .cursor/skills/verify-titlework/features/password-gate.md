@@ -4,7 +4,7 @@ The password gate asks for the shared application password before showing the up
 
 ## Sub-features
 
-- `gate-show` shows **Access Required** and hides the upload form.
+- `gate-show` shows **Access Required** and hides `#mainApp` (the whole app shell, not only the upload form).
 - `gate-reject` shows **Incorrect password.** and stays on the gate.
 - `gate-accept` hides the gate and shows the home form after the right password.
 

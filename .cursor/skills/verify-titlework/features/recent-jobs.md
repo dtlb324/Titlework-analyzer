@@ -30,4 +30,5 @@ Preconditions:
 - The toolbar control is an anchor, `#recentJobsButton`, not a button. When it is disabled it has no `href` and `aria-disabled="true"`.
 - `#/jobs` still renders the empty state when the toolbar link is disabled. That is the entry point to prove on a fresh profile.
 - Recent jobs survive inside one Chrome profile. Cleanup removes the profile with the run directory. Do not reuse `chrome-profile` across runs and then expect the empty state.
-- Completing an analysis is what enables the toolbar. Merely visiting `#/jobs` does not.
+- The toolbar enables only after this profile stores a job with status `complete` or `partial_failed` (opening an already-complete job counts). Merely visiting `#/jobs` does not. Incomplete remembered jobs leave the link disabled.
+- The toolbar label is `Recent Jobs`; the history card heading is `Recent jobs`.

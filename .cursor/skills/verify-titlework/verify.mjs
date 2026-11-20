@@ -497,20 +497,26 @@ async function browser(flags, sub) {
     const url = String(flags.url || '');
     if (!url) fail(`browser ${sub} requires --url.`);
     await withPage(state, runDir, async cdp => {
-      const loaded = new Promise((resolve, reject) => {
+      let settle;
+      const settled = new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('timeout waiting for page load')), timeout);
+        settle = () => {
+          clearTimeout(timer);
+          cdp.ws.removeEventListener('message', onMessage);
+          resolve();
+        };
         const onMessage = event => {
           const message = JSON.parse(event.data);
-          if (message.method === 'Page.loadEventFired') {
-            clearTimeout(timer);
-            cdp.ws.removeEventListener('message', onMessage);
-            resolve();
+          if (message.method === 'Page.loadEventFired' || message.method === 'Page.navigatedWithinDocument') {
+            settle();
           }
         };
         cdp.ws.addEventListener('message', onMessage);
       });
-      await cdp.send('Page.navigate', { url });
-      await loaded;
+      const nav = await cdp.send('Page.navigate', { url });
+      // Same-document hash navigations omit loaderId and never fire loadEventFired.
+      if (!nav?.loaderId) settle();
+      else await settled;
     });
     succeed({ url });
     return;
