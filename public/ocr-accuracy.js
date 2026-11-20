@@ -28,7 +28,11 @@ function containsField(haystack, needle) {
   const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const lead = /^[\p{L}\p{N}]/u.test(needle) ? `(?<!${WORD})(?<!${WORD}-)` : '';
   const trail = /[\p{L}\p{N}]$/u.test(needle) ? `(?!${WORD})(?!-${WORD})` : '';
-  return new RegExp(lead + escaped + trail, 'u').test(haystack);
+  try {
+    return new RegExp(lead + escaped + trail, 'u').test(haystack);
+  } catch {
+    return false; // a needle too long to compile cannot be a real field value
+  }
 }
 
 function modelFailed(model) {
@@ -136,14 +140,107 @@ const FULL_MONTH_NAMES = [
   'july', 'august', 'september', 'october', 'november', 'december',
 ];
 const MONTH_PATTERN = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const ABSTAIN_FIELD_VALUE = /\b(illegible|not visible|verify manually|unclear|unreadable|unknown|not stated|not shown|not given|not legible|cannot be determined|omitted|missing|blank)\b/i;
+// Read failures: these markers abstain wherever they appear in the value.
+const HARD_ABSTAIN_MARKER = /\b(illegible|not visible|verify manually|unreadable|not legible|cannot be determined)\b/i;
+// Strong soft words abstain anywhere in the value. "unknown" is handled after party-name phrases are masked.
+const STRONG_SOFT_ABSTAIN = /\b(?:unclear|unknown|not stated|not shown|not given|omitted|missing)\b/i;
+// A stated year with a missing day or month is a statement; these words describe what is absent.
+const ABSENCE_ONLY_SOFT_ABSTAIN = /\b(?:not stated|not shown|not given|omitted|missing)\b/i;
+const STATED_YEAR = /\b(?:1[7-9]|20|21)\d{2}\b/;
+const DATE_FIELDS = new Set(['DATE EXECUTED', 'DATE RECORDED']);
+// "blank" is also an ordinary word (a blank tract), so it abstains only as the status of a short value.
+const BLANK_LEADING = /^[\s\[(\-—–:]*blank\b/i;
+const BLANK_TRAILING = /(?:^|[-—–:,(\[])\s*(?:[\p{L}]+\s+){0,4}blank[\s)\].]*$/iu;
+// "Unknown Heirs of ..." is a party name. Heirs-type nouns qualify when naming text follows;
+// owner/party-type nouns only in the "Unknown Owners of <Name>" form.
+const UNKNOWN_HEIR_NOUN = '(?:heirs?|devisees?|successors?|assigns?|claimants?|creditors?|beneficiaries|legatees?|lienholders?)';
+const UNKNOWN_OWNER_NOUN = '(?:owners?|part(?:y|ies)|persons?|interests?|spouses?|trustees?|lessees?|lessors?)';
+const UNKNOWN_PARTY_PHRASE = new RegExp(`\\bunknown\\s+(${UNKNOWN_HEIR_NOUN}|${UNKNOWN_OWNER_NOUN})\\b`, 'gi');
+const UNKNOWN_HEIR_ONLY = new RegExp(`^${UNKNOWN_HEIR_NOUN}$`, 'i');
+const UNFILLED_BLANK = /(?:_{2,}|\[[\s_.\-]*\]|\.{3,})/g;
+const NAMING_STOPWORDS = new Set(['of', 'and', 'or', 'the', 'deceased', 'their', 'his', 'her', 'unknown', 'if', 'any']);
 const ABSTAIN_EXACT_VALUE = /^(n\/a|na|none|none stated|none noted|none specified|not specified|not recorded|unrecorded)$/i;
 const NOT_APPLICABLE_VALUE = /^(?:not applicable)(?:\s*(?:\([^)]*\)|[-—:].*))?$/i;
+const NA_ABBREVIATION_VALUE = /^(?:n\/a|na)\.?$/i;
+const NONE_VALUE = /^(?:none|none stated|none noted|none specified)\.?$/i;
 const PLACEHOLDER_ONLY_VALUE = /^(?:\s*\[[^\]]+\]\s*|[-—–_?.]+)$/;
 const UNCERTAIN_RECORDED_DATE = /\b(illegible|not visible|verify manually|unclear|unreadable|unknown|not legible)\b/i;
-const BILATERAL_DOC_TYPE = /\b(deed|lease|assignment|conveyance|bill of sale|grant)\b/i;
-const UNILATERAL_DOC_TYPE = /\b(release|affidavit|notice|order|decree|certificate|plat|termination|revocation|ratification)\b/i;
-const NON_CONVEYANCE_DOC_TYPE = /\b(affidavit|order|decree|certificate|plat|notice|release|will|probate|death)\b/i;
+
+// DOC TYPE classes are decided by the earliest instrument noun ("Deed of Release" is a deed),
+// and any conveying word makes the instrument conveying whatever its head noun is.
+const BILATERAL_NOUNS = /\b(deed|lease|assignment|conveyance|bill of sale|grant)\b/gi;
+const NON_LAND_NOUNS = /\b(release|affidavit|notice|order|decree|certificate|plat|termination|revocation|ratification|power of attorney|judgment|will|probate|death|memorandum)\b/gi;
+const CONVEYING_WORD = /\b(?:convey\w*|sale|transfer\w*|quitclaim\w*|assign\w*|grant\w*|warranty)\b/i;
+// Instruments that do not convey a fraction: leases and security or unit instruments.
+const NO_FRACTION_INSTRUMENT = /\b(?:lease|mortgage|deed of trust|lien|declaration of pool\w*|pooling|pooled unit|unit declaration|farm-?out|memorandum)\b/i;
+const FRACTION_CONVEYING_NOUN = /\b(?:assignment|deed|conveyance|bill of sale)\b/i;
+
+function firstIndex(regex, text) {
+  regex.lastIndex = 0;
+  const match = regex.exec(text);
+  return match ? match.index : Infinity;
+}
+
+function nameBearingText(text) {
+  return text.replace(UNFILLED_BLANK, ' ').replace(/\b(?:illegible|verify manually)\b/gi, ' ');
+}
+
+function hasNamingText(tail) {
+  const words = nameBearingText(tail).match(/[\p{L}\p{N}]+/gu) || [];
+  return words.some(word => !NAMING_STOPWORDS.has(word.toLowerCase()));
+}
+
+// Mask party-name phrases ("Unknown Heirs of Silas Brooks") so only real abstentions are left.
+function maskUnknownParties(value) {
+  return value.replace(UNKNOWN_PARTY_PHRASE, (phrase, noun, offset) => {
+    const tail = value.slice(offset + phrase.length);
+    if (/(?:_{2,}|\[[\s_.\-]*\]|\.{3,}|illegible[\s\]).]*)\s*$/i.test(tail)) return phrase;
+    if (UNKNOWN_HEIR_ONLY.test(noun)) return hasNamingText(tail) ? ' ' : phrase;
+    return /^\s+of\s+\S/i.test(tail) && hasNamingText(tail) ? ' ' : phrase;
+  });
+}
+
+function hasSoftAbstention(value, field) {
+  const rest = maskUnknownParties(value.replace(/\s+/g, ' ').trim()).replace(/\s+/g, ' ').trim();
+  if (!rest) return false;
+  if (DATE_FIELDS.has(field) && STATED_YEAR.test(rest)) {
+    if (/\b(?:unclear|unknown)\b/i.test(rest)) return true;
+    return false;
+  }
+  if (STRONG_SOFT_ABSTAIN.test(rest)) return true;
+  if (!/\bblank\b/i.test(rest)) return false;
+  if (BLANK_LEADING.test(rest) || BLANK_TRAILING.test(rest)) return true;
+  return rest.split(' ').length <= 4;
+}
+
+function isNotApplicableValue(value) {
+  return NOT_APPLICABLE_VALUE.test(value) || NA_ABBREVIATION_VALUE.test(value);
+}
+
+function isBilateralDocType(docType) {
+  if (CONVEYING_WORD.test(docType)) return true;
+  return firstIndex(BILATERAL_NOUNS, docType) < firstIndex(NON_LAND_NOUNS, docType);
+}
+
+function isNonLandDocType(docType) {
+  return !isBilateralDocType(docType) && firstIndex(NON_LAND_NOUNS, docType) < Infinity;
+}
+
+// A none/not-applicable fraction is a statement for leases, security and unit instruments and non-land instruments.
+function acceptsNoFraction(docType) {
+  if (isNonLandDocType(docType)) return true;
+  const withoutTrustDeed = docType.replace(/\bdeed of trust\b/gi, ' ');
+  return NO_FRACTION_INSTRUMENT.test(docType)
+    && !FRACTION_CONVEYING_NOUN.test(withoutTrustDeed)
+    && !CONVEYING_WORD.test(withoutTrustDeed);
+}
+
+// An explicit "Not applicable" is a statement, not a read failure, when the instrument has no such field.
+function acceptsNotApplicable(field, docType) {
+  if (field === 'GRANTEE') return !isBilateralDocType(docType);
+  if (field === 'GRANTOR' || field === 'LEGAL DESC') return isNonLandDocType(docType);
+  return false;
+}
 
 export function parseAbstractFields(text) {
   const fields = Object.create(null);
@@ -268,14 +365,14 @@ function compareDatePrecisionOrder(a, b) {
   return (a.year - b.year) || ((a.month ?? 0) - (b.month ?? 0)) || ((a.day ?? 0) - (b.day ?? 0));
 }
 
-function isGroundingAbstention(raw) {
+function isGroundingAbstention(raw, field) {
   const trimmed = String(raw || '').trim();
   if (!trimmed) return true;
   if (PLACEHOLDER_ONLY_VALUE.test(trimmed)) return true;
-  if (ABSTAIN.test(trimmed)) return true;
-  if (ABSTAIN_FIELD_VALUE.test(trimmed)) return true;
+  if (HARD_ABSTAIN_MARKER.test(trimmed)) return true;
+  if (hasSoftAbstention(trimmed, field)) return true;
   if (ABSTAIN_EXACT_VALUE.test(trimmed)) return true;
-  if (NOT_APPLICABLE_VALUE.test(trimmed)) return true;
+  if (/not applicable/i.test(trimmed)) return true;
   return false;
 }
 
@@ -290,8 +387,22 @@ function normalizeRecordingRef(value) {
     .trim();
 }
 
+function twoDigitYearDates(rawDate) {
+  const dates = [];
+  const regex = /(?<![\d/-])(\d{1,2})[/-](\d{1,2})[/-](\d{2})(?![\d/-])/g;
+  for (const match of String(rawDate || '').matchAll(regex)) {
+    const month = Number(match[1]);
+    const day = Number(match[2]);
+    for (const century of [18, 19, 20]) {
+      const year = century * 100 + Number(match[3]);
+      if (validCalendarDate(year, month, day)) dates.push({ year, month, day });
+    }
+  }
+  return dates;
+}
+
 function dateMatchesDocumentText(rawDate, haystack, documentText) {
-  const parsed = extractCalendarDates(rawDate);
+  const parsed = [...extractCalendarDates(rawDate), ...twoDigitYearDates(rawDate)];
   for (const date of parsed) {
     if (date.month == null || date.day == null) continue;
     const monthName = FULL_MONTH_NAMES[date.month];
@@ -309,6 +420,101 @@ function dateMatchesDocumentText(rawDate, haystack, documentText) {
   return false;
 }
 
+// Party names in an abstract carry role tags and capacity phrases the document may word differently.
+// Only bounded forms are dropped; anything that names another party stays and is checked against the text.
+const MAX_DECORATED_LENGTH = 2000;
+const SIMPLE_ROLE = '(?:an?\\s+(?:single|married|unmarried|widowed|divorced|legally separated)?\\s*(?:man|woman|widow|widower|person|individual|minor)|(?:his|her)\\s+(?:wife|husband)|husband\\s+and\\s+wife|wife\\s+and\\s+husband|wife|husband|spouses?|affiant|principal|testator|testatrix|decedent|deceased|(?:successor\\s+)?trustee|executor|executrix|administrator|administratrix)';
+const CAPACITY_NOUN = '(?:(?:successor|independent|substitute|special|co)[\\s-]+)*(?:trustee|executor|executrix|administrator|administratrix|guardian|attorney-in-fact|agent|personal\\s+representative)';
+const ROLE_TAG = '(?:lessors?|lessees?|assignors?|assignees?|grantors?|grantees?|mortgagors?|mortgagees?|trustors?|beneficiary|beneficiaries|obligors?|obligees?|optionors?|optionees?|borrowers?|lenders?|vendors?|vendees?|sellers?|buyers?|owners?|surviving\\s+spouse|et\\s+ux|et\\s+vir)';
+const ROLE_WORD = `(?:the\\s+)?(?:${ROLE_TAG}|${SIMPLE_ROLE}|${CAPACITY_NOUN}|individually)`;
+const ROLE_PARENTHETICAL = new RegExp(`^${ROLE_WORD}(?:\\s*(?:,|/|&|and)\\s*${ROLE_WORD})*\\.?$`, 'i');
+const ALIAS_PARENTHETICAL = /^(?:a\/k\/a|f\/k\/a|n\/k\/a|aka|fka|also\s+known\s+as|formerly(?:\s+known\s+as)?|now\s+known\s+as)\s+(.+)$/i;
+const PARENTHETICAL = /\(([^()]{0,200})\)/g;
+const NAME_WORDS = "[\\p{L}][\\p{L}.'\u2019-]*";
+const AS_CAPACITY = new RegExp(
+  `(?:\\s*,)?\\s+as\\s+(?:the\\s+)?${CAPACITY_NOUN}`
+  + `(?:\\s+(?:of|for)\\s+(?:the\\s+)?(?:estate\\s+of\\s+(?<estate>${NAME_WORDS}(?:\\s+(?!and\\b|deceased\\b)${NAME_WORDS}){0,3})`
+  + `|(?<trust>(?:(?!and\\b)${NAME_WORDS}\\s+){0,5}?(?:trust|estate|will)\\b)))?`,
+  'giu',
+);
+const INDIVIDUALLY = /(?:\s*,)?\s+individually\b(?:\s+and(?=\s+as\b))?/gi;
+const CAPACITY_CLAUSE = new RegExp(`\\s*,\\s*${SIMPLE_ROLE}\\s*\\.?\\s*$`, 'i');
+const ET_ABBREVIATION = /,?\s+et\s+(?:ux|al|vir)\.?/gi;
+const LEADING_SPOUSE = /^(?:and\s+)?(?:(?:his|her)\s+)?(?:wife|husband)\s*,?\s+/i;
+const PARTY_SEPARATOR = /\s+and\s+|\s*&\s*/i;
+
+// Returns the bare name plus what the document must also contain: named entities (a trust, an estate,
+// an unexplained parenthetical) and, separately, aliases where either spelling is enough.
+function stripPartyDecorations(raw) {
+  let value = String(raw || '').replace(/\s+/g, ' ').trim();
+  const requires = [];
+  const aliases = [];
+  if (value.length > MAX_DECORATED_LENGTH) return { name: value, requires, aliases };
+
+  value = value.replace(PARENTHETICAL, (_, inner) => {
+    const text = inner.trim();
+    if (!text || ROLE_PARENTHETICAL.test(text)) return ' ';
+    const alias = text.match(ALIAS_PARENTHETICAL);
+    if (alias) aliases.push(alias[1].trim());
+    else requires.push(text);
+    return ' ';
+  });
+  value = value.replace(INDIVIDUALLY, ' ');
+  value = value.replace(AS_CAPACITY, (...args) => {
+    const groups = args.at(-1);
+    const entity = groups.estate || groups.trust;
+    if (entity) requires.push(entity.replace(/^the\s+/i, ''));
+    return ' ';
+  });
+  value = value.replace(ET_ABBREVIATION, ' ').replace(/\s+/g, ' ').trim();
+  for (let i = 0; i < 3; i += 1) {
+    const next = value.replace(/[,;]+$/, '').replace(CAPACITY_CLAUSE, '').replace(LEADING_SPOUSE, '').trim();
+    if (next === value) break;
+    value = next;
+  }
+  return { name: value.replace(/[,;]+$/, '').trim(), requires, aliases };
+}
+
+function nameInText(name, haystack) {
+  const needle = normalizeForMatch(name);
+  return Boolean(needle) && containsField(haystack, needle);
+}
+
+function decoratedPresent(decorated, haystack) {
+  if (!decorated.requires.every(required => nameInText(required, haystack))) return false;
+  return nameInText(decorated.name, haystack) || decorated.aliases.some(alias => nameInText(alias, haystack));
+}
+
+function partyNamePresent(part, haystack) {
+  return nameInText(part, haystack) || decoratedPresent(stripPartyDecorations(part), haystack);
+}
+
+// Every party named in the abstract must appear in the document text.
+function allPartiesPresent(raw, haystack) {
+  const segments = String(raw)
+    .split(/[;\n]+/)
+    .map(seg => seg.replace(/^(?:[-*•]\s+)/, '').trim())
+    .filter(Boolean);
+  if (!segments.length) return false;
+  return segments.every(segment => {
+    if (partyNamePresent(segment, haystack)) return true;
+    const whole = stripPartyDecorations(segment);
+    if (segment.length > MAX_DECORATED_LENGTH || !whole.requires.every(required => nameInText(required, haystack))) return false;
+    const fragments = whole.name.split(PARTY_SEPARATOR).map(p => p.trim()).filter(Boolean).map(stripPartyDecorations);
+    if (fragments.length < 2) return false;
+    const tokens = fragments.map(fragment => fragment.name.split(' ').filter(Boolean));
+    return fragments.every((fragment, i) => {
+      let name = fragment.name;
+      if (tokens[i].length === 1) {
+        // A lone first name takes the surname of the adjacent full name (next first, else previous).
+        const neighbor = [tokens[i + 1], tokens[i - 1]].find(t => t && t.length > 1);
+        if (neighbor) name = `${name} ${neighbor.at(-1)}`;
+      }
+      return decoratedPresent({ ...fragment, name }, haystack);
+    });
+  });
+}
+
 export function scoreAbstractAgainstText(documentText, fields) {
   if (typeof documentText !== 'string' || !documentText.trim()) {
     return { status: 'none', reason: 'no-document-text' };
@@ -321,7 +527,7 @@ export function scoreAbstractAgainstText(documentText, fields) {
   for (const name of IDENTITY_FIELDS) {
     const raw = fields?.[name];
     if (typeof raw !== 'string' || !raw.trim()) continue;
-    if (isGroundingAbstention(raw)) continue;
+    if (isGroundingAbstention(raw, name)) continue;
 
     scored += 1;
     const needle = normalizeForMatch(raw);
@@ -337,20 +543,8 @@ export function scoreAbstractAgainstText(documentText, fields) {
       continue;
     }
 
-    if ((name === 'GRANTOR' || name === 'GRANTEE') && /[;\n]/.test(raw)) {
-      const segments = raw
-        .split(/[;\n]+/)
-        .map(seg => seg.replace(/^(?:[-*•]\s+)/, '').trim())
-        .filter(Boolean);
-      if (
-        segments.length >= 2
-        && segments.every(seg => {
-          const segNeedle = normalizeForMatch(seg);
-          return Boolean(segNeedle) && containsField(haystack, segNeedle);
-        })
-      ) {
-        matched += 1;
-      }
+    if (name === 'GRANTOR' || name === 'GRANTEE') {
+      if (allPartiesPresent(raw, haystack)) matched += 1;
       continue;
     }
 
@@ -367,11 +561,12 @@ export function scoreAbstractAgainstText(documentText, fields) {
   return { status: 'scored', matched, scored, percent: Math.floor(100 * matched / scored) };
 }
 
-function isFieldAbstained(value) {
+export function isFieldAbstained(value, field) {
   const trimmed = String(value || '').trim();
   if (!trimmed) return true;
   if (PLACEHOLDER_ONLY_VALUE.test(trimmed)) return true;
-  if (ABSTAIN_FIELD_VALUE.test(trimmed)) return true;
+  if (HARD_ABSTAIN_MARKER.test(trimmed)) return true;
+  if (hasSoftAbstention(trimmed, field)) return true;
   if (ABSTAIN_EXACT_VALUE.test(trimmed)) return true;
   return false;
 }
@@ -412,7 +607,6 @@ export function validateAbstractQuality(text, options = {}) {
   const fields = parseAbstractFields(text);
   const reasons = [];
   const docType = String(fields['DOC TYPE'] || '').trim();
-  const isBilateral = BILATERAL_DOC_TYPE.test(docType) && !UNILATERAL_DOC_TYPE.test(docType);
   const dateRecorded = fields['DATE RECORDED'];
   const dateRecordedUncertain = typeof dateRecorded === 'string' && UNCERTAIN_RECORDED_DATE.test(dateRecorded);
   const recordedDates = extractCalendarDates(dateRecorded);
@@ -424,16 +618,16 @@ export function validateAbstractQuality(text, options = {}) {
       continue;
     }
     const trimmed = raw.trim();
-    if (NOT_APPLICABLE_VALUE.test(trimmed)) {
-      if (field !== 'GRANTEE' || isBilateral) {
-        reasons.push(`abstained_required_field:${field}`);
-      }
+    const statesNotApplicable = !HARD_ABSTAIN_MARKER.test(trimmed)
+      && (isNotApplicableValue(trimmed) || (field === 'GRANTEE' && NONE_VALUE.test(trimmed)));
+    if (statesNotApplicable) {
+      if (!acceptsNotApplicable(field, docType)) reasons.push(`abstained_required_field:${field}`);
       continue;
     }
     if (field === 'RECORDING REF' && UNRECORDED_VALUE.test(trimmed) && !recordedDates.length && !dateRecordedUncertain) {
       continue;
     }
-    if (isFieldAbstained(trimmed)) {
+    if (isFieldAbstained(trimmed, field)) {
       reasons.push(`abstained_required_field:${field}`);
     }
   }
@@ -454,10 +648,9 @@ export function validateAbstractQuality(text, options = {}) {
   const minerals = String(fields['MINERALS'] || '').trim();
   if (/^yes\b/i.test(minerals)) {
     const fraction = String(fields['FRACTION CONVEYED'] || '').trim();
-    const nonConveyance = NON_CONVEYANCE_DOC_TYPE.test(docType);
+    const statesNone = !HARD_ABSTAIN_MARKER.test(fraction) && (isNotApplicableValue(fraction) || NONE_VALUE.test(fraction));
     const invalidFraction = !fraction
-      || isFieldAbstained(fraction)
-      || (NOT_APPLICABLE_VALUE.test(fraction) && !nonConveyance);
+      || (statesNone ? !acceptsNoFraction(docType) : isFieldAbstained(fraction, 'FRACTION CONVEYED'));
     if (invalidFraction) {
       reasons.push('minerals_without_fraction');
     }

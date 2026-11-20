@@ -27,6 +27,7 @@ import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { applyAbstractionClaim } from '../api/_lib/jobs.js';
 import { fileURLToPath } from 'url';
+import { cleanCases, defectiveCases } from './fixtures/abstract-quality-corpus.js';
 import { dirname, join } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2129,6 +2130,31 @@ test('Priority 5: deterministic triggers fire via shouldEscalateAbstract/evaluat
     ABSTRACTION_PROMPT.includes('"not stated"') && ABSTRACTION_PROMPT.includes('"unrecorded"'),
     'ABSTRACTION_PROMPT must distinguish absent/unrecorded fields from ILLEGIBLE - VERIFY MANUALLY',
   );
+});
+
+test('Priority 5: clean, correct abstracts are not escalated by the quality checks (with and without document text)', () => {
+  const failures = [];
+  for (const c of cleanCases) {
+    for (const [label, context] of [['no text', {}], ['with text', { documentText: c.text }]]) {
+      const result = evaluateAbstractEscalation(c.abstract, { outputTokens: 450 }, 2000, context);
+      if (result.shouldEscalate) failures.push(`${c.name} (${label}): ${result.reasons.join(', ')}`);
+    }
+  }
+  assert(failures.length === 0, `${failures.length} clean abstracts escalated:\n${failures.join('\n')}`);
+});
+
+test('Priority 5: defective abstracts keep escalating with their stated reason', () => {
+  const failures = [];
+  for (const c of defectiveCases) {
+    const contexts = c.needsText ? [['with text', { documentText: c.text }]] : [['no text', {}], ['with text', { documentText: c.text }]];
+    for (const [label, context] of contexts) {
+      const result = evaluateAbstractEscalation(c.abstract, { outputTokens: 450 }, 2000, context);
+      if (!result.shouldEscalate || !result.reasons.some(reason => reason.startsWith(c.reason))) {
+        failures.push(`${c.name} (${label}): expected ${c.reason}, got ${JSON.stringify(result.reasons)}`);
+      }
+    }
+  }
+  assert(failures.length === 0, `${failures.length} defective abstracts not flagged:\n${failures.join('\n')}`);
 });
 
 test('Priority 4: resolveEscalationModel and resolveEscalationMaxTokens read env dynamically', async () => {
