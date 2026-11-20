@@ -12,7 +12,7 @@
 &nbsp;&nbsp;
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-badge-windows-dark.svg">
-<img alt="Windows OS" src="docs/assets/readme-badge-windows-light.svg" width="125">
+<img alt="Windows OS" src="docs/assets/readme-badge-windows-light.svg" width="127">
 </picture>
 </p>
 
