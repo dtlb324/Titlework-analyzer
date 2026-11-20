@@ -6,7 +6,6 @@ import {
   addUsage,
   buildAbstractMessagesForChunks,
   buildEscalationQualityContext,
-  enrichVisualDeliveryForModel,
   estimateAbstractPayloadBytes,
   estimateRequestBytes,
   evaluateAbstractEscalation,
@@ -28,7 +27,7 @@ import {
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const MAX_PAYLOAD_BYTES = REQUEST_ENVELOPE_SAFE_BYTES - 350_000;
-const MAX_DOCS_PER_BATCH = clampInt(process.env.ABSTRACTION_BATCH_MAX_DOCS, 24, 1, 48);
+const MAX_DOCS_PER_BATCH = clampInt(process.env.ABSTRACTION_BATCH_MAX_DOCS, 6, 1, 48);
 const LARGE_CHUNK_BYTES = clampInt(process.env.ABSTRACTION_BATCH_LARGE_BYTES, 2_000_000, 100_000, 8_000_000);
 const MAX_BATCH_PAGE_SPAN = clampInt(process.env.ABSTRACTION_BATCH_MAX_PAGE_SPAN, 32, 4, 120);
 function clampInt(raw, fallback, min, max) {
@@ -41,8 +40,21 @@ export function isAbstractionBatchingEnabled() {
   return process.env.ABSTRACTION_BATCH_ENABLED !== 'false';
 }
 
+function isImageChunk(chunk) {
+  return Boolean(chunk?.renderedImages) || /^image\/[-+.a-z0-9]+$/i.test(chunk?.mediaType || '');
+}
+
 function isPdfChunk(chunk) {
-  return chunk.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk.originalFilename || '');
+  return !chunk?.renderedImages && (chunk?.mediaType === 'application/pdf' || /\.pdf$/i.test(chunk?.originalFilename || ''));
+}
+
+function isCsvChunk(chunk) {
+  return !chunk?.renderedImages && (chunk?.mediaType === 'text/csv' || /\.csv$/i.test(chunk?.originalFilename || ''));
+}
+
+function isTextBatchableItem(item) {
+  if (isCsvChunk(item.chunk)) return true;
+  return isPdfChunk(item.chunk) && item.delivery?.mode === 'text' && Boolean(String(item.delivery.extractedText || '').trim());
 }
 
 export function estimateChunkPayloadBytes(chunk, payloadBytes = null, delivery = null) {
@@ -50,12 +62,19 @@ export function estimateChunkPayloadBytes(chunk, payloadBytes = null, delivery =
 }
 
 export function chunkRequiresSoloBatch(chunk, estimatedPayload = null) {
+  if (isImageChunk(chunk)) return true;
+  if (isPdfChunk(chunk)) {
+    const largePdfSoloBytes = clampInt(process.env.GEMINI_FILE_API_MIN_BYTES, 1_500_000, 250_000, 10_000_000);
+    if (Number.isFinite(Number(chunk?.sizeBytes)) && Number(chunk.sizeBytes) >= largePdfSoloBytes) {
+      return true;
+    }
+    if (chunk.pageStart && chunk.pageEnd) {
+      const span = chunk.pageEnd - chunk.pageStart + 1;
+      if (span > MAX_BATCH_PAGE_SPAN) return true;
+    }
+  }
   const payload = estimatedPayload ?? estimateChunkPayloadBytes(chunk);
   if (payload > LARGE_CHUNK_BYTES) return true;
-  if (chunk.pageStart && chunk.pageEnd && isPdfChunk(chunk)) {
-    const span = chunk.pageEnd - chunk.pageStart + 1;
-    if (span > MAX_BATCH_PAGE_SPAN) return true;
-  }
   return false;
 }
 
@@ -196,13 +215,14 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   const escalationMaxTokens = options.escalationMaxTokens ?? resolveEscalationMaxTokens();
   const escalationEnabled = isAbstractionEscalationEnabled({ model, escalationModel, options });
 
-  // Leases this worker still holds. Every paid call renews all of them in one batch: a flagged chunk's
-  // Sonnet call or an earlier fallback solo can run for minutes while other chunks wait their turn.
+  // Chunks this worker claimed and has not finished. Their leases only live as long as the last renewal, so
+  // renew them before every billable call. A 'lost' answer is final: never pay for that chunk again.
   const held = new Map(ready.map(entry => [entry.chunk.id, entry.chunk]));
   const lostIds = new Set();
   const renewState = new Map();
   const renewMs = callLeaseMs(leaseMs, options.upstreamTimeoutMs ?? config.upstreamTimeoutMs);
   const renewHeld = async (activeChunk = null, activeLeaseMs = null) => {
+    if (activeChunk && lostIds.has(activeChunk.id)) return 'lost';
     const targets = activeChunk && !held.has(activeChunk.id)
       ? [...held.values(), activeChunk]
       : [...held.values()];
@@ -220,11 +240,12 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     await options.chunkLeaseGuard?.();
     return activeChunk ? outcomes.get(activeChunk.id) : undefined;
   };
-  const tier1Guard = async () => {
-    await renewHeld();
-    if (!held.size) throw chunkLeaseLostError(null);
-    await options.modelCallGuard?.();
+  const stale = chunk => ({ status: 'stale', chunkId: chunk.id });
+  const release = results => {
+    for (const result of results) held.delete(result?.chunkId);
+    return results;
   };
+  const soloOptions = { ...options, chunkLeaseGuard: renewHeld };
   const escalationGuard = chunk => async () => {
     if (lostIds.has(chunk.id)) throw chunkLeaseLostError(chunk.id);
     await renewHeld();
@@ -248,19 +269,17 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     await options.modelCallGuard?.();
   };
 
+  let preparedItems;
   try {
-    const preparations = await Promise.allSettled(ready.map(async entry => {
+    const preparations = await Promise.allSettled(ready.map(async (entry, batchPosition) => {
       const payload = await blobLoader(entry.chunk);
-      const delivery = await enrichVisualDeliveryForModel(
-        await resolveChunkDelivery(entry.chunk, payload.bytes),
-        entry.chunk,
-        payload.bytes,
-        model,
-      );
+      const delivery = await resolveChunkDelivery(entry.chunk, payload.bytes);
       return {
         chunk: entry.chunk,
+        payload,
         payloadBytes: payload.bytes,
         delivery,
+        batchPosition,
       };
     }));
     const failedPreparation = preparations.find(result => result.status === 'rejected');
@@ -268,32 +287,79 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       preparations.length = 0;
       throw failedPreparation.reason;
     }
-    const preparedItems = preparations.map(result => result.value);
+    preparedItems = preparations.map(result => result.value);
     preparations.length = 0;
+  } catch (err) {
+    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds, renewHeld })];
+  }
 
-    const messages = buildAbstractMessagesForChunks(preparedItems, globalStart);
+  const textItems = [];
+  const visualItems = [];
+  for (const item of preparedItems) {
+    if (isTextBatchableItem(item)) textItems.push(item);
+    else visualItems.push(item);
+  }
+  preparedItems.length = 0;
+
+  const visualResults = [];
+  for (const item of visualItems) {
+    await renewHeld();
+    if (lostIds.has(item.chunk.id)) {
+      visualResults.push(stale(item.chunk));
+      continue;
+    }
+    visualResults.push(release([await runSoloPreparedItem(item, soloOptions, { workerId, leaseMs, maxAttempts, globalStart })])[0]);
+  }
+
+  // Slow solos above may have outlived a text chunk's lease: drop those, no model call for them.
+  await renewHeld();
+  const lostText = textItems.filter(item => lostIds.has(item.chunk.id));
+  const lostTextResults = lostText.map(item => stale(item.chunk));
+  if (lostText.length) {
+    for (let i = textItems.length - 1; i >= 0; i--) {
+      if (lostIds.has(textItems[i].chunk.id)) textItems.splice(i, 1);
+    }
+  }
+
+  if (!textItems.length) {
+    return [...finished, ...visualResults, ...lostTextResults];
+  }
+  if (textItems.length === 1) {
+    const soloText = await runSoloPreparedItem(textItems[0], soloOptions, { workerId, leaseMs, maxAttempts, globalStart });
+    return [...finished, ...visualResults, soloText, ...lostTextResults];
+  }
+
+  try {
+    const messages = buildAbstractMessagesForChunks(textItems, globalStart);
     const payloadBytes = estimateRequestBytes(model, config.maxTokens, ABSTRACTION_PROMPT, messages);
     if (payloadBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
-      if (ready.length > 2) {
-        const mid = Math.ceil(ready.length / 2);
-        const leftChunks = ready.slice(0, mid).map(entry => entry.chunk);
-        const rightChunks = ready.slice(mid).map(entry => entry.chunk);
-        for (const chunk of leftChunks) held.delete(chunk.id);
+      if (textItems.length > 2) {
+        const mid = Math.ceil(textItems.length / 2);
+        // The right half stays in `held` (renewed through the guard) while the left half runs.
+        for (const item of textItems.slice(0, mid)) held.delete(item.chunk.id);
         const leftResults = await processMultiChunkAbstraction(
-          leftChunks,
-          { ...options, chunkLeaseGuard: renewHeld, globalStart, workerId, leaseMs, maxAttempts },
+          textItems.slice(0, mid).map(item => item.chunk),
+          { ...soloOptions, globalStart, workerId, leaseMs, maxAttempts },
         );
-        for (const chunk of rightChunks) held.delete(chunk.id);
-        const rightResults = await processMultiChunkAbstraction(
-          rightChunks,
-          { ...options, globalStart: globalStart + mid, workerId, leaseMs, maxAttempts },
-        );
-        return [...finished, ...leftResults, ...rightResults];
+        await renewHeld();
+        const rightItems = textItems.slice(mid);
+        const rightResults = rightItems.map(item => (lostIds.has(item.chunk.id)
+          ? stale(item.chunk)
+          : null));
+        const rightLive = rightItems.filter(item => !lostIds.has(item.chunk.id));
+        for (const item of rightLive) held.delete(item.chunk.id);
+        const rightDone = rightLive.length
+          ? await processMultiChunkAbstraction(
+            rightLive.map(item => item.chunk),
+            { ...options, globalStart: globalStart + mid, workerId, leaseMs, maxAttempts },
+          )
+          : [];
+        return [...finished, ...visualResults, ...lostTextResults, ...leftResults, ...rightResults.filter(Boolean), ...rightDone];
       }
-      return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, 'payload_too_large', { held, renewHeld })];
+      return [...finished, ...visualResults, ...lostTextResults, ...await fallbackToSingles(textItems.map(item => item.chunk), { ...soloOptions, workerId, leaseMs, maxAttempts }, 'payload_too_large', { held, lostIds, renewHeld })];
     }
 
-    const batchMaxTokens = Math.min(config.maxTokens * preparedItems.length, 65536);
+    const batchMaxTokens = Math.min(config.maxTokens * textItems.length, 65536);
     const modelResult = await runModelAbstraction({
       messages,
       model,
@@ -302,15 +368,25 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       escalationModel,
       escalationMaxTokens,
       responseSchema: BATCH_ABSTRACT_RESPONSE_SCHEMA,
-      options: { ...options, modelCallGuard: tier1Guard },
+      options: {
+        ...options,
+        // Last check before the paid batch call: if a member was taken, do not pay for a batch that cannot be saved.
+        modelCallGuard: async () => {
+          await renewHeld();
+          const lost = textItems.find(item => lostIds.has(item.chunk.id));
+          if (lost) throw chunkLeaseLostError(lost.chunk.id);
+          if (!held.size) throw chunkLeaseLostError(null);
+          await options.modelCallGuard?.();
+        },
+      },
     });
-    const parsed = parseBatchAbstracts(modelResult.text, preparedItems, globalStart);
-    const perChunkPayload = Math.floor(payloadBytes / preparedItems.length);
+    const parsed = parseBatchAbstracts(modelResult.text, textItems, globalStart);
+    const perChunkPayload = Math.floor(payloadBytes / textItems.length);
     const batchResults = [];
     const fallbackChunks = [];
     const noEscalateFallbackChunks = [];
-    for (let i = 0; i < preparedItems.length; i++) {
-      const item = preparedItems[i];
+    for (let i = 0; i < textItems.length; i++) {
+      const item = textItems[i];
       const parsedItem = parsed[i];
       const text = String(parsedItem?.abstractText || '').trim();
       if (!text) {
@@ -320,10 +396,10 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       }
       const perChunkUsage = {
         inputTokens: modelResult.usage.inputTokens != null
-          ? Math.floor(modelResult.usage.inputTokens / preparedItems.length)
+          ? Math.floor(modelResult.usage.inputTokens / textItems.length)
           : null,
         outputTokens: modelResult.usage.outputTokens != null
-          ? Math.floor(modelResult.usage.outputTokens / preparedItems.length)
+          ? Math.floor(modelResult.usage.outputTokens / textItems.length)
           : null,
       };
       let finalText = text;
@@ -348,6 +424,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
               escalationModel,
               escalationMaxTokens,
               reasons: assessment.reasons,
+              mediaResolution: options.mediaResolution,
               options: { ...options, modelCallGuard: escalationGuard(item.chunk) },
             });
             if (escalated.usage) {
@@ -392,28 +469,55 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     if (fallbackChunks.length) {
       const partialResults = await fallbackToSingles(
         fallbackChunks,
-        { ...options, workerId, leaseMs, maxAttempts },
-        `batch_parse_partial:${fallbackChunks.length}/${preparedItems.length}`,
-        { held, renewHeld },
+        { ...soloOptions, workerId, leaseMs, maxAttempts },
+        `batch_parse_partial:${fallbackChunks.length}/${textItems.length}`,
+        { held, lostIds, renewHeld },
       );
       batchResults.push(...partialResults);
     }
     if (noEscalateFallbackChunks.length) {
       const partialResults = await fallbackToSingles(
         noEscalateFallbackChunks,
-        { ...options, escalationEnabled: false, workerId, leaseMs, maxAttempts },
-        `batch_persist_partial:${noEscalateFallbackChunks.length}/${preparedItems.length}`,
-        { held, renewHeld },
+        { ...soloOptions, escalationEnabled: false, workerId, leaseMs, maxAttempts },
+        `batch_persist_partial:${noEscalateFallbackChunks.length}/${textItems.length}`,
+        { held, lostIds, renewHeld },
       );
       batchResults.push(...partialResults);
     }
-    return [...finished, ...batchResults];
+    return [...finished, ...visualResults, ...lostTextResults, ...release(batchResults)];
   } catch (err) {
-    if (isChunkLeaseLostError(err)) {
-      // Every chunk of this batch was reclaimed before the first paid call. Nothing was billed.
-      return [...finished, ...ready.map(entry => ({ status: 'stale', chunkId: entry.chunk.id }))];
+    // Nothing was paid when the guard fired. Members taken by another worker are stale; the rest retry as singles.
+    const lostNow = isChunkLeaseLostError(err);
+    const results = [];
+    const rest = [];
+    for (const item of textItems) {
+      if (lostNow && lostIds.has(item.chunk.id)) results.push(stale(item.chunk));
+      else rest.push(item.chunk);
     }
-    return [...finished, ...await fallbackToSingles(ready.map(entry => entry.chunk), { ...options, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, renewHeld })];
+    if (rest.length) {
+      results.push(...await fallbackToSingles(rest, { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds, renewHeld }));
+    }
+    return [...finished, ...visualResults, ...lostTextResults, ...results];
+  }
+}
+
+async function runSoloPreparedItem(item, options, { workerId, leaseMs, maxAttempts, globalStart }) {
+  try {
+    return await processChunkAbstraction(item.chunk, {
+      ...options,
+      workerId,
+      leaseMs,
+      maxAttempts,
+      sequenceIndex: Number.isInteger(item.chunk.chunkOrder)
+        ? item.chunk.chunkOrder
+        : (globalStart + item.batchPosition),
+      preloadedPayload: { chunkId: item.chunk.id, payload: item.payload },
+      preloadedDelivery: { chunkId: item.chunk.id, delivery: item.delivery },
+    });
+  } finally {
+    item.payload = null;
+    item.payloadBytes = null;
+    item.delivery = null;
   }
 }
 
@@ -438,7 +542,10 @@ async function fallbackToSingles(chunks, options, reason, lease = null) {
     return activeChunk ? outcomes.get(activeChunk.id) : undefined;
   });
   for (const chunk of chunks) {
-    // Keep all waiting fallback chunks (including those queued in a later fallback list) alive while this one runs.
+    if (lease?.lostIds?.has(chunk.id)) {
+      results.push({ status: 'stale', chunkId: chunk.id });
+      continue;
+    }
     try {
       results.push(await processChunkAbstraction(chunk, { ...options, chunkLeaseGuard: guard }));
     } finally {
