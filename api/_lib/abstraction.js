@@ -1,12 +1,16 @@
 import { createHash } from 'crypto';
+import { hasKeyIllegibleMarker, validateAbstractQuality } from '../../public/ocr-accuracy.js';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
+import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
 import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { messagesHaveVisualMedia, resolveGeminiMediaResolution } from './gemini-request.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
 
 const REQUEST_ENVELOPE_SAFE_BYTES = clampInt(process.env.REQUEST_ENVELOPE_SAFE_BYTES, 18_000_000, 100_000, 20_000_000);
 const REQUEST_OVERHEAD_BYTES = 350_000;
 const DEFAULT_ABSTRACT_MODEL = 'gemini-3.1-flash-lite';
+const DEFAULT_ESCALATION_MODEL = 'claude-sonnet-5-5';
 const REMOVED_ABSTRACT_MODELS = new Set(['claude-haiku-4-5', 'claude-3-5-haiku-20241022', 'claude-3-5-haiku-latest']);
 
 export function resolveAbstractModel() {
@@ -17,10 +21,16 @@ export function resolveAbstractModel() {
   return configured;
 }
 
+export function resolveEscalationModel() {
+  return String(process.env.ABSTRACT_ESCALATION_MODEL || DEFAULT_ESCALATION_MODEL).trim() || DEFAULT_ESCALATION_MODEL;
+}
+
+export function resolveEscalationMaxTokens() {
+  return clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
+}
+
 const ABSTRACT_MODEL = resolveAbstractModel();
 const ABSTRACT_MAX_TOKENS = clampInt(process.env.ABSTRACT_MAX_TOKENS, 2000, 512, 4096);
-const ABSTRACT_ESCALATION_MODEL = process.env.ABSTRACT_ESCALATION_MODEL || 'claude-sonnet-5-5';
-const ABSTRACT_ESCALATION_MAX_TOKENS = clampInt(process.env.ABSTRACT_ESCALATION_MAX_TOKENS, 4096, 512, 8192);
 const UPSTREAM_TIMEOUT_MS = clampInt(process.env.ABSTRACTION_UPSTREAM_TIMEOUT_MS || process.env.CLOUD_RUN_UPSTREAM_TIMEOUT_MS, 240_000, 10_000, 300_000);
 const SPLITTABLE_PDF_FETCH_MAX_BYTES = clampInt(process.env.ABSTRACTION_SPLITTABLE_PDF_MAX_BYTES, 25_000_000, 1_000_000, 100_000_000);
 export const ABSTRACTION_WAVE_RAW_BYTES = 128_000_000;
@@ -42,7 +52,17 @@ const RAW_PERSISTENCE_KEYS = new Set([
   'sourceBytes',
 ]);
 
-export const BATCH_ABSTRACT_RESPONSE_SCHEMA = { type: 'array', items: { type: 'string' } };
+export const BATCH_ABSTRACT_RESPONSE_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: {
+      docIndex: { type: 'integer' },
+      abstract: { type: 'string' },
+    },
+    required: ['docIndex', 'abstract'],
+  },
+};
 
 function clampInt(raw, fallback, min, max) {
   const value = Number(raw);
@@ -80,9 +100,10 @@ export function getAbstractionConfig() {
     requestEnvelopeSafeBytes: REQUEST_ENVELOPE_SAFE_BYTES,
     model: ABSTRACT_MODEL,
     maxTokens: ABSTRACT_MAX_TOKENS,
-    escalationModel: ABSTRACT_ESCALATION_MODEL,
-    escalationMaxTokens: ABSTRACT_ESCALATION_MAX_TOKENS,
+    escalationModel: resolveEscalationModel(),
+    escalationMaxTokens: resolveEscalationMaxTokens(),
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
   };
 }
 
@@ -306,11 +327,12 @@ function pdfDeliveryParts(bytes, delivery, docNum, name) {
     };
   }
   if (delivery?.mode === 'hybrid' && delivery.extractedText) {
-    const sparse = Array.isArray(delivery.sparsePages) && delivery.sparsePages.length
-      ? delivery.sparsePages.join(', ')
-      : 'sparse/blank pages';
+    const visualPageList = Array.isArray(delivery.visualPages) && delivery.visualPages.length
+      ? delivery.visualPages
+      : (Array.isArray(delivery.sparsePages) && delivery.sparsePages.length ? delivery.sparsePages : null);
+    const pagesLabel = visualPageList ? visualPageList.join(', ') : 'scanned, stamped, or sparse pages';
     return {
-      promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - HYBRID PDF:\nText-extracted pages:\n${delivery.extractedText}\n\nSparse or blank pages (${sparse}) are attached as a visual PDF in that original page order. Abstract those pages from the attached PDF. Stay coverage-complete across extracted text and attached pages.`,
+      promptSuffix: `\n\nDOCUMENT #${docNum} (${name}) - HYBRID PDF:\nText-extracted pages:\n${delivery.extractedText}\n\nPages (${pagesLabel}) contain visual content (scans, stamps, signatures, or sparse/noisy text) and are attached as a visual PDF in that original page order. Abstract those pages — including any recording stamps, handwritten notes, signatures, or marginalia — from the attached PDF. Stay coverage-complete across extracted text and attached pages.`,
       documentBlock: visualPdfDocumentBlock(delivery, bytes),
     };
   }
@@ -321,41 +343,63 @@ function pdfDeliveryParts(bytes, delivery, docNum, name) {
 }
 
 export function buildAbstractMessagesForChunks(items, globalStartIdx = 0) {
-  const content = [];
   const labels = items.map((item, index) => {
     const docNum = globalStartIdx + index + 1;
     return `Document #${docNum} (${chunkDisplayName(item.chunk)})`;
   });
-  let textPrompt = `Abstract each of the following ${items.length} document${items.length === 1 ? '' : 's'} in order: ${labels.join(', ')}.
+  const docNums = items.map((_, index) => globalStartIdx + index + 1);
+  let instructionsPrompt = `Abstract each of the following ${items.length} document${items.length === 1 ? '' : 's'} in order: ${labels.join(', ')}.
 
-Return a JSON array of exactly ${items.length} string${items.length === 1 ? '' : 's'}. Index 0 is the complete abstract for ${labels[0]}, index 1 for ${labels[1] ?? 'the next document'}, and so on. Each element must follow the output format from your instructions. If a document has no abstractable content, use the string "No abstractable content."
+Return a JSON array of exactly ${items.length} object${items.length === 1 ? '' : 's'}, each with {"docIndex": <number>, "abstract": "<string>"}, matching the exact document numbers above (${docNums.join(', ')}). Each "abstract" must follow the output format from your instructions. If a document has no abstractable content, use the string "No abstractable content."
 
 Extract every relevant fact. Do not guess at anything illegible.`;
   if (items.some(item => item.chunk.splitFrom || (item.chunk.pageStart && item.chunk.pageEnd))) {
-    textPrompt += ' Some files are page ranges from a larger PDF. Abstract each part fully and note the source document/page range.';
+    instructionsPrompt += ' Some files are page ranges from a larger PDF. Abstract each part fully and note the source document/page range.';
   }
+
+  let hasVisualBlock = false;
+  const interleavedContent = [];
+  const textSections = [];
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
     const docNum = globalStartIdx + index + 1;
     const name = chunkDisplayName(item.chunk);
+    const startMarker = `--- START DOCUMENT #${docNum} (${name}) ---`;
+    const endMarker = `--- END DOCUMENT #${docNum} (${name}) ---`;
     const bytes = normalizeBytes(item.payloadBytes);
     const delivery = item.delivery || null;
     const renderedPages = getRenderedImagePages(item.chunk, delivery);
+
     if (renderedPages) {
-      content.push(...buildRenderedImageBlocks(renderedPages));
-      if (renderedPages.length > 1) {
-        textPrompt += `\n\nDOCUMENT #${docNum} (${name}) is provided as ${renderedPages.length} high-DPI rendered page images in page order.`;
-      }
+      hasVisualBlock = true;
+      const pageNote = renderedPages.length > 1
+        ? `\nDOCUMENT #${docNum} (${name}) is provided as ${renderedPages.length} high-DPI rendered page images in page order.`
+        : '';
+      interleavedContent.push({ type: 'text', text: `${startMarker}${pageNote}` });
+      interleavedContent.push(...buildRenderedImageBlocks(renderedPages));
+      interleavedContent.push({ type: 'text', text: endMarker });
     } else if (isCsvChunk(item.chunk)) {
       const csvText = bytes.toString('utf8');
-      textPrompt += `\n\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.`;
+      const sectionText = `${startMarker}\nDOCUMENT #${docNum} (${name}) - CSV DATA:\n${csvText}\n\nAbstract this CSV as a structured ownership or lease record. Identify all owners, interests, fractions, and any other relevant title information.\n${endMarker}`;
+      textSections.push(`\n\n${sectionText}`);
+      interleavedContent.push({ type: 'text', text: sectionText });
     } else if (isPdfChunk(item.chunk)) {
       const pdf = pdfDeliveryParts(bytes, delivery, docNum, name);
-      textPrompt += pdf.promptSuffix;
-      if (pdf.documentBlock) content.push(pdf.documentBlock);
+      if (pdf.documentBlock) {
+        hasVisualBlock = true;
+        interleavedContent.push({ type: 'text', text: `${startMarker}${pdf.promptSuffix}` });
+        interleavedContent.push(pdf.documentBlock);
+        interleavedContent.push({ type: 'text', text: endMarker });
+      } else {
+        const sectionText = `${startMarker}${pdf.promptSuffix}\n${endMarker}`;
+        textSections.push(`\n\n${sectionText}`);
+        interleavedContent.push({ type: 'text', text: sectionText });
+      }
     } else if (isImageChunk(item.chunk) && delivery?.mode === 'gemini_file' && delivery.fileUri) {
-      content.push({
+      hasVisualBlock = true;
+      interleavedContent.push({ type: 'text', text: startMarker });
+      interleavedContent.push({
         type: 'image',
         source: {
           type: 'file_uri',
@@ -364,8 +408,11 @@ Extract every relevant fact. Do not guess at anything illegible.`;
           geminiFileName: delivery.geminiFileName || null,
         },
       });
+      interleavedContent.push({ type: 'text', text: endMarker });
     } else if (isImageChunk(item.chunk)) {
-      content.push({
+      hasVisualBlock = true;
+      interleavedContent.push({ type: 'text', text: startMarker });
+      interleavedContent.push({
         type: 'image',
         source: {
           type: 'base64',
@@ -373,26 +420,60 @@ Extract every relevant fact. Do not guess at anything illegible.`;
           data: bytes.toString('base64'),
         },
       });
+      interleavedContent.push({ type: 'text', text: endMarker });
     } else {
       throw new Error(`Unsupported chunk media type: ${item.chunk.mediaType || 'unknown'}`);
     }
   }
 
-  content.push({ type: 'text', text: textPrompt });
+  const content = hasVisualBlock
+    ? [...interleavedContent, { type: 'text', text: instructionsPrompt }]
+    : [{ type: 'text', text: `${instructionsPrompt}${textSections.join('')}` }];
   return [{ role: 'user', content }];
 }
 
 export function parseBatchAbstracts(result, items, globalStartIdx = 0) {
   const trimmed = String(result || '').trim();
+  const cleaned = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   let parsed = null;
   try {
-    parsed = JSON.parse(trimmed);
+    parsed = JSON.parse(cleaned);
   } catch (_) {
   }
-  const positional = Array.isArray(parsed) && parsed.length === items.length;
+
+  const expectedDocNums = new Set(items.map((_, index) => globalStartIdx + index + 1));
+  const byDocIndex = new Map();
+  let valid = Array.isArray(parsed) && parsed.length === items.length;
+  if (valid) {
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        valid = false;
+        break;
+      }
+      if (!Number.isInteger(entry.docIndex) || !expectedDocNums.has(entry.docIndex) || byDocIndex.has(entry.docIndex)) {
+        valid = false;
+        break;
+      }
+      if (typeof entry.abstract !== 'string') {
+        valid = false;
+        break;
+      }
+      const abstractText = entry.abstract.trim();
+      const headerMatch = abstractText.match(/^DOCUMENT\s*#(\d+)\s*:?/i);
+      if (headerMatch && Number(headerMatch[1]) !== entry.docIndex) {
+        valid = false;
+        break;
+      }
+      byDocIndex.set(entry.docIndex, abstractText);
+    }
+  }
+  if (byDocIndex.size !== items.length) {
+    valid = false;
+  }
+
   return items.map((item, index) => ({
     chunk: item.chunk,
-    abstractText: positional ? String(parsed[index] ?? '').trim() : '',
+    abstractText: valid ? (byDocIndex.get(globalStartIdx + index + 1) ?? '') : '',
     sequenceIndex: globalStartIdx + index,
   }));
 }
@@ -637,18 +718,191 @@ export function estimateAbstractPayloadBytes(chunk, payloadBytes = null, deliver
   return Math.ceil(size * 1.37);
 }
 
+function sanitizeEscalationWarningMessage(message) {
+  let sanitized = sanitizeModelClientError(message);
+  for (const envKey of ['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY']) {
+    const secret = process.env[envKey];
+    if (typeof secret === 'string' && secret.length >= 8) {
+      sanitized = sanitized.split(secret).join('[REDACTED]');
+    }
+  }
+  return sanitized.slice(0, 500);
+}
+
+function logEscalationFailure({ chunk = null, model, reasons = [], errorType, message }) {
+  try {
+    console.warn(JSON.stringify({
+      event: 'abstraction_escalation_failed',
+      jobId: chunk?.jobId ?? null,
+      chunkId: chunk?.id ?? null,
+      model,
+      reasons,
+      errorType,
+      message: sanitizeEscalationWarningMessage(message),
+    }));
+  } catch {
+  }
+}
+
+export function isAbstractionEscalationEnabled({ model, escalationModel, options = {}, responseSchema = null } = {}) {
+  return !responseSchema
+    && options?.escalationEnabled !== false
+    && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
+    && Boolean(escalationModel)
+    && escalationModel !== model;
+}
+
+export function buildEscalationQualityContext(chunk, delivery = null) {
+  const isCsv = chunk ? isCsvChunk(chunk) : false;
+  return {
+    isCsv,
+    documentText: !isCsv && delivery?.mode === 'text' ? (delivery.extractedText || null) : null,
+  };
+}
+
+export async function buildEscalationRequestForChunk({
+  chunk,
+  payloadBytes,
+  sequenceIndex = 0,
+  escalationModel = resolveEscalationModel(),
+  escalationMaxTokens = resolveEscalationMaxTokens(),
+}) {
+  const rawBytes = normalizeBytes(payloadBytes);
+  const delivery = await enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, rawBytes, escalationModel);
+  assertInlineVisualCanFit(chunk, rawBytes, delivery);
+  const messages = buildAbstractMessagesForChunk(chunk, rawBytes, sequenceIndex, delivery);
+  const requestBytes = estimateRequestBytes(escalationModel, escalationMaxTokens, ABSTRACTION_PROMPT, messages);
+  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+    const error = new Error(`Escalation request too large (${(requestBytes / 1024 / 1024).toFixed(1)} MB).`);
+    error.status = 413;
+    throw error;
+  }
+  return { messages, payloadBytes: requestBytes, delivery };
+}
+
+export async function runChunkEscalation({
+  chunk,
+  payloadBytes,
+  sequenceIndex = 0,
+  escalationModel = resolveEscalationModel(),
+  escalationMaxTokens = resolveEscalationMaxTokens(),
+  reasons = [],
+  mediaResolution = undefined,
+  options = {},
+}) {
+  const modelClient = getModelClient(options);
+  let guardError = null;
+  try {
+    const request = await buildEscalationRequestForChunk({
+      chunk,
+      payloadBytes,
+      sequenceIndex,
+      escalationModel,
+      escalationMaxTokens,
+    });
+    const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && messagesHaveVisualMedia(request.messages)
+      ? resolveGeminiMediaResolution(mediaResolution)
+      : null;
+    try {
+      await options.modelCallGuard?.();
+    } catch (err) {
+      guardError = err;
+      throw err;
+    }
+    const escalatedResponse = await modelClient({
+      model: escalationModel,
+      maxTokens: escalationMaxTokens,
+      system: ABSTRACTION_PROMPT,
+      messages: request.messages,
+      payloadBytes: request.payloadBytes,
+      escalation: true,
+      ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
+    });
+    const usage = extractUsage(escalatedResponse?.usage);
+    if (escalatedResponse?.stopReason === 'max_tokens') {
+      logEscalationFailure({
+        chunk,
+        model: escalationModel,
+        reasons,
+        errorType: 'output_truncated',
+        message: 'Escalated model output was truncated at the token limit (max_tokens).',
+      });
+      return {
+        ok: false,
+        truncated: true,
+        usage,
+        response: escalatedResponse,
+        payloadBytes: request.payloadBytes,
+      };
+    }
+    const text = String(escalatedResponse?.text || '').trim();
+    if (!text) {
+      logEscalationFailure({
+        chunk,
+        model: escalationModel,
+        reasons,
+        errorType: 'empty_output',
+        message: 'Escalated model returned empty output.',
+      });
+      return {
+        ok: false,
+        truncated: false,
+        usage,
+        response: escalatedResponse,
+        payloadBytes: request.payloadBytes,
+      };
+    }
+    return {
+      ok: true,
+      text: escalatedResponse.text || '',
+      model: escalatedResponse.model || escalationModel,
+      usage,
+      payloadBytes: request.payloadBytes,
+      deliveryMode: request.delivery.mode,
+      stopReason: escalatedResponse.stopReason || null,
+    };
+  } catch (err) {
+    if (guardError) throw guardError;
+    logEscalationFailure({
+      chunk,
+      model: escalationModel,
+      reasons,
+      errorType: classifyError(err),
+      message: err?.message || String(err),
+    });
+    return {
+      ok: false,
+      truncated: false,
+      usage: null,
+      error: err,
+    };
+  }
+}
+
 export async function runModelAbstraction({
   messages,
   model,
   maxTokens,
   payloadBytes,
-  escalationModel = ABSTRACT_ESCALATION_MODEL,
-  escalationMaxTokens = ABSTRACT_ESCALATION_MAX_TOKENS,
+  escalationModel = resolveEscalationModel(),
+  escalationMaxTokens = resolveEscalationMaxTokens(),
   responseSchema = null,
+  chunk = null,
+  rawPayloadBytes = null,
+  sequenceIndex = 0,
+  escalationContext = {},
+  mediaResolution = undefined,
   options = {},
 }) {
   const modelClient = getModelClient(options);
   const schemaForModel = responseSchema && isGeminiModel(model) ? responseSchema : null;
+  const hasVisualMedia = messagesHaveVisualMedia(messages);
+  const mediaResolutionForModel = isGeminiModel(model) && !shouldUseOpenRouter(model) && hasVisualMedia
+    ? resolveGeminiMediaResolution(mediaResolution)
+    : null;
+  // Awaited before every billable call. A guard error (lost lease) propagates and is never swallowed.
+  const guard = typeof options.modelCallGuard === 'function' ? options.modelCallGuard : null;
+  if (guard) await guard();
   let response = await modelClient({
     model,
     maxTokens,
@@ -656,28 +910,98 @@ export async function runModelAbstraction({
     messages,
     payloadBytes,
     ...(schemaForModel ? { responseSchema: schemaForModel } : {}),
+    ...(mediaResolutionForModel ? { mediaResolution: mediaResolutionForModel } : {}),
   });
   let usage = extractUsage(response.usage);
-  const escalationEnabled = !responseSchema
-    && options.escalationEnabled !== false
-    && process.env.ABSTRACTION_ESCALATION_ENABLED !== 'false'
-    && escalationModel
-    && escalationModel !== model;
+  let finalPayloadBytes = payloadBytes;
+  const escalationEnabled = isAbstractionEscalationEnabled({ model, escalationModel, options, responseSchema });
+  const assessment = escalationEnabled
+    ? evaluateAbstractEscalation(response.text, usage, maxTokens, escalationContext)
+    : { shouldEscalate: false, reasons: [], quality: null };
   let escalated = false;
-  if (escalationEnabled && shouldEscalateAbstract(response.text, usage, maxTokens)) {
-    try {
-      const escalatedResponse = await modelClient({
-        model: escalationModel,
-        maxTokens: escalationMaxTokens,
-        system: ABSTRACTION_PROMPT,
-        messages,
-        payloadBytes,
-        escalation: true,
+
+  if (escalationEnabled && assessment.shouldEscalate) {
+    if (chunk && rawPayloadBytes != null) {
+      const escalatedResult = await runChunkEscalation({
+        chunk,
+        payloadBytes: rawPayloadBytes,
+        sequenceIndex,
+        escalationModel,
+        escalationMaxTokens,
+        reasons: assessment.reasons,
+        mediaResolution,
+        options,
       });
-      usage = addUsage(usage, extractUsage(escalatedResponse.usage));
-      response = escalatedResponse;
-      escalated = true;
-    } catch (_) {
+      if (escalatedResult.usage) {
+        usage = addUsage(usage, escalatedResult.usage);
+      }
+      if (escalatedResult.ok) {
+        response = {
+          text: escalatedResult.text,
+          model: escalatedResult.model,
+          stopReason: escalatedResult.stopReason,
+        };
+        finalPayloadBytes = escalatedResult.payloadBytes ?? finalPayloadBytes;
+        escalated = true;
+      } else if (escalatedResult.truncated) {
+        response = escalatedResult.response;
+        finalPayloadBytes = escalatedResult.payloadBytes ?? finalPayloadBytes;
+        escalated = true;
+      }
+    } else {
+      const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && hasVisualMedia
+        ? resolveGeminiMediaResolution(mediaResolution)
+        : null;
+      let guardError = null;
+      try {
+        try {
+          if (guard) await guard();
+        } catch (err) {
+          guardError = err;
+          throw err;
+        }
+        const escalatedResponse = await modelClient({
+          model: escalationModel,
+          maxTokens: escalationMaxTokens,
+          system: ABSTRACTION_PROMPT,
+          messages,
+          payloadBytes,
+          escalation: true,
+          ...(escalationMediaResolution ? { mediaResolution: escalationMediaResolution } : {}),
+        });
+        usage = addUsage(usage, extractUsage(escalatedResponse.usage));
+        if (escalatedResponse?.stopReason === 'max_tokens') {
+          logEscalationFailure({
+            chunk,
+            model: escalationModel,
+            reasons: assessment.reasons,
+            errorType: 'output_truncated',
+            message: 'Escalated model output was truncated at the token limit (max_tokens).',
+          });
+          response = escalatedResponse;
+          escalated = true;
+        } else if (String(escalatedResponse?.text || '').trim()) {
+          response = escalatedResponse;
+          escalated = true;
+        } else {
+          logEscalationFailure({
+            chunk,
+            model: escalationModel,
+            reasons: assessment.reasons,
+            errorType: 'empty_output',
+            message: 'Escalated model returned empty output.',
+          });
+        }
+      } catch (err) {
+        if (guardError) throw guardError;
+        logEscalationFailure({
+          chunk,
+          model: escalationModel,
+          reasons: assessment.reasons,
+          errorType: classifyError(err),
+          message: err?.message || String(err),
+        });
+      }
     }
   }
   if (response.stopReason === 'max_tokens') {
@@ -690,6 +1014,8 @@ export async function runModelAbstraction({
     model: response.model || model,
     usage,
     escalated,
+    escalationReasons: escalated ? assessment.reasons : [],
+    payloadBytes: finalPayloadBytes,
   };
 }
 
@@ -762,20 +1088,46 @@ function sumNullableTokenCounts(a, b) {
   return (a || 0) + (b || 0);
 }
 
-function addUsage(left, right) {
+export function addUsage(left, right) {
   return {
     inputTokens: sumNullableTokenCounts(left?.inputTokens, right?.inputTokens),
     outputTokens: sumNullableTokenCounts(left?.outputTokens, right?.outputTokens),
   };
 }
 
-export function shouldEscalateAbstract(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS) {
+export function evaluateAbstractEscalation(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS, context = {}) {
   const value = String(text || '').trim();
-  if (!value) return true;
-  if (/ILLEGIBLE\s*[-—]\s*VERIFY MANUALLY/i.test(value)) return true;
-  if (/CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value)) return true;
-  const outputTokens = Number(usage.outputTokens ?? usage.output_tokens ?? 0);
-  return Number.isFinite(outputTokens) && maxTokens > 0 && outputTokens >= Math.floor(maxTokens * 0.9);
+  const reasons = [];
+  if (!value) {
+    reasons.push('empty_output');
+  } else {
+    if (!context?.isCsv && hasKeyIllegibleMarker(value)) {
+      reasons.push('illegible_marker');
+    }
+    if (/CONFIDENCE:\s*(low|limited|poor|unclear|uncertain)/i.test(value)) {
+      reasons.push('low_confidence');
+    }
+  }
+  const outputTokens = Number(usage?.outputTokens ?? usage?.output_tokens ?? 0);
+  if (Number.isFinite(outputTokens) && maxTokens > 0 && outputTokens >= Math.floor(maxTokens * 0.9)) {
+    reasons.push('near_token_limit');
+  }
+  let quality = null;
+  if (value && context?.checkStructure !== false && !context?.isCsv) {
+    quality = validateAbstractQuality(value, { documentText: context?.documentText ?? null });
+    for (const reason of quality.reasons) {
+      reasons.push(reason);
+    }
+  }
+  return {
+    shouldEscalate: reasons.length > 0,
+    reasons,
+    quality,
+  };
+}
+
+export function shouldEscalateAbstract(text, usage = {}, maxTokens = ABSTRACT_MAX_TOKENS, context = {}) {
+  return evaluateAbstractEscalation(text, usage, maxTokens, context).shouldEscalate;
 }
 
 export function stripDocumentLabel(text, docNum) {
@@ -950,8 +1302,21 @@ export async function processChunkAbstraction(chunk, options = {}) {
     };
   }
   const processingChunk = claimedChunk;
+  const upstreamTimeoutMs = options.upstreamTimeoutMs ?? UPSTREAM_TIMEOUT_MS;
   const attemptCount = Math.max(1, Number(processingChunk.abstractionAttempts) || 1);
   const stageLoggingEnabled = options.logStages || process.env.WORKER_STAGE_LOGS === 'true';
+
+  // Renew this chunk's lease before every billable call; stop before paying if another worker owns it now.
+  const renewLeaseMs = callLeaseMs(leaseMs, upstreamTimeoutMs);
+  const modelCallGuard = async () => {
+    if (typeof options.chunkLeaseGuard === 'function') {
+      const outcome = await options.chunkLeaseGuard(processingChunk, renewLeaseMs);
+      if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
+      if (outcome !== undefined) return;
+    }
+    const outcome = await renewChunkLease(store, processingChunk, { workerId, leaseMs: renewLeaseMs });
+    if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
+  };
 
   let loadedPayload = null;
   try {
@@ -991,7 +1356,9 @@ export async function processChunkAbstraction(chunk, options = {}) {
       return { status: 'completed', chunkId: processingChunk.id, abstract: record, reused: true };
     }
     logChunkStage('claimed', processingChunk, { workerId, attemptCount }, stageLoggingEnabled);
-    const payload = await getBlobLoader(options)(processingChunk);
+    const payload = options.preloadedPayload?.chunkId === processingChunk.id
+      ? options.preloadedPayload.payload
+      : await getBlobLoader(options)(processingChunk);
     loadedPayload = payload;
     logChunkStage('loaded', processingChunk, {
       workerId,
@@ -1000,8 +1367,11 @@ export async function processChunkAbstraction(chunk, options = {}) {
       loadedMediaType: payload.mediaType || processingChunk.mediaType || null,
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
+    const resolvedDelivery = options.preloadedDelivery?.chunkId === processingChunk.id
+      ? options.preloadedDelivery.delivery
+      : await resolveChunkDelivery(processingChunk, payload.bytes);
     const delivery = await enrichVisualDeliveryForModel(
-      await resolveChunkDelivery(processingChunk, payload.bytes),
+      resolvedDelivery,
       processingChunk,
       payload.bytes,
       model,
@@ -1027,17 +1397,24 @@ export async function processChunkAbstraction(chunk, options = {}) {
       model,
       maxTokens,
       payloadBytes,
-      escalationModel: options.escalationModel || ABSTRACT_ESCALATION_MODEL,
-      escalationMaxTokens: options.escalationMaxTokens || ABSTRACT_ESCALATION_MAX_TOKENS,
-      options,
+      escalationModel: options.escalationModel ?? resolveEscalationModel(),
+      escalationMaxTokens: options.escalationMaxTokens ?? resolveEscalationMaxTokens(),
+      chunk: processingChunk,
+      rawPayloadBytes: payload.bytes,
+      sequenceIndex,
+      escalationContext: buildEscalationQualityContext(processingChunk, delivery),
+      mediaResolution: options.mediaResolution,
+      options: { ...options, modelCallGuard },
     });
+    const finalPayloadBytes = modelResult.payloadBytes ?? payloadBytes;
     logChunkStage('model_response', processingChunk, {
       workerId,
       attemptCount,
       modelUsed: modelResult.model,
-      payloadBytes,
+      payloadBytes: finalPayloadBytes,
       deliveryMode: delivery.mode,
       escalated: modelResult.escalated,
+      ...(modelResult.escalated ? { escalationReasons: modelResult.escalationReasons } : {}),
       elapsedMs: Date.now() - startedAt,
     }, stageLoggingEnabled);
     const saved = await persistCompletedAbstract({
@@ -1047,16 +1424,18 @@ export async function processChunkAbstraction(chunk, options = {}) {
       sequenceIndex,
       abstractText: modelResult.text,
       modelUsed: modelResult.model,
-      payloadBytes,
+      payloadBytes: finalPayloadBytes,
       usage: modelResult.usage,
       latencyMs: Date.now() - startedAt,
       attemptCount,
     });
     if (saved.status === 'completed') {
-      logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
+      logChunkStage('saved', processingChunk, { workerId, attemptCount, payloadBytes: finalPayloadBytes, elapsedMs: Date.now() - startedAt }, stageLoggingEnabled);
     }
     return saved;
   } catch (err) {
+    // Lease lost: the new owner's row is not ours to mark failed, retry_wait or split.
+    if (isChunkLeaseLostError(err)) return { status: 'stale', chunkId: processingChunk.id };
     const errorType = classifyError(err);
     logChunkStage('error', processingChunk, {
       workerId,

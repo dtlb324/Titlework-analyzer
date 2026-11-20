@@ -152,7 +152,19 @@ function objectStorage(initial) {
   };
 }
 
-const ABSTRACT_TEXT = 'DOC TYPE: Deed\nGRANTOR: A\nGRANTEE: B\nFRACTION CONVEYED: 100%\nLEGAL DESC: Test tract\nISSUES: none noted\nCONFIDENCE: High, all fields clearly legible.';
+const ABSTRACT_TEXT = [
+  'DOC TYPE: Warranty Deed',
+  'DATE EXECUTED: January 1, 2020',
+  'DATE RECORDED: January 2, 2020',
+  'RECORDING REF: Vol 1, Page 2',
+  'GRANTOR: John Smith',
+  'GRANTEE: Mary Jones',
+  'LEGAL DESC: Section 1, Block C-9',
+  'MINERALS: yes',
+  'FRACTION CONVEYED: 100% mineral interest',
+  'ISSUES: none noted',
+  'CONFIDENCE: High, all fields clearly legible.',
+].join('\n');
 
 function recordingModel() {
   const requests = [];
@@ -355,7 +367,7 @@ test('a multi-page PDF that fits one inline request is still abstracted whole', 
 });
 
 test('a single page with a text layer over the inline limit is abstracted from its text', async () => {
-  const lines = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}: Grantor John Smith conveys to Grantee Mary Jones all of Section ${i + 1}, Block C-9.`);
+  const lines = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}: Grantor John Smith conveys to Grantee Mary Jones on January 1, 2020, recorded January 2, 2020 in Vol 1 Page 2, all of Section ${i + 1}, Block C-9.`);
   const bytes = await textPdfOf(lines, 700_000);
   assert(bytes.byteLength > INLINE_LIMIT && bytes.byteLength < 1_000_000, `fixture size ${bytes.byteLength}`);
   const chunk = pdfChunk(bytes, 1, 1);
@@ -376,7 +388,7 @@ test('a single page with a text layer over the inline limit is abstracted from i
 });
 
 test('a multi-page PDF with a text layer over the whole-document floor is abstracted from its text in one call', async () => {
-  const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}: Grantor John Smith conveys to Grantee Mary Jones all of Section ${i + 1}, Block C-9.`);
+  const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}: Grantor John Smith conveys to Grantee Mary Jones on January 1, 2020, recorded January 2, 2020 in Vol 1 Page 2, all of Section ${i + 1}, Block C-9.`);
   const bytes = await textPdfOf(lines, 600_000, 2);
   assert(bytes.byteLength > WHOLE_PDF_LIMIT && bytes.byteLength < UPLOAD_LIMIT, `fixture size ${bytes.byteLength}`);
   const chunk = pdfChunk(bytes, 1, 2);
