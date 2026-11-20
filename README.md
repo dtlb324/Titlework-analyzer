@@ -36,25 +36,9 @@ Titlework Analyzer is a self-hosted web app for oil and gas landmen. Upload cour
 
 Titlework Analyzer is built with **Node.js 26 ESM and zero web framework** (`node:http`). Two services share one container image and coordinate through Neon Postgres and a private Google Cloud Storage (GCS) bucket:
 
-```mermaid
-flowchart LR
-  Browser["Browser UI (public/index.html)"]
-  API["API & Static Server (server.js)"]
-  Worker["Background Worker (worker.js)"]
-  GCS["Private GCS Bucket"]
-  Neon["Neon Postgres"]
-  Gemini["Gemini 3.1 Flash-Lite"]
-  Claude["Claude Sonnet 5.5"]
-
-  Browser -->|"1. Create job & request signed PUT"| API
-  Browser -->|"2. Upload raw PDFs / images / CSVs"| GCS
-  API <-->|"Job state, chunks, abstracts, results"| Neon
-  Worker <-->|"Lease-guarded chunk & segment claims"| Neon
-  Worker -->|"Read source bytes"| GCS
-  API -.->|"Optional bounded kick when tab is open"| Neon
-  Worker -->|"Abstracts & partial synthesis"| Gemini
-  Worker -->|"Escalation re-reads, final merge & follow-ups"| Claude
-```
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Titlework Analyzer architecture overview" width="100%">
+</p>
 
 ### Services and storage
 

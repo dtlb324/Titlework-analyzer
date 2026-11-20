@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 370" width="1000" height="370" role="img" aria-label="Titlework Analyzer architecture overview">
+  <title>Titlework Analyzer Architecture Overview</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#070e1b"/>
+      <stop offset="100%" stop-color="#0f1c30"/>
+    </linearGradient>
+    <linearGradient id="goldBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#d8a55b"/>
+      <stop offset="100%" stop-color="#b47b32"/>
+    </linearGradient>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .header-title { font-size: 11px; font-weight: 700; letter-spacing: 2px; fill: #d8a55b; }
+      .header-meta { font-size: 11px; font-weight: 500; fill: #8fa3bf; }
+      .col-label { font-size: 10.5px; font-weight: 700; letter-spacing: 1.4px; fill: #94a9c6; }
+      .card { fill: #122036; stroke: #223654; stroke-width: 1.25; }
+      .card-title { font-size: 14px; font-weight: 700; fill: #f1f5f9; }
+      .badge-bg { fill: #0a1424; stroke: #2a4063; stroke-width: 1; }
+      .badge-text { font-size: 10.5px; fill: #e2b878; }
+      .body-text { font-size: 11.5px; fill: #b6c6dc; }
+      .dot { fill: #d8a55b; }
+    </style>
+  </defs>
+
+  <!-- Outer container -->
+  <rect x="0.75" y="0.75" width="998.5" height="368.5" rx="16" fill="url(#bg)" stroke="#1f324d" stroke-width="1.5"/>
+
+  <!-- Top bar -->
+  <text x="26" y="29" class="sans header-title">ARCHITECTURE OVERVIEW</text>
+  <text x="974" y="29" text-anchor="end" class="sans header-meta">Node.js 26 ESM · Zero Framework · Shared Container Image</text>
+  <line x1="24" y1="44" x2="976" y2="44" stroke="#1b2d47" stroke-width="1"/>
+
+  <!-- Column headers -->
+  <text x="24" y="71" class="sans col-label">01 · CLIENT</text>
+  <text x="267" y="71" class="sans col-label">02 · SERVICES</text>
+  <text x="510" y="71" class="sans col-label">03 · STORAGE &amp; STATE</text>
+  <text x="753" y="71" class="sans col-label">04 · AI MODELS</text>
+
+  <!-- Column 1: Client -->
+  <g>
+    <rect x="24" y="84" width="223" height="260" rx="12" class="card"/>
+    <rect x="24" y="84" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="40" y="114" class="sans card-title">Browser UI</text>
+    <rect x="40" y="124" width="124" height="22" rx="5" class="badge-bg"/>
+    <text x="48" y="138.5" class="mono badge-text">public/index.html</text>
+
+    <circle cx="44" cy="172" r="2.5" class="dot"/>
+    <text x="54" y="176" class="sans body-text">Direct signed PUT uploads</text>
+    <text x="54" y="191" class="sans body-text">for PDFs, CSVs, and images</text>
+
+    <circle cx="44" cy="218" r="2.5" class="dot"/>
+    <text x="54" y="222" class="sans body-text">Live status &amp; resumable</text>
+    <text x="54" y="237" class="sans body-text">job links (#/job/&lt;id&gt;)</text>
+
+    <circle cx="44" cy="264" r="2.5" class="dot"/>
+    <text x="54" y="268" class="sans body-text">Local high-DPI PDF re-read</text>
+    <text x="54" y="283" class="sans body-text">renderer (pdfjs-dist)</text>
+
+    <circle cx="44" cy="310" r="2.5" class="dot"/>
+    <text x="54" y="314" class="sans body-text">Client-side PDF opinion</text>
+    <text x="54" y="329" class="sans body-text">export (jsPDF)</text>
+  </g>
+
+  <!-- Column 2: Services -->
+  <g>
+    <!-- API Server -->
+    <rect x="267" y="84" width="223" height="122" rx="12" class="card"/>
+    <rect x="267" y="84" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="283" y="113" class="sans card-title">API &amp; Static Server</text>
+    <rect x="283" y="122" width="76" height="21" rx="5" class="badge-bg"/>
+    <text x="291" y="136" class="mono badge-text">server.js</text>
+    <text x="283" y="162" class="sans body-text">Serves the UI, /api/* routes,</text>
+    <text x="283" y="178" class="sans body-text">signed upload URLs, and</text>
+    <text x="283" y="194" class="sans body-text">bounded API workflow kicks</text>
+
+    <!-- Worker -->
+    <rect x="267" y="222" width="223" height="122" rx="12" class="card"/>
+    <rect x="267" y="222" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="283" y="251" class="sans card-title">Background Worker</text>
+    <rect x="283" y="260" width="76" height="21" rx="5" class="badge-bg"/>
+    <text x="291" y="274" class="mono badge-text">worker.js</text>
+    <text x="283" y="300" class="sans body-text">Claims chunks &amp; segments</text>
+    <text x="283" y="316" class="sans body-text">with lease guards; exposes</text>
+    <text x="283" y="332" class="sans body-text">/healthz &amp; /internal/drain</text>
+  </g>
+
+  <!-- Column 3: Storage & State -->
+  <g>
+    <!-- GCS -->
+    <rect x="510" y="84" width="223" height="122" rx="12" class="card"/>
+    <rect x="510" y="84" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="526" y="113" class="sans card-title">Private GCS Bucket</text>
+    <rect x="526" y="122" width="136" height="21" rx="5" class="badge-bg"/>
+    <text x="534" y="136" class="mono badge-text">api/_lib/storage.js</text>
+    <text x="526" y="162" class="sans body-text">Stores raw PDFs, CSVs, and</text>
+    <text x="526" y="178" class="sans body-text">images directly from browser</text>
+    <text x="526" y="194" class="sans body-text">outside the API request path</text>
+
+    <!-- Neon -->
+    <rect x="510" y="222" width="223" height="122" rx="12" class="card"/>
+    <rect x="510" y="222" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="526" y="251" class="sans card-title">Neon Postgres</text>
+    <rect x="526" y="260" width="116" height="21" rx="5" class="badge-bg"/>
+    <text x="534" y="274" class="mono badge-text">api/_lib/jobs.js</text>
+    <text x="526" y="300" class="sans body-text">7 auto-migrated tables for</text>
+    <text x="526" y="316" class="sans body-text">jobs, chunks, abstracts,</text>
+    <text x="526" y="332" class="sans body-text">segments, results &amp; chat</text>
+  </g>
+
+  <!-- Column 4: AI Models -->
+  <g>
+    <!-- Gemini -->
+    <rect x="753" y="84" width="223" height="122" rx="12" class="card"/>
+    <rect x="753" y="84" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="769" y="113" class="sans card-title">Gemini 3.1 Flash-Lite</text>
+    <rect x="769" y="122" width="154" height="21" rx="5" class="badge-bg"/>
+    <text x="777" y="136" class="mono badge-text">Abstraction &amp; Partials</text>
+    <text x="769" y="162" class="sans body-text">Batched text PDFs, solo high-</text>
+    <text x="769" y="178" class="sans body-text">res visual PDFs, Files API,</text>
+    <text x="769" y="194" class="sans body-text">and large-job summaries</text>
+
+    <!-- Claude -->
+    <rect x="753" y="222" width="223" height="122" rx="12" class="card"/>
+    <rect x="753" y="222" width="223" height="3" rx="1.5" fill="url(#goldBar)"/>
+    <text x="769" y="251" class="sans card-title">Claude Sonnet 5.5</text>
+    <rect x="769" y="260" width="158" height="21" rx="5" class="badge-bg"/>
+    <text x="777" y="274" class="mono badge-text">Synthesis &amp; Escalation</text>
+    <text x="769" y="300" class="sans body-text">Low-confidence re-reads,</text>
+    <text x="769" y="316" class="sans body-text">final mineral ownership</text>
+    <text x="769" y="332" class="sans body-text">opinion &amp; follow-up Q&amp;A</text>
+  </g>
+</svg>
