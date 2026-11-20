@@ -4,6 +4,7 @@ import {
   chunkLeaseLostError,
   isChunkLeaseLostError,
   renewChunkLease,
+  renewChunkLeases,
 } from '../api/_lib/abstraction-lease.js';
 
 function assert(condition, message) {
@@ -69,6 +70,89 @@ test('the Postgres renewal is owner- and status-checked', () => {
   assert(/abstraction_worker_id = \$\{options\.workerId \?\? null\}::text/.test(body), 'only the owning worker may renew');
   assert(/abstraction_lease_expires_at = now\(\) \+ make_interval/.test(body), 'the lease moves forward from now');
   assert(/RETURNING \*/.test(body), 'a lost lease must return no row');
+});
+
+test('renewChunkLeases batches by job, deduplicates, and separates renewed from lost', async () => {
+  const bulkCalls = [];
+  const store = {
+    async renewChunkAbstractionLeases(jobId, chunkIds, options) {
+      bulkCalls.push({ jobId, chunkIds: [...chunkIds], options });
+      return chunkIds.filter(id => id !== 'chk_lost').map(id => ({ id }));
+    },
+    async renewChunkAbstractionLease() {
+      throw new Error('singular renewChunkAbstractionLease should not be called when bulk exists');
+    },
+  };
+  const outcomes = await renewChunkLeases(
+    store,
+    [
+      { id: 'chk_1', jobId: 'job_1' },
+      { id: 'chk_lost', jobId: 'job_1' },
+      { id: 'chk_1', jobId: 'job_1' },
+      { id: 'chk_2', jobId: 'job_2' },
+    ],
+    { workerId: 'wkr_A', leaseMs: 120_000 },
+  );
+  assert(bulkCalls.length === 2, `Expected 1 bulk call per job (2), got ${bulkCalls.length}`);
+  assert(JSON.stringify(bulkCalls[0].chunkIds) === JSON.stringify(['chk_1', 'chk_lost']), `Expected deduplicated job_1 chunks, got ${JSON.stringify(bulkCalls[0].chunkIds)}`);
+  assert(outcomes.get('chk_1') === 'renewed', 'chk_1 must be renewed');
+  assert(outcomes.get('chk_lost') === 'lost', 'missing row must be lost');
+  assert(outcomes.get('chk_2') === 'renewed', 'chk_2 in job_2 must be renewed');
+  assert((await renewChunkLeases(store, [], { workerId: 'wkr_A', leaseMs: 120_000 })).size === 0, 'empty input returns empty map');
+});
+
+test('renewChunkLeases handles bulk errors safely, falls back to singular, and reports unavailable', async () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = line => warnings.push(String(line));
+  try {
+    const failingBulk = {
+      async renewChunkAbstractionLeases() {
+        throw Object.assign(new Error('postgres://user:secret@db.internal/neon Bearer tok_xyz'), { code: 'ETIMEDOUT' });
+      },
+    };
+    const errOutcomes = await renewChunkLeases(
+      failingBulk,
+      [{ id: 'chk_1', jobId: 'job_1' }, { id: 'chk_2', jobId: 'job_1' }],
+      { workerId: 'wkr_A', leaseMs: 5000 },
+    );
+    assert(errOutcomes.get('chk_1') === 'unavailable' && errOutcomes.get('chk_2') === 'unavailable', 'failing bulk renewal must yield unavailable');
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert(warnings.length === 1, `Expected 1 sanitized warning for the bulk call, got ${warnings.length}`);
+  const parsed = JSON.parse(warnings[0]);
+  assert(parsed.event === 'abstraction_chunk_lease_renew_failed' && parsed.errorType === 'ETIMEDOUT', 'warning logs event and errorType');
+  assert(JSON.stringify(parsed.chunkIds) === JSON.stringify(['chk_1', 'chk_2']), 'warning lists affected chunkIds');
+  assert(!/secret|tok_xyz|db\.internal/.test(warnings[0]), 'warning must not leak store error message');
+
+  const singularOnly = {
+    async renewChunkAbstractionLease(_jobId, chunkId) {
+      return chunkId === 'chk_2' ? null : { id: chunkId };
+    },
+  };
+  const singularOutcomes = await renewChunkLeases(
+    singularOnly,
+    [{ id: 'chk_1', jobId: 'job_1' }, { id: 'chk_2', jobId: 'job_1' }],
+    { workerId: 'wkr_A', leaseMs: 5000 },
+  );
+  assert(singularOutcomes.get('chk_1') === 'renewed' && singularOutcomes.get('chk_2') === 'lost', 'singular fallback preserves renewed/lost');
+
+  const noneOutcomes = await renewChunkLeases({}, [{ id: 'chk_1', jobId: 'job_1' }], { workerId: 'wkr_A', leaseMs: 5000 });
+  assert(noneOutcomes.get('chk_1') === 'unavailable', 'store without renewal methods returns unavailable');
+});
+
+test('the Postgres bulk renewal is owner- and status-checked with ANY()', () => {
+  const source = readFileSync(new URL('../api/_lib/jobs.js', import.meta.url), 'utf8');
+  const start = source.indexOf('async renewChunkAbstractionLeases(');
+  assert(start > 0, 'renewChunkAbstractionLeases must exist on the Postgres store');
+  const end = source.indexOf('\n    async ', start + 10);
+  const body = source.slice(start, end);
+  assert(/id = ANY\(\$\{ids\}::text\[\]\)/.test(body), 'bulk renewal must match id = ANY(${ids}::text[])');
+  assert(/abstraction_status = 'processing'/.test(body), 'only processing chunks may be renewed');
+  assert(/abstraction_worker_id = \$\{options\.workerId \?\? null\}::text/.test(body), 'only the owning worker may renew');
+  assert(/abstraction_lease_expires_at = now\(\) \+ make_interval/.test(body), 'the lease moves forward from now');
+  assert(/RETURNING \*/.test(body), 'lost leases must be omitted from returned rows');
 });
 
 let passed = 0;

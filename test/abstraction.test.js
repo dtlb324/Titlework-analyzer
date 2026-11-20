@@ -1512,6 +1512,43 @@ test('processChunkAbstraction renews its own lease before each paid call (primar
   assert(renewMs.every(ms => ms >= 300_000), `Renewal must cover upstream timeout + 60s, not the 1s claim lease, got ${renewMs}`);
 });
 
+test('processChunkAbstraction delegates renewal to chunkLeaseGuard without duplicate singular renewal', async () => {
+  const store = createMemoryPhase3Store([makeChunk({ id: 'chk_delegate_guard' })]);
+  let singularRenewals = 0;
+  const origRenew = store.renewChunkAbstractionLease;
+  store.renewChunkAbstractionLease = async (...args) => { singularRenewals += 1; return origRenew(...args); };
+  const guardArgs = [];
+  const result = await processChunkAbstraction(store.chunks.get('chk_delegate_guard'), {
+    store,
+    workerId: 'wkr_guard',
+    leaseMs: 1000,
+    chunkLeaseGuard: async (chunk, ms) => {
+      guardArgs.push({ id: chunk.id, ms });
+      return 'renewed';
+    },
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => ({
+      text: 'DOCUMENT #1:\nDOC TYPE: Warranty Deed\nGRANTOR: A\nGRANTEE: B\nISSUES: none noted\nCONFIDENCE: Clear.',
+      model: 'gemini-3.1-flash-lite',
+      usage: { input_tokens: 10, output_tokens: 15 },
+    }),
+  });
+  assert(result.status === 'completed', `Expected completed, got ${result.status}`);
+  assert(guardArgs.length === 1 && guardArgs[0].id === 'chk_delegate_guard' && guardArgs[0].ms >= 300_000, `Expected chunkLeaseGuard called with chunk and call leaseMs, got ${JSON.stringify(guardArgs)}`);
+  assert(singularRenewals === 0, `Expected 0 singular renewals when chunkLeaseGuard returns outcome, got ${singularRenewals}`);
+
+  const lostStore = createMemoryPhase3Store([makeChunk({ id: 'chk_delegate_lost' })]);
+  let calls = 0;
+  const lostResult = await processChunkAbstraction(lostStore.chunks.get('chk_delegate_lost'), {
+    store: lostStore,
+    workerId: 'wkr_guard',
+    chunkLeaseGuard: async () => 'lost',
+    blobLoader: async chunk => ({ bytes: Buffer.from(chunk.id), mediaType: chunk.mediaType }),
+    modelClient: async () => { calls += 1; return { text: 'should not pay', model: 'gemini-3.1-flash-lite', usage: {} }; },
+  });
+  assert(lostResult.status === 'stale' && calls === 0, `Expected stale with 0 paid calls, got ${lostResult.status}/${calls}`);
+});
+
 test('processChunkAbstraction keeps clean Gemini abstracts on the cheap path', async () => {
   const store = createMemoryPhase3Store([makeChunk({ id: 'chk_clean' })]);
   const models = [];

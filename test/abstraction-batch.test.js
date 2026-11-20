@@ -731,6 +731,97 @@ test('lease: a visual solo that finished leaves the held set and is not renewed 
   assert(renewals('chk_3') > atCall.chk_3, 'Control: a text chunk still held keeps being renewed through the later paid calls');
 });
 
+function withBulkLeaseStore(store, bulkCalls = []) {
+  store.renewChunkAbstractionLeases = async (jobId, chunkIds, opts = {}) => {
+    bulkCalls.push({ jobId, chunkIds: [...chunkIds], leaseMs: opts.leaseMs });
+    const renewed = [];
+    for (const id of chunkIds) {
+      const chunk = store.chunks.get(id);
+      if (!chunk || chunk.abstractionStatus !== 'processing' || !opts.workerId || chunk.abstractionWorkerId !== opts.workerId) continue;
+      const updated = { ...chunk, abstractionLeaseExpiresAt: Date.now() + (opts.leaseMs || 90_000) };
+      store.chunks.set(id, updated);
+      renewed.push(updated);
+    }
+    return renewed;
+  };
+  store.renewChunkAbstractionLease = async () => {
+    throw new Error('singular renewChunkAbstractionLease must not be called when bulk renewal exists');
+  };
+  return store;
+}
+
+test('lease: bulk renewal keeps 6 visual solos linear (12 bulk DB calls, 0 singular) and stops steals', async () => {
+  const bulkCalls = [];
+  const fx = await makeLeaseFixture({
+    visualCount: 6,
+    textCount: 0,
+    callMs: 5,
+    leaseMs: 150,
+    storeWrap: store => withBulkLeaseStore(store, bulkCalls),
+    onCall: async (_n, store) => { await workerBSweep(store, fx.allIds); },
+  });
+  const results = await fx.run();
+  const stolen = fx.store.claims.filter(c => c.workerId === 'wkr_B');
+  assert(stolen.length === 0, `Worker B must never steal a live chunk, got ${JSON.stringify(stolen)}`);
+  assert(results.length === 6 && results.every(r => r.status === 'completed'), `Expected 6 completed, got ${JSON.stringify(statusById(results))}`);
+  assert(bulkCalls.length === 12, `Expected 12 bulk renewals for 6 visual solos (2 per solo), got ${bulkCalls.length}`);
+  assert(fx.store.renewCalls.length === 0, `Expected 0 singular renewals, got ${fx.store.renewCalls.length}`);
+});
+
+test('lease: bulk renewal marks a stolen waiting text chunk stale and omits it from the batch call', async () => {
+  const bulkCalls = [];
+  const fx = await makeLeaseFixture({
+    visualCount: 1,
+    textCount: 3,
+    callMs: 5,
+    storeWrap: store => withBulkLeaseStore(store, bulkCalls),
+    onCall: async (n, store) => {
+      if (n === 1) await stealChunk(store, 'chk_3');
+    },
+  });
+  const results = await fx.run();
+  const byId = statusById(results);
+  assert(byId.chk_3 === 'stale', `Stolen waiting chunk must be stale, got ${byId.chk_3}`);
+  assert(['chk_1', 'chk_2', 'chk_4'].every(id => byId[id] === 'completed'), `Remaining chunks must complete, got ${JSON.stringify(byId)}`);
+  assert(fx.calls.every(call => !call.includes('chk_3')), 'Stolen chunk must not be sent to the model');
+  assert(bulkCalls.length > 0 && fx.store.renewCalls.length === 0, 'Only bulk renewal should be used');
+});
+
+test('lease: partial-parse fallback drops already-persisted batch chunks before renewing fallback singles', async () => {
+  const bulkCalls = [];
+  let batchFinished = false;
+  const fx = await makeLeaseFixture({
+    visualCount: 0,
+    textCount: 3,
+    callMs: 5,
+    storeWrap: store => {
+      withBulkLeaseStore(store, bulkCalls);
+      const save = store.saveDocumentAbstract;
+      store.saveDocumentAbstract = async record => {
+        const res = await save(record);
+        if (record.chunkId === 'chk_2') batchFinished = true;
+        return res;
+      };
+      return store;
+    },
+  });
+  // Fail chk_3 persistence once so only chk_3 enters partial fallback after chk_1 and chk_2 save.
+  let chk3PersistFailures = 0;
+  const realSave = fx.store.saveDocumentAbstract;
+  fx.store.saveDocumentAbstract = async record => {
+    if (record.chunkId === 'chk_3' && chk3PersistFailures === 0) {
+      chk3PersistFailures += 1;
+      throw new Error('transient save failure');
+    }
+    return await realSave(record);
+  };
+  const { result: results } = await withWarnings(() => fx.run());
+  assert(results.length === 3 && results.every(r => r.status === 'completed'), `Expected 3 completed, got ${JSON.stringify(statusById(results))}`);
+  assert(chk3PersistFailures === 1 && batchFinished, 'Test setup must fail chk_3 persist after chk_1 and chk_2 saved');
+  const fallbackBulkCalls = bulkCalls.slice(-1);
+  assert(fallbackBulkCalls.length === 1 && JSON.stringify(fallbackBulkCalls[0].chunkIds) === JSON.stringify(['chk_3']), `Only chk_3 should be renewed during fallback, got ${JSON.stringify(fallbackBulkCalls)}`);
+});
+
 test('isAbstractionBatchingEnabled defaults to true', () => {
   const previous = process.env.ABSTRACTION_BATCH_ENABLED;
   delete process.env.ABSTRACTION_BATCH_ENABLED;

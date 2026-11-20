@@ -951,10 +951,13 @@ export async function processChunkAbstraction(chunk, options = {}) {
   // Renew this chunk's lease before every billable call; stop before paying if another worker owns it now.
   const renewLeaseMs = callLeaseMs(leaseMs, UPSTREAM_TIMEOUT_MS);
   const modelCallGuard = async () => {
+    if (typeof options.chunkLeaseGuard === 'function') {
+      const outcome = await options.chunkLeaseGuard(processingChunk, renewLeaseMs);
+      if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
+      if (outcome !== undefined) return;
+    }
     const outcome = await renewChunkLease(store, processingChunk, { workerId, leaseMs: renewLeaseMs });
     if (outcome === 'lost') throw chunkLeaseLostError(processingChunk.id);
-    // Renews the other chunks the batch caller still holds. It never throws for them.
-    if (typeof options.chunkLeaseGuard === 'function') await options.chunkLeaseGuard();
   };
 
   let loadedPayload = null;

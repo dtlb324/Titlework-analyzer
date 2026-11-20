@@ -1,5 +1,5 @@
 
-import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
+import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLeases } from './abstraction-lease.js';
 import {
   ABSTRACTION_PROMPT,
   BATCH_ABSTRACT_RESPONSE_SCHEMA,
@@ -208,15 +208,23 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
   const held = new Map(ready.map(entry => [entry.chunk.id, entry.chunk]));
   const lostIds = new Set();
   const renewMs = callLeaseMs(leaseMs, config.upstreamTimeoutMs);
-  const renewHeld = async () => {
-    for (const [id, chunk] of [...held]) {
-      const outcome = await renewChunkLease(store, chunk, { workerId, leaseMs: renewMs });
-      if (outcome === 'lost') {
+  const renewHeld = async (activeChunk = null, activeLeaseMs = null) => {
+    if (activeChunk && lostIds.has(activeChunk.id)) return 'lost';
+    const targets = activeChunk && !held.has(activeChunk.id)
+      ? [...held.values(), activeChunk]
+      : [...held.values()];
+    const outcomes = await renewChunkLeases(store, targets, {
+      workerId,
+      leaseMs: Math.max(renewMs, Number(activeLeaseMs) || 0),
+    });
+    for (const [id, outcome] of outcomes) {
+      if (outcome === 'lost' && held.has(id)) {
         lostIds.add(id);
         held.delete(id);
       }
     }
     if (typeof options.chunkLeaseGuard === 'function') await options.chunkLeaseGuard();
+    return activeChunk ? outcomes.get(activeChunk.id) : undefined;
   };
   const stale = chunk => ({ status: 'stale', chunkId: chunk.id });
   const release = results => {
@@ -367,6 +375,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
           attemptCount: Math.max(1, Number(item.chunk.abstractionAttempts) || 1),
         });
         batchResults.push(saved);
+        held.delete(item.chunk.id);
       } catch (err) {
         fallbackChunks.push(item.chunk);
       }
@@ -427,8 +436,11 @@ async function fallbackToSingles(chunks, options, reason, lease = null) {
       results.push({ status: 'stale', chunkId: chunk.id });
       continue;
     }
-    results.push(await processChunkAbstraction(chunk, options));
-    lease?.held.delete(chunk.id);
+    try {
+      results.push(await processChunkAbstraction(chunk, options));
+    } finally {
+      lease?.held.delete(chunk.id);
+    }
   }
   return results;
 }
