@@ -308,6 +308,56 @@ test('Critical #2b: runStagedAnalysis refreshes #view-job after stopping poller 
   assert.match(app.getEl('jobHeader').innerHTML, /Job failed/, 'Expected #view-job header to reflect failed status after refresh');
 });
 
+test('Critical #2c: a hung #view-job refresh does not hold the failed run open', async () => {
+  const server = makeJobServer({
+    hooks: {
+      'POST /api/jobs/job_1/abstraction/start': async () => jsonResponse(503, { error: 'no server', fallback: 'browser_abstraction' }),
+      'POST /api/analyze': async () => jsonResponse(500, { error: 'Upstream failed' }),
+      'PATCH /api/jobs/job_1': async (_srv, opts) => jsonResponse(200, { job: { id: 'job_1', status: JSON.parse(opts.body).status || 'abstracting' } }),
+      'GET /api/jobs/job_1': () => new Promise(() => {}),
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed.png', 'a'.repeat(32))]);
+  await Promise.race([app.run('analyze()'), tick(300)]);
+  assert.equal(app.ctx.location.hash, '#/job/job_1');
+  assert.ok(server.calls.includes('GET /api/jobs/job_1'), 'Expected the #view-job refresh to start');
+  assert.equal(app.getEl('progressSection').style.display, 'none', 'Progress must hide while the refresh is still pending');
+  assert.equal(app.getEl('analyzeBtn').disabled, false, 'Analyze must re-enable while the refresh is still pending');
+  assert.equal(app.run('activeAnalysisRun'), null, 'The failed run must end while the refresh is still pending');
+});
+
+test('Critical #2d: refreshing a still-running job after a failed run polls only while its page is open', async () => {
+  const server = makeJobServer({
+    abstractionReadyAfter: 0,
+    hooks: {
+      'POST /api/jobs/job_1/synthesis/start': async () => jsonResponse(503, { error: 'no synth', fallback: 'browser_synthesis' }),
+      'POST /api/analyze': async () => jsonResponse(500, { error: 'browser synthesis upstream failed' }),
+      'PATCH /api/jobs/job_1': async () => jsonResponse(500, { error: 'patch failed' }),
+      'GET /api/jobs/job_1': async () => jsonResponse(200, {
+        job: { id: 'job_1', status: 'synthesizing', totalDocuments: 1, completedDocuments: 1, failedDocuments: 0, currentPhase: 'Synthesizing' },
+      }),
+      'GET /api/jobs/job_1/synthesis/status': async () => jsonResponse(200, {
+        status: { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0, hasResult: false, mergeInProgress: false, mergeLeaseHeld: false },
+      }),
+      'POST /api/jobs/job_1/synthesis/process': async () => jsonResponse(503, { error: 'no synth', fallback: 'browser_synthesis' }),
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed.png', 'a'.repeat(32))]);
+  await app.run('analyze()');
+  await tick(20);
+  assert.equal(app.ctx.location.hash, '#/job/job_1');
+  assert.equal(app.run('activeAnalysisRun'), null);
+  const kicks = () => server.calls.filter(c => c === 'POST /api/jobs/job_1/synthesis/process').length;
+  const kicksBeforeLeaving = kicks();
+  app.ctx.location.hash = '#/';
+  for (let i = 0; i < 8; i++) {
+    if (app.run('activeJobPollState')) await app.run('runJobPollTick(activeJobPollState)');
+  }
+  assert.equal(kicks(), kicksBeforeLeaving, 'A job the tab no longer drives must not be kicked after its page is left');
+});
+
 // ---- Critical #3: maybeKickStalledJobWorkflow kicks unplanned synthesizing jobs ----
 
 test('Critical #3: maybeKickStalledJobWorkflow kicks /synthesis/process when a synthesizing job has no plan yet', async () => {
