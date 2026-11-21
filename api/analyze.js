@@ -167,12 +167,17 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'APP_PASSWORD is required.', requestId });
   }
   if (requiredPassword) {
-    const providedPassword = req.headers['x-app-password'];
+    const rawProvided = req.headers['x-app-password'];
+    const providedPassword = Array.isArray(rawProvided) ? rawProvided[0] : rawProvided;
+    if (!providedPassword) {
+      logRequestEvent('api_reject', { requestId, status: 401, reason: 'missing_password', ip, latencyMs: Date.now() - startedAt });
+      return res.status(401).json({ error: 'Password required.', requestId });
+    }
     let outcome;
     try {
       outcome = await mutateAnalyzeRateLimit(ip, entry => {
         if (entry.failedAuth >= PASSWORD_RATE_LIMIT_MAX) return 'locked';
-        if (secureCompare(providedPassword || '', requiredPassword)) return 'ok';
+        if (secureCompare(providedPassword, requiredPassword)) return 'ok';
         entry.failedAuth += 1;
         return 'invalid';
       });

@@ -27,10 +27,11 @@ function sanitizeFilename(name) {
     .normalize('NFKD')
     .replace(/[^\w.\- ()]+/g, '-')
     .replace(/\s+/g, '-')
+    .replace(/\.{2,}/g, '.')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 120);
-  return base || 'document';
+  return !base || base === '.' ? 'document' : base;
 }
 
 export function buildObjectKey(jobId, chunkId, originalFilename) {
@@ -220,7 +221,7 @@ export async function createSignedUpload({ jobId, chunkId, originalFilename, obj
     chunkId,
     objectKey: key,
     objectUrl: buildObjectUrl(config.bucket, key),
-  });
+  }, config);
   if (!validation.valid) {
     const error = new Error(validation.reason);
     error.statusCode = 400;

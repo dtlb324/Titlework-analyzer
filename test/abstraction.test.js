@@ -1893,8 +1893,9 @@ test('Priority 6: computePdfSplitRanges and splitPdfChunk add 1-page overlap for
   const chunk4 = makeChunk({ id: 'chk_overlap_4', pageStart: 1, pageEnd: 4, sizeBytes: bytes4.byteLength });
   const store4 = createMemoryPhase3Store([chunk4]);
   const childPageCounts = [];
+  let createdSplitCount = 0;
   store4.createSplitChunk = async (jobId, documentId, input) => {
-    const childId = `chk_overlap_child_${childPageCounts.length + 1}`;
+    const childId = `chk_overlap_child_${++createdSplitCount}`;
     const child = {
       ...makeChunk({
         id: childId,
@@ -1946,8 +1947,9 @@ test('Priority 6: computePdfSplitRanges and splitPdfChunk add 1-page overlap for
   const chunk2 = makeChunk({ id: 'chk_two_page', pageStart: 1, pageEnd: 2, sizeBytes: bytes2.byteLength });
   const store2 = createMemoryPhase3Store([chunk2]);
   const childBytesById = new Map();
+  let createdTwoSplitCount = 0;
   store2.createSplitChunk = async (jobId, documentId, input) => {
-    const childId = `chk_two_child_${childBytesById.size + 1}`;
+    const childId = `chk_two_child_${++createdTwoSplitCount}`;
     const child = {
       ...makeChunk({
         id: childId,
