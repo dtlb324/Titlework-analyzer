@@ -266,6 +266,18 @@ export async function postOpenRouterChat(request, options = {}) {
       throw error;
     }
 
+    const noCompletion = detail => {
+      const err = new Error(openRouterErrorText(detail) || 'OpenRouter returned no completion (HTTP 200)');
+      const code = Number(detail?.code ?? detail?.status);
+      if (Number.isInteger(code) && code >= 400 && code < 600) err.status = code;
+      return err;
+    };
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw noCompletion();
+    if (data.error) throw noCompletion(data.error);
+    const choice = data.choices?.[0];
+    if (!choice || typeof choice !== 'object') throw noCompletion();
+    if (choice.finish_reason === 'error') throw noCompletion(choice.error);
+
     return data;
   } finally {
     timeout?.cleanup?.();

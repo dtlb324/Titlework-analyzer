@@ -45,6 +45,47 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
   const onDelta = typeof handlers.onDelta === 'function' ? handlers.onDelta : null;
   const onEvent = typeof handlers.onEvent === 'function' ? handlers.onEvent : null;
 
+  async function processBlock(block) {
+    const parsed = parseSseEventBlock(block);
+    if (!parsed) return;
+    if (onEvent) await onEvent(parsed);
+    if (parsed.done) return;
+    const payload = parsed.data;
+    if (!payload || typeof payload !== 'object') return;
+    if (parsed.event === 'error' || payload.type === 'error') {
+      const errorType = payload.error?.type || 'unknown_error';
+      const message = payload.error?.message || 'Unknown provider error.';
+      throw new Error(`Anthropic stream error (${errorType}): ${message}`);
+    }
+    if (payload.type === 'message_start' && payload.message?.model) {
+      model = payload.message.model;
+    }
+    // message_start carries input/cache token counts; later message_delta
+    // usage (cumulative output tokens) is merged over it.
+    if (payload.type === 'message_start' && payload.message?.usage) {
+      usage = { ...usage, ...payload.message.usage };
+    }
+    if (payload.type === 'content_block_delta' && payload.delta?.type === 'text_delta') {
+      const delta = String(payload.delta.text || '');
+      if (delta) {
+        if (firstDeltaAt == null) firstDeltaAt = Date.now();
+        text += delta;
+        if (onDelta) await onDelta(delta, text);
+      }
+    }
+    if (payload.type === 'message_delta') {
+      if (payload.delta?.stop_reason) stopReason = payload.delta.stop_reason;
+      if (payload.usage) usage = { ...usage, ...payload.usage };
+    }
+    if (payload.type === 'message_stop') {
+      if (!VALID_STOP_REASONS.has(stopReason)) {
+        throw new Error('Anthropic message_stop received without a valid stop reason.');
+      }
+      messageStopped = true;
+      if (payload.message?.usage) usage = { ...usage, ...payload.message.usage };
+    }
+  }
+
   let readerState = 'reading';
   try {
     while (true) {
@@ -62,51 +103,19 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
       }
       buffer += decoder.decode(value, { stream: true });
       let boundary;
-      while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+      while (!messageStopped && (boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
         const block = buffer.slice(0, boundary.index);
         buffer = buffer.slice(boundary.index + boundary[0].length);
-        const parsed = parseSseEventBlock(block);
-        if (!parsed) continue;
-        if (onEvent) onEvent(parsed);
-        if (parsed.done) continue;
-        const payload = parsed.data;
-        if (!payload || typeof payload !== 'object') continue;
-        if (parsed.event === 'error' || payload.type === 'error') {
-          const errorType = payload.error?.type || 'unknown_error';
-          const message = payload.error?.message || 'Unknown provider error.';
-          throw new Error(`Anthropic stream error (${errorType}): ${message}`);
-        }
-        if (payload.type === 'message_start' && payload.message?.model) {
-          model = payload.message.model;
-        }
-        // message_start carries input/cache token counts; later message_delta
-        // usage (cumulative output tokens) is merged over it.
-        if (payload.type === 'message_start' && payload.message?.usage) {
-          usage = { ...usage, ...payload.message.usage };
-        }
-        if (payload.type === 'content_block_delta' && payload.delta?.type === 'text_delta') {
-          const delta = String(payload.delta.text || '');
-          if (delta) {
-            if (firstDeltaAt == null) firstDeltaAt = Date.now();
-            text += delta;
-            if (onDelta) await onDelta(delta, text);
-          }
-        }
-        if (payload.type === 'message_delta') {
-          if (payload.delta?.stop_reason) stopReason = payload.delta.stop_reason;
-          if (payload.usage) usage = { ...usage, ...payload.usage };
-        }
-        if (payload.type === 'message_stop') {
-          if (!VALID_STOP_REASONS.has(stopReason)) {
-            throw new Error('Anthropic message_stop received without a valid stop reason.');
-          }
-          messageStopped = true;
-          if (payload.message?.usage) usage = { ...usage, ...payload.message.usage };
-        }
+        await processBlock(block);
       }
+      if (messageStopped) break;
     }
 
     if (!messageStopped) throw new Error('Anthropic stream ended before message_stop.');
+    if (readerState === 'reading') {
+      readerState = 'abandoned';
+      try { Promise.resolve(reader.cancel?.()).catch(() => {}); } catch {}
+    }
 
     return {
       text,

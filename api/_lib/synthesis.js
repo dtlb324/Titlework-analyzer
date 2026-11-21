@@ -1,6 +1,6 @@
 
 import { createHash } from 'crypto';
-import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, sanitizeModelClientError } from './model-client.js';
+import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, modelApiKeyError, shouldUseOpenRouter, sanitizeModelClientError } from './model-client.js';
 import { buildMergeUserMessageContent, estimateTextTokens } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
@@ -8,7 +8,7 @@ const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-5-5';
 
 export function resolveFinalSynthesisModel() {
   const configured = String(process.env.SYNTHESIS_MODEL || DEFAULT_FINAL_SYNTHESIS_MODEL).trim();
-  if (isGeminiModel(configured) || /^claude-haiku/i.test(configured)) {
+  if (isGeminiModel(configured) || /^google\/gemini-/i.test(configured) || /(?:^|\/)claude-haiku/i.test(configured)) {
     return DEFAULT_FINAL_SYNTHESIS_MODEL;
   }
   return configured || DEFAULT_FINAL_SYNTHESIS_MODEL;
@@ -24,10 +24,10 @@ const REMOVED_PARTIAL_SYNTHESIS_MODELS = new Set([
 
 export function resolvePartialSynthesisModel() {
   const configured = String(process.env.SYNTHESIS_PARTIAL_MODEL || DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID).trim();
-  if (REMOVED_PARTIAL_SYNTHESIS_MODELS.has(configured) || /^claude-haiku/i.test(configured)) {
+  if (REMOVED_PARTIAL_SYNTHESIS_MODELS.has(configured) || /(?:^|\/)claude-haiku/i.test(configured)) {
     return DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID;
   }
-  if (!isGeminiModel(configured)) {
+  if (!isGeminiModel(configured) && !/^google\/gemini-/i.test(configured)) {
     return DEFAULT_PARTIAL_SYNTHESIS_MODEL_ID;
   }
   return configured;
@@ -124,7 +124,7 @@ export function shouldCompactBeforeMerge({ segmentCount, mergeInputBytes, mergeI
   return tokens >= resolveCompactionMinMergeTokens();
 }
 
-function createPreviewWriter(store, jobId, model, { planId, mergeWorkerId } = {}) {
+function createPreviewWriter(store, jobId, model, { planId, mergeWorkerId, degraded = false } = {}) {
   if (!store?.setSynthesisPreview || !jobId) {
     return {
       async begin() {},
@@ -136,42 +136,69 @@ function createPreviewWriter(store, jobId, model, { planId, mergeWorkerId } = {}
   let buffer = '';
   let lastFlushAt = 0;
   const minFlushMs = 250;
+  const isDegraded = Boolean(degraded);
+  function warnPreviewError(stage, err) {
+    logSynthesisMetrics({
+      event: 'synthesis_preview_write_failed',
+      jobId,
+      stage,
+      errorMessage: sanitizeErrorMessage(err),
+    });
+  }
   async function flush(force = false) {
     const now = Date.now();
     if (!force && now - lastFlushAt < minFlushMs) return;
     lastFlushAt = now;
-    await store.setSynthesisPreview(jobId, {
-      text: buffer,
-      complete: false,
-      bytesReceived: buffer.length,
-      modelUsed: model,
-      planId,
-      mergeWorkerId,
-    });
+    try {
+      await store.setSynthesisPreview(jobId, {
+        text: buffer,
+        complete: false,
+        degraded: isDegraded,
+        bytesReceived: buffer.length,
+        modelUsed: model,
+        planId,
+        mergeWorkerId,
+      });
+    } catch (err) {
+      warnPreviewError('flush', err);
+    }
   }
   return {
     async begin() {
       buffer = '';
       lastFlushAt = 0;
-      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId });
-      await store.setSynthesisPreview(jobId, { text: '', complete: false, bytesReceived: 0, modelUsed: model, planId, mergeWorkerId });
+      try {
+        if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId });
+        await store.setSynthesisPreview(jobId, { text: '', complete: false, degraded: isDegraded, bytesReceived: 0, modelUsed: model, planId, mergeWorkerId });
+      } catch (err) {
+        warnPreviewError('begin', err);
+      }
     },
     async onDelta(_delta, fullText) {
       buffer = fullText;
       await flush(false);
     },
     async complete() {
-      await store.setSynthesisPreview(jobId, {
-        text: buffer,
-        complete: true,
-        bytesReceived: buffer.length,
-        modelUsed: model,
-        planId,
-        mergeWorkerId,
-      });
+      try {
+        await store.setSynthesisPreview(jobId, {
+          text: buffer,
+          complete: true,
+          degraded: isDegraded,
+          bytesReceived: buffer.length,
+          modelUsed: model,
+          planId,
+          mergeWorkerId,
+        });
+      } catch (err) {
+        warnPreviewError('complete', err);
+      }
     },
     async discard() {
-      if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId });
+      try {
+        if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId });
+      } catch (err) {
+        warnPreviewError('discard', err);
+      }
     },
     get text() {
       return buffer;
@@ -483,6 +510,8 @@ export function planSynthesisSegments(abstracts, tract, contextNotes, configOver
   );
   if (shouldForceMultiSegmentPlanning(abstracts.length)) {
     const baseConfig = getSynthesisConfig(configOverrides);
+    // Uses forceChunkSize = baseConfig.chunkSize: jobs with abstracts.length <= chunkSize stay single-pass
+    // (one Sonnet call), while jobs with abstracts.length > chunkSize split into multi-segment partial synthesis.
     chunkLists = buildSynthesisChunks(
       abstracts,
       tract,
@@ -645,9 +674,10 @@ async function callSynthesisModel({
   config,
   options,
 }) {
-  // A segment worker re-asserts its lease before each billable call, so a lease that expired or was
-  // reclaimed stops the chain here instead of paying for a result that can no longer be saved.
-  if (options.segmentLeaseGuard) await options.segmentLeaseGuard();
+  // A segment or final-merge worker re-asserts its lease before each billable call, so an expired or
+  // reclaimed lease stops the chain here instead of paying for a result that can no longer be saved.
+  const leaseGuard = options.leaseGuard || options.segmentLeaseGuard;
+  if (leaseGuard) await leaseGuard();
   const messages = buildSegmentMessages(abstracts, tract, contextNotes, preamble, {
     cacheMergeSegments: Boolean(options.cacheMergeSegments),
   });
@@ -660,7 +690,7 @@ async function callSynthesisModel({
   const shouldStream = Boolean(options.enableFinalStream)
     && synthesisStreamEnabled(options)
     && systemPrompt === SYNTHESIS_PROMPT
-    && isAnthropicModel(config.model);
+    && (isAnthropicModel(config.model) || shouldUseOpenRouter(config.model));
   const previewWriter = shouldStream
     ? (options.previewWriter || createPreviewWriter(options.store, options.jobId, config.model, options))
     : null;
@@ -716,7 +746,9 @@ async function callSynthesisModel({
       stopReason: response.stopReason || null,
     };
   } catch (err) {
-    if (previewWriter?.discard) await previewWriter.discard();
+    if (previewWriter?.discard) {
+      try { await previewWriter.discard(); } catch {}
+    }
     throw err;
   }
 }
@@ -759,17 +791,24 @@ async function synthesizeWithBinarySplit({
   const splitPreamble = `${preamble}\n\nThis subset was split automatically because the original synthesis hit ${reason}. Produce a faithful partial chain-of-title segment.`;
   // retry_larger stays on the outermost recombine. Forwarding it would bill another final-merge-sized call at every nested level.
   const halfRecovery = recombineRecovery?.mode === 'keep_halves' ? recombineRecovery : null;
-  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, halfRecovery);
-  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, config, options, truncationDepth, halfRecovery);
+  const halfConfig = (systemPrompt === SYNTHESIS_PROMPT && options.partialConfig)
+    ? options.partialConfig
+    : config;
+  const halfOptions = { ...options, enableFinalStream: false, cacheMergeSegments: false };
+  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, halfConfig, halfOptions, truncationDepth, halfRecovery);
+  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, halfConfig, halfOptions, truncationDepth, halfRecovery);
   const mergeAbstracts = [
     { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftResult.text },
     { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightResult.text },
   ];
+  const recombineGoal = systemPrompt === SYNTHESIS_PROMPT
+    ? 'one complete title opinion'
+    : 'one coherent segment summary';
   const recombineRequest = {
     abstracts: mergeAbstracts,
     tract,
     contextNotes,
-    preamble: 'Merge these partial chain-of-title syntheses into one coherent segment summary. Preserve all caveats, gaps, curative requirements, and fractional calculations.',
+    preamble: `Merge these partial chain-of-title syntheses into ${recombineGoal}. Preserve all caveats, gaps, curative requirements, and fractional calculations.`,
     systemPrompt,
     config,
     options,
@@ -1006,6 +1045,8 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   const startedAt = Date.now();
   let lastError = null;
   for (let attempt = firstAttempt; attempt <= config.maxAttempts; attempt++) {
+    let attemptsUsed = attempt;
+    let repairAttempted = false;
     try {
       // A truncated recombine keeps the two finished halves on a multi-segment plan, where the final merge reads them.
       // A single-pass recombine is the final opinion itself, so it gets one retry with the final-merge output limit.
@@ -1017,7 +1058,10 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       const warnings = [];
       if (result.splitApplied) warnings.push('segment_split');
       if (result.recoveryWarning) warnings.push(result.recoveryWarning);
-      if (!validation.ok && attempt < config.maxAttempts && SYNTHESIS_REPAIR_ENABLED) {
+      if (!validation.ok && !result.splitApplied && attemptsUsed < config.maxAttempts && SYNTHESIS_REPAIR_ENABLED) {
+        attemptsUsed += 1;
+        attempt = attemptsUsed;
+        repairAttempted = true;
         const repairAbstracts = segmentAbstracts;
         const repairPreamble = `${preamble}\n\nPrevious response was incomplete or missing required sections: ${validation.reason} Produce a complete response that includes every required section.`;
         const retry = await callSynthesisModel({
@@ -1049,16 +1093,17 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
         const failure = {
           errorType: 'validation_failed',
           errorMessage: validation.reason,
-          modelUsed: result.model || config.model,
+          modelUsed: result.model || activeConfig.model,
           payloadBytes: result.payloadBytes,
           latencyMs: Date.now() - startedAt,
           workerId,
         };
-        if (attempt < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
-          const retryAtMs = Date.now() + computeRetryBackoff(attempt, 0);
+        if (attemptsUsed < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
+          const retryAtMs = Date.now() + computeRetryBackoff(attemptsUsed, 0);
           const updated = await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
             ...failure,
             retryAtIso: new Date(retryAtMs).toISOString(),
+            ...(repairAttempted ? { extraAttempts: 1 } : {}),
           });
           if (!updated) return { status: 'stale', segmentId: segment.id };
           return { status: 'retry_wait', segmentId: segment.id, failure };
@@ -1088,25 +1133,26 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
       const failure = {
         errorType,
         errorMessage: sanitizeErrorMessage(err),
-        modelUsed: config.model,
+        modelUsed: activeConfig.model,
         latencyMs: Date.now() - startedAt,
       };
-      if (isRetryable && attempt < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
-        const retryAtMs = Date.now() + computeRetryBackoff(attempt, extractRetryAfter(err));
+      if (isRetryable && attemptsUsed < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
+        const retryAtMs = Date.now() + computeRetryBackoff(attemptsUsed, extractRetryAfter(err));
         const updated = await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
           ...failure,
           retryAtIso: new Date(retryAtMs).toISOString(),
           workerId,
+          ...(repairAttempted ? { extraAttempts: 1 } : {}),
         });
         if (!updated) return { status: 'stale', segmentId: segment.id };
         return { status: 'retry_wait', segmentId: segment.id, failure };
       }
-      if (!isRetryable || attempt >= config.maxAttempts) {
+      if (!isRetryable || attemptsUsed >= config.maxAttempts) {
         const updated = await store.markSynthesisSegmentFailed(jobId, segment.id, { ...failure, workerId });
         if (!updated) return { status: 'stale', segmentId: segment.id };
         return { status: 'failed', segmentId: segment.id, failure };
       }
-      await sleep(computeRetryBackoff(attempt, extractRetryAfter(err)));
+      await sleep(computeRetryBackoff(attemptsUsed, extractRetryAfter(err)));
     }
   }
   return { status: 'failed', segmentId: segment.id, failure: { errorType: 'unknown', errorMessage: sanitizeErrorMessage(lastError) } };
@@ -1306,6 +1352,7 @@ async function mergeSegmentsIntoOpinion({
       finalConfig,
       {
         ...options,
+        partialConfig: partial,
         enableFinalStream: true,
         cacheMergeSegments: true,
         jobId: options.jobId,
@@ -1331,6 +1378,7 @@ async function mergeSegmentsIntoOpinion({
     finalConfig,
     {
       ...options,
+      partialConfig: partial,
       enableFinalStream: true,
       cacheMergeSegments: true,
       jobId: options.jobId,
@@ -1429,10 +1477,11 @@ export async function planJobSynthesis(jobId, options = {}) {
   return { plan, abstracts: orderedAbstracts, job };
 }
 
-export async function tryRecoverMergePreview(store, jobId, config) {
+export async function tryRecoverMergePreview(store, jobId, config, { allowDegraded = false } = {}) {
   if (!store?.getSynthesisPreview || !jobId) return null;
   const preview = await store.getSynthesisPreview(jobId);
   if (!preview?.complete) return null;
+  if (preview.degraded && !allowDegraded) return null;
   const text = preview.text || '';
   if (!validateFinalOpinion(text).ok) return null;
   return {
@@ -1448,7 +1497,9 @@ export async function tryRecoverMergePreview(store, jobId, config) {
 async function runOrRecoverMerge(mergeArgs) {
   const store = mergeArgs.options?.store;
   const jobId = mergeArgs.options?.jobId;
-  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config);
+  const recovered = await tryRecoverMergePreview(store, jobId, mergeArgs.config, {
+    allowDegraded: Boolean(mergeArgs.options?.degraded),
+  });
   if (recovered) {
     if (Array.isArray(mergeArgs.warningsAccum)) {
       mergeArgs.warningsAccum.push('merge_recovered: reused completed merge preview from an interrupted attempt');
@@ -1510,13 +1561,22 @@ export async function processSynthesisJob(jobId, options = {}) {
       });
     });
     currentJob = await store.getJob(jobId);
+    let anyClaimed = false;
+    let hadError = false;
     for (const result of segmentResults) {
       if (!result || result.status === 'skipped' || result.status === 'stale') continue;
+      if (result.status === 'error') {
+        hadError = true;
+        lastError = { errorType: classifyError(result.error), errorMessage: sanitizeErrorMessage(result.error) };
+        continue;
+      }
+      anyClaimed = true;
       if (result.status === 'complete') completedInBatch += 1;
       else if (result.status === 'failed') { failedInBatch += 1; lastError = result.failure; }
       else if (result.status === 'retry_wait') { retryInBatch += 1; lastError = result.failure; }
     }
     if (currentJob?.status === 'canceled') break;
+    if (!anyClaimed || hadError) break;
   }
 
   const refreshedSegments = await store.listSynthesisSegments(jobId, planId);
@@ -1558,6 +1618,31 @@ export async function processSynthesisJob(jobId, options = {}) {
       return null;
     }
     return claim;
+  }
+  const mergeCallLeaseMs = Math.max(options.mergeLeaseMs || DEFAULT_MERGE_LEASE_MS, config.upstreamTimeoutMs + 60_000);
+  function buildMergeLeaseGuard(mergeClaim) {
+    if (!store.renewSynthesisMergeLease || !mergeClaim?.workerId) return undefined;
+    return async function mergeLeaseGuard() {
+      let renewed;
+      try {
+        renewed = await store.renewSynthesisMergeLease(jobId, planId, {
+          workerId: mergeClaim.workerId,
+          leaseMs: mergeCallLeaseMs,
+        });
+      } catch (err) {
+        logSynthesisMetrics({
+          event: 'synthesis_merge_lease_renew_failed',
+          jobId,
+          errorMessage: sanitizeErrorMessage(err),
+        });
+        return;
+      }
+      if (!renewed) {
+        const lost = new Error('Synthesis merge lease was taken by another worker or job was canceled.');
+        lost.code = 'lease_lost';
+        throw lost;
+      }
+    };
   }
   const mergeGateJob = await store.getJob(jobId);
   const mergeCanceled = mergeGateJob?.status === 'canceled';
@@ -1606,14 +1691,22 @@ export async function processSynthesisJob(jobId, options = {}) {
           contextNotes,
           config,
           partialConfig: getPartialSynthesisConfig(options.config || {}),
-          options: { ...options, store, jobId, planId, mergeWorkerId: mergeClaim.workerId },
+          options: {
+            ...options,
+            store,
+            jobId,
+            planId,
+            mergeWorkerId: mergeClaim.workerId,
+            degraded: false,
+            leaseGuard: buildMergeLeaseGuard(mergeClaim),
+          },
           warningsAccum,
           tokensAccum,
         });
         const validation = validateFinalOpinion(merged.text);
         if (!validation.ok) {
           warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-          if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+          if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId: mergeClaim.workerId });
         }
         lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
         const failedDocs = await failedDocumentsForMerge();
@@ -1636,22 +1729,26 @@ export async function processSynthesisJob(jobId, options = {}) {
         result = await store.saveJobResult(jobId, resultPayload);
         mergeRanInThisBatch = Boolean(result);
       } catch (err) {
-        lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
-        const finalWarnings = await appendResultWarnings([`final_merge_failed: ${lastError.errorType}`]);
-        result = await store.saveJobResult(jobId, {
-          planId,
-          status: 'failed',
-          finalTitleOpinion: '',
-          warnings: finalWarnings,
-          failedDocuments: await failedDocumentsForMerge(),
-          modelUsed: config.model,
-          inputTokens: tokensAccum.inputTokens,
-          outputTokens: tokensAccum.outputTokens,
-          payloadBytes: 0,
-          synthesisDurationMs: Date.now() - startedAt,
-          mergeWorkerId: mergeClaim.workerId,
-        });
-        mergeRanInThisBatch = Boolean(result);
+        if (classifyError(err) === 'lease_lost') {
+          mergeClaimBlocked = true;
+        } else {
+          lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+          const finalWarnings = await appendResultWarnings([`final_merge_failed: ${lastError.errorType}`]);
+          result = await store.saveJobResult(jobId, {
+            planId,
+            status: 'failed',
+            finalTitleOpinion: '',
+            warnings: finalWarnings,
+            failedDocuments: await failedDocumentsForMerge(),
+            modelUsed: config.model,
+            inputTokens: tokensAccum.inputTokens,
+            outputTokens: tokensAccum.outputTokens,
+            payloadBytes: 0,
+            synthesisDurationMs: Date.now() - startedAt,
+            mergeWorkerId: mergeClaim.workerId,
+          });
+          mergeRanInThisBatch = Boolean(result);
+        }
       }
     }
   } else if (!mergeCanceled && !existingResult && failedSegments.length && !stillPending.length) {
@@ -1676,14 +1773,22 @@ export async function processSynthesisJob(jobId, options = {}) {
             contextNotes,
             config,
             partialConfig: getPartialSynthesisConfig(options.config || {}),
-            options: { ...options, store, jobId, planId, mergeWorkerId: mergeClaim.workerId },
+            options: {
+              ...options,
+              store,
+              jobId,
+              planId,
+              mergeWorkerId: mergeClaim.workerId,
+              degraded: true,
+              leaseGuard: buildMergeLeaseGuard(mergeClaim),
+            },
             warningsAccum,
             tokensAccum,
           });
           const validation = validateFinalOpinion(merged.text);
           if (!validation.ok) {
             warningsAccum.push(`final_validation_failed: ${validation.reason}`);
-            if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId);
+            if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId: mergeClaim.workerId });
           }
           lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
           const failedDocs = await failedDocumentsForMerge();
@@ -1706,22 +1811,26 @@ export async function processSynthesisJob(jobId, options = {}) {
           result = await store.saveJobResult(jobId, resultPayload);
           mergeRanInThisBatch = Boolean(result);
         } catch (err) {
-          lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
-          await appendResultWarnings(warningsAccum);
-          result = await store.saveJobResult(jobId, {
-            planId,
-            status: 'failed',
-            finalTitleOpinion: '',
-            warnings: [...warningsAccum, `final_merge_failed: ${lastError.errorType}`],
-            failedDocuments: await failedDocumentsForMerge(),
-            modelUsed: config.model,
-            inputTokens: tokensAccum.inputTokens,
-            outputTokens: tokensAccum.outputTokens,
-            payloadBytes: 0,
-            synthesisDurationMs: Date.now() - startedAt,
-            mergeWorkerId: mergeClaim.workerId,
-          });
-          mergeRanInThisBatch = Boolean(result);
+          if (classifyError(err) === 'lease_lost') {
+            mergeClaimBlocked = true;
+          } else {
+            lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
+            await appendResultWarnings(warningsAccum);
+            result = await store.saveJobResult(jobId, {
+              planId,
+              status: 'failed',
+              finalTitleOpinion: '',
+              warnings: [...warningsAccum, `final_merge_failed: ${lastError.errorType}`],
+              failedDocuments: await failedDocumentsForMerge(),
+              modelUsed: config.model,
+              inputTokens: tokensAccum.inputTokens,
+              outputTokens: tokensAccum.outputTokens,
+              payloadBytes: 0,
+              synthesisDurationMs: Date.now() - startedAt,
+              mergeWorkerId: mergeClaim.workerId,
+            });
+            mergeRanInThisBatch = Boolean(result);
+          }
         }
       } else {
         const failureWarnings = [
@@ -1990,10 +2099,9 @@ export function synthesisSetupError() {
     return null;
   }
   const missing = [];
-  const geminiError = geminiApiKeyError();
-  if (geminiError) missing.push(geminiError);
-  if (!process.env.ANTHROPIC_API_KEY) {
-    missing.push('ANTHROPIC_API_KEY is required for final title synthesis and follow-ups.');
+  for (const model of [resolvePartialSynthesisModel(), resolveFinalSynthesisModel()]) {
+    const err = modelApiKeyError(model);
+    if (err && !missing.includes(err)) missing.push(err);
   }
   return missing.length ? missing.join(' ') : null;
 }

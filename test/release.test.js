@@ -338,6 +338,30 @@ test('release workflows and image context encode immutable Cloud Run deployment 
   assert(!releaseWorkflow.includes('SYNTHESIS_MAX_TOKENS=5000'), 'Old 5000-token synthesis cap must not remain');
   assert(!releaseWorkflow.includes('SYNTHESIS_PARTIAL_MAX_TOKENS=4000'), 'Old 4000-token partial synthesis cap must not remain');
   assert(releaseWorkflow.includes('ABSTRACTION_ESCALATION_ENABLED=false'), 'Expected Phase 0 abstraction escalation off on API deploy');
+  const workerDeploySection = releaseWorkflow.slice(
+    releaseWorkflow.indexOf('Deploy worker from immutable image'),
+    releaseWorkflow.indexOf('Deploy API from immutable image'),
+  );
+  const apiDeploySection = releaseWorkflow.slice(
+    releaseWorkflow.indexOf('Deploy API from immutable image'),
+    releaseWorkflow.indexOf('Verify production release'),
+  );
+  for (const sharedEnvVar of [
+    'SYNTHESIS_CONCURRENCY=8',
+    'SYNTHESIS_BATCH_LIMIT=8',
+    'SYNTHESIS_STREAM_ENABLED=true',
+    'SYNTHESIS_COMPACTION_ENABLED=true',
+    'SYNTHESIS_LARGE_JOB_MULTI_SEGMENT=true',
+    'BULK_JOB_MIN_ABSTRACTS=50',
+    'SYNTHESIS_MAX_TOKENS=8000',
+    'SYNTHESIS_PARTIAL_MAX_TOKENS=5000',
+    'SYNTHESIS_CHUNK_SIZE=50',
+    'BULK_SYNTHESIS_CHUNK_SIZE=50',
+    'ABSTRACTION_ESCALATION_ENABLED=false',
+  ]) {
+    assert(workerDeploySection.includes(sharedEnvVar), `Expected worker deploy to set ${sharedEnvVar}`);
+    assert(apiDeploySection.includes(sharedEnvVar), `Expected API deploy to set ${sharedEnvVar}`);
+  }
   assert(releaseWorkflow.includes('gh release'), 'Expected workflow to create or update GitHub Release');
   assert(releaseWorkflow.includes('GH_REPO: ${{ github.repository }}'), 'Expected github-release job to set GH_REPO without a checkout');
   assert(releaseWorkflow.includes('--json tagName,isLatest'), 'Expected workflow to enforce that the GitHub Release is marked Latest');

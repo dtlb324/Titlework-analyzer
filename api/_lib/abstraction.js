@@ -1159,7 +1159,10 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
   if (!isPdfChunk(parentChunk)) {
     return false;
   }
-  if (!options.store?.createSplitChunk || !options.store?.markChunkAbstractionSplitSuperseded) return false;
+  const hasAtomicCommit = typeof options.store?.commitSplitPdfChunks === 'function';
+  if (!hasAtomicCommit && (!options.store?.createSplitChunk || !options.store?.markChunkAbstractionSplitSuperseded)) {
+    return false;
+  }
   const { PDFDocument } = await import('pdf-lib');
   const source = await PDFDocument.load(normalizeBytes(bytes), { ignoreEncryption: true });
   const pageCount = source.getPageCount();
@@ -1172,6 +1175,46 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
   const ranges = computePdfSplitRanges(pageCount, sourcePageStart, sourcePageEnd);
   if (!ranges.length) return false;
   const baseName = String(parentChunk.originalFilename || 'document.pdf').replace(/\.pdf$/i, '');
+
+  const preparedChildren = [];
+  for (const range of ranges) {
+    const childDoc = await PDFDocument.create();
+    const indices = [];
+    for (let i = range.startPageIndex; i <= range.endPageIndex; i++) indices.push(i);
+    const pages = await childDoc.copyPages(source, indices);
+    for (const page of pages) childDoc.addPage(page);
+    const childBytes = Buffer.from(await childDoc.save());
+    const childName = `${baseName} (pp ${range.pageStart}${range.pageEnd === range.pageStart ? '' : `-${range.pageEnd}`}).pdf`;
+    const blob = await getBlobWriter(options)(parentChunk, childName, childBytes);
+    preparedChildren.push({
+      originalFilename: childName,
+      mediaType: 'application/pdf',
+      sizeBytes: childBytes.byteLength,
+      pageStart: range.pageStart,
+      pageEnd: range.pageEnd,
+      splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
+      fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
+      checksumSha256: sha256Hex(childBytes),
+      chunkOrder: parentChunk.chunkOrder,
+      blobKey: blob.blobKey,
+      blobUrl: blob.blobUrl,
+      splitParentChunkId: parentChunk.id,
+      splitReason: reason,
+      workerId: options.workerId,
+    });
+  }
+
+  if (hasAtomicCommit) {
+    const committed = await options.store.commitSplitPdfChunks(
+      parentChunk.jobId,
+      parentChunk.documentId,
+      parentChunk.id,
+      preparedChildren,
+      { reason, workerId: options.workerId },
+    );
+    return Boolean(committed);
+  }
+
   const createdChildIds = [];
   const splitFailure = {
     errorType: 'storage_error',
@@ -1180,31 +1223,8 @@ async function splitPdfChunk(parentChunk, bytes, reason, options) {
   };
   let splitComplete = false;
   try {
-    for (const range of ranges) {
-      const childDoc = await PDFDocument.create();
-      const indices = [];
-      for (let i = range.startPageIndex; i <= range.endPageIndex; i++) indices.push(i);
-      const pages = await childDoc.copyPages(source, indices);
-      for (const page of pages) childDoc.addPage(page);
-      const childBytes = Buffer.from(await childDoc.save());
-      const childName = `${baseName} (pp ${range.pageStart}${range.pageEnd === range.pageStart ? '' : `-${range.pageEnd}`}).pdf`;
-      const blob = await getBlobWriter(options)(parentChunk, childName, childBytes);
-      const child = await options.store.createSplitChunk(parentChunk.jobId, parentChunk.documentId, {
-        originalFilename: childName,
-        mediaType: 'application/pdf',
-        sizeBytes: childBytes.byteLength,
-        pageStart: range.pageStart,
-        pageEnd: range.pageEnd,
-        splitFrom: parentChunk.splitFrom || parentChunk.originalFilename,
-        fingerprint: `${parentChunk.fingerprint || parentChunk.id}:split:${range.pageStart}-${range.pageEnd}`,
-        checksumSha256: sha256Hex(childBytes),
-        chunkOrder: parentChunk.chunkOrder,
-        blobKey: blob.blobKey,
-        blobUrl: blob.blobUrl,
-        splitParentChunkId: parentChunk.id,
-        splitReason: reason,
-        workerId: options.workerId,
-      });
+    for (const childInput of preparedChildren) {
+      const child = await options.store.createSplitChunk(parentChunk.jobId, parentChunk.documentId, childInput);
       if (!child) return false;
       createdChildIds.push(child.id);
     }

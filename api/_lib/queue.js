@@ -179,6 +179,13 @@ export async function processAbstractionBatch(jobId, options = {}) {
   const startedAt = Date.now();
   const deadline = startedAt + config.budgetMs;
 
+  const initialJob = await getJobOrThrow(store, jobId);
+  if (['created', 'uploading'].includes(initialJob.status)) {
+    const error = new Error('Uploads must be finalized before processing abstraction.');
+    error.statusCode = 409;
+    throw error;
+  }
+
   if (store.resetStaleProcessingChunks) {
     await store.resetStaleProcessingChunks(jobId, config.staleLeaseMs);
   }
@@ -391,18 +398,22 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
   }
   const planResult = await planJobSynthesis(jobId, options);
   const planId = planResult?.plan?.planId;
-  if (job.status === 'failed') {
+  const rebuild = Boolean(options.rebuild || options.force);
+  if (job.status === 'failed' || (job.status === 'partial_failed' && rebuild)) {
     if (planId && store.resetFailedSynthesisSegments) {
       await store.resetFailedSynthesisSegments(jobId, planId);
     }
     if (store.clearJobResult) {
       await store.clearJobResult(jobId);
     }
+    if (store.clearSynthesisPreview) {
+      await store.clearSynthesisPreview(jobId);
+    }
   }
-  const existingPartialResult = job.status === 'partial_failed' && typeof store.getJobResult === 'function'
+  const existingPartialResult = job.status === 'partial_failed' && !rebuild && typeof store.getJobResult === 'function'
     ? await store.getJobResult(jobId)
     : null;
-  const resumeFromPartialFailed = job.status === 'partial_failed' && !existingPartialResult;
+  const resumeFromPartialFailed = job.status === 'partial_failed' && (rebuild || !existingPartialResult);
   if (store.updateJob && !['synthesizing', 'complete', 'partial_failed', 'failed'].includes(job.status)) {
     try {
       await store.updateJob(jobId, { status: 'synthesizing', currentPhase: 'Queued for server-side synthesis' });
@@ -415,7 +426,9 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
         status: 'synthesizing',
         currentPhase: job.status === 'failed'
           ? 'Resuming synthesis after failure'
-          : 'Queued for server-side synthesis with warnings',
+          : rebuild
+            ? 'Rebuilding opinion without failed documents'
+            : 'Queued for server-side synthesis with warnings',
       });
     } catch (error) {
       if (!isInvalidJobStatusTransition(error)) throw error;
@@ -563,6 +576,9 @@ export async function retryFailedAbstractionChunks(jobId, options = {}) {
   if (reset > 0 && store.updateJob) {
     if (store.clearJobResult) {
       await store.clearJobResult(jobId);
+    }
+    if (store.clearSynthesisPreview) {
+      await store.clearSynthesisPreview(jobId);
     }
     const refreshed = await store.getJob(jobId);
     if (refreshed && ['failed', 'partial_failed'].includes(refreshed.status)) {
