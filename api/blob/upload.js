@@ -80,6 +80,9 @@ export default async function handler(req, res) {
     if (!job || !chunk) {
       return res.status(404).json({ error: 'Upload chunk not found.', requestId });
     }
+    if (['complete', 'partial_failed', 'failed', 'canceled'].includes(job.status)) {
+      return res.status(409).json({ error: 'Cannot sign uploads for a terminal job.', requestId });
+    }
     if (mediaType !== chunk.mediaType) {
       return res.status(400).json({ error: 'Upload media type does not match chunk metadata.', requestId });
     }

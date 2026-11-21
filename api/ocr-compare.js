@@ -4,6 +4,7 @@ import { isProductionRuntime } from './_lib/runtime-info.js';
 import { geminiApiKeyError, invokeGeminiGenerateContent, resolveGeminiThinkingConfig } from './_lib/gemini-request.js';
 import { invokeAnthropicModel, invokeAnthropicModelStream, isAnthropicModel, NON_STREAMING_MAX_TOKENS, sanitizeModelClientError } from './_lib/model-client.js';
 import { normalizeOpenRouterResponse, openRouterErrorText, postOpenRouterChat } from './_lib/openrouter-request.js';
+import { parseAbstractFields } from '../public/ocr-accuracy.js';
 
 const MAX_PAGES = 60;
 const DEFAULT_LAB_MAX_TOKENS = 16000;
@@ -196,18 +197,7 @@ function validateUpload(body) {
 }
 
 function fieldsFromText(text) {
-  const fields = Object.create(null);
-  let field = null;
-  for (const line of text.split('\n')) {
-    const match = line.match(/^([A-Z][A-Z /-]*[A-Z]):\s*(.*)$/);
-    if (match) {
-      field = match[1].trim();
-      fields[field] = match[2].trim();
-    } else if (field && line.trim()) {
-      fields[field] += `\n${line.trim()}`;
-    }
-  }
-  return fields;
+  return parseAbstractFields(text);
 }
 
 // Anthropic reports thinking inside output_tokens and breaks it out separately in

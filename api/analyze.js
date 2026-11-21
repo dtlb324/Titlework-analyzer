@@ -103,6 +103,9 @@ function validateRequestBody(body) {
     return { valid: false, reason: 'Invalid max_tokens value.' };
   }
   for (const msg of body.messages) {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      return { valid: false, reason: 'Invalid message object.' };
+    }
     if (!msg.role || !['user', 'assistant'].includes(msg.role)) {
       return { valid: false, reason: 'Invalid message role.' };
     }
@@ -111,6 +114,9 @@ function validateRequestBody(body) {
     }
     if (Array.isArray(msg.content)) {
       for (const block of msg.content) {
+        if (!block || typeof block !== 'object' || Array.isArray(block)) {
+          return { valid: false, reason: 'Invalid content block.' };
+        }
         if (!block.type || !['text', 'image', 'document'].includes(block.type)) {
           return { valid: false, reason: 'Invalid content block type.' };
         }

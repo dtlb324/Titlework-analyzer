@@ -6,9 +6,12 @@ import {
   addUsage,
   buildAbstractMessagesForChunks,
   buildEscalationQualityContext,
+  classifyAbstractionError,
+  computeRetryBackoff,
   estimateAbstractPayloadBytes,
   estimateRequestBytes,
   evaluateAbstractEscalation,
+  extractRetryAfterMs,
   getAbstractionConfig,
   isAbstractionEscalationEnabled,
   parseBatchAbstracts,
@@ -20,6 +23,8 @@ import {
   runChunkEscalation,
   runModelAbstraction,
   getBlobLoader,
+  sanitizeErrorMessage,
+  splitPdfChunk,
   stripDocumentLabel,
   tryReuseExistingAbstract,
   validateAbstractPersistenceInput,
@@ -434,6 +439,30 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
               finalText = escalated.text;
               finalModel = escalated.model;
               finalPayloadBytes = escalated.payloadBytes ?? finalPayloadBytes;
+            } else if (escalated.truncated) {
+              const split = item.payloadBytes
+                ? await splitPdfChunk(item.chunk, item.payloadBytes, 'output_truncated', { ...options, store, workerId }).catch(() => false)
+                : false;
+              item.payloadBytes = null;
+              held.delete(item.chunk.id);
+              if (split) {
+                batchResults.push({ status: 'split_superseded', chunkId: item.chunk.id });
+              } else {
+                const failure = {
+                  errorType: 'output_truncated',
+                  errorMessage: 'Escalated model output was truncated at the token limit (max_tokens).',
+                  latencyMs: Date.now() - startedAt,
+                  modelUsed: escalated.model || escalationModel,
+                  workerId,
+                };
+                if (store.markChunkAbstractionFailed) {
+                  const updated = await store.markChunkAbstractionFailed(item.chunk.jobId, item.chunk.id, failure);
+                  batchResults.push(updated ? { status: 'failed', chunkId: item.chunk.id, failure } : stale(item.chunk));
+                } else {
+                  batchResults.push({ status: 'failed', chunkId: item.chunk.id, failure });
+                }
+              }
+              continue;
             }
           }
         }
@@ -495,7 +524,40 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
       else rest.push(item.chunk);
     }
     if (rest.length) {
-      results.push(...await fallbackToSingles(rest, { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds, renewHeld }));
+      const errorType = classifyAbstractionError(err);
+      if (!lostNow && (errorType === 'rate_limit' || errorType === 'upstream_timeout')) {
+        const retryAfterMs = extractRetryAfterMs(err);
+        const failure = {
+          errorType,
+          errorMessage: sanitizeErrorMessage(err),
+          latencyMs: Date.now() - startedAt,
+          modelUsed: model,
+          workerId,
+        };
+        for (const chunk of rest) {
+          held.delete(chunk.id);
+          const attemptCount = Math.max(1, Number(chunk.abstractionAttempts) || 1);
+          if (attemptCount < maxAttempts && store.markChunkAbstractionRetryWait) {
+            const retryAtMs = Date.now() + computeRetryBackoff(attemptCount, retryAfterMs);
+            const updated = await store.markChunkAbstractionRetryWait(chunk.jobId, chunk.id, {
+              ...failure,
+              retryAtIso: new Date(retryAtMs).toISOString(),
+            });
+            results.push(updated
+              ? { status: 'retry_wait', chunkId: chunk.id, failure, retryAt: retryAtMs }
+              : stale(chunk));
+          } else if (store.markChunkAbstractionFailed) {
+            const updated = await store.markChunkAbstractionFailed(chunk.jobId, chunk.id, failure);
+            results.push(updated
+              ? { status: 'failed', chunkId: chunk.id, failure }
+              : stale(chunk));
+          } else {
+            results.push({ status: 'failed', chunkId: chunk.id, failure });
+          }
+        }
+      } else {
+        results.push(...await fallbackToSingles(rest, { ...soloOptions, workerId, leaseMs, maxAttempts }, err?.message || String(err), { held, lostIds, renewHeld }));
+      }
     }
     return [...finished, ...visualResults, ...lostTextResults, ...results];
   }

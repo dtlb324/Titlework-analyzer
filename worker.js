@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import { fileURLToPath } from 'url';
 import { runWorkerLoop, runWorkerDrain } from './api/_lib/cloud-run-worker.js';
 import { secureCompare } from './api/_lib/jobs.js';
 import { getRuntimeInfo, isProductionRuntime } from './api/_lib/runtime-info.js';
@@ -58,8 +59,8 @@ export function isWorkerLoopDisabled(env = process.env) {
   return value === 'true' || value === '1' || value === 'yes';
 }
 
-export function createWorkerHealthServer({ drain } = {}) {
-  const runDrain = drain || (() => runWorkerDrain());
+export function createWorkerHealthServer({ drain, signal } = {}) {
+  const runDrain = drain ? () => drain({ signal }) : () => runWorkerDrain({ signal });
   let draining = false;
   return createServer((req, res) => {
     if (req.url === '/healthz') {
@@ -104,7 +105,7 @@ export function createWorkerHealthServer({ drain } = {}) {
 export async function startWorker() {
   const controller = new AbortController();
   const port = Number(process.env.PORT || 8080);
-  const healthServer = createWorkerHealthServer();
+  const healthServer = createWorkerHealthServer({ signal: controller.signal });
   await new Promise(resolve => healthServer.listen(port, '0.0.0.0', resolve));
   const shutdown = signal => {
     console.log(JSON.stringify({ event: 'worker_shutdown_requested', signal }));
@@ -127,7 +128,7 @@ export async function startWorker() {
   return result;
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   startWorker().catch(err => {
     console.error(JSON.stringify({ event: 'worker_fatal_error', reason: err?.message || String(err) }));
     process.exit(1);

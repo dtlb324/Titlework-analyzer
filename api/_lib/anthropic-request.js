@@ -18,6 +18,23 @@ export function mergeUserCacheMinTokens() {
 }
 
 export function buildSystemParam(prompt, options = {}) {
+  if (Array.isArray(prompt)) {
+    const blocks = prompt
+      .filter(block => block && typeof block === 'object')
+      .map(block => ({ ...block }));
+    if (!blocks.length) return '';
+    const totalLength = blocks.reduce((sum, block) => sum + (typeof block.text === 'string' ? block.text.length : 0), 0);
+    const hasCacheControl = blocks.some(block => Boolean(block.cache_control));
+    if (!hasCacheControl && options.cache !== false && promptCacheEnabled() && totalLength >= 256) {
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        if (blocks[i].type === 'text' && typeof blocks[i].text === 'string') {
+          blocks[i] = { ...blocks[i], cache_control: { type: 'ephemeral' } };
+          break;
+        }
+      }
+    }
+    return blocks;
+  }
   const text = String(prompt || '');
   const useCache = options.cache !== false && promptCacheEnabled() && text.length >= 256;
   if (!useCache) return text;

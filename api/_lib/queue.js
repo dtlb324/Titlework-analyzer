@@ -218,6 +218,9 @@ export async function processAbstractionBatch(jobId, options = {}) {
           if (!job || isJobCanceled(job)) {
             return batch.chunks.map(chunk => ({ status: 'skipped', chunkId: chunk.id, reason: 'canceled' }));
           }
+          if (Date.now() >= deadline) {
+            return batch.chunks.map(chunk => ({ status: 'skipped', chunkId: chunk.id, reason: 'budget_exceeded' }));
+          }
           return await processMultiChunkAbstraction(batch.chunks, {
             ...options,
             store,
@@ -231,6 +234,9 @@ export async function processAbstractionBatch(jobId, options = {}) {
         ...singles.map(chunk => async () => {
           if (!job || isJobCanceled(job)) {
             return [{ status: 'skipped', chunkId: chunk.id, reason: 'canceled' }];
+          }
+          if (Date.now() >= deadline) {
+            return [{ status: 'skipped', chunkId: chunk.id, reason: 'budget_exceeded' }];
           }
           return [await processChunkAbstraction(chunk, {
             ...options,
@@ -249,6 +255,9 @@ export async function processAbstractionBatch(jobId, options = {}) {
       results = await runWithConcurrency(ready, config.concurrency, async chunk => {
         if (!job || isJobCanceled(job)) {
           return { status: 'skipped', chunkId: chunk.id, reason: 'canceled' };
+        }
+        if (Date.now() >= deadline) {
+          return { status: 'skipped', chunkId: chunk.id, reason: 'budget_exceeded' };
         }
         return await processChunkAbstraction(chunk, {
           ...options,

@@ -10,6 +10,7 @@ import { isGemini3SeriesModel, isGemini4SeriesModel, resolveGeminiThinkingConfig
 import {
   SYNTHESIS_PROMPT,
   buildAbstractInput,
+  finalMergeMaxTokens,
   getSynthesisConfig,
   groupAbstractsByDocument,
   planSynthesisSegments,
@@ -100,10 +101,9 @@ async function loadJobContext(store, jobId) {
   return { job, abstracts, tract, contextNotes, segmentSummaries, plannedSegmentCount: planned.length };
 }
 
-function resolveMode(ctx) {
+export function resolveMode(ctx) {
   if (ctx.segmentSummaries.length > 1) return 'merge';
-  if (ctx.plannedSegmentCount === 1) return 'single-pass';
-  if (ctx.segmentSummaries.length === 1) return 'merge';
+  if (ctx.plannedSegmentCount === 1 || ctx.segmentSummaries.length === 1) return 'single-pass';
   throw new Error(
     `Job has ${ctx.plannedSegmentCount} planned segments but no completed segment summaries. `
     + 'Finish server synthesis on this job first, or use a smaller job that fits single-pass.',
@@ -127,8 +127,9 @@ export function resolveFinalOpinionThinking(model, thinkingLevel) {
   return { thinkingLevel: thinkingLevel || undefined, thinkingBudget: undefined };
 }
 
-async function generateFinalOpinion({ mode, ctx, model, thinkingLevel: requestedLevel }) {
+export async function generateFinalOpinion({ mode, ctx, model, thinkingLevel: requestedLevel, invokeModelFn = invokeModel }) {
   const config = getSynthesisConfig({ model });
+  const maxTokens = mode === 'merge' ? finalMergeMaxTokens() : config.maxTokens;
   const started = Date.now();
   const { thinkingLevel, thinkingBudget } = resolveFinalOpinionThinking(model, requestedLevel);
   let messages;
@@ -152,19 +153,26 @@ async function generateFinalOpinion({ mode, ctx, model, thinkingLevel: requested
     messages = [{ role: 'user', content }];
   }
 
-  const response = await invokeModel({
+  const response = await invokeModelFn({
     model: config.model,
-    maxTokens: config.maxTokens,
+    maxTokens,
     system: SYNTHESIS_PROMPT,
     messages,
     thinkingLevel: thinkingLevel || undefined,
     thinkingBudget: thinkingBudget !== undefined ? thinkingBudget : undefined,
   });
 
+  if (response?.stopReason === 'max_tokens') {
+    const err = new Error(`Model ${model} output was truncated at max_tokens (${maxTokens}).`);
+    err.code = 'output_truncated';
+    throw err;
+  }
+
   return {
     model: response.model || model,
     text: response.text || '',
     usage: response.usage || {},
+    stopReason: response.stopReason || null,
     thoughtSummaries: response.thoughtSummaries,
     latencyMs: Date.now() - started,
     mode,
@@ -379,7 +387,7 @@ async function main() {
     process.exit(args.help ? 0 : 1);
   }
 
-  if (!process.env.DATABASE_URL && !process.env.POSTGRES_URL) {
+  if (!process.env.DATABASE_URL && !process.env.POSTGRES_URL && !process.env.POSTGRES_PRISMA_URL) {
     console.error('DATABASE_URL is required.');
     process.exit(1);
   }
@@ -434,6 +442,7 @@ async function main() {
     results[arm.id] = {
       model: result.model,
       mode: result.mode,
+      stopReason: result.stopReason,
       latencyMs: result.latencyMs,
       usage: result.usage,
       opinionFile: opinionPath,

@@ -67,13 +67,21 @@ export function extractEnvNames(service) {
 function envEntryIsConfigured(entry) {
   if (!entry?.name) return false;
   if (entry.valueFrom) return true;
-  if (!Object.hasOwn(entry, 'value')) return true;
   return typeof entry.value === 'string' && entry.value.trim().length > 0;
 }
 
 export function validateRequiredEnv(service) {
   const envEntries = firstContainer(service).env || [];
-  const missing = REQUIRED_ENV_GROUPS
+  const providerEntry = envEntries.find(entry => entry?.name === 'MODEL_PROVIDER');
+  const usesOpenRouter = typeof providerEntry?.value === 'string'
+    && providerEntry.value.trim().toLowerCase() === 'openrouter';
+  const groups = usesOpenRouter
+    ? [
+        ...REQUIRED_ENV_GROUPS.filter(group => group.label !== 'Gemini API key' && group.label !== 'Anthropic API key'),
+        { label: 'OpenRouter API key', names: ['OPENROUTER_API_KEY'] },
+      ]
+    : REQUIRED_ENV_GROUPS;
+  const missing = groups
     .filter(group => !group.names.some(name => envEntryIsConfigured(envEntries.find(entry => entry?.name === name))))
     .map(group => group.label);
   return { valid: missing.length === 0, missing };

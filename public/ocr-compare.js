@@ -238,12 +238,12 @@ export function createCompareUI(deps = {}) {
   };
   const validMetadata = metadata => Array.isArray(metadata.models) && metadata.models.length === MODEL_COUNT && metadata.renderScale === LIMITS.renderScale && Number.isInteger(metadata.maxPages) && metadata.maxPages >= 1 && Number.isInteger(metadata.maxBytes) && metadata.maxBytes >= 1 && metadata.models.every(model => model.maxTokens === metadata.models[0].maxTokens && Array.isArray(model.effortLevels) && model.effortLevels.length && model.effortLevels.every(level => typeof level === 'string') && model.effortLevels.includes(model.effort));
   const invalidateMetadata = () => {
-    metadataState = { ...metadataState, status: metadataState.error ? 'error' : 'idle', generation: metadataState.generation + 1 };
+    metadataState = { ...metadataState, status: 'idle', error: '', generation: metadataState.generation + 1 };
     renderEfforts();
   };
   const loadMetadata = async headers => {
     const current = metadataState.generation + 1;
-    metadataState = { ...metadataState, status: 'loading', generation: current };
+    metadataState = { ...metadataState, status: 'loading', error: '', generation: current };
     renderEfforts();
     try {
       const response = await request('/api/ocr-compare', { method: 'GET', headers });

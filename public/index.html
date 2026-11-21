@@ -1480,16 +1480,35 @@ async function acquireRequestSlot() {
   await job;
 }
 
+const EXTENSION_TO_MEDIA_TYPE = {
+  pdf: 'application/pdf',
+  csv: 'text/csv',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+};
+
+function inferNormalizedMediaType(file) {
+  const raw = String(file?.type || '').trim().toLowerCase();
+  const normalized = raw === 'image/jpg' ? 'image/jpeg' : raw;
+  if (normalized && normalized !== 'application/octet-stream') return normalized;
+  const match = /\.([a-z0-9]+)$/i.exec(String(file?.name || ''));
+  const ext = match ? match[1].toLowerCase() : '';
+  return EXTENSION_TO_MEDIA_TYPE[ext] || normalized || '';
+}
+
 function isPdfFile(file) {
-  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  return inferNormalizedMediaType(file) === 'application/pdf';
 }
 
 function isImageFile(file) {
-  return file.type && file.type.startsWith('image/');
+  return inferNormalizedMediaType(file).startsWith('image/');
 }
 
 function isCsvFile(file) {
-  return file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv');
+  return inferNormalizedMediaType(file) === 'text/csv';
 }
 
 async function readFileAsBase64(file) {
@@ -1626,15 +1645,16 @@ async function prepareFileEntries(file, slotsAvailable) {
   }
   const pdfPageCount = isPdfFile(file) ? await readPdfPageCount(file) : null;
   const data = await readFileAsBase64(file);
+  const mediaType = inferNormalizedMediaType(file) || file.type;
   return [{
     name: file.name,
-    type: file.type || (isPdfFile(file) ? 'application/pdf' : file.type),
+    type: mediaType,
     size: file.size,
     data,
     csvText: null,
     sourceFile: file,
     originalSizeBytes: file.size,
-    originalMediaType: file.type || (isPdfFile(file) ? 'application/pdf' : file.type),
+    originalMediaType: mediaType,
     sourceDocumentKey: `${file.name}:${file.size}:${file.lastModified || ''}:${hashStringSample(data)}`,
     pageRange: pdfPageCount ? [1, pdfPageCount] : undefined,
   }];
@@ -2213,21 +2233,37 @@ function derivedProgressPercent(job) {
   if (!job) return 0;
   if (job.status === 'complete') return 100;
   if (job.status === 'failed' || job.status === 'canceled') return 0;
-  const totalChunks = job.totalChunks || job.abstractChunkTotal || 0;
-  const doneChunks = (job.completedChunks || job.abstractChunkCompleted || 0)
-                   + (job.failedChunks || job.abstractChunkFailed || 0);
-  if (totalChunks > 0) {
-    const abstractPct = Math.min(70, (doneChunks / totalChunks) * 70);
-    if (job.status === 'synthesizing' || job.status === 'partial_failed') {
-      return Math.min(99, Math.round(70 + (job.synthesisCompletedSegments || 0) /
-        Math.max(1, job.synthesisTotalSegments || 1) * 30));
-    }
-    return Math.round(abstractPct);
+  if (job.status === 'created' || job.status === 'uploading') {
+    const total = Number(job.totalChunks) || 0;
+    const done = Number(job.completedChunks) || 0;
+    return total > 0 ? Math.min(15, Math.round((done / total) * 15)) : 0;
   }
-  if (!job.totalDocuments) return 0;
-  const finished = (job.completedDocuments || 0) + (job.failedDocuments || 0);
-  if (job.status === 'synthesizing') return Math.max(85, Math.round((finished / job.totalDocuments) * 85));
-  return Math.round(Math.min(85, (finished / job.totalDocuments) * 85));
+  if (job.status === 'ready' || job.status === 'queued' || job.status === 'planning') return 15;
+  if (job.status === 'synthesizing' || job.status === 'partial_failed') {
+    const segTotal = Number(job.synthesisTotalSegments) || 0;
+    const segDone = Number(job.synthesisCompletedSegments) || 0;
+    if (segTotal > 0) {
+      const mergeBoost = job.synthesisPreviewComplete
+        ? 5
+        : (job.synthesisPreviewBytes > 0 ? 4 : (job.synthesisMergeWorkerId ? 2 : 0));
+      return Math.min(99, Math.round(70 + (segDone / segTotal) * 24 + mergeBoost));
+    }
+    if (job.synthesisPreviewComplete) return 98;
+    if (job.synthesisPreviewBytes > 0) return 92;
+    if (job.synthesisMergeWorkerId) return 85;
+    return 75;
+  }
+  const hasAbstractChunkStats = job.abstractChunkTotal != null
+    || job.abstractChunkCompleted != null
+    || job.abstractChunkFailed != null;
+  const abstractTotal = Number(job.abstractChunkTotal ?? job.totalChunks) || 0;
+  if (hasAbstractChunkStats && abstractTotal > 0) {
+    const abstractDone = (Number(job.abstractChunkCompleted) || 0) + (Number(job.abstractChunkFailed) || 0);
+    return Math.min(70, Math.round(15 + (abstractDone / abstractTotal) * 55));
+  }
+  if (!job.totalDocuments) return 15;
+  const finished = (Number(job.completedDocuments) || 0) + (Number(job.failedDocuments) || 0);
+  return Math.min(70, Math.round(15 + (finished / job.totalDocuments) * 55));
 }
 
 let lastJobProgressId = null;
@@ -4541,7 +4577,9 @@ function saveActiveJob(job, driver) {
   if (!storage || !job?.id) return;
   const previous = loadSavedJobRecord();
   const keep = driver || (previous?.id === job.id ? previous.driver : null);
-  storage.setItem(getJobStorageKey(), JSON.stringify({ id: job.id, savedAt: Date.now(), ...(keep ? { driver: keep } : {}) }));
+  try {
+    storage.setItem(getJobStorageKey(), JSON.stringify({ id: job.id, savedAt: Date.now(), ...(keep ? { driver: keep } : {}) }));
+  } catch {}
 }
 
 function isPlausibleJobId(id) {
@@ -5042,7 +5080,8 @@ function renderSynthesisPreview(text, visible) {
   }
   section.style.display = 'block';
   body.textContent = text;
-  body.scrollTop = body.scrollHeight;
+  const scrollEl = body.closest?.('.synthesis-preview-card') || section.querySelector?.('.synthesis-preview-card') || body;
+  scrollEl.scrollTop = scrollEl.scrollHeight;
 }
 
 function clearSynthesisPreview() {
@@ -5574,9 +5613,10 @@ let lastRenderedStageId = 0;
 let lastQueueViewKey = '';
 
 function stagedFileTag(f) {
-  const name = String(f?.name || '').toLowerCase();
+  const rawName = String(f?.name || '').toLowerCase();
+  const cleanName = rawName.replace(/\s*\(pp?\s*[^)]*\)\s*$/i, '').trim();
   const type = String(f?.type || '').toLowerCase();
-  const ext = (name.match(/\.([a-z0-9]+)(?:\s|$)/) || [])[1] || '';
+  const ext = (cleanName.match(/\.([a-z0-9]+)$/) || [])[1] || '';
   if (type.includes('pdf') || ext === 'pdf') return { kind: 'pdf', label: 'PDF' };
   if (type.includes('csv') || ext === 'csv') return { kind: 'csv', label: 'CSV' };
   if (type.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) {
@@ -6194,12 +6234,21 @@ function buildAdaptiveBatches(fileList) {
 
 async function runWithConcurrency(taskFns, limit) {
   const executing = new Set();
+  let firstError = null;
+  let hasError = false;
   for (const fn of taskFns) {
-    const p = Promise.resolve().then(fn).finally(() => executing.delete(p));
+    if (hasError) break;
+    const p = Promise.resolve().then(fn).catch(err => {
+      if (!hasError) {
+        hasError = true;
+        firstError = err;
+      }
+    }).finally(() => executing.delete(p));
     executing.add(p);
     if (executing.size >= limit) await Promise.race(executing);
   }
   await Promise.all(executing);
+  if (hasError) throw firstError;
 }
 
 async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgress, checkpointLabel = 'initial', jobId = null, run = null) {
@@ -6735,25 +6784,50 @@ async function rereadFlaggedPdfsAsHighDpi() {
       updateProgress(92, status, null);
     });
     if (isAnalysisCanceled(run)) return;
+    const opinionIdx = conversationHistory
+      .map((m, i) => (m.role === 'assistant' && (m.kind === 'title-opinion' || i === 1) ? i : -1))
+      .filter(i => i >= 0)
+      .pop();
+    const priorExport = opinionIdx >= 0 ? conversationHistory[opinionIdx]?.exportContext : null;
+    let currentJobData = null;
+    if (jobId) {
+      try {
+        const currentJob = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
+        if (currentJob.kind === 'ok') currentJobData = currentJob.data.job;
+      } catch {}
+    }
+    const priorFailedDocs = Array.isArray(priorExport?.result?.failedDocuments) ? priorExport.result.failedDocuments : [];
+    const priorWarnings = Array.isArray(priorExport?.result?.warnings)
+      ? priorExport.result.warnings.filter(w => !String(w).startsWith('synthesis_driver:'))
+      : [];
+    const missingDocsCount = Math.max(
+      priorFailedDocs.length,
+      Number(priorExport?.job?.failedDocuments) || 0,
+      Number(priorExport?.failedDocuments) || 0,
+      Number(currentJobData?.failedDocuments) || 0,
+    );
+    const isPartial = missingDocsCount > 0;
     const totalDocs = sourceList.length || documentAbstracts.length;
+    const completedDocs = completedDocumentsForJob(documentAbstracts.length, totalDocs);
     const exportResult = {
-      status: 'complete',
+      status: isPartial ? 'partial_failed' : 'complete',
       finalTitleOpinion: synthesis,
-      warnings: [],
-      failedDocuments: [],
+      warnings: isPartial
+        ? (priorWarnings.length ? priorWarnings : [`${missingDocsCount} document abstract(s) excluded due to abstraction failure.`])
+        : [],
+      failedDocuments: isPartial ? priorFailedDocs : [],
       modelUsed: SYNTHESIS_MODEL,
       synthesisDriver: 'browser',
     };
     let savedResultOk = false;
     if (jobId) {
       try {
-        const currentJob = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
-        const currentStatus = currentJob.kind === 'ok' ? currentJob.data.job.status : null;
+        const currentStatus = currentJobData?.status || null;
         if (currentStatus === 'failed' || currentStatus === 'partial_failed') {
           await safePatchAnalysisJob(jobId, {
             status: 'synthesizing',
-            completedDocuments: completedDocumentsForJob(documentAbstracts.length, totalDocs),
-            failedDocuments: 0,
+            completedDocuments: completedDocs,
+            failedDocuments: missingDocsCount,
             currentPhase: 'Re-synthesizing after high-DPI page read',
           });
         }
@@ -6763,10 +6837,6 @@ async function rereadFlaggedPdfsAsHighDpi() {
         console.warn('Could not save high-DPI re-read job result', saveErr);
       }
     }
-    const opinionIdx = conversationHistory
-      .map((m, i) => (m.role === 'assistant' && (m.kind === 'title-opinion' || i === 1) ? i : -1))
-      .filter(i => i >= 0)
-      .pop();
     const synthesisInput = buildAbstractInput(
       documentAbstracts,
       tract,
@@ -6781,7 +6851,7 @@ async function rereadFlaggedPdfsAsHighDpi() {
       content: synthesis,
       kind: 'title-opinion',
       sourceJobId: savedResultOk ? jobId : null,
-      exportContext: homeRunExportContext(jobId, totalDocs, completedDocumentsForJob(documentAbstracts.length, totalDocs), 0, exportResult),
+      exportContext: homeRunExportContext(jobId, totalDocs, completedDocs, missingDocsCount, exportResult),
     };
     if (opinionIdx >= 0) conversationHistory[opinionIdx] = nextOpinionMsg;
     else conversationHistory.push(nextOpinionMsg);
@@ -7361,7 +7431,7 @@ function buildFollowupMessages(question, titleOpinionOverride = null, priorPairs
         .slice(2, -1)
         .filter(m => m.kind === 'followup' && typeof m.content === 'string');
   for (let turns = FOLLOWUP_HISTORY_TURNS; turns >= 0; turns--) {
-    const recent = followupOnly.slice(-turns * 2);
+    const recent = turns === 0 ? [] : followupOnly.slice(-turns * 2);
     const recentText = recent.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
     const content = `Use the completed title opinion below to answer the landman's follow-up question. Do not rely on the original raw document abstracts unless they are quoted in the title opinion. If the answer requires checking source documents, say so clearly.\n\n## Completed Title Opinion\n\n${titleOpinion}\n\n${recentText ? `## Recent Follow-up Context\n\n${recentText}\n\n` : ''}## Follow-up Question\n\n${question}`;
     const messages = [{ role: 'user', content }];
@@ -7553,7 +7623,7 @@ function renderResults() {
 }
 
 function md(text) {
-  let h = esc(text);
+  let h = esc(String(text ?? '').replace(/\r\n?/g, '\n'));
   // A table is a run of whole lines that start and end with a pipe. The last row may end the text without a
   // newline, and the table is set apart by blank lines so the prose after it stays its own paragraph.
   h = h.replace(/(^|\n)((?:[ \t]*\|[^\n]*\|[ \t]*(?:\n|$))+)/g, (match, lead, block, offset) => {

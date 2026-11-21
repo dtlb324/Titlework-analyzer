@@ -87,6 +87,20 @@ export function safePublicPath(pathname, publicDir = PUBLIC_DIR) {
   return resolved;
 }
 
+function streamFile(req, res, filePath) {
+  if (req.method === 'HEAD') return res.end();
+  const stream = createReadStream(filePath);
+  const cleanup = () => {
+    if (!stream.destroyed) stream.destroy();
+  };
+  res.on('close', cleanup);
+  stream.on('error', () => {
+    cleanup();
+    if (!res.destroyed) res.destroy();
+  });
+  stream.pipe(res);
+}
+
 async function serveStatic(req, res, url) {
   const filePath = safePublicPath(url.pathname);
   if (!filePath) return sendJson(res, 403, { error: 'Forbidden.' });
@@ -105,7 +119,7 @@ async function serveStatic(req, res, url) {
     'content-length': fileStat.size,
     ...staticSecurityHeaders(),
   });
-  createReadStream(filePath).pipe(res);
+  return streamFile(req, res, filePath);
 }
 
 export function createServer({ ocrCompareModelClient } = {}) {
@@ -133,8 +147,7 @@ export function createServer({ ocrCompareModelClient } = {}) {
         const fileStat = await stat(filePath);
         const contentType = /\.(mjs|js)$/.test(filePath) ? 'text/javascript; charset=utf-8' : filePath.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream';
         res.writeHead(200, { 'content-type': contentType, 'content-length': fileStat.size, 'cache-control': 'no-cache', ...staticSecurityHeaders() });
-        if (req.method === 'HEAD') return res.end();
-        return createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
+        return streamFile(req, res, filePath);
       }
       return await serveStatic(req, res, url);
     } catch (err) {

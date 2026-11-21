@@ -49,6 +49,20 @@ function sanitizeProviderErrorMessage(err) {
     .slice(0, 1000);
 }
 
+function extractProviderErrorMessage(errorField, fallback) {
+  if (typeof errorField === 'string' && errorField.trim()) return errorField;
+  if (errorField && typeof errorField === 'object') {
+    if (typeof errorField.message === 'string' && errorField.message.trim()) return errorField.message;
+    if (typeof errorField.type === 'string' && errorField.type.trim()) return errorField.type;
+    if (errorField.code != null) return `${fallback} (${errorField.code})`;
+    try {
+      const serialized = JSON.stringify(errorField);
+      if (serialized && serialized !== '{}') return `${fallback}: ${serialized}`;
+    } catch {}
+  }
+  return fallback;
+}
+
 function createDefaultTimeoutSignal(ms) {
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
     return { signal: AbortSignal.timeout(ms), cleanup() {} };
@@ -96,7 +110,7 @@ export async function invokeAnthropicModelStream(request, options = {}) {
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      const error = new Error(data?.error?.message || data?.error || `Anthropic request failed (HTTP ${response.status}).`);
+      const error = new Error(extractProviderErrorMessage(data?.error, `Anthropic request failed (HTTP ${response.status}).`));
       error.status = response.status;
       throw error;
     }
@@ -152,7 +166,7 @@ export async function invokeAnthropicModel(request, options = {}) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const error = new Error(data?.error?.message || data?.error || `Anthropic request failed (HTTP ${response.status}).`);
+      const error = new Error(extractProviderErrorMessage(data?.error, `Anthropic request failed (HTTP ${response.status}).`));
       error.status = response.status;
       throw error;
     }
@@ -203,7 +217,7 @@ async function invokeOpenRouterModelStream(request, options = {}) {
       // SSE stream that must be handed to consumeOpenRouterMessageStream untouched —
       // calling response.json() here would consume the stream and yield empty text.
       const data = await response.json().catch(() => ({}));
-      const error = new Error(data?.error?.message || data?.error || `OpenRouter request failed (HTTP ${response.status}).`);
+      const error = new Error(extractProviderErrorMessage(data?.error, `OpenRouter request failed (HTTP ${response.status}).`));
       error.status = response.status;
       throw error;
     }
