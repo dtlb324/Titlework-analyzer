@@ -356,6 +356,9 @@ async function handleAbstractionProcess(req, res, requestId, store, jobId) {
   if (job.status === 'canceled') {
     return res.status(409).json({ error: 'Job has been canceled.', requestId });
   }
+  if (job.status === 'created' || job.status === 'uploading') {
+    return res.status(409).json({ error: 'Uploads must be finalized before processing abstraction.', requestId });
+  }
   const result = await processAbstractionBatch(jobId, { store });
   return res.status(200).json({
     status: publicStatus(result),
@@ -502,7 +505,7 @@ async function handleSynthesisStart(req, res, requestId, store, jobId) {
   }
   let snapshot;
   try {
-    snapshot = await enqueueSynthesisJob(jobId, { store });
+    snapshot = await enqueueSynthesisJob(jobId, { store, rebuild: validation.value.rebuild });
   } catch (err) {
     if (err?.statusCode === 409 || /No abstracts available/i.test(err?.message || '')) {
       return res.status(409).json({ error: err.message || 'Synthesis cannot start before abstracts are available.', requestId });
@@ -601,6 +604,9 @@ async function handleJobResult(req, res, requestId, store, jobId) {
   if (req.method === 'POST') {
     if (job.status === 'canceled') {
       return res.status(409).json({ error: 'Cannot save a result for a canceled job.', requestId });
+    }
+    if (job.status === 'complete') {
+      return res.status(409).json({ error: 'Cannot overwrite a result for a complete job.', requestId });
     }
     if (!store.saveJobResult) {
       return res.status(503).json({ error: 'Job result storage is not available.', requestId });

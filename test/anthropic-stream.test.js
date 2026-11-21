@@ -248,7 +248,8 @@ test('consumeAnthropicMessageStream releases a normally exhausted reader without
   assertStrict.equal(result.text, 'Synthetic text');
   assertStrict.equal(result.stopReason, 'end_turn');
   assertStrict.deepEqual(result.usage, { output_tokens: 3 });
-  assertStrict.deepEqual(stats, { cancellations: 0, releases: 1 });
+  // Superseded pin: breaking at message_stop and cancelling any remaining body protects finished opinions from late transport errors or hangs.
+  assertStrict.deepEqual(stats, { cancellations: 1, releases: 1 });
   assertStrict.equal(body.locked, false);
 });
 
@@ -359,7 +360,7 @@ test('consumeAnthropicMessageStream preserves results and errors when reader met
     const promise = consumeAnthropicMessageStream({ getReader: () => reader }, success ? {} : { onEvent() { throw failure; } });
     if (success) assertStrict.equal((await promise).text, 'Synthetic text');
     else await assertStrict.rejects(promise, error => error === failure);
-    assertStrict.equal(cancellations, success ? 0 : 1);
+    assertStrict.equal(cancellations, 1);
     assertStrict.equal(releases, 1);
   }
 });

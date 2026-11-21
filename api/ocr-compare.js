@@ -286,13 +286,23 @@ function sanitizeOpenRouterError(error) {
 
 export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
   let active = false;
-  return async function handler(req, res) {
+  function beforeAuth(_req, res) {
+    if (process.env.OCR_COMPARE_ENABLED !== 'true') {
+      res.status(404).json({ error: 'OCR comparison is disabled.' });
+      return false;
+    }
+    if (!process.env.APP_PASSWORD && isProductionRuntime()) {
+      res.status(503).json({ error: 'APP_PASSWORD must be configured for OCR comparison.' });
+      return false;
+    }
+    return true;
+  }
+  async function handler(req, res) {
     setJobSecurityHeaders(res);
-    if (process.env.OCR_COMPARE_ENABLED !== 'true') return res.status(404).json({ error: 'OCR comparison is disabled.' });
+    if (!beforeAuth(req, res)) return;
     // No password is needed only for local use: APP_PASSWORD unset and not a production runtime.
     // Production with APP_PASSWORD unset is refused here, so past this line unset means local.
     const passwordRequired = Boolean(process.env.APP_PASSWORD);
-    if (!process.env.APP_PASSWORD && isProductionRuntime()) return res.status(503).json({ error: 'APP_PASSWORD must be configured for OCR comparison.' });
     if (!(await requireJobPassword(req, res))) return;
     if (!['GET', 'POST'].includes(req.method)) return res.status(405).json({ error: 'Method not allowed.' });
     let pair;
@@ -332,5 +342,7 @@ export function createOcrCompareHandler({ modelClient = invokeLabModel } = {}) {
       }));
       return res.status(200).json({ filename: upload.filename, pageCount: upload.pages.length, inputMode: 'rendered_images', models: results });
     } finally { active = false; }
-  };
+  }
+  handler.beforeAuth = beforeAuth;
+  return handler;
 }
