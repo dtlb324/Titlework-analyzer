@@ -882,12 +882,12 @@ export function createSqlClient(databaseUrl) {
   return neon(databaseUrl);
 }
 
-function createPostgresJobStore() {
+export function createPostgresJobStore({ sql: sqlClient } = {}) {
   const databaseUrl = getDatabaseUrl();
-  if (!databaseUrl) {
+  if (!sqlClient && !databaseUrl) {
     return null;
   }
-  const sql = createSqlClient(databaseUrl);
+  const sql = sqlClient || createSqlClient(databaseUrl);
   let initialized = null;
 
   async function ensureSchema() {
