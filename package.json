@@ -12,7 +12,7 @@
     "start:worker": "node worker.js",
     "dev": "node --env-file=.env.local server.js",
     "dev:worker": "node --env-file=.env.local worker.js",
-    "test": "node test/cloud-run.test.js && node test/neon.test.js && node test/worker.test.js && node test/internal-drain-auth.test.js && node test/release.test.js && node test/gemini-files.test.js && node test/gemini-request.test.js && node test/anthropic-stream.test.js && node test/model-client.test.js && node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/anthropic-cost.test.js && node test/pdf-text.test.js && node test/abstraction-batch.test.js && node test/abstraction-lease.test.js && node test/abstraction.test.js && node test/abstraction-fetch-ceiling.test.js && node test/synthesis.test.js && node test/compare-final-opinion.test.js && node test/security-hardening.test.js && node test/security-regressions.test.js && node test/ocr-compare.test.js && node test/ocr-compare-openrouter.test.js && node test/ocr-accuracy.test.js && node test/ocr-compare-ui.test.js && node test/openrouter-request.test.js && node test/openrouter-stream.test.js && node test/server-bughunt.test.js && node test/split-cleanup.test.js && node test/workflow-bughunt.test.js && node test/browser-bughunt.test.js && node test/results-dashboard.test.js && node test/results-dashboard-repairs.test.js && node test/frontpage-ui-repairs.test.js && node test/results-page-audit-repairs.test.js && node test/audit-probes.test.js",
+    "test": "node test/cloud-run.test.js && node test/neon.test.js && node test/worker.test.js && node test/internal-drain-auth.test.js && node test/release.test.js && node test/gemini-files.test.js && node test/gemini-request.test.js && node test/anthropic-stream.test.js && node test/model-client.test.js && node test/app.test.js && node test/batching.test.js && node test/reliability.test.js && node test/jobs.test.js && node test/storage.test.js && node test/anthropic-cost.test.js && node test/pdf-text.test.js && node test/abstraction-batch.test.js && node test/abstraction-lease.test.js && node test/abstraction.test.js && node test/abstraction-fetch-ceiling.test.js && node test/synthesis.test.js && node test/compare-final-opinion.test.js && node test/security-hardening.test.js && node test/security-regressions.test.js && node test/ocr-compare.test.js && node test/ocr-compare-openrouter.test.js && node test/ocr-accuracy.test.js && node test/ocr-compare-ui.test.js && node test/openrouter-request.test.js && node test/openrouter-stream.test.js && node test/server-bughunt.test.js && node test/split-cleanup.test.js && node test/workflow-bughunt.test.js && node test/browser-bughunt.test.js && node test/results-dashboard.test.js && node test/results-dashboard-repairs.test.js && node test/frontpage-ui-repairs.test.js && node test/results-page-audit-repairs.test.js && node test/audit-probes.test.js && node test/critical-fixes.test.js",
     "audit:ui": "node scripts/audit/run.mjs"
   },
   "dependencies": {
@@ -24,6 +24,7 @@
     "unpdf": "^2.0.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.17",
     "playwright-core": "1.65.1"
   }
 }

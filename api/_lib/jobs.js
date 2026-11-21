@@ -882,12 +882,12 @@ export function createSqlClient(databaseUrl) {
   return neon(databaseUrl);
 }
 
-function createPostgresJobStore() {
+export function createPostgresJobStore({ sql: sqlClient } = {}) {
   const databaseUrl = getDatabaseUrl();
-  if (!databaseUrl) {
+  if (!sqlClient && !databaseUrl) {
     return null;
   }
-  const sql = createSqlClient(databaseUrl);
+  const sql = sqlClient || createSqlClient(databaseUrl);
   let initialized = null;
 
   async function ensureSchema() {
@@ -1186,7 +1186,10 @@ function createPostgresJobStore() {
         await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS truncation_warning text`;
         await sql`ALTER TABLE followup_messages ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`;
         await sql`CREATE INDEX IF NOT EXISTS idx_followup_messages_job ON followup_messages(job_id, created_at)`;
-      })();
+      })().catch(err => {
+        initialized = null;
+        throw err;
+      });
     }
     await initialized;
   }
@@ -1793,6 +1796,19 @@ function createPostgresJobStore() {
         WHERE job_id = ${jobId}
           AND abstraction_status IN ('pending', 'retry_wait', 'processing')
       `;
+      await sql`
+        UPDATE synthesis_segments
+        SET status = 'failed',
+            error_type = 'canceled',
+            error_message = ${cancelReason},
+            retry_at = NULL,
+            claimed_at = NULL,
+            lease_expires_at = NULL,
+            worker_id = NULL,
+            updated_at = now()
+        WHERE job_id = ${jobId}
+          AND status IN ('pending', 'retry_wait', 'processing')
+      `;
       await this.clearSynthesisPreview(jobId);
       await refreshAbstractionCounts(jobId);
       return rowToJob(rows[0]);
@@ -2144,33 +2160,26 @@ function createPostgresJobStore() {
       const planId = String(planInput?.planId || '').slice(0, 128);
       if (!planId) throw new JobApiError('planId is required to save a synthesis plan.', 400);
       const segments = Array.isArray(planInput?.segments) ? planInput.segments : [];
-      await sql`
+      const segmentIndices = segments.map(segment => segment.segmentIndex);
+
+      const deleteStaleSegments = q => q`
         DELETE FROM synthesis_segments
-        WHERE job_id = ${jobId} AND plan_id <> ${planId}
+        WHERE job_id = ${jobId}
+          AND (
+            plan_id <> ${planId}
+            OR (plan_id = ${planId} AND NOT (segment_index = ANY(${segmentIndices}::integer[])))
+          )
       `;
-      await sql`
-        UPDATE analysis_jobs
-        SET synthesis_plan_id = ${planId},
-            synthesis_merge_worker_id = NULL,
-            synthesis_merge_lease_expires_at = NULL,
-            synthesis_preview_text = NULL,
-            synthesis_preview_complete = false,
-            synthesis_preview_bytes = 0,
-            synthesis_preview_updated_at = NULL,
-            updated_at = now()
-        WHERE id = ${jobId}
-      `;
-      await sql`
+      const deleteStaleResults = q => q`
         DELETE FROM job_results
         WHERE job_id = ${jobId}
           AND (plan_id IS NULL OR plan_id <> ${planId})
       `;
-      const saved = [];
-      for (const segment of segments) {
+      const upsertSegment = (q, segment) => {
         const id = `seg_${randomUUID()}`;
         const documentIds = Array.isArray(segment.documentIds) ? segment.documentIds : [];
         const filenames = Array.isArray(segment.filenames) ? segment.filenames : [];
-        const rows = await sql`
+        return q`
           INSERT INTO synthesis_segments (
             id, job_id, plan_id, segment_index,
             start_sequence_index, end_sequence_index,
@@ -2193,7 +2202,40 @@ function createPostgresJobStore() {
             updated_at = now()
           RETURNING *
         `;
-        saved.push(rowToSynthesisSegment(rows[0]));
+      };
+      const updateJobPlan = q => q`
+        UPDATE analysis_jobs
+        SET synthesis_plan_id = ${planId},
+            synthesis_merge_worker_id = NULL,
+            synthesis_merge_lease_expires_at = NULL,
+            synthesis_preview_text = NULL,
+            synthesis_preview_complete = false,
+            synthesis_preview_bytes = 0,
+            synthesis_preview_updated_at = NULL,
+            synthesis_preview_model_used = NULL,
+            updated_at = now()
+        WHERE id = ${jobId}
+          AND synthesis_plan_id IS DISTINCT FROM ${planId}
+      `;
+
+      let saved;
+      if (typeof sql.transaction === 'function') {
+        const results = await sql.transaction(txn => [
+          deleteStaleSegments(txn),
+          deleteStaleResults(txn),
+          ...segments.map(segment => upsertSegment(txn, segment)),
+          updateJobPlan(txn),
+        ]);
+        saved = results.slice(2, 2 + segments.length).map(rows => rowToSynthesisSegment(rows[0]));
+      } else {
+        await deleteStaleSegments(sql);
+        await deleteStaleResults(sql);
+        saved = [];
+        for (const segment of segments) {
+          const rows = await upsertSegment(sql, segment);
+          saved.push(rowToSynthesisSegment(rows[0]));
+        }
+        await updateJobPlan(sql);
       }
       return { planId, segments: saved };
     },
@@ -2313,7 +2355,7 @@ function createPostgresJobStore() {
                 FROM synthesis_segments pending
                 WHERE pending.job_id = j.id
                   AND pending.plan_id = j.synthesis_plan_id
-                  AND pending.status <> 'complete'
+                  AND pending.status IN ('pending', 'processing', 'retry_wait')
               )
               AND (
                 j.synthesis_merge_worker_id IS NULL
@@ -2346,6 +2388,11 @@ function createPostgresJobStore() {
           updated_at = now()
         WHERE job_id = ${jobId}::text
           AND id = ${segmentId}::text
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = synthesis_segments.job_id
+              AND j.status <> 'canceled'
+          )
           AND (
             status = 'pending'
             OR (status = 'retry_wait' AND (retry_at IS NULL OR retry_at <= now()))
@@ -2368,6 +2415,11 @@ function createPostgresJobStore() {
           AND id = ${segmentId}::text
           AND status = 'processing'
           AND worker_id = ${options.workerId ?? null}::text
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = synthesis_segments.job_id
+              AND j.status <> 'canceled'
+          )
         RETURNING *
       `;
       return rowToSynthesisSegment(rows[0]);
