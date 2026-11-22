@@ -22,7 +22,7 @@ const TERMINAL_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canc
 const VALID_TRANSITIONS = {
   created: new Set(['created', 'uploading', 'abstracting', 'failed', 'canceled']),
   uploading: new Set(['uploading', 'ready', 'abstracting', 'failed', 'canceled']),
-  ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'synthesizing', 'complete', 'failed', 'canceled']),
+  ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'synthesizing', 'complete', 'partial_failed', 'failed', 'canceled']),
   queued: new Set(['queued', 'planning', 'abstracting', 'failed', 'canceled']),
   planning: new Set(['planning', 'abstracting', 'failed', 'canceled']),
   abstracting: new Set(['abstracting', 'synthesizing', 'partial_failed', 'failed', 'canceled']),

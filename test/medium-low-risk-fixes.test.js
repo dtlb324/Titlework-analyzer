@@ -18,6 +18,7 @@ import { defaultSleep, runWorkerDrain } from '../api/_lib/cloud-run-worker.js';
 import { deleteGeminiFile, uploadGeminiFile } from '../api/_lib/gemini-files.js';
 import { invokeGeminiGenerateContent } from '../api/_lib/gemini-request.js';
 import {
+  createPostgresJobStore,
   isValidStatusTransition,
   parseJsonBody,
   resetJobRateLimits,
@@ -45,6 +46,7 @@ import { buildReport as buildOcrComparisonReport, scoreField as scoreOcrField } 
 import { generateFinalOpinion, resolveMode as resolveCompareMode } from '../scripts/compare-final-opinion.mjs';
 import { validateRequiredEnv } from '../scripts/verify-release.mjs';
 import { disposeAll, jsonResponse, loadIndex, StubElement, tick } from './helpers/browser-index-harness.js';
+import { createPgliteSql } from './helpers/pglite-sql.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
@@ -625,6 +627,7 @@ test('M7: batch escalation truncation fails cleanly without saving Tier 1 abstra
 test('M8: ready transitions, continuation doc counts, newest followups, turns=0, synthesis status meta, finalize 404, block system prompt', async () => {
   assert.equal(isValidStatusTransition('ready', 'synthesizing'), true);
   assert.equal(isValidStatusTransition('ready', 'complete'), true);
+  assert.equal(isValidStatusTransition('ready', 'partial_failed'), true);
 
   // importContinuationAbstracts calls refreshDocumentCounts and NOT refreshAbstractionCounts
   const importStart = jobsSource.indexOf('async importContinuationAbstracts(');
@@ -694,6 +697,23 @@ test('M8: ready transitions, continuation doc counts, newest followups, turns=0,
   const sysBlocks = buildSystemParam([{ type: 'text', text: 'x'.repeat(300) }]);
   assert(Array.isArray(sysBlocks));
   assert.equal(sysBlocks[0].text, 'x'.repeat(300));
+
+test('M8: a browser result saved on a ready job moves the job to the result status on real SQL', async () => {
+  const pg = createPgliteSql();
+  const store = createPostgresJobStore({ sql: pg.sql });
+  const finalStatuses = {};
+  for (const status of ['complete', 'partial_failed', 'failed']) {
+    const job = await store.createJob({ subjectTract: 'Section 12, Block C-8', contextNotes: '', totalDocuments: 1 });
+    await pg.db.query(`UPDATE analysis_jobs SET status = 'ready' WHERE id = $1`, [job.id]);
+    const saved = await store.saveJobResult(job.id, { status, finalTitleOpinion: 'Opinion text' });
+    finalStatuses[status] = [saved?.status, (await store.getJob(job.id)).status];
+  }
+  assert.deepEqual(finalStatuses, {
+    complete: ['complete', 'complete'],
+    partial_failed: ['partial_failed', 'partial_failed'],
+    failed: ['failed', 'failed'],
+  });
+});
   assert.deepEqual(sysBlocks[0].cache_control, { type: 'ephemeral' });
 });
 
