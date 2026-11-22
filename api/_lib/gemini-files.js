@@ -1,6 +1,65 @@
 
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 const DEFAULT_UPLOAD_BASE_URL = 'https://generativelanguage.googleapis.com/upload';
+const DEFAULT_UPLOAD_TIMEOUT_MS = 120_000;
+const DEFAULT_POLL_TIMEOUT_MS = 30_000;
+const DEFAULT_DELETE_TIMEOUT_MS = 10_000;
+
+function extractGeminiErrorMessage(errorField, fallback) {
+  if (typeof errorField === 'string' && errorField.trim()) return errorField;
+  if (errorField && typeof errorField === 'object') {
+    if (typeof errorField.message === 'string' && errorField.message.trim()) return errorField.message;
+    if (typeof errorField.status === 'string' && errorField.status.trim()) return errorField.status;
+    if (errorField.code != null) return `${fallback} (${errorField.code})`;
+    try {
+      const serialized = JSON.stringify(errorField);
+      if (serialized && serialized !== '{}') return `${fallback}: ${serialized}`;
+    } catch {}
+  }
+  return fallback;
+}
+
+function createTimeoutSignal(ms, externalSignal) {
+  const timeoutMs = Number(ms);
+  const effectiveMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_UPLOAD_TIMEOUT_MS;
+  let timer = null;
+  let timeoutSignal;
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    timeoutSignal = AbortSignal.timeout(effectiveMs);
+  } else {
+    const controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), effectiveMs);
+    timeoutSignal = controller.signal;
+  }
+  let signal = timeoutSignal;
+  let cleanupExternal = null;
+  if (externalSignal) {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+      signal = AbortSignal.any([externalSignal, timeoutSignal]);
+    } else {
+      const combined = new AbortController();
+      const abortCombined = () => combined.abort();
+      if (externalSignal.aborted || timeoutSignal.aborted) {
+        combined.abort();
+      } else {
+        externalSignal.addEventListener('abort', abortCombined, { once: true });
+        timeoutSignal.addEventListener('abort', abortCombined, { once: true });
+      }
+      signal = combined.signal;
+      cleanupExternal = () => {
+        externalSignal.removeEventListener('abort', abortCombined);
+        timeoutSignal.removeEventListener('abort', abortCombined);
+      };
+    }
+  }
+  return {
+    signal,
+    cleanup() {
+      if (timer) clearTimeout(timer);
+      if (cleanupExternal) cleanupExternal();
+    },
+  };
+}
 
 function geminiApiKey() {
   return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
@@ -77,18 +136,25 @@ export async function uploadGeminiFile(bytes, mimeType, displayName, options = {
   const body = Buffer.concat([preamble, buffer, closing]);
 
   const uploadUrl = `${uploadBaseUrl()}/v1beta/files?uploadType=multipart`;
-  const response = await fetch(uploadUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': `multipart/related; boundary=${boundary}`,
-      'x-goog-api-key': key,
-    },
-    body,
-    signal: options.signal,
-  });
-  const data = await response.json().catch(() => ({}));
+  const timeout = createTimeoutSignal(options.timeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS, options.signal);
+  let response;
+  let data;
+  try {
+    response = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+        'x-goog-api-key': key,
+      },
+      body,
+      signal: timeout.signal,
+    });
+    data = await response.json().catch(() => ({}));
+  } finally {
+    timeout.cleanup();
+  }
   if (!response.ok) {
-    const message = data?.error?.message || data?.error || `Gemini file upload failed (HTTP ${response.status}).`;
+    const message = extractGeminiErrorMessage(data?.error, `Gemini file upload failed (HTTP ${response.status}).`);
     const error = new Error(message);
     error.status = response.status;
     throw error;
@@ -120,19 +186,26 @@ async function waitForGeminiFileActive(fileName, options = {}) {
   const url = `${apiBaseUrl()}/${resource}`;
 
   while (Date.now() - started < config.pollMaxMs) {
-    const response = await fetch(url, {
-      headers: { 'x-goog-api-key': key },
-      signal: options.signal,
-    });
-    const data = await response.json().catch(() => ({}));
+    const timeout = createTimeoutSignal(options.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS, options.signal);
+    let response;
+    let data;
+    try {
+      response = await fetch(url, {
+        headers: { 'x-goog-api-key': key },
+        signal: timeout.signal,
+      });
+      data = await response.json().catch(() => ({}));
+    } finally {
+      timeout.cleanup();
+    }
     if (!response.ok) {
-      const message = data?.error?.message || `Gemini file status check failed (HTTP ${response.status}).`;
+      const message = extractGeminiErrorMessage(data?.error, `Gemini file status check failed (HTTP ${response.status}).`);
       throw new Error(message);
     }
     const state = data.state || data.file?.state;
     if (state === 'ACTIVE') return;
     if (state === 'FAILED') {
-      throw new Error(data.error?.message || 'Gemini file processing failed.');
+      throw new Error(extractGeminiErrorMessage(data.error, 'Gemini file processing failed.'));
     }
     await sleep(config.pollIntervalMs);
   }
@@ -142,14 +215,17 @@ async function waitForGeminiFileActive(fileName, options = {}) {
 /**
  * Best-effort delete of an uploaded Gemini file (48h TTL makes this optional).
  */
-export async function deleteGeminiFile(fileName) {
+export async function deleteGeminiFile(fileName, options = {}) {
   const key = geminiApiKey();
   if (!key || typeof fileName !== 'string' || !/^files\/[A-Za-z0-9_-]+$/.test(fileName)) return;
   const resource = fileName;
   const url = `${apiBaseUrl()}/${resource}`;
+  const timeout = createTimeoutSignal(options.timeoutMs ?? DEFAULT_DELETE_TIMEOUT_MS, options.signal);
   try {
-    await fetch(url, { method: 'DELETE', headers: { 'x-goog-api-key': key } });
+    await fetch(url, { method: 'DELETE', headers: { 'x-goog-api-key': key }, signal: timeout.signal });
   } catch {
+  } finally {
+    timeout.cleanup();
   }
 }
 

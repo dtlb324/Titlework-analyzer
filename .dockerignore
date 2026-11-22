@@ -12,6 +12,9 @@ __pycache__/
 docs/
 test/
 scripts/audit/
+scripts/ocr-comparison-results/
+scripts/sample-docs/
+eval/compare/
 *.log
 *.md
 repo_agent_cloud.py

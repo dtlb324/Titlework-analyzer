@@ -512,7 +512,7 @@ function createTimeoutSignal(ms) {
   return { signal: controller.signal, cleanup: () => clearTimeout(timeout) };
 }
 
-function classifyError(err) {
+export function classifyAbstractionError(err) {
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
   if (err?.code === 'output_truncated') return 'output_truncated';
@@ -523,7 +523,9 @@ function classifyError(err) {
   return 'provider_error';
 }
 
-function sanitizeErrorMessage(err) {
+const classifyError = classifyAbstractionError;
+
+export function sanitizeErrorMessage(err) {
   return sanitizeModelClientError(err);
 }
 
@@ -626,7 +628,7 @@ export async function resolveChunkDelivery(chunk, payloadBytes) {
   return { mode: 'visual' };
 }
 
-export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model) {
+export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes, model, options = {}) {
   if (getRenderedImagePages(chunk, delivery)) {
     return delivery;
   }
@@ -649,7 +651,10 @@ export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes
   }
   const mimeType = isPdfChunk(chunk) ? 'application/pdf' : (chunk.mediaType || 'image/jpeg');
   try {
-    const uploaded = await uploadGeminiFile(bytes, mimeType, chunkDisplayName(chunk));
+    const uploaded = await uploadGeminiFile(bytes, mimeType, chunkDisplayName(chunk), {
+      signal: options.signal,
+      timeoutMs: options.upstreamTimeoutMs,
+    });
     if (delivery.mode === 'hybrid') {
       return {
         ...delivery,
@@ -766,9 +771,10 @@ export async function buildEscalationRequestForChunk({
   sequenceIndex = 0,
   escalationModel = resolveEscalationModel(),
   escalationMaxTokens = resolveEscalationMaxTokens(),
+  options = {},
 }) {
   const rawBytes = normalizeBytes(payloadBytes);
-  const delivery = await enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, rawBytes, escalationModel);
+  const delivery = await enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, rawBytes, escalationModel, options);
   assertInlineVisualCanFit(chunk, rawBytes, delivery);
   const messages = buildAbstractMessagesForChunk(chunk, rawBytes, sequenceIndex, delivery);
   const requestBytes = estimateRequestBytes(escalationModel, escalationMaxTokens, ABSTRACTION_PROMPT, messages);
@@ -799,6 +805,7 @@ export async function runChunkEscalation({
       sequenceIndex,
       escalationModel,
       escalationMaxTokens,
+      options,
     });
     const escalationMediaResolution = isGeminiModel(escalationModel) && !shouldUseOpenRouter(escalationModel) && messagesHaveVisualMedia(request.messages)
       ? resolveGeminiMediaResolution(mediaResolution)
@@ -1155,7 +1162,7 @@ export function computePdfSplitRanges(pageCount, sourcePageStart = 1, sourcePage
   ];
 }
 
-async function splitPdfChunk(parentChunk, bytes, reason, options) {
+export async function splitPdfChunk(parentChunk, bytes, reason, options) {
   if (!isPdfChunk(parentChunk)) {
     return false;
   }
@@ -1248,17 +1255,30 @@ async function abandonSplitChildren(store, parentChunk, childIds, failure) {
   if (abandon) await Promise.allSettled(childIds.map(abandon));
 }
 
-function computeRetryBackoff(attempt, retryAfter) {
-  if (retryAfter > 0) {
-    return Math.min(retryAfter > 1000 ? retryAfter : retryAfter * 1000, MAX_RETRY_WAIT_MS);
+export function computeRetryBackoff(attempt, retryAfterMs = 0) {
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+    return Math.min(Math.floor(retryAfterMs), MAX_RETRY_WAIT_MS);
   }
   return Math.min(2000 * (2 ** Math.max(0, attempt - 1)), MAX_RETRY_WAIT_MS);
 }
 
-function extractRetryAfter(err) {
-  const raw = err?.retryAfter ?? err?.retryAfterMs ?? err?.headers?.['retry-after'] ?? 0;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : 0;
+export function extractRetryAfterMs(err) {
+  if (err?.retryAfterMs != null) {
+    const ms = Number(err.retryAfterMs);
+    return Number.isFinite(ms) && ms > 0 ? ms : 0;
+  }
+  const raw = err?.retryAfter ?? err?.headers?.['retry-after'] ?? err?.response?.headers?.['retry-after'];
+  if (raw == null || raw === '') return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) {
+    return seconds > 0 ? seconds * 1000 : 0;
+  }
+  const targetMs = Date.parse(String(raw));
+  if (Number.isFinite(targetMs)) {
+    const delta = targetMs - Date.now();
+    return delta > 0 ? delta : 0;
+  }
+  return 0;
 }
 
 async function claimChunkWithLease(store, chunk, workerId, leaseMs, maxAttempts) {
@@ -1395,6 +1415,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
       processingChunk,
       payload.bytes,
       model,
+      options,
     );
     assertInlineVisualCanFit(processingChunk, payload.bytes, delivery);
     const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex, delivery);
@@ -1480,7 +1501,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
     const isRetryable = ['rate_limit', 'upstream_timeout', 'provider_error', 'storage_error'].includes(errorType);
     const hasAttemptsLeft = attemptCount < maxAttempts;
     if (isRetryable && hasAttemptsLeft && store.markChunkAbstractionRetryWait) {
-      const retryAtMs = Date.now() + computeRetryBackoff(attemptCount, extractRetryAfter(err));
+      const retryAtMs = Date.now() + computeRetryBackoff(attemptCount, extractRetryAfterMs(err));
       const updated = await store.markChunkAbstractionRetryWait(processingChunk.jobId, processingChunk.id, {
         ...failure,
         retryAtIso: new Date(retryAtMs).toISOString(),
@@ -1583,6 +1604,11 @@ export async function retryChunkAbstraction(jobId, chunkId, options = {}) {
     throw error;
   }
   const reset = store.resetChunkAbstraction ? await store.resetChunkAbstraction(jobId, chunkId) : { ...chunk, abstractionStatus: 'pending' };
+  if (!reset) {
+    const error = new Error('Chunk is no longer eligible for retry.');
+    error.statusCode = 409;
+    throw error;
+  }
   const result = await processChunkAbstraction(reset, { ...options, store, sequenceIndex: reset.chunkOrder || 0 });
   const status = store.getAbstractionStatus ? await store.getAbstractionStatus(jobId) : null;
   return { result, status };

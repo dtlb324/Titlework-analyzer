@@ -222,6 +222,29 @@ export function geminiApiKeyError() {
   return 'GEMINI_API_KEY is required for Gemini models. Create a key at https://aistudio.google.com/apikey and set GEMINI_API_KEY on Cloud Run.';
 }
 
+function createDefaultTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return { signal: AbortSignal.timeout(ms), cleanup() {} };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, cleanup: () => clearTimeout(timeout) };
+}
+
+function extractGeminiErrorMessage(errorField, fallback) {
+  if (typeof errorField === 'string' && errorField.trim()) return errorField;
+  if (errorField && typeof errorField === 'object') {
+    if (typeof errorField.message === 'string' && errorField.message.trim()) return errorField.message;
+    if (typeof errorField.status === 'string' && errorField.status.trim()) return errorField.status;
+    if (errorField.code != null) return `${fallback} (${errorField.code})`;
+    try {
+      const serialized = JSON.stringify(errorField);
+      if (serialized && serialized !== '{}') return `${fallback}: ${serialized}`;
+    } catch {}
+  }
+  return fallback;
+}
+
 export async function invokeGeminiGenerateContent(request, options = {}) {
   const apiKeyError = geminiApiKeyError();
   if (apiKeyError) {
@@ -253,7 +276,7 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
   const timeoutMs = Number(options.timeoutMs) || 240_000;
   const timeout = options.createTimeoutSignal
     ? options.createTimeoutSignal(timeoutMs)
-    : null;
+    : createDefaultTimeoutSignal(timeoutMs);
 
   const cleanupFileNames = collectGeminiFileNamesFromMessages(request.messages);
   try {
@@ -268,7 +291,7 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const message = data?.error?.message || data?.error || `Gemini request failed (HTTP ${response.status}).`;
+      const message = extractGeminiErrorMessage(data?.error, `Gemini request failed (HTTP ${response.status}).`);
       const error = new Error(message);
       error.status = response.status;
       throw error;

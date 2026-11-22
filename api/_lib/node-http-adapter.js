@@ -25,15 +25,22 @@ export async function readNodeRequestBody(req, maxBodyBytes = configuredMaxBodyB
   }
   if (!chunks.length) return undefined;
   const raw = Buffer.concat(chunks).toString('utf8');
-  const contentType = String(req.headers['content-type'] || '');
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
   if (contentType.includes('application/json')) {
+    let parsed;
     try {
-      return JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
       const error = new Error('Invalid JSON in request body.');
       error.statusCode = 400;
       throw error;
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      const error = new Error('JSON request body must be an object.');
+      error.statusCode = 400;
+      throw error;
+    }
+    return parsed;
   }
   return raw;
 }
@@ -50,7 +57,7 @@ function decodePathSegment(segment) {
 
 export function createApiRequest(req, url, body) {
   const query = Object.fromEntries(url.searchParams.entries());
-  if (url.pathname.startsWith('/api/jobs/') && !query.path) {
+  if (url.pathname.startsWith('/api/jobs/')) {
     query.path = url.pathname.slice('/api/jobs/'.length).split('/').filter(Boolean).map(decodePathSegment);
   }
   return {

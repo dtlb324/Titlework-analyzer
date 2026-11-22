@@ -44,6 +44,7 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
     } catch {
       return;
     }
+    if (!parsed || typeof parsed !== 'object') return;
 
     if (parsed?.error) {
       if (options?.onEvent) await options.onEvent(parsed);
@@ -55,7 +56,7 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
     const choices = parsed?.choices || [];
     const delta = choices[0]?.delta || {};
 
-    if (parsed.model && !model) model = parsed.model;
+    if (parsed?.model && !model) model = parsed.model;
 
     const deltaText = delta.content || '';
     if (deltaText && firstDeltaAt == null) {

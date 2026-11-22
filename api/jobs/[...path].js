@@ -1,4 +1,5 @@
 import {
+  JobApiError,
   publicRequestId,
   enforceJobRateLimit,
   getJobStore,
@@ -46,12 +47,20 @@ export const config = {
   maxDuration: 60,
 };
 
+function decodePathSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new JobApiError('Malformed URL path.', 400);
+  }
+}
+
 function getPathParts(req) {
   const queryPath = req.query?.path;
   if (Array.isArray(queryPath)) return queryPath.map(String);
   if (typeof queryPath === 'string') return [queryPath];
   const match = String(req.url || '').match(/\/api\/jobs\/([^?#]+)/);
-  return match ? match[1].split('/').filter(Boolean).map(decodeURIComponent) : [];
+  return match ? match[1].split('/').filter(Boolean).map(decodePathSegment) : [];
 }
 
 function validPrefixedId(id, prefix) {
@@ -153,7 +162,16 @@ async function handleJobDetail(req, res, requestId, store, jobId) {
     return res.status(404).json({ error: 'Job not found.', requestId });
   }
   if (req.method === 'GET') {
-    return res.status(200).json({ job: existing, requestId });
+    let job = existing;
+    if (existing.status === 'synthesizing' && existing.synthesisPlanId && typeof store.summarizeSynthesisSegments === 'function') {
+      const segCounts = await store.summarizeSynthesisSegments(jobId, existing.synthesisPlanId);
+      job = {
+        ...existing,
+        synthesisTotalSegments: segCounts?.total || 0,
+        synthesisCompletedSegments: segCounts?.complete || 0,
+      };
+    }
+    return res.status(200).json({ job, requestId });
   }
 
   const body = parseBody(req, res, requestId);
@@ -231,6 +249,11 @@ async function handleChunkPatch(req, res, requestId, store, jobId, chunkId) {
   }
   const body = parseBody(req, res, requestId);
   if (!body) return;
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (isTerminalJob(job)) {
+    return res.status(409).json({ error: 'Cannot modify chunks on a terminal job.', requestId });
+  }
   const existing = typeof store.getChunk === 'function'
     ? await store.getChunk(jobId, chunkId)
     : (await store.listChunks(jobId)).find(item => item.id === chunkId);
@@ -618,7 +641,11 @@ async function handleJobResult(req, res, requestId, store, jobId) {
       return res.status(validation.statusCode).json({ error: validation.reason, requestId });
     }
     const result = await store.saveJobResult(jobId, validation.payload);
-    if (!result) return res.status(404).json({ error: 'Job not found.', requestId });
+    if (!result) {
+      const latestJob = await store.getJob(jobId);
+      if (!latestJob) return res.status(404).json({ error: 'Job not found.', requestId });
+      return res.status(409).json({ error: `Cannot save result because job status is ${latestJob.status}.`, requestId });
+    }
     if (validation.payload.synthesisDriver === 'browser') {
       const fallbackPayload = {
         event: 'server_synthesis_fallback',
@@ -656,6 +683,11 @@ async function handleFollowup(req, res, requestId, store, jobId) {
   if (!body) return;
   const validation = validateFollowupRequestInput(body);
   if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  const job = await store.getJob(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
+  if (job.status === 'canceled') {
+    return res.status(409).json({ error: 'Cannot ask follow-up questions on a canceled job.', requestId });
+  }
   const setupError = synthesisSetupError();
   if (setupError) {
     return res.status(503).json({ error: setupError, fallback: 'browser_synthesis', requestId });
@@ -685,7 +717,23 @@ async function handleChunkRetry(req, res, requestId, store, jobId, chunkId) {
     return res.status(503).json({ error: setupError, fallback: 'browser_abstraction', requestId });
   }
   const retry = await retryChunkAbstraction(jobId, chunkId, { store });
-  return res.status(200).json({ retry, status: retry.status, requestId });
+  const sanitizedStatus = publicStatus(retry.status);
+  const sanitizedResult = retry.result ? {
+    status: retry.result.status,
+    chunkId: retry.result.chunkId,
+    ...(retry.result.failure ? {
+      failure: {
+        errorType: retry.result.failure.errorType,
+        errorMessage: retry.result.failure.errorMessage,
+      },
+    } : {}),
+    ...(retry.result.retryAt ? { retryAt: retry.result.retryAt } : {}),
+  } : null;
+  return res.status(200).json({
+    retry: { result: sanitizedResult, status: sanitizedStatus },
+    status: sanitizedStatus,
+    requestId,
+  });
 }
 
 export default async function handler(req, res) {
@@ -693,14 +741,15 @@ export default async function handler(req, res) {
   const requestId = publicRequestId(req.headers['x-request-id']);
   res.setHeader('X-Request-Id', requestId);
 
-  const parts = getPathParts(req);
   if (!(await enforceJobRateLimit(req, res, requestId))) return;
   if (!(await requireJobPassword(req, res, requestId))) return;
 
   const store = getJobStore();
   if (!store) return sendStorageNotConfigured(res, requestId);
 
+  let parts = [];
   try {
+    parts = getPathParts(req);
     const [jobId, second, third, fourth] = parts;
     if (parts.length === 1) return await handleJobDetail(req, res, requestId, store, jobId);
     if (parts.length === 2 && second === 'documents') return await handleCreateDocument(req, res, requestId, store, jobId);

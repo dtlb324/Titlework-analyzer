@@ -314,7 +314,9 @@ export function getSynthesisConfig(overrides = {}) {
     requestEnvelopeSafeBytes: overrides.requestEnvelopeSafeBytes || DEFAULT_REQUEST_ENVELOPE_SAFE_BYTES,
     requestOverheadBytes: overrides.requestOverheadBytes || DEFAULT_REQUEST_OVERHEAD_BYTES,
     maxAttempts: overrides.maxAttempts || DEFAULT_MAX_ATTEMPTS,
-    followupHistoryTurns: overrides.followupHistoryTurns || DEFAULT_FOLLOWUP_HISTORY_TURNS,
+    followupHistoryTurns: overrides.followupHistoryTurns !== undefined && Number.isFinite(Number(overrides.followupHistoryTurns))
+      ? Math.max(0, Math.floor(Number(overrides.followupHistoryTurns)))
+      : DEFAULT_FOLLOWUP_HISTORY_TURNS,
     upstreamTimeoutMs: overrides.upstreamTimeoutMs || DEFAULT_UPSTREAM_TIMEOUT_MS,
     concurrency: overrides.concurrency || DEFAULT_SYNTHESIS_CONCURRENCY,
     mergeConcurrency: overrides.mergeConcurrency || DEFAULT_MERGE_CONCURRENCY,
@@ -873,7 +875,7 @@ async function synthesizeWithBinarySplit({
 // larger recombine retry. Request-size and timeout splits recurse further, and the validation repair call is extra.
 const MAX_TRUNCATION_SPLIT_DEPTH = 1;
 
-function finalMergeMaxTokens() {
+export function finalMergeMaxTokens() {
   return clampInt(process.env.SYNTHESIS_MERGE_MAX_TOKENS, 16000, 1024, 32000);
 }
 
@@ -1733,7 +1735,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           mergeClaimBlocked = true;
         } else {
           lastError = { errorType: classifyError(err), errorMessage: sanitizeErrorMessage(err) };
-          const finalWarnings = await appendResultWarnings([`final_merge_failed: ${lastError.errorType}`]);
+          const finalWarnings = await appendResultWarnings([...warningsAccum, `final_merge_failed: ${lastError.errorType}`]);
           result = await store.saveJobResult(jobId, {
             planId,
             status: 'failed',
@@ -2034,6 +2036,12 @@ export function buildFollowupMessages({
 export async function answerFollowupQuestion(jobId, question, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required for follow-ups.');
+  const job = store.getJob ? await store.getJob(jobId) : null;
+  if (job?.status === 'canceled') {
+    const err = new Error('Cannot ask follow-up questions on a canceled job.');
+    err.statusCode = 409;
+    throw err;
+  }
   const result = await store.getJobResult(jobId);
   if (!result || !result.finalTitleOpinion) {
     const err = new Error('Final title opinion not available for this job. Run synthesis first.');
@@ -2041,13 +2049,15 @@ export async function answerFollowupQuestion(jobId, question, options = {}) {
     throw err;
   }
   const config = getSynthesisConfig(options.config || {});
-  const priorMessages = store.listFollowupMessages
+  const priorMessages = store.listFollowupMessages && config.followupHistoryTurns > 0
     ? await store.listFollowupMessages(jobId, 50)
     : [];
   const { messages, truncationWarning } = buildFollowupMessages({
     question,
     finalTitleOpinion: result.finalTitleOpinion,
-    recentTurns: priorMessages.slice(-config.followupHistoryTurns).map(m => ({ question: m.question, answer: m.answer })),
+    recentTurns: config.followupHistoryTurns > 0
+      ? priorMessages.slice(-config.followupHistoryTurns).map(m => ({ question: m.question, answer: m.answer }))
+      : [],
     retrievedAbstracts: [],
     configOverrides: options.config || {},
   });

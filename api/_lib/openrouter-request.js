@@ -224,6 +224,15 @@ export function openRouterErrorText(error) {
   return typeof code === 'string' || typeof code === 'number' ? `OpenRouter error ${code}` : '';
 }
 
+function createDefaultTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return { signal: AbortSignal.timeout(ms), cleanup() {} };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, cleanup: () => clearTimeout(timeout) };
+}
+
 /** POST one non-streaming chat completion and return OpenRouter's parsed JSON (usage, cost and routed model intact). */
 export async function postOpenRouterChat(request, options = {}) {
   const keyError = openRouterApiKeyError();
@@ -247,7 +256,7 @@ export async function postOpenRouterChat(request, options = {}) {
   const timeoutMs = Number(options.timeoutMs) || 240_000;
   const timeout = options.createTimeoutSignal
     ? options.createTimeoutSignal(timeoutMs)
-    : null;
+    : createDefaultTimeoutSignal(timeoutMs);
 
   try {
     const response = await fetch(url, {

@@ -80,9 +80,16 @@ function normalise(fieldKey, value) {
   return normName(s);
 }
 
+function isExplicitlyAbstained(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return false;
+  return /illegible|not visible|verify manually|unclear|^n\/a$|^none$|not applicable/i.test(trimmed);
+}
+
 function scoreField(modelRaw, gtValue, isDegraded, fieldKey) {
   if (isDegraded) {
-    return isAbstained(modelRaw) ? 'correct_illegible' : 'fabricated';
+    if (!String(modelRaw || '').trim()) return 'missed_degraded';
+    return isExplicitlyAbstained(modelRaw) ? 'correct_illegible' : 'fabricated';
   }
   if (gtValue === undefined || gtValue === null) return 'no_gt';
   if (!modelRaw || isAbstained(modelRaw)) return 'missed';
@@ -241,7 +248,7 @@ async function main() {
               if (s === 'partial') return '~';
               if (s === 'correct_illegible') return '⊘';
               if (s === 'fabricated') return '✗FAB';
-              if (s === 'missed') return '?';
+              if (s === 'missed' || s === 'missed_degraded') return '?';
               if (s === 'wrong') return '✗';
               return '-';
             }).join(' ')
@@ -274,7 +281,7 @@ function buildReport(docResults, groundTruth) {
   const tally = Object.fromEntries(modelIds.map(id => [id, {
     docs: 0, latencySum: 0, inTok: 0, outTok: 0, abstains: 0,
     fillWhileOtherAbstained: 0, errors: 0,
-    acc: Object.fromEntries(ACCURACY_FIELDS.map(f => [f.gt, { correct: 0, partial: 0, wrong: 0, missed: 0, fabricated: 0, correct_illegible: 0, total: 0, total_degraded: 0 }])),
+    acc: Object.fromEntries(ACCURACY_FIELDS.map(f => [f.gt, { correct: 0, partial: 0, wrong: 0, missed: 0, missed_degraded: 0, fabricated: 0, correct_illegible: 0, total: 0, total_degraded: 0 }])),
   }]));
 
   const disagreements = [];
@@ -298,6 +305,7 @@ function buildReport(docResults, groundTruth) {
           at.total++;
           if (s === 'correct_illegible') { at.correct_illegible++; at.total_degraded++; }
           else if (s === 'fabricated') { at.fabricated++; at.total_degraded++; }
+          else if (s === 'missed_degraded') { at.missed_degraded++; at.total_degraded++; }
           else if (s === 'correct') at.correct++;
           else if (s === 'partial') at.partial++;
           else if (s === 'wrong')   at.wrong++;
@@ -360,7 +368,8 @@ function buildReport(docResults, groundTruth) {
         ci      += acc[k].correct_illegible; fab += acc[k].fabricated;
         total   += acc[k].total; totalDeg += acc[k].total_degraded;
       }
-      const pct = n => total ? Math.round(n / total * 100) + '%' : '-';
+      const nonDegTotal = total - totalDeg;
+      const pct = n => nonDegTotal ? Math.round(n / nonDegTotal * 100) + '%' : '-';
       const dpct = n => totalDeg ? Math.round(n / totalDeg * 100) + '%' : '-';
       lines.push(`| \`${id}\` | ${correct} (${pct(correct)}) | ${partial} (${pct(partial)}) | ${wrong} (${pct(wrong)}) | ${missed} (${pct(missed)}) | ${ci} (${dpct(ci)}) | **${fab}** (${dpct(fab)}) |`);
     }
@@ -392,7 +401,7 @@ function buildReport(docResults, groundTruth) {
         const cells = ACCURACY_FIELDS.map(({ gt: k }) => {
           const s = r.scores?.[k] || '-';
           return s === 'correct' ? '✓' : s === 'partial' ? '~' : s === 'wrong' ? '✗' :
-                 s === 'missed' ? '?' : s === 'correct_illegible' ? '⊘' :
+                 (s === 'missed' || s === 'missed_degraded') ? '?' : s === 'correct_illegible' ? '⊘' :
                  s === 'fabricated' ? '**F**' : '-';
         });
         lines.push(`| ${shortName} | \`${id}\` | ${cells.join(' | ')} |`);
@@ -438,4 +447,8 @@ function buildReport(docResults, groundTruth) {
   return lines.join('\n');
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+export { buildReport, scoreField };
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}

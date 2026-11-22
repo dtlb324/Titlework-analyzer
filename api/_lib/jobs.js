@@ -22,7 +22,7 @@ const TERMINAL_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canc
 const VALID_TRANSITIONS = {
   created: new Set(['created', 'uploading', 'abstracting', 'failed', 'canceled']),
   uploading: new Set(['uploading', 'ready', 'abstracting', 'failed', 'canceled']),
-  ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'failed', 'canceled']),
+  ready: new Set(['ready', 'queued', 'planning', 'abstracting', 'synthesizing', 'complete', 'partial_failed', 'failed', 'canceled']),
   queued: new Set(['queued', 'planning', 'abstracting', 'failed', 'canceled']),
   planning: new Set(['planning', 'abstracting', 'failed', 'canceled']),
   abstracting: new Set(['abstracting', 'synthesizing', 'partial_failed', 'failed', 'canceled']),
@@ -33,6 +33,7 @@ const VALID_TRANSITIONS = {
   canceled: new Set(['canceled']),
 };
 const MAX_TOTAL_DOCUMENTS = 2000;
+const MAX_INT4 = 2147483647;
 const MAX_FILENAME_LENGTH = 255;
 const MAX_MEDIA_TYPE_LENGTH = 100;
 const MAX_FINGERPRINT_LENGTH = 512;
@@ -96,8 +97,18 @@ export function publicRequestId(headerValue) {
 }
 
 export function parseJsonBody(body) {
-  if (typeof body !== 'string') return body || {};
-  return JSON.parse(body || '{}');
+  if (body === undefined || body === null || body === '') return {};
+  if (typeof body === 'string') {
+    const parsed = JSON.parse(body);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new SyntaxError('JSON body must be an object.');
+    }
+    return parsed;
+  }
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    throw new SyntaxError('JSON body must be an object.');
+  }
+  return body;
 }
 
 export function secureCompare(a, b) {
@@ -289,12 +300,23 @@ function isAllowedMediaType(value) {
   return value === 'application/pdf' || value === 'text/csv' || ALLOWED_IMAGE_MEDIA_TYPES.has(value || '');
 }
 
+const EXTENSION_MEDIA_TYPES = {
+  pdf: 'application/pdf',
+  csv: 'text/csv',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+};
+
 function normalizeMediaType(value, filename = '') {
-  const provided = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (provided) return provided;
-  if (/\.pdf$/i.test(filename)) return 'application/pdf';
-  if (/\.csv$/i.test(filename)) return 'text/csv';
-  return 'application/octet-stream';
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  const provided = raw === 'image/jpg' ? 'image/jpeg' : raw;
+  if (provided && provided !== 'application/octet-stream') return provided;
+  const match = /\.([a-z0-9]+)$/i.exec(String(filename || ''));
+  const ext = match ? match[1].toLowerCase() : '';
+  return EXTENSION_MEDIA_TYPES[ext] || provided || 'application/octet-stream';
 }
 
 function normalizeChecksum(value) {
@@ -444,6 +466,16 @@ export function validateSaveJobResultInput(input) {
   const outputTokens = toInteger(input.outputTokens, null);
   const payloadBytes = toInteger(input.payloadBytes, null);
   const synthesisDurationMs = toInteger(input.synthesisDurationMs, null);
+  for (const [fieldName, fieldVal] of [
+    ['inputTokens', inputTokens],
+    ['outputTokens', outputTokens],
+    ['payloadBytes', payloadBytes],
+    ['synthesisDurationMs', synthesisDurationMs],
+  ]) {
+    if (Number.isInteger(fieldVal) && fieldVal > MAX_INT4) {
+      return { valid: false, statusCode: 400, reason: `${fieldName} exceeds maximum supported integer value.` };
+    }
+  }
   const synthesisDriver = input.synthesisDriver === 'browser' ? 'browser' : null;
   if (synthesisDriver === 'browser' && !warnings.some(w => String(w).startsWith('synthesis_driver:'))) {
     warnings.unshift('synthesis_driver:browser');
@@ -457,10 +489,10 @@ export function validateSaveJobResultInput(input) {
       warnings,
       failedDocuments,
       modelUsed: truncateText(input.modelUsed, 100),
-      inputTokens: Number.isInteger(inputTokens) && inputTokens >= 0 ? inputTokens : null,
-      outputTokens: Number.isInteger(outputTokens) && outputTokens >= 0 ? outputTokens : null,
-      payloadBytes: Number.isInteger(payloadBytes) && payloadBytes >= 0 ? payloadBytes : null,
-      synthesisDurationMs: Number.isInteger(synthesisDurationMs) && synthesisDurationMs >= 0 ? synthesisDurationMs : null,
+      inputTokens: Number.isInteger(inputTokens) && inputTokens >= 0 && inputTokens <= MAX_INT4 ? inputTokens : null,
+      outputTokens: Number.isInteger(outputTokens) && outputTokens >= 0 && outputTokens <= MAX_INT4 ? outputTokens : null,
+      payloadBytes: Number.isInteger(payloadBytes) && payloadBytes >= 0 && payloadBytes <= MAX_INT4 ? payloadBytes : null,
+      synthesisDurationMs: Number.isInteger(synthesisDurationMs) && synthesisDurationMs >= 0 && synthesisDurationMs <= MAX_INT4 ? synthesisDurationMs : null,
       synthesisDriver,
     },
   };
@@ -481,12 +513,12 @@ export function validateCreateDocumentInput(input) {
     return { valid: false, reason: 'mediaType must be application/pdf, text/csv, image/jpeg, image/png, image/gif, or image/webp.' };
   }
   const sizeBytes = toInteger(input.sizeBytes);
-  if (!Number.isInteger(sizeBytes) || sizeBytes < 0) {
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_INT4) {
     return { valid: false, reason: 'sizeBytes must be a non-negative integer.' };
   }
   const pageStart = toInteger(input.pageStart, null);
   const pageEnd = toInteger(input.pageEnd, null);
-  if ((pageStart !== null || pageEnd !== null) && (!Number.isInteger(pageStart) || !Number.isInteger(pageEnd) || pageStart < 1 || pageEnd < pageStart)) {
+  if ((pageStart !== null || pageEnd !== null) && (!Number.isInteger(pageStart) || !Number.isInteger(pageEnd) || pageStart < 1 || pageEnd < pageStart || pageStart > MAX_INT4 || pageEnd > MAX_INT4)) {
     return { valid: false, reason: 'pageStart and pageEnd must be a valid 1-based range.' };
   }
   const checksumSha256 = normalizeChecksum(input.checksumSha256 ?? input.checksum);
@@ -528,12 +560,12 @@ export function validateCreateChunkInput(input) {
     return { valid: false, reason: 'mediaType must be application/pdf, text/csv, image/jpeg, image/png, image/gif, or image/webp.' };
   }
   const sizeBytes = toInteger(input.sizeBytes);
-  if (!Number.isInteger(sizeBytes) || sizeBytes < 0) {
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_INT4) {
     return { valid: false, reason: 'sizeBytes must be a non-negative integer.' };
   }
   const pageStart = toInteger(input.pageStart, null);
   const pageEnd = toInteger(input.pageEnd, null);
-  if ((pageStart !== null || pageEnd !== null) && (!Number.isInteger(pageStart) || !Number.isInteger(pageEnd) || pageStart < 1 || pageEnd < pageStart)) {
+  if ((pageStart !== null || pageEnd !== null) && (!Number.isInteger(pageStart) || !Number.isInteger(pageEnd) || pageStart < 1 || pageEnd < pageStart || pageStart > MAX_INT4 || pageEnd > MAX_INT4)) {
     return { valid: false, reason: 'pageStart and pageEnd must be a valid 1-based range.' };
   }
   if (!isSafeMetadataString(input.fingerprint, MAX_FINGERPRINT_LENGTH)) {
@@ -3064,10 +3096,13 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       await ensureSchema();
       const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
       const rows = await sql`
-        SELECT * FROM followup_messages
-        WHERE job_id = ${jobId}
-        ORDER BY created_at ASC
-        LIMIT ${safeLimit}
+        SELECT * FROM (
+          SELECT * FROM followup_messages
+          WHERE job_id = ${jobId}
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${safeLimit}
+        ) recent
+        ORDER BY created_at ASC, id ASC
       `;
       return rows.map(rowToFollowupMessage);
     },
@@ -3101,7 +3136,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           retry_wait: tallies.retry_wait || 0,
         };
       }
-      const resultMeta = lightweight && !includeResult
+      const resultMeta = !includeResult
         ? await this.getJobResultMeta(jobId)
         : null;
       const result = includeResult
@@ -3158,6 +3193,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       const targetChunks = await this.listChunks(targetJobId);
       let orderOffset = targetChunks.reduce((max, chunk) => Math.max(max, Number(chunk.chunkOrder) || 0), -1) + 1;
       const documentIdsBySource = new Map();
+      const touchedDocumentIds = new Set();
       let imported = 0;
       for (const row of completed) {
         const sourceDocumentKey = `continuation:${sourceJobId}:${row.documentId || row.chunkId}`;
@@ -3227,6 +3263,10 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         `;
         orderOffset += 1;
         imported += 1;
+        touchedDocumentIds.add(documentId);
+      }
+      for (const docId of touchedDocumentIds) {
+        await refreshDocumentCounts(targetJobId, docId);
       }
       await refreshUploadCounts(targetJobId);
       return { imported, sourceJobId, targetJobId, nextChunkOrder: orderOffset };
@@ -3234,6 +3274,8 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
 
     async finalizeUploads(jobId) {
       await ensureSchema();
+      const existing = await this.getJob(jobId);
+      if (!existing) return null;
       const chunks = await this.listChunks(jobId);
       const invalidUploaded = chunks.filter(chunk => !validateChunkFinalizationStorage(chunk).valid);
       if (invalidUploaded.length) {
@@ -3243,8 +3285,6 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       if (!chunks.length || pendingChunks > 0) {
         return { ready: false, job: await refreshUploadCounts(jobId), pendingChunks: pendingChunks || 1 };
       }
-      const existing = await this.getJob(jobId);
-      if (!existing) return null;
       if (existing.status !== 'ready') {
         assertValidStatusTransition(existing.status, 'ready');
       }
