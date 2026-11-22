@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createPostgresJobStore, validatePatchJobInput } from '../api/_lib/jobs.js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
-import { processSynthesisJob } from '../api/_lib/synthesis.js';
+import { getPartialSynthesisConfig, PARTIAL_SYNTHESIS_PROMPT, processSynthesisJob } from '../api/_lib/synthesis.js';
 import { createPgliteSql } from './helpers/pglite-sql.js';
 
 const tests = [];
@@ -41,6 +41,35 @@ async function saveServerAbstract({ jobId, chunkId, documentId }) {
     modelUsed: 'gemini-3.1-flash-lite', payloadBytes: 1, latencyMs: 1, inputTokens: 1, outputTokens: 1,
     status: 'completed', attemptCount: 1, workerId: 'wkr_setup',
   });
+}
+
+const SEGMENT = '## CHAIN ROWS\n| Date | Doc Type | Grantor | Grantee |\n| 2001 | Deed | A | B |\n\n## DEFECTS\nnone\n\n## RUNNING BALANCE\n| B | 1/2 | '
+  + 'chain content filler '.repeat(12) + ' |';
+
+async function synthesizingJobWithAbstracts(count) {
+  const job = await store.createJob({ subjectTract: 'Section 12, Block C-8', contextNotes: '', totalDocuments: count });
+  for (let i = 0; i < count; i += 1) {
+    const fingerprint = `fp_${job.id}_${i}`;
+    const doc = await store.createDocument(job.id, { originalFilename: `deed${i}.pdf`, mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
+    const chunk = await store.createChunk(job.id, doc.id, { chunkOrder: i, originalFilename: `deed${i}.pdf`, mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
+    await saveServerAbstract({ jobId: job.id, chunkId: chunk.id, documentId: doc.id });
+  }
+  await pg.db.query("UPDATE analysis_jobs SET status = 'synthesizing' WHERE id = $1", [job.id]);
+  return job.id;
+}
+
+function synthesisCallKind(request) {
+  const text = JSON.stringify(request.messages);
+  if (/Merge these partial chain-of-title syntheses/.test(text)) return 'recombine';
+  if (request.system === PARTIAL_SYNTHESIS_PROMPT) return 'half';
+  if (/Previous response was incomplete/.test(text)) return 'repair';
+  return 'original';
+}
+
+async function segmentRow(jobId) {
+  const { rows } = await pg.db.query('SELECT status, error_type FROM synthesis_segments WHERE job_id = $1', [jobId]);
+  assert.equal(rows.length, 1, 'Expected a single-pass plan');
+  return rows[0];
 }
 
 async function expectStatusCode(promise, statusCode) {
@@ -153,6 +182,57 @@ test('H2: only the lease owner\'s PDF split supersedes the parent and adds child
   assert.equal(won?.parent?.abstractionStatus, 'split_superseded');
   assert.deepEqual(won.children.map(c => c.abstractionStatus), ['pending', 'pending']);
   assert.equal(await childCount(), 2);
+});
+
+test('H5: halves of a truncated single-pass opinion run on the partial synthesis model, not the final model', async () => {
+  const jobId = await synthesizingJobWithAbstracts(2);
+  const calls = [];
+  const modelClient = async request => {
+    const kind = synthesisCallKind(request);
+    calls.push({ kind, model: request.model, maxTokens: request.maxTokens });
+    if (kind === 'original') return { text: OPINION.slice(0, 100), model: request.model, usage: {}, stopReason: 'max_tokens' };
+    return { text: kind === 'half' ? SEGMENT : OPINION, model: request.model, usage: {}, stopReason: 'end_turn' };
+  };
+  await processSynthesisJob(jobId, { store, modelClient, config: { model: 'claude-sonnet-5-5', maxAttempts: 3 }, budgetMs: 5_000 });
+  const partial = getPartialSynthesisConfig({ model: 'claude-sonnet-5-5', maxAttempts: 3 });
+  assert.deepEqual(calls.map(call => call.kind), ['original', 'half', 'half', 'recombine']);
+  assert.deepEqual(calls.filter(call => call.kind === 'half').map(call => call.model), [partial.model, partial.model]);
+  assert.notEqual(partial.model, 'claude-sonnet-5-5');
+  assert.equal((await segmentRow(jobId)).status, 'complete');
+});
+
+test('H6: a single-pass opinion fails closed instead of re-billing after a split, a repair, or an error inside a paid split', async () => {
+  const scenarios = {
+    // The split finishes but the recombined opinion fails validation.
+    invalidAfterSplit: kind => (kind === 'original'
+      ? { text: 'cut', stopReason: 'max_tokens' }
+      : { text: kind === 'half' ? SEGMENT : 'not an opinion', stopReason: 'end_turn' }),
+    // No split: the first answer and its repair both fail validation.
+    invalidAfterRepair: () => ({ text: 'not an opinion', stopReason: 'end_turn' }),
+    // The billed truncated call splits, then a half hits a retryable rate limit.
+    rateLimitInPaidSplit: kind => {
+      if (kind === 'original') return { text: 'cut', stopReason: 'max_tokens' };
+      throw Object.assign(new Error('rate limit'), { status: 429 });
+    },
+  };
+  const outcome = {};
+  for (const [name, respond] of Object.entries(scenarios)) {
+    const jobId = await synthesizingJobWithAbstracts(2);
+    const kinds = [];
+    const modelClient = async request => {
+      const kind = synthesisCallKind(request);
+      kinds.push(kind);
+      return { model: request.model, usage: {}, ...respond(kind) };
+    };
+    await processSynthesisJob(jobId, { store, modelClient, config: { maxAttempts: 3 }, budgetMs: 5_000 });
+    const row = await segmentRow(jobId);
+    outcome[name] = { kinds, status: row.status, errorType: row.error_type };
+  }
+  assert.deepEqual(outcome, {
+    invalidAfterSplit: { kinds: ['original', 'half', 'half', 'recombine'], status: 'failed', errorType: 'validation_failed' },
+    invalidAfterRepair: { kinds: ['original', 'repair'], status: 'failed', errorType: 'validation_failed' },
+    rateLimitInPaidSplit: { kinds: ['original', 'half'], status: 'failed', errorType: 'paid_split_failed' },
+  });
 });
 
 let passed = 0;

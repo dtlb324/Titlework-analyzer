@@ -568,6 +568,7 @@ function createTimeoutSignal(ms) {
 function classifyError(err) {
   if (err?.code === 'output_truncated') return 'output_truncated';
   if (err?.code === 'recombine_retry_failed') return 'recombine_retry_failed';
+  if (err?.code === 'paid_split_failed') return 'paid_split_failed';
   if (err?.code === 'lease_lost') return 'lease_lost';
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
@@ -797,8 +798,23 @@ async function synthesizeWithBinarySplit({
     ? options.partialConfig
     : config;
   const halfOptions = { ...options, enableFinalStream: false, cacheMergeSegments: false };
-  const leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, halfConfig, halfOptions, truncationDepth, halfRecovery);
-  const rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, halfConfig, halfOptions, truncationDepth, halfRecovery);
+  // The truncated final-opinion call that started this split was billed. A retryable error from here on would
+  // re-run that call on the next attempt, so it fails closed instead.
+  const failClosed = systemPrompt === SYNTHESIS_PROMPT && reason === 'max_tokens';
+  const closeIfPaid = err => {
+    if (!failClosed || ['output_truncated', 'lease_lost'].includes(classifyError(err))) return err;
+    const failed = new Error(`Split after a billed truncated opinion failed: ${sanitizeErrorMessage(err)}`);
+    failed.code = 'paid_split_failed';
+    return failed;
+  };
+  let leftResult;
+  let rightResult;
+  try {
+    leftResult = await tryRecursiveSegment(left, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, halfConfig, halfOptions, truncationDepth, halfRecovery);
+    rightResult = await tryRecursiveSegment(right, tract, contextNotes, splitPreamble, PARTIAL_SYNTHESIS_PROMPT, halfConfig, halfOptions, truncationDepth, halfRecovery);
+  } catch (err) {
+    throw closeIfPaid(err);
+  }
   const mergeAbstracts = [
     { filename: `Documents 1-${left.length} partial synthesis`, abstract: leftResult.text },
     { filename: `Documents ${left.length + 1}-${abstracts.length} partial synthesis`, abstract: rightResult.text },
@@ -821,7 +837,7 @@ async function synthesizeWithBinarySplit({
   try {
     merged = await callSynthesisModel(recombineRequest);
   } catch (err) {
-    if (classifyError(err) !== 'output_truncated' || !recombineRecovery) throw err;
+    if (classifyError(err) !== 'output_truncated' || !recombineRecovery) throw closeIfPaid(err);
     truncatedUsage = err.usage || {};
     if (recombineRecovery.mode === 'keep_halves') {
       // Each half must stand on its own; otherwise its documents would vanish behind a complete-looking segment.
@@ -975,9 +991,12 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
   // Each renewal must outlive the call it precedes: one call may take the full upstream timeout, and a
   // truncation chain is up to five sequential calls, far longer than a single claim lease.
   const callLeaseMs = Math.max(leaseMs, activeConfig.upstreamTimeoutMs + 60_000);
+  const baseSegmentOptions = isSinglePass
+    ? { ...options, partialConfig: getPartialSynthesisConfig(options.config || {}) }
+    : options;
   const segmentOptions = store.renewSynthesisSegmentLease
     ? {
-      ...options,
+      ...baseSegmentOptions,
       async segmentLeaseGuard() {
         let renewed;
         try {
@@ -994,7 +1013,7 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
         }
       },
     }
-    : options;
+    : baseSegmentOptions;
 
   const byDocumentId = new Map(
     abstracts
@@ -1100,7 +1119,9 @@ export async function processSynthesisSegment(jobId, segment, abstracts, options
           latencyMs: Date.now() - startedAt,
           workerId,
         };
-        if (attemptsUsed < config.maxAttempts && store.markSynthesisSegmentRetryWait) {
+        // A single-pass segment is the billed final opinion: after a split or a repair it fails closed.
+        const paidRetryBlocked = isSinglePass && (result.splitApplied || repairAttempted);
+        if (attemptsUsed < config.maxAttempts && !paidRetryBlocked && store.markSynthesisSegmentRetryWait) {
           const retryAtMs = Date.now() + computeRetryBackoff(attemptsUsed, 0);
           const updated = await store.markSynthesisSegmentRetryWait(jobId, segment.id, {
             ...failure,

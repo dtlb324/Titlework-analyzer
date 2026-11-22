@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { estimateTextTokens } from '../api/_lib/anthropic-request.js';
 import {
+  getPartialSynthesisConfig,
   PARTIAL_SYNTHESIS_PROMPT,
   processSynthesisJob,
 } from '../api/_lib/synthesis.js';
@@ -850,7 +851,7 @@ test('recombine recovery: a single-pass nested recombine that truncates fails wi
     const modelClient = async request => {
       const kind = callKind(request);
       const text = JSON.stringify(request.messages);
-      calls.push({ kind, label: synthesisCallLabel(request), maxTokens: request.maxTokens });
+      calls.push({ kind, label: synthesisCallLabel(request), model: request.model, maxTokens: request.maxTokens });
       if (kind === 'original' && text.includes('deed0.pdf') && text.includes('deed3.pdf')) {
         throw Object.assign(new Error('payload too large'), { status: 413 });
       }
@@ -865,7 +866,12 @@ test('recombine recovery: a single-pass nested recombine that truncates fails wi
     assertStrict.equal(segment.summaryText, null);
     assertStrict.equal(calls.filter(call => call.maxTokens === 16000).length, 0);
     assertStrict.deepEqual(calls.map(call => call.label), ['original:0-3', 'half:0-1', 'half:2-3', 'half:2', 'half:3', 'recombine']);
-    assertStrict.equal(calls.at(-1).maxTokens, 8000);
+    // Halves of a single-pass opinion, and their nested recombines, run on the partial synthesis config.
+    const partial = getPartialSynthesisConfig({ maxAttempts: 1, maxTokens: 8000 });
+    assertStrict.deepEqual(
+      [...new Set(calls.slice(1).map(call => `${call.model}/${call.maxTokens}`))],
+      [`${partial.model}/${partial.maxTokens}`],
+    );
   });
 });
 
