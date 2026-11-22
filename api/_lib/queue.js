@@ -201,7 +201,7 @@ export async function processAbstractionBatch(jobId, options = {}) {
   let splits = 0;
   let lastError = null;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !options.signal?.aborted) {
     let job = await getJobOrThrow(store, jobId);
     if (isJobCanceled(job)) break;
     const now = Date.now();

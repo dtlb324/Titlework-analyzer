@@ -4,6 +4,7 @@ import { classifyAbstractionError, enrichVisualDeliveryForModel, processChunkAbs
 import { consumeAnthropicMessageStream } from '../api/_lib/anthropic-stream.js';
 import { uploadGeminiFile } from '../api/_lib/gemini-files.js';
 import { consumeOpenRouterMessageStream } from '../api/_lib/openrouter-stream.js';
+import { runWorkerDrain, runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-run-worker.js';
 import { createPostgresJobStore, validatePatchJobInput } from '../api/_lib/jobs.js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
@@ -384,6 +385,69 @@ test('H11: an uploaded Gemini file is deleted when it never becomes ACTIVE or it
   assert.equal(modelCalls, 0);
   assert.equal(renewals, 2, 'Expected one renewal before the upload and one before the paid call');
   assert.equal(requests.at(-1), 'DELETE /v1beta/files/abc123');
+});
+
+const noProgressPass = { completedInBatch: 0, failedInBatch: 0, retryScheduledInBatch: 0, splitsInBatch: 0, lastError: { errorType: 'provider_error', errorMessage: 'claim failed' } };
+const listedOnce = ids => ({
+  async listRunnableAbstractionJobIds() { return ids; },
+  async listRunnableSynthesisJobIds() { return []; },
+});
+
+test('H12: a batch that returns an error without progress backs off and trips the drain breaker, instead of hot-looping', async () => {
+  let loopSleeps = 0;
+  await runWorkerLoop({ store: listedOnce(['job_poison']), processAbstraction: async () => noProgressPass, maxIterations: 3, sleep: async () => { loopSleeps += 1; } });
+  assert.equal(loopSleeps, 3);
+
+  let stalledSleeps = 0;
+  const stalledPass = { ...noProgressPass, lastError: null };
+  await runWorkerLoop({ store: listedOnce(['job_stuck']), processAbstraction: async () => stalledPass, maxIterations: 3, sleep: async () => { stalledSleeps += 1; } });
+  assert.equal(stalledSleeps, 3, 'A cycle that lists work but moves nothing must pause too');
+
+  let drainPasses = 0;
+  const drained = await runWorkerDrain({ store: listedOnce(['job_poison']), processAbstraction: async () => { drainPasses += 1; return noProgressPass; }, sleep: async () => {} });
+  assert.equal(drainPasses, 3);
+  assert.equal(drained.iterations, 3);
+});
+
+test('H12: an aborted worker starts no further job and no synthesis after the current pass', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const store = {
+    ...listedOnce(['job_a', 'job_b']),
+    async getJob() { return { status: 'synthesizing' }; },
+  };
+  await runWorkerOnce({
+    store,
+    signal: controller.signal,
+    processAbstraction: async jobId => { calls.push(`abstract:${jobId}`); controller.abort(); },
+    processSynthesis: async jobId => { calls.push(`synthesis:${jobId}`); },
+  });
+  assert.deepEqual(calls, ['abstract:job_a']);
+});
+
+test('H12: a drain deadline caps the budget of each job batch', async () => {
+  const previousBatching = process.env.ABSTRACTION_BATCH_ENABLED;
+  process.env.ABSTRACTION_BATCH_ENABLED = 'false';
+  const chunk = { id: 'chk_loop', jobId: 'job_budget', documentId: 'doc_loop', chunkOrder: 0, mediaType: 'image/png', originalFilename: 'plat.png', uploadStatus: 'uploaded', sizeBytes: 10 };
+  // Every pass reuses a saved abstract, so the batch would keep going until its budget runs out.
+  const store = {
+    ...listedOnce(['job_budget']),
+    async getJob() { return { id: 'job_budget', status: 'abstracting' }; },
+    async listReadyAbstractionChunks() { return [chunk]; },
+    async claimChunkForAbstraction(_jobId, _chunkId, opts) { return { ...chunk, abstractionStatus: 'processing', abstractionWorkerId: opts.workerId, abstractionAttempts: 1 }; },
+    async getDocumentAbstractByChunkId() { return { abstractText: 'DOCUMENT #1: Plat of survey.', modelUsed: 'gemini-3.1-flash-lite' }; },
+    async saveDocumentAbstract() { return { id: 'abs_loop' }; },
+    async getAbstractionStatus() { return { total: 1, pending: 1, processing: 0, completed: 0, failed: 0, retry_wait: 0, failedChunks: [], job: { status: 'abstracting' } }; },
+  };
+  const startedAt = Date.now();
+  try {
+    await runWorkerOnce({ store, deadline: Date.now() + 1_200 });
+  } finally {
+    if (previousBatching === undefined) delete process.env.ABSTRACTION_BATCH_ENABLED;
+    else process.env.ABSTRACTION_BATCH_ENABLED = previousBatching;
+  }
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs < 5_000, `Expected the batch to stop near the 1.2s drain deadline, ran ${elapsedMs}ms`);
 });
 
 let passed = 0;

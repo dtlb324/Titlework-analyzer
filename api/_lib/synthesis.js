@@ -1565,7 +1565,7 @@ export async function processSynthesisJob(jobId, options = {}) {
   let retryInBatch = 0;
   let lastError = null;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !options.signal?.aborted) {
     let currentJob = await store.getJob(jobId);
     if (currentJob?.status === 'canceled') break;
     const ready = await store.listReadySynthesisSegments(
@@ -1678,7 +1678,8 @@ export async function processSynthesisJob(jobId, options = {}) {
     };
   }
   const mergeGateJob = await store.getJob(jobId);
-  const mergeCanceled = mergeGateJob?.status === 'canceled';
+  // A shutting-down worker does not start a billable merge it cannot finish before it is killed.
+  const mergeCanceled = mergeGateJob?.status === 'canceled' || Boolean(options.signal?.aborted);
   if (!mergeCanceled && !existingResult && completedSegments.length === refreshedSegments.length && refreshedSegments.length > 0) {
     // Resolve the exclusion set before claiming the merge or paying for it. A lookup error propagates.
     await failedDocumentsForMerge();
