@@ -5,7 +5,10 @@ import { consumeAnthropicMessageStream } from '../api/_lib/anthropic-stream.js';
 import { uploadGeminiFile } from '../api/_lib/gemini-files.js';
 import { consumeOpenRouterMessageStream } from '../api/_lib/openrouter-stream.js';
 import { runWorkerDrain, runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-run-worker.js';
-import { createPostgresJobStore, hasRawPayloadFields, validatePatchJobInput } from '../api/_lib/jobs.js';
+import { runWithConcurrency } from '../api/_lib/concurrency.js';
+import { createPostgresJobStore, hasRawPayloadFields, validatePatchJobInput, validateSaveJobResultInput } from '../api/_lib/jobs.js';
+import { invokeModel } from '../api/_lib/model-client.js';
+import { buildOpenRouterRequestBody, shouldUseOpenRouter } from '../api/_lib/openrouter-request.js';
 import jobPathHandler from '../api/jobs/[...path].js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
@@ -708,6 +711,132 @@ test('M10: follow-ups asked about an earlier opinion are not fed into the prompt
   });
   assert.equal(prompt.includes('QUESTION ABOUT OPINION V1'), false);
   assert.equal(prompt.includes('QUESTION ABOUT OPINION V2'), true);
+});
+
+test('L4: integer fields reject booleans, arrays and blanks; result arrays are capped first; the driver label is the server\'s', () => {
+  const job = { status: 'abstracting', totalDocuments: 5, completedDocuments: 0, failedDocuments: 0 };
+  assert.deepEqual([true, [], '   ', '2', 3].map(value => validatePatchJobInput({ completedDocuments: value }, job).valid), [false, false, false, true, true]);
+
+  const spoofed = validateSaveJobResultInput({ finalTitleOpinion: 'Opinion', warnings: ['synthesis_driver:server', 'note'] });
+  assert.equal(JSON.stringify(spoofed.payload.warnings), '["note"]');
+  const browser = validateSaveJobResultInput({ finalTitleOpinion: 'Opinion', synthesisDriver: 'browser', warnings: ['synthesis_driver:server', 'note'] });
+  assert.equal(JSON.stringify(browser.payload.warnings), '["synthesis_driver:browser","note"]');
+  const huge = validateSaveJobResultInput({ finalTitleOpinion: 'Opinion', warnings: new Array(1_000_000).fill('w') });
+  assert.equal(huge.payload.warnings.length, 100);
+});
+
+test('L5: a zero concurrency still runs every item, and rollups, cancel, preview clears and lease reads agree with the SQL', async () => {
+  assert.deepEqual(await runWithConcurrency([1, 2, 3], 0, async n => n * 2), [2, 4, 6]);
+
+  const failed = await jobWithChunk({ jobStatus: 'abstracting', chunkStatus: 'failed' });
+  const rolled = await store.refreshAbstractionRollup(failed.jobId);
+  assert.equal(rolled.status, 'failed');
+  assert.ok(rolled.completedAt, 'A job whose abstraction failed is terminal, so it records completedAt');
+
+  const live = await jobWithChunk({ jobStatus: 'abstracting', chunkStatus: 'pending' });
+  const canceled = await store.cancelJob(live.jobId, 'User stopped job.');
+  assert.equal(canceled.abstractChunkFailed, 1, 'cancelJob returns the counts after its chunks were failed');
+
+  const merging = await store.createJob({ subjectTract: 'Section 12', contextNotes: '', totalDocuments: 1 });
+  await pg.db.query("UPDATE analysis_jobs SET status = 'synthesizing', synthesis_plan_id = 'plan_l5' WHERE id = $1", [merging.id]);
+  await store.setSynthesisPreview(merging.id, { text: 'draft', modelUsed: 'claude-sonnet-5-5' });
+  await store.clearSynthesisPreview(merging.id);
+  assert.equal((await store.getSynthesisPreview(merging.id)).modelUsed, null);
+  await pg.db.query("UPDATE analysis_jobs SET synthesis_merge_worker_id = 'wkr_legacy', synthesis_merge_lease_expires_at = NULL WHERE id = $1", [merging.id]);
+  assert.equal((await store.getSynthesisStatus(merging.id, { lightweight: true })).mergeLeaseHeld, false);
+  assert.ok(await store.claimSynthesisMerge(merging.id, 'plan_l5', { workerId: 'wkr_new' }), 'The lease the status reports as free can be claimed');
+});
+
+test('L6: stream errors keep their text, and OpenRouter routing, slugs and stream options are consistent', async () => {
+  await assert.rejects(
+    consumeAnthropicMessageStream(streamBody('event: error\ndata: upstream connect error\n\n')),
+    /Anthropic stream error: upstream connect error/,
+  );
+  await assert.rejects(consumeOpenRouterMessageStream(streamBody('data: {"error":"Provider returned error"}\n\n')), /Provider returned error/);
+
+  const previousProvider = process.env.MODEL_PROVIDER;
+  process.env.MODEL_PROVIDER = ' OpenRouter ';
+  try {
+    assert.equal(shouldUseOpenRouter('claude-sonnet-5-5'), true);
+  } finally {
+    if (previousProvider === undefined) delete process.env.MODEL_PROVIDER;
+    else process.env.MODEL_PROVIDER = previousProvider;
+  }
+  assert.deepEqual(
+    ['claude-sonnet-5-5', 'claude-opus-4-7', 'claude-sonnet-5', 'gemini-3.1-flash-lite'].map(model => buildOpenRouterRequestBody({ model, maxTokens: 10, messages: [] }).model),
+    ['anthropic/claude-sonnet-5.5', 'anthropic/claude-opus-4.7', 'anthropic/claude-sonnet-5', 'google/gemini-3.1-flash-lite'],
+  );
+
+  let sentBody = null;
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'test-key';
+  globalThis.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200 });
+  };
+  try {
+    await invokeModel({ model: 'anthropic/claude-sonnet-5.5', maxTokens: 9_000, system: 'sys', messages: [{ role: 'user', content: 'q' }], reasoningEffort: 'high' }, { timeoutMs: 5_000 });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousKey;
+  }
+  assert.equal(sentBody.stream, true);
+  assert.deepEqual(sentBody.reasoning, { effort: 'high' });
+});
+
+test('L7: PDF export spells out arrows, pages a long notice box, and home follow-ups use only the current opinion', async () => {
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(404, {}) });
+  try {
+    const counter = { count: 0 };
+    assert.equal(app.ctx.pdfSafeText('Smith → Jones', counter), 'Smith -> Jones');
+    assert.equal(counter.count, 0);
+
+    const PAGE_H = 279;
+    const MARGIN = 20;
+    const draws = [];
+    let pages = 1;
+    app.ctx.jspdf = {
+      jsPDF: class {
+        constructor() { this.internal = { pageSize: { getWidth: () => 216, getHeight: () => PAGE_H }, getNumberOfPages: () => pages }; }
+        setFillColor() {} setDrawColor() {} rect() {} setTextColor() {} setFontSize() {} setFont() {} line() {} setPage() {}
+        addPage() { pages += 1; }
+        text(t, _x, y) { draws.push({ page: pages, y, text: String(t) }); }
+        splitTextToSize(t) { return [t]; }
+        save() {}
+      },
+    };
+    const para = { nodeType: 1, tagName: 'P', innerText: 'B owns 1/2', textContent: 'B owns 1/2', innerHTML: 'B owns 1/2' };
+    const card = { querySelector: sel => (sel === '.ac' ? { childNodes: [para] } : null) };
+    const jobRoot = app.getEl('jobResults');
+    jobRoot.querySelectorAll = sel => (sel === '.analysis-card' ? [card] : []);
+    app.ctx.__warnings = Array.from({ length: 120 }, (_, i) => `Instrument ${i + 1} needs a manual check`);
+    app.run(`rdLatestJob = { jobId: 'job_pdf', job: { id: 'job_pdf', totalDocuments: 1 }, result: { warnings: __warnings, failedDocuments: [] } }`);
+    app.ctx.downloadPDF({ rootElement: jobRoot, tractOverride: 'T' });
+    const noticeDraws = draws.filter(d => d.text.startsWith('• Instrument'));
+    assert.equal(noticeDraws.length, 120);
+    assert.ok(new Set(noticeDraws.map(d => d.page)).size > 1, 'A 120-line notice list continues on another page');
+    assert.ok(noticeDraws.every(d => d.y <= PAGE_H - MARGIN), `Every notice line stays above the bottom margin, max y ${Math.max(...noticeDraws.map(d => d.y))}`);
+
+    app.run(`conversationHistory = [
+      { role: 'user', content: 'abstracts', kind: 'analysis-input' },
+      { role: 'assistant', content: 'OPINION V1', kind: 'title-opinion' },
+      { role: 'user', content: 'QUESTION ABOUT V1', kind: 'followup' },
+      { role: 'assistant', content: 'ANSWER ABOUT V1', kind: 'followup' },
+      { role: 'user', content: 'more abstracts', kind: 'analysis-input' },
+      { role: 'assistant', content: 'OPINION V2', kind: 'title-opinion' },
+      { role: 'user', content: 'QUESTION ABOUT V2', kind: 'followup' },
+      { role: 'assistant', content: 'ANSWER ABOUT V2', kind: 'followup' },
+      { role: 'user', content: 'current question', kind: 'followup' },
+    ]`);
+    const prompt = app.ctx.buildFollowupMessages('current question')[0].content;
+    assert.equal(prompt.includes('QUESTION ABOUT V1'), false);
+    assert.equal(prompt.includes('QUESTION ABOUT V2'), true);
+    assert.equal(prompt.includes('OPINION V2'), true);
+  } finally {
+    disposeAll();
+  }
 });
 
 let passed = 0;

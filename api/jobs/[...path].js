@@ -19,7 +19,6 @@ import {
   inferSynthesisDriver,
 } from '../_lib/jobs.js';
 import {
-  processJobAbstraction,
   retryChunkAbstraction,
   serverAbstractionSetupError,
 } from '../_lib/abstraction.js';

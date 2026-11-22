@@ -3,8 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'">
-<meta http-equiv="X-Content-Type-Options" content="nosniff">
-<meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mineral Title Analyzer</title>
 <style>
@@ -666,7 +664,7 @@
     <h2>Access Required</h2>
     <p>Enter the access password provided by your administrator.</p>
     <div class="field">
-      <input type="password" id="passwordInput" placeholder="Password..." aria-label="Password" />
+      <input type="password" id="passwordInput" placeholder="Password..." aria-label="Password" autocomplete="off" />
     </div>
     <button class="btn-primary" onclick="checkPassword()">Enter</button>
     <div id="passwordError"></div>
@@ -7517,8 +7515,9 @@ function buildFollowupMessages(question, titleOpinionOverride = null, priorPairs
         { role: 'user', content: pair.question, kind: 'followup' },
         { role: 'assistant', content: pair.answer, kind: 'followup' },
       ])).filter(m => typeof m.content === 'string')
+    // Only follow-ups after the latest opinion: + Add Documents replaces the opinion the earlier ones were about.
     : conversationHistory
-        .slice(2, -1)
+        .slice(Math.max(2, conversationHistory.findLastIndex(m => m.role === 'assistant' && m.kind === 'title-opinion') + 1), -1)
         .filter(m => m.kind === 'followup' && typeof m.content === 'string');
   for (let turns = FOLLOWUP_HISTORY_TURNS; turns >= 0; turns--) {
     const recent = turns === 0 ? [] : followupOnly.slice(-turns * 2);
@@ -8216,6 +8215,8 @@ const PDF_WINANSI_EXTRA = new Set('€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“�
 function pdfSafeText(text, counter) {
   let s = String(text == null ? '' : text);
   try { s = s.normalize('NFC'); } catch {}
+  // The synthesis prompt asks for "Grantor → Grantee", so the arrow is in nearly every opinion; spell it out.
+  s = s.replace(/\u2192/g, '->');
   let out = '';
   for (const ch of s) {
     const c = ch.codePointAt(0);
@@ -8385,37 +8386,56 @@ function downloadPDF(options = {}) {
   doc.text('AI-ASSISTED ANALYSIS — NOT A LEGAL OPINION. Verify all facts against source documents before any action.', margin + 3, y + 6.5);
   y += 16;
 
-  // Completeness notices: amber box on page one, right after the disclaimer.
+  // Completeness notices: amber box on page one, right after the disclaimer. A list taller than the rest of the
+  // page continues in another box on the next page instead of running off the bottom.
   if (notices.length) {
     doc.setFontSize(8.5);
     doc.setFont('helvetica', 'normal');
     const inner = contentW() - 8;
-    const items = notices.map(n => doc.splitTextToSize(`• ${n.text}`, inner));
     const lh = 8.5 * 0.3528 * 1.25;
-    const height = 6 + 5 + (docsLine ? 4.5 : 0) + items.reduce((sum, lines) => sum + lines.length * lh + 1, 0) + 2;
-    doc.setFillColor(255, 247, 230);
-    doc.setDrawColor(217, 119, 6);
-    doc.rect(margin, y, contentW(), height, 'FD');
-    let ny = y + 6;
-    doc.setTextColor(146, 64, 14);
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'bold');
+    const rows = [];
+    for (const n of notices) {
+      for (const line of doc.splitTextToSize(`• ${n.text}`, inner)) rows.push({ line, h: lh });
+      rows[rows.length - 1].h += 1;
+    }
     // Completeness caveats keep their heading; a box holding only the replaced-characters note says just that.
     const onlyUnshown = notices.every(n => n.kind === 'unshown_characters');
-    doc.text(onlyUnshown ? 'Some characters could not be shown' : 'This result may be incomplete', margin + 4, ny);
-    ny += 5;
-    doc.setFontSize(8.5);
-    if (docsLine) {
-      doc.text(docsLine, margin + 4, ny);
-      ny += 4.5;
+    let first = true;
+    while (rows.length) {
+      const headH = first ? 5 + (docsLine ? 4.5 : 0) : 0;
+      const room = pageH() - margin - y - 8 - headH;
+      let take = 0;
+      for (let used = 0; take < rows.length && used + rows[take].h <= room; take += 1) used += rows[take].h;
+      if (!take) {
+        startPage();
+        continue;
+      }
+      const boxRows = rows.splice(0, take);
+      const height = 6 + headH + boxRows.reduce((sum, row) => sum + row.h, 0) + 2;
+      doc.setFillColor(255, 247, 230);
+      doc.setDrawColor(217, 119, 6);
+      doc.rect(margin, y, contentW(), height, 'FD');
+      let ny = y + 6;
+      if (first) {
+        doc.setTextColor(146, 64, 14);
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.text(onlyUnshown ? 'Some characters could not be shown' : 'This result may be incomplete', margin + 4, ny);
+        ny += 5;
+        doc.setFontSize(8.5);
+        if (docsLine) {
+          doc.text(docsLine, margin + 4, ny);
+          ny += 4.5;
+        }
+      }
+      doc.setFontSize(8.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(120, 53, 15);
+      boxRows.forEach(row => { doc.text(row.line, margin + 4, ny); ny += row.h; });
+      y += height + 6;
+      first = false;
+      if (rows.length) startPage();
     }
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(120, 53, 15);
-    items.forEach(lines => {
-      lines.forEach(line => { doc.text(line, margin + 4, ny); ny += lh; });
-      ny += 1;
-    });
-    y += height + 6;
   }
 
   function addText(text, fontSize, isBold, color, indent) {

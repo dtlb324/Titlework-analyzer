@@ -63,6 +63,11 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
     if (onEvent) await onEvent(parsed);
     if (parsed.done) return;
     const payload = parsed.data;
+    if (parsed.event === 'error' && (!payload || typeof payload !== 'object')) {
+      const error = new Error(`Anthropic stream error: ${String(parsed.raw || 'unreadable error event').slice(0, 500)}`);
+      error.status = 500;
+      throw error;
+    }
     if (!payload || typeof payload !== 'object') return;
     if (parsed.event === 'error' || payload.type === 'error') {
       const errorType = payload.error?.type || 'unknown_error';

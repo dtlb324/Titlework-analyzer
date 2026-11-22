@@ -1945,9 +1945,9 @@ export async function processSynthesisJob(jobId, options = {}) {
     result,
     status,
     lastError: lastError ? { errorType: lastError.errorType, errorMessage: lastError.errorMessage } : null,
-    hasMore: mergeClaimBlocked
+    hasMore: status?.job?.status !== 'canceled' && (mergeClaimBlocked
       || Boolean(status?.mergeInProgress)
-      || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0),
+      || ((status?.pending || 0) + (status?.processing || 0) + (status?.retry_wait || 0) > 0)),
   };
 }
 

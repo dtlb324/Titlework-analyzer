@@ -300,6 +300,8 @@ function truncateText(value, maxLength) {
 
 function toInteger(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
+  // Number() turns true, false, [] and blank strings into 0 or 1; only numbers and numeric strings count.
+  if (typeof value !== 'number' && !(typeof value === 'string' && value.trim())) return NaN;
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return NaN;
   return parsed;
@@ -472,11 +474,12 @@ export function validateSaveJobResultInput(input) {
     return { valid: false, statusCode: 400, reason: 'finalTitleOpinion is required.' };
   }
   const status = JOB_RESULT_STATUSES.has(input.status) ? input.status : 'complete';
+  // Capped before mapping so a huge array costs nothing. The driver warning is the server's to write.
   const warnings = Array.isArray(input.warnings)
-    ? input.warnings.map(sanitizeResultWarning).filter(Boolean).slice(0, MAX_RESULT_WARNINGS)
+    ? input.warnings.slice(0, MAX_RESULT_WARNINGS).map(sanitizeResultWarning).filter(w => w && !w.startsWith('synthesis_driver:'))
     : [];
   const failedDocuments = Array.isArray(input.failedDocuments)
-    ? input.failedDocuments.map(sanitizeResultFailedDocument).filter(Boolean).slice(0, MAX_RESULT_FAILED_DOCUMENTS)
+    ? input.failedDocuments.slice(0, MAX_RESULT_FAILED_DOCUMENTS).map(sanitizeResultFailedDocument).filter(Boolean)
     : [];
   const inputTokens = toInteger(input.inputTokens, null);
   const outputTokens = toInteger(input.outputTokens, null);
@@ -493,7 +496,7 @@ export function validateSaveJobResultInput(input) {
     }
   }
   const synthesisDriver = input.synthesisDriver === 'browser' ? 'browser' : null;
-  if (synthesisDriver === 'browser' && !warnings.some(w => String(w).startsWith('synthesis_driver:'))) {
+  if (synthesisDriver === 'browser') {
     warnings.unshift('synthesis_driver:browser');
   }
   return {
@@ -1354,6 +1357,15 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
             THEN 'Server abstraction ' || counts.completed || '/' || counts.total || ' (' || counts.processing || ' running, ' || counts.retry_wait || ' awaiting retry)'
           ELSE 'Server abstraction ' || counts.completed || '/' || counts.total
         END,
+        completed_at = CASE
+          WHEN status IN ('canceled', 'complete') THEN completed_at
+          WHEN status IN ('synthesizing', 'failed', 'partial_failed')
+            AND counts.processing + counts.pending + counts.retry_wait = 0
+            THEN completed_at
+          WHEN counts.total > 0 AND counts.completed + counts.failed = counts.total AND counts.failed > 0
+            THEN COALESCE(completed_at, now())
+          ELSE completed_at
+        END,
         status = CASE
           WHEN status IN ('canceled', 'complete') THEN status
           WHEN status IN ('synthesizing', 'failed', 'partial_failed')
@@ -1917,8 +1929,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           AND status IN ('pending', 'retry_wait', 'processing')
       `;
       await this.clearSynthesisPreview(jobId);
-      await refreshAbstractionCounts(jobId);
-      return rowToJob(rows[0]);
+      return (await refreshAbstractionCounts(jobId)) || rowToJob(rows[0]);
     },
 
     async retryFailedChunks(jobId) {
@@ -2285,6 +2296,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
               synthesis_preview_complete = false,
               synthesis_preview_bytes = 0,
               synthesis_preview_updated_at = NULL,
+              synthesis_preview_model_used = NULL,
               updated_at = now()
           WHERE id = ${record.jobId}
         `;
@@ -2889,6 +2901,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           synthesis_preview_degraded = false,
           synthesis_preview_bytes = 0,
           synthesis_preview_updated_at = NULL,
+          synthesis_preview_model_used = NULL,
           updated_at = now()
         WHERE id = ${jobId}
           AND (${options.mergeWorkerId ?? null}::text IS NULL OR (
@@ -2982,6 +2995,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
                 synthesis_preview_degraded = false,
                 synthesis_preview_bytes = 0,
                 synthesis_preview_updated_at = NULL,
+                synthesis_preview_model_used = NULL,
                 synthesis_merge_worker_id = NULL,
                 synthesis_merge_lease_expires_at = NULL,
                 completed_at = COALESCE(completed_at, now()),
@@ -3142,7 +3156,8 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         ? await this.getJobResult(jobId)
         : null;
       const mergeLeaseExpiresAt = job.synthesisMergeLeaseExpiresAt ? Date.parse(job.synthesisMergeLeaseExpiresAt) : 0;
-      const mergeLeaseHeld = Boolean(job.synthesisMergeWorkerId && (!mergeLeaseExpiresAt || mergeLeaseExpiresAt > Date.now()));
+      // The same rule claimSynthesisMerge uses: a lease with no expiry can be claimed, so it is not held.
+      const mergeLeaseHeld = Boolean(job.synthesisMergeWorkerId && mergeLeaseExpiresAt > Date.now());
       const hasResultRow = Boolean(result || resultMeta);
       const { hasResult, mergeInProgress } = deriveSynthesisProgress({
         job,

@@ -202,7 +202,7 @@ MODEL_PROVIDER=openrouter
 ```
 
 - `shouldUseOpenRouter` in `api/_lib/openrouter-request.js` routes a call through OpenRouter when `MODEL_PROVIDER=openrouter` or when a configured model ID contains `/`. Any other value (or unset) uses direct Gemini and Anthropic routing.
-- Model ID mapping: `claude-sonnet-5-5` maps to `anthropic/claude-sonnet-5.5`; other `claude-*` IDs map to `anthropic/<id>`; `gemini-*` IDs map to `google/<id>`; IDs already containing `/` are sent unchanged.
+- Model ID mapping: versioned IDs such as `claude-sonnet-5-5` and `claude-opus-4-7` map to dotted slugs (`anthropic/claude-sonnet-5.5`, `anthropic/claude-opus-4.7`); other `claude-*` IDs map to `anthropic/<id>`; `gemini-*` IDs map to `google/<id>`; IDs already containing `/` are sent unchanged.
 - A missing `OPENROUTER_API_KEY` on an OpenRouter call fails with `OPENROUTER_API_KEY is required when the selected provider is OpenRouter.`
 - **Important caveats:**
   - Server abstraction checks `abstractionApiKeyError`, so abstraction can start on OpenRouter without `GEMINI_API_KEY`.

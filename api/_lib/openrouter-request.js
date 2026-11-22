@@ -19,20 +19,16 @@ export function openRouterApiKeyError() {
 export function shouldUseOpenRouter(model) {
   const modelName = String(model || '').trim();
   if (modelName.includes('/')) return true;
-  if (process.env.MODEL_PROVIDER === 'openrouter') return true;
+  // Matched the way scripts/verify-release.mjs reads it, so release checks and routing agree.
+  if (String(process.env.MODEL_PROVIDER || '').trim().toLowerCase() === 'openrouter') return true;
   return false;
 }
 
-// OpenRouter slugs that are not the internal id with a vendor prefix (dotted version numbers).
-const OPENROUTER_SLUGS = new Map([
-  ['claude-sonnet-5-5', 'anthropic/claude-sonnet-5.5'],
-  ['claude-haiku-5-5', 'anthropic/claude-haiku-5.5'],
-]);
 
 /**
  * Auto-map internal model names to OpenRouter slash-names when MODEL_PROVIDER=openrouter.
- * - claude-sonnet-5-5 → anthropic/claude-sonnet-5.5 (OpenRouter slug uses a dot)
- * - claude-haiku-5-5 → anthropic/claude-haiku-5.5
+ * - claude-<family>-<major>-<minor> → anthropic/claude-<family>-<major>.<minor> (OpenRouter slugs use a dot),
+ *   e.g. claude-sonnet-5-5 → anthropic/claude-sonnet-5.5 and claude-opus-4-7 → anthropic/claude-opus-4.7
  * - other claude-* → anthropic/claude-*
  * - gemini-* → google/gemini-*
  * - already contains '/' → pass through unchanged
@@ -40,7 +36,8 @@ const OPENROUTER_SLUGS = new Map([
 function mapModelName(model) {
   const modelName = String(model || '').trim();
   if (modelName.includes('/')) return modelName;
-  if (OPENROUTER_SLUGS.has(modelName)) return OPENROUTER_SLUGS.get(modelName);
+  const versioned = /^(claude-[a-z]+-\d+)-(\d+)$/i.exec(modelName);
+  if (versioned) return `anthropic/${versioned[1]}.${versioned[2]}`;
   if (/^claude-/i.test(modelName)) return `anthropic/${modelName}`;
   if (/^gemini-/i.test(modelName)) return `google/${modelName}`;
   return modelName;
