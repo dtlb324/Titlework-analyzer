@@ -56,6 +56,11 @@ const RAW_PAYLOAD_KEYS = new Set([
 ]);
 const SYNTHESIS_SEGMENT_STATUSES = new Set(['pending', 'processing', 'complete', 'failed', 'retry_wait']);
 const JOB_RESULT_STATUSES = new Set(['complete', 'partial_failed', 'failed']);
+// Paid synthesis work runs only where every result it can produce is a valid next status, so a merge is never
+// billed and then refused by saveJobResult.
+const SYNTHESIS_WORK_STATUSES = Object.keys(VALID_TRANSITIONS)
+  .filter(status => [...JOB_RESULT_STATUSES].every(next => VALID_TRANSITIONS[status].has(next)));
+const ABSTRACTION_RUNNABLE_STATUSES = ['ready', 'queued', 'planning', 'abstracting'];
 const MAX_FOLLOWUP_QUESTION_CHARS = 2000;
 const MAX_RESULT_WARNINGS = 100;
 const MAX_RESULT_FAILED_DOCUMENTS = 1000;
@@ -381,6 +386,9 @@ export function validatePatchJobInput(input, existingJob) {
   if (input.status !== undefined) {
     if (!ALLOWED_STATUSES.has(input.status)) {
       return { valid: false, statusCode: 400, reason: 'Invalid job status.' };
+    }
+    if (input.status === 'canceled' && existingJob.status !== 'canceled') {
+      return { valid: false, statusCode: 409, reason: 'Cancel a job with POST /api/jobs/:id/cancel.' };
     }
     if (!isValidStatusTransition(existingJob.status, input.status)) {
       return { valid: false, statusCode: 409, reason: `Invalid job status transition from ${existingJob.status} to ${input.status}.` };
@@ -1340,10 +1348,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           ELSE 'Server abstraction ' || counts.completed || '/' || counts.total
         END,
         status = CASE
-          WHEN status = 'canceled' THEN 'canceled'
-          WHEN status = 'complete'
-            AND counts.processing + counts.pending + counts.retry_wait = 0
-            THEN 'complete'
+          WHEN status IN ('canceled', 'complete') THEN status
           WHEN status IN ('synthesizing', 'failed', 'partial_failed')
             AND counts.processing + counts.pending + counts.retry_wait = 0
             THEN status
@@ -1725,6 +1730,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
           AND upload_status = 'uploaded'
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = document_chunks.job_id
+              AND j.status NOT IN ('canceled', 'complete')
+          )
           AND (
             abstraction_status = 'pending'
             OR (abstraction_status = 'retry_wait' AND (abstraction_retry_at IS NULL OR abstraction_retry_at <= now()))
@@ -1752,6 +1762,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           AND id = ${chunkId}
           AND abstraction_status = 'processing'
           AND abstraction_worker_id = ${options.workerId ?? null}::text
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = document_chunks.job_id
+              AND j.status NOT IN ('canceled', 'complete')
+          )
         RETURNING *
       `;
       return rowToChunk(rows[0]);
@@ -1771,6 +1786,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           AND id = ANY(${ids}::text[])
           AND abstraction_status = 'processing'
           AND abstraction_worker_id = ${options.workerId ?? null}::text
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = document_chunks.job_id
+              AND j.status NOT IN ('canceled', 'complete')
+          )
         RETURNING *
       `;
       return rows.map(rowToChunk);
@@ -1828,7 +1848,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         SELECT DISTINCT dc.job_id
         FROM document_chunks dc
         INNER JOIN analysis_jobs j ON j.id = dc.job_id
-        WHERE j.status NOT IN ('canceled', 'created', 'uploading')
+        WHERE j.status = ANY(${ABSTRACTION_RUNNABLE_STATUSES}::text[])
           AND dc.upload_status = 'uploaded'
           AND (
             dc.abstraction_status = 'pending'
@@ -1910,6 +1930,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
             updated_at = now()
         WHERE job_id = ${jobId}
           AND abstraction_status IN ('failed', 'retry_wait')
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = document_chunks.job_id
+              AND j.status NOT IN ('canceled', 'complete')
+          )
         RETURNING id
       `;
       if (rows.length) await refreshAbstractionCounts(jobId);
@@ -2206,6 +2231,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           WHERE job_id = ${record.jobId}
             AND id = ${record.chunkId}
             AND (${record.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${record.workerId}::text))
+            AND EXISTS (
+              SELECT 1 FROM analysis_jobs j
+              WHERE j.id = document_chunks.job_id
+                AND j.status NOT IN ('canceled', 'complete')
+            )
           RETURNING id
         )
         INSERT INTO document_abstracts (
@@ -2323,6 +2353,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         WHERE job_id = ${jobId}
           AND id = ${chunkId}
           AND abstraction_status IN ('failed', 'retry_wait')
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = document_chunks.job_id
+              AND j.status NOT IN ('canceled', 'complete')
+          )
         RETURNING *
       `;
       if (rows.length) await refreshAbstractionCounts(jobId);
@@ -2378,6 +2413,9 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       await ensureSchema();
       const job = await this.getJob(jobId);
       if (!job) return null;
+      if (job.status === 'complete' || job.status === 'canceled') {
+        throw new JobApiError(`Cannot plan synthesis for a ${job.status} job.`, 409);
+      }
       const planId = String(planInput?.planId || '').slice(0, 128);
       if (!planId) throw new JobApiError('planId is required to save a synthesis plan.', 400);
       const segments = Array.isArray(planInput?.segments) ? planInput.segments : [];
@@ -2395,6 +2433,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         DELETE FROM job_results
         WHERE job_id = ${jobId}
           AND (plan_id IS NULL OR plan_id <> ${planId})
+          AND EXISTS (
+            SELECT 1 FROM analysis_jobs j
+            WHERE j.id = job_results.job_id
+              AND j.status NOT IN ('complete', 'canceled')
+          )
       `;
       const upsertSegment = (q, segment) => {
         const id = `seg_${randomUUID()}`;
@@ -2613,7 +2656,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           AND EXISTS (
             SELECT 1 FROM analysis_jobs j
             WHERE j.id = synthesis_segments.job_id
-              AND j.status <> 'canceled'
+              AND j.status = ANY(${SYNTHESIS_WORK_STATUSES}::text[])
           )
           AND (
             status = 'pending'
@@ -2640,7 +2683,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           AND EXISTS (
             SELECT 1 FROM analysis_jobs j
             WHERE j.id = synthesis_segments.job_id
-              AND j.status <> 'canceled'
+              AND j.status = ANY(${SYNTHESIS_WORK_STATUSES}::text[])
           )
         RETURNING *
       `;
@@ -2858,7 +2901,8 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           updated_at = now()
         WHERE id = ${jobId}
           AND synthesis_plan_id = ${planId}
-          AND status <> 'canceled'
+          AND status = ANY(${SYNTHESIS_WORK_STATUSES}::text[])
+          AND NOT EXISTS (SELECT 1 FROM job_results r WHERE r.job_id = analysis_jobs.id AND r.plan_id = ${planId})
           AND (
             synthesis_merge_worker_id IS NULL
             OR synthesis_merge_lease_expires_at IS NULL
@@ -2886,7 +2930,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           updated_at = now()
         WHERE id = ${jobId}
           AND synthesis_plan_id = ${planId}
-          AND status <> 'canceled'
+          AND status = ANY(${SYNTHESIS_WORK_STATUSES}::text[])
           AND synthesis_merge_worker_id = ${options.workerId ?? null}::text
         RETURNING id, synthesis_plan_id, synthesis_merge_worker_id, synthesis_merge_lease_expires_at
       `;
@@ -2910,19 +2954,35 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         const status = JOB_RESULT_STATUSES.has(payload.status) ? payload.status : 'complete';
         const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
         const failedDocuments = Array.isArray(payload.failedDocuments) ? payload.failedDocuments : [];
-        const desiredJobStatus = status === 'complete' ? 'complete'
-          : status === 'partial_failed' ? 'partial_failed'
-          : 'failed';
-        let canAdvanceStatus = false;
-        if (job.status !== desiredJobStatus) {
-          try {
-            assertValidStatusTransition(job.status, desiredJobStatus);
-            canAdvanceStatus = true;
-          } catch (error) {
-            if (!isInvalidJobStatusTransition(error)) throw error;
-          }
-        }
-        const insertResult = q => q`
+        // A result whose status the job cannot take is refused, so the row and the job never disagree.
+        if (!isValidStatusTransition(job.status, status)) return null;
+        const nextPhase = job.status === status ? null
+          : status === 'complete' ? 'complete'
+          : status === 'partial_failed' ? 'complete with synthesis warnings'
+          : 'synthesis failed';
+        // One statement: the guarded job update locks the row, and the result is written only if it matched.
+        const rows = await sql`
+          WITH saved_job AS (
+            UPDATE analysis_jobs
+            SET status = ${status}::text,
+                current_phase = COALESCE(${nextPhase}::text, current_phase),
+                synthesis_preview_text = NULL,
+                synthesis_preview_complete = false,
+                synthesis_preview_degraded = false,
+                synthesis_preview_bytes = 0,
+                synthesis_preview_updated_at = NULL,
+                synthesis_merge_worker_id = NULL,
+                synthesis_merge_lease_expires_at = NULL,
+                completed_at = COALESCE(completed_at, now()),
+                updated_at = now()
+            WHERE id = ${jobId}::text
+              AND status = ${job.status}::text
+              AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
+                synthesis_plan_id = ${payload.planId || null}::text
+                AND synthesis_merge_worker_id = ${payload.mergeWorkerId ?? null}::text
+              ))
+            RETURNING id
+          )
           INSERT INTO job_results (
             id, job_id, plan_id, status,
             final_title_opinion, warnings_json, failed_documents_json,
@@ -2930,18 +2990,11 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
             synthesis_duration_ms, generated_at
           )
           SELECT
-            ${id}::text, ${jobId}::text, ${payload.planId || null}::text, ${status}::text,
+            ${id}::text, saved_job.id, ${payload.planId || null}::text, ${status}::text,
             ${payload.finalTitleOpinion || ''}, ${JSON.stringify(warnings)}::jsonb, ${JSON.stringify(failedDocuments)}::jsonb,
             ${payload.modelUsed || null}::text, ${payload.inputTokens ?? null}::integer, ${payload.outputTokens ?? null}::integer, ${payload.payloadBytes ?? null}::integer,
             ${payload.synthesisDurationMs ?? null}::integer, now()
-          FROM analysis_jobs aj
-          WHERE aj.id = ${jobId}::text
-            AND aj.status = ${job.status}::text
-            AND aj.status NOT IN ('canceled', 'complete')
-            AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
-              aj.synthesis_plan_id = ${payload.planId || null}::text
-              AND aj.synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
-            ))
+          FROM saved_job
           ON CONFLICT (job_id) DO UPDATE
           SET
             plan_id = EXCLUDED.plan_id,
@@ -2957,72 +3010,7 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
             generated_at = now()
           RETURNING *
         `;
-        if (typeof sql.transaction === 'function') {
-          const nextPhase = status === 'complete' ? 'complete'
-            : status === 'partial_failed' ? 'complete with synthesis warnings'
-            : 'synthesis failed';
-          const updateJobOnSave = q => (canAdvanceStatus
-            ? q`
-              UPDATE analysis_jobs
-              SET status = ${desiredJobStatus},
-                  current_phase = ${nextPhase},
-                  synthesis_preview_text = NULL,
-                  synthesis_preview_complete = false,
-                  synthesis_preview_degraded = false,
-                  synthesis_preview_bytes = 0,
-                  synthesis_preview_updated_at = NULL,
-                  synthesis_merge_worker_id = NULL,
-                  synthesis_merge_lease_expires_at = NULL,
-                  completed_at = COALESCE(completed_at, now()),
-                  updated_at = now()
-              WHERE id = ${jobId}
-                AND status = ${job.status}
-                AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
-                  synthesis_plan_id = ${payload.planId || null}::text
-                  AND synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
-                ))
-            `
-            : q`
-              UPDATE analysis_jobs
-              SET synthesis_preview_text = NULL,
-                  synthesis_preview_complete = false,
-                  synthesis_preview_degraded = false,
-                  synthesis_preview_bytes = 0,
-                  synthesis_preview_updated_at = NULL,
-                  synthesis_merge_worker_id = NULL,
-                  synthesis_merge_lease_expires_at = NULL,
-                  updated_at = now()
-              WHERE id = ${jobId}
-                AND status = ${job.status}
-                AND (${payload.mergeWorkerId ?? null}::text IS NULL OR (
-                  synthesis_plan_id = ${payload.planId || null}::text
-                  AND synthesis_merge_worker_id = ${payload.mergeWorkerId}::text
-                ))
-            `);
-          const [insertedRows] = await sql.transaction(txn => [
-            insertResult(txn),
-            updateJobOnSave(txn),
-          ]);
-          if (!insertedRows?.[0]) return null;
-          return rowToJobResult(insertedRows[0]);
-        }
-
-        const rows = await insertResult(sql);
         if (!rows[0]) return null;
-        await this.clearSynthesisPreview(jobId);
-        if (canAdvanceStatus) {
-          await sql`
-            UPDATE analysis_jobs
-            SET status = ${desiredJobStatus},
-                current_phase = ${status === 'complete' ? 'complete' : status === 'partial_failed' ? 'complete with synthesis warnings' : 'synthesis failed'},
-                synthesis_merge_worker_id = NULL,
-                synthesis_merge_lease_expires_at = NULL,
-                completed_at = COALESCE(completed_at, now()),
-                updated_at = now()
-            WHERE id = ${jobId}
-              AND status = ${job.status}
-          `;
-        }
         return rowToJobResult(rows[0]);
       } finally {
         if (payload.mergeWorkerId) {

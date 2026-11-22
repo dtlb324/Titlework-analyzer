@@ -523,8 +523,8 @@ async function handleSynthesisStart(req, res, requestId, store, jobId) {
   }
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  if (job.status === 'canceled') {
-    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  if (job.status === 'canceled' || job.status === 'complete') {
+    return res.status(409).json({ error: job.status === 'canceled' ? 'Job has been canceled.' : 'Job is already complete.', requestId });
   }
   let snapshot;
   try {
@@ -592,8 +592,8 @@ async function handleSynthesisProcess(req, res, requestId, store, jobId) {
   }
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  if (job.status === 'canceled') {
-    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  if (job.status === 'canceled' || job.status === 'complete') {
+    return res.status(409).json({ error: job.status === 'canceled' ? 'Job has been canceled.' : 'Job is already complete.', requestId });
   }
   let result;
   try {

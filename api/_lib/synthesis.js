@@ -1407,8 +1407,8 @@ export async function planJobSynthesis(jobId, options = {}) {
     err.statusCode = 404;
     throw err;
   }
-  if (job.status === 'canceled') {
-    const err = new Error('Job has been canceled.');
+  if (job.status === 'canceled' || job.status === 'complete') {
+    const err = new Error(job.status === 'canceled' ? 'Job has been canceled.' : 'Job is already complete.');
     err.statusCode = 409;
     throw err;
   }

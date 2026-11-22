@@ -101,8 +101,8 @@ export async function enqueueAbstractionJob(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to enqueue abstraction.');
   const job = await getJobOrThrow(store, jobId);
-  if (isJobCanceled(job)) {
-    const error = new Error('Job has been canceled.');
+  if (isJobCanceled(job) || job.status === 'complete') {
+    const error = new Error(isJobCanceled(job) ? 'Job has been canceled.' : 'Job is already complete.');
     error.statusCode = 409;
     throw error;
   }
@@ -180,6 +180,11 @@ export async function processAbstractionBatch(jobId, options = {}) {
   const deadline = startedAt + config.budgetMs;
 
   const initialJob = await getJobOrThrow(store, jobId);
+  if (initialJob.status === 'complete') {
+    const error = new Error('Job is already complete.');
+    error.statusCode = 409;
+    throw error;
+  }
   if (['created', 'uploading'].includes(initialJob.status)) {
     const error = new Error('Uploads must be finalized before processing abstraction.');
     error.statusCode = 409;
@@ -402,6 +407,16 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
     error.statusCode = 409;
     throw error;
   }
+  if (job.status === 'complete') {
+    const error = new Error('Job is already complete.');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (['created', 'uploading'].includes(job.status)) {
+    const error = new Error('Uploads must be finalized before starting server-side synthesis.');
+    error.statusCode = 409;
+    throw error;
+  }
   if (store.resetStaleSynthesisSegments) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
   }
@@ -565,8 +580,8 @@ export async function retryFailedAbstractionChunks(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to retry failed chunks.');
   const job = await getJobOrThrow(store, jobId);
-  if (isJobCanceled(job)) {
-    const error = new Error('Job has been canceled.');
+  if (isJobCanceled(job) || job.status === 'complete') {
+    const error = new Error(isJobCanceled(job) ? 'Job has been canceled.' : 'Job is already complete.');
     error.statusCode = 409;
     throw error;
   }
