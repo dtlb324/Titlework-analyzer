@@ -1187,7 +1187,6 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`;
         await sql`ALTER TABLE synthesis_segments ADD COLUMN IF NOT EXISTS completed_at timestamptz`;
         await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_synthesis_segments_job_plan_segment_unique ON synthesis_segments(job_id, plan_id, segment_index)`;
-        await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_job_plan ON synthesis_segments(job_id, plan_id, segment_index)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_job_status ON synthesis_segments(job_id, status)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_lease ON synthesis_segments(job_id, status, lease_expires_at)`;
         await sql`CREATE INDEX IF NOT EXISTS idx_synthesis_segments_retry ON synthesis_segments(job_id, status, retry_at)`;

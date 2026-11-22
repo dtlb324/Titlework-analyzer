@@ -5,3 +5,4 @@ node_modules/
 .tmp-gcloud/
 scripts/ocr-comparison-results/
 scripts/sample-docs/
+.DS_Store

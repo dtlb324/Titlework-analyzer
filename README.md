@@ -96,7 +96,7 @@ Running real jobs locally requires **four external resources** (a Neon database,
 1. Create a Gemini API key at [Google AI Studio](https://aistudio.google.com/apikey) for `GEMINI_API_KEY` (`GOOGLE_API_KEY` is also accepted).
 2. Create an Anthropic API key in the [Anthropic console](https://console.anthropic.com) for `ANTHROPIC_API_KEY`.
 
-*(Want to route model calls through OpenRouter instead? See [Route models through OpenRouter](#route-models-through-openrouter) — note that synthesis start still checks for both direct key names.)*
+*(Want to route model calls through OpenRouter instead? See [Route models through OpenRouter](#route-models-through-openrouter). With `MODEL_PROVIDER=openrouter`, `OPENROUTER_API_KEY` replaces both direct keys.)*
 
 ### 3. Create a private GCS bucket for local uploads
 
@@ -206,8 +206,8 @@ MODEL_PROVIDER=openrouter
 - A missing `OPENROUTER_API_KEY` on an OpenRouter call fails with `OPENROUTER_API_KEY is required when the selected provider is OpenRouter.`
 - **Important caveats:**
   - Server abstraction checks `abstractionApiKeyError`, so abstraction can start on OpenRouter without `GEMINI_API_KEY`.
-  - **Synthesis start (`synthesisSetupError`) still requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and `ANTHROPIC_API_KEY`.** If either is missing, `POST /api/jobs/:id/synthesis/start` returns `503` with `fallback: "browser_synthesis"`.
-  - **Release verification (`scripts/verify-release.mjs`)** also checks for the Gemini and Anthropic env var names on both services and does not check `OPENROUTER_API_KEY`.
+  - Synthesis start (`synthesisSetupError`) checks the key for each synthesis model's route, so on OpenRouter it needs only `OPENROUTER_API_KEY`. If that key is missing, `POST /api/jobs/:id/synthesis/start` returns `503` with `fallback: "browser_synthesis"`.
+  - Release verification (`scripts/verify-release.mjs`) requires `OPENROUTER_API_KEY` instead of the Gemini and Anthropic keys on a service with `MODEL_PROVIDER=openrouter`.
 - Optional headers: `OPENROUTER_REFERER` is sent as `HTTP-Referer` when set; `OPENROUTER_TITLE` is sent as `X-Title` (defaults to `Titlework Analyzer`).
 
 ---
@@ -363,7 +363,7 @@ Set runtime variables on both Cloud Run services unless a row says API only or w
 | `DATABASE_URL` | Yes, for durable jobs | `getDatabaseUrl` also reads `POSTGRES_URL` and `POSTGRES_PRISMA_URL`. If all three are empty, job and upload routes fail with `DATABASE_URL or POSTGRES_URL is required`. |
 | `GCS_BUCKET` | Yes, for uploads and server abstraction | `GOOGLE_CLOUD_STORAGE_BUCKET` and `STORAGE_BUCKET` are aliases. Storage errors start with `Google Cloud Storage is not configured`. |
 | `GEMINI_API_KEY` | Yes, for direct Gemini calls | `GOOGLE_API_KEY` is the alias. A direct Gemini call fails with `GEMINI_API_KEY is required for Gemini models.` |
-| `ANTHROPIC_API_KEY` | Yes, for direct Claude calls and for synthesis start | A direct Claude call fails with `ANTHROPIC_API_KEY is required for Claude models.` Synthesis start also fails when this is empty. See [Route models through OpenRouter](#route-models-through-openrouter). |
+| `ANTHROPIC_API_KEY` | Yes, for direct Claude calls | A direct Claude call fails with `ANTHROPIC_API_KEY is required for Claude models.` Synthesis start also fails when this is empty, unless the synthesis models route through OpenRouter. See [Route models through OpenRouter](#route-models-through-openrouter). |
 | `APP_PASSWORD` | Yes for production | Outside production, job routes and `POST /api/analyze` allow the request, but server abstraction, synthesis, follow-up, retry, and the abstract list still return 401 with `APP_PASSWORD is required for server-side abstraction endpoints.` Production returns 401 from the job gate and `/api/analyze` until set. The browser sends it as `x-app-password`. |
 | `INTERNAL_DRAIN_TOKEN` | Yes for production, worker only | `POST /internal/drain` compares header `x-internal-drain-token` with `secureCompare`. Production returns 401 `INTERNAL_DRAIN_TOKEN is required.` Outside production, an unset token allows the request with no header. Worker `/healthz` stays unauthenticated. |
 
