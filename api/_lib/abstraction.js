@@ -1172,6 +1172,8 @@ export async function splitPdfChunk(parentChunk, bytes, reason, options) {
   }
   const { PDFDocument } = await import('pdf-lib');
   const source = await PDFDocument.load(normalizeBytes(bytes), { ignoreEncryption: true });
+  // pdf-lib cannot decrypt, so split children of an encrypted PDF would be blank pages.
+  if (source.isEncrypted) return false;
   const pageCount = source.getPageCount();
   if (pageCount <= 1) return false;
 

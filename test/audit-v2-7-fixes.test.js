@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import * as pdfLib from 'pdf-lib';
+import { processChunkAbstraction } from '../api/_lib/abstraction.js';
 import { createPostgresJobStore, validatePatchJobInput } from '../api/_lib/jobs.js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
+import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
 import { getPartialSynthesisConfig, PARTIAL_SYNTHESIS_PROMPT, processSynthesisJob } from '../api/_lib/synthesis.js';
+import { disposeAll, jsonResponse, loadIndex } from './helpers/browser-index-harness.js';
 import { createPgliteSql } from './helpers/pglite-sql.js';
 
 const tests = [];
@@ -233,6 +237,48 @@ test('H6: a single-pass opinion fails closed instead of re-billing after a split
     invalidAfterRepair: { kinds: ['original', 'repair'], status: 'failed', errorType: 'validation_failed' },
     rateLimitInPaidSplit: { kinds: ['original', 'half'], status: 'failed', errorType: 'paid_split_failed' },
   });
+});
+
+// pdf-lib only reads the /Encrypt flag, so a trailer entry is enough to reproduce an owner-locked courthouse PDF.
+async function encryptedPdfBytes(pageCount) {
+  const doc = await pdfLib.PDFDocument.create();
+  for (let i = 0; i < pageCount; i += 1) doc.addPage([200, 200]);
+  doc.context.trailerInfo.Encrypt = doc.context.register(doc.context.obj({ Filter: 'Standard', V: 1, R: 2, P: -4 }));
+  return Buffer.from(await doc.save({ useObjectStreams: false }));
+}
+
+test('H4: encrypted PDFs are never copied into blank subsets or split children', async () => {
+  const bytes = await encryptedPdfBytes(4);
+  await assert.rejects(extractPdfPageSubset(bytes, [1]), /Encrypted PDF/);
+
+  const parent = {
+    id: 'chk_enc', jobId: 'job_enc', documentId: 'doc_enc', chunkOrder: 0, originalFilename: 'deed.pdf',
+    mediaType: 'application/pdf', uploadStatus: 'uploaded', abstractionStatus: 'processing', abstractionWorkerId: 'wkr_enc',
+    abstractionAttempts: 1, pageStart: 1, pageEnd: 4, sizeBytes: bytes.length, fingerprint: 'fp_enc',
+  };
+  const writes = [];
+  const store = {
+    async claimChunkForAbstraction() { return parent; },
+    async commitSplitPdfChunks() { writes.push('commit'); return null; },
+    async markChunkAbstractionFailed() { return { ...parent, abstractionStatus: 'failed' }; },
+  };
+  const result = await processChunkAbstraction(parent, {
+    store, workerId: 'wkr_enc', maxAttempts: 1,
+    blobLoader: async () => ({ bytes, mediaType: 'application/pdf' }),
+    blobWriter: async (_chunk, name) => { writes.push(`upload:${name}`); return { blobKey: name, blobUrl: null }; },
+    modelClient: async () => { throw Object.assign(new Error('payload too large'), { status: 413 }); },
+  });
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(writes, []);
+
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(200, {}) });
+  try {
+    app.ctx.PDFLib = pdfLib;
+    const file = { name: 'deed.pdf', size: bytes.length, type: 'application/pdf', arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
+    await assert.rejects(app.ctx.splitPdfIntoEntries(file, 50, 400), /deed\.pdf: this PDF is encrypted/);
+  } finally {
+    disposeAll();
+  }
 });
 
 let passed = 0;

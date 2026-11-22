@@ -1561,6 +1561,10 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
   } catch (e) {
     throw new Error(`${file.name}: could not read PDF for splitting. Re-export the file or scan at 150 DPI.`);
   }
+  // pdf-lib cannot decrypt, so split parts of an encrypted PDF would be blank pages.
+  if (srcDoc.isEncrypted) {
+    throw new Error(`${file.name}: this PDF is encrypted, so it cannot be split without blanking its pages. Print it to a new PDF or split it by page range manually.`);
+  }
 
   const pageCount = srcDoc.getPageCount();
   if (!pageCount) throw new Error(`${file.name}: PDF has no pages.`);
