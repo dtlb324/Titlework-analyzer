@@ -8,6 +8,7 @@ import { runWorkerDrain, runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-
 import { createPostgresJobStore, validatePatchJobInput } from '../api/_lib/jobs.js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
+import { prepareDocument } from '../public/pdf-raster.js';
 import { getPartialSynthesisConfig, PARTIAL_SYNTHESIS_PROMPT, processSynthesisJob } from '../api/_lib/synthesis.js';
 import { disposeAll, jsonResponse, loadIndex } from './helpers/browser-index-harness.js';
 import { createPgliteSql } from './helpers/pglite-sql.js';
@@ -448,6 +449,113 @@ test('H12: a drain deadline caps the budget of each job batch', async () => {
   }
   const elapsedMs = Date.now() - startedAt;
   assert.ok(elapsedMs < 5_000, `Expected the batch to stop near the 1.2s drain deadline, ran ${elapsedMs}ms`);
+});
+
+function listableStorage(entries = {}) {
+  const map = new Map(Object.entries(entries));
+  return {
+    get length() { return map.size; },
+    key: i => [...map.keys()][i] ?? null,
+    getItem: key => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, String(value)),
+    removeItem: key => map.delete(key),
+    keys: () => [...map.keys()],
+  };
+}
+
+test('H13: a complete job offers no high-DPI re-read it could not save, and refuses one before any paid call', async () => {
+  const requests = [];
+  const app = loadIndex({ fetchImpl: async (url, init = {}) => { requests.push(`${init.method || 'GET'} ${url}`); return jsonResponse(200, {}); } });
+  try {
+    const pdf = new File([new Uint8Array([37, 80, 68, 70, 45])], 'deed.pdf', { type: 'application/pdf' });
+    const sourceFiles = app.run('sessionSourceFilesByJob');
+    sourceFiles.set('job_done', [pdf]);
+    sourceFiles.set('job_partial', [pdf]);
+    const labelsFor = job => { app.ctx.renderJobActions(job); return app.run('jobActionButtons').map(button => button.label); };
+    assert.equal(labelsFor({ id: 'job_done', status: 'complete', failedDocuments: 1 }).includes('Re-read as high-DPI page images'), false);
+    assert.equal(labelsFor({ id: 'job_partial', status: 'partial_failed', failedDocuments: 1 }).includes('Re-read as high-DPI page images'), true);
+    await app.ctx.rereadJobPdfsAsHighDpi({ id: 'job_done', status: 'complete', failedDocuments: 1 });
+    assert.deepEqual(requests, []);
+  } finally {
+    disposeAll();
+  }
+});
+
+test('H14: a Windows .csv typed application/vnd.ms-excel is read as CSV, and a PDF with a short preamble rasterizes', async () => {
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(200, {}) });
+  try {
+    assert.equal(app.ctx.isCsvFile(new File(['grantor,grantee'], 'deeds.csv', { type: 'application/vnd.ms-excel' })), true);
+    assert.equal(app.ctx.isPdfFile(new File(['%PDF-1.7'], 'deed.pdf', { type: 'application/x-pdf' })), true);
+    assert.equal(app.ctx.isImageFile(new File(['x'], 'plat.png', { type: 'image/png' })), true);
+  } finally {
+    disposeAll();
+  }
+  const withPreamble = new File([new Uint8Array(64), '%PDF-1.7\n'], 'deed.pdf', { type: 'application/pdf' });
+  const pdfjs = { GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve({ numPages: 0, destroy() {} }), destroy() {} }) };
+  const outcome = await prepareDocument(withPreamble, { loadPdfjs: async () => pdfjs }).then(() => 'rendered', err => err.message);
+  assert.notEqual(outcome, 'File signature does not match the selected document type.');
+});
+
+test('H14: a 401 is not retried into a password lockout, and polls end when the job is canceled or already finished', async () => {
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(200, {}) });
+  try {
+    let reads = 0;
+    await assert.rejects(app.ctx.readServerState(async () => { reads += 1; throw Object.assign(new Error('Unauthorized'), { status: 401 }); }, null), /Unauthorized/);
+    assert.equal(reads, 1);
+  } finally {
+    disposeAll();
+  }
+  for (const [jobStatus, expected] of [['canceled', 'Job was canceled.'], ['failed', 'returned']]) {
+    let statusReads = 0;
+    const app2 = loadIndex({
+      fetchImpl: async url => {
+        if (String(url).endsWith('/synthesis/status')) {
+          statusReads += 1;
+          return jsonResponse(200, { status: { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0 }, job: { id: 'job_end', status: jobStatus } });
+        }
+        return jsonResponse(200, {});
+      },
+    });
+    try {
+      const outcome = await app2.ctx.pollServerSynthesis('job_end', [], 1, null, null).then(() => 'returned', err => err.message);
+      assert.equal(outcome, expected);
+      assert.equal(statusReads, 1);
+    } finally {
+      disposeAll();
+    }
+  }
+});
+
+test('H14: a failed save keeps the paid browser opinion with a notice instead of throwing', async () => {
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(503, { error: 'Database unavailable.' }) });
+  try {
+    await app.ctx.saveBrowserResultOrWarn('job_save', { status: 'complete', finalTitleOpinion: OPINION });
+    assert.match(app.getEl('errorBox').innerHTML, /not saved to the job/);
+  } finally {
+    disposeAll();
+  }
+});
+
+test('H14: local abstraction checkpoints expire after a day and are pruned at startup', async () => {
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(200, {}) });
+  try {
+    const dayAgo = Date.now() - 25 * 60 * 60 * 1000;
+    const files = [new File(['%PDF-1.7'], 'deed.pdf', { type: 'application/pdf' })];
+    const key = app.ctx.getFileSignature(files, 0, 'home');
+    const storage = listableStorage({
+      'title-analyzer-abstraction:old': JSON.stringify({ savedAt: dayAgo, entries: [{ localIndex: 0, abstract: 'old' }] }),
+      'title-analyzer-abstraction:fresh': JSON.stringify({ savedAt: Date.now(), entries: [] }),
+      [key]: JSON.stringify({ savedAt: dayAgo, entries: [{ localIndex: 0, abstract: 'stale' }] }),
+      'unrelated-key': 'kept',
+    });
+    app.ctx.localStorage = storage;
+    assert.equal(app.ctx.loadAbstractionCheckpoint(files, 0, 'home').entries.length, 0);
+    assert.equal(storage.getItem(key), null);
+    app.ctx.pruneExpiredAbstractionCheckpoints();
+    assert.deepEqual(storage.keys().sort(), ['title-analyzer-abstraction:fresh', 'unrelated-key']);
+  } finally {
+    disposeAll();
+  }
 });
 
 let passed = 0;

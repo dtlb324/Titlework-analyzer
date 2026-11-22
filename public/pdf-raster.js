@@ -28,10 +28,11 @@ async function encodeRenderedPage(canvas, index, png, deficit) {
 export async function prepareDocument(file, deps = {}) {
   const allowed = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
   if (!allowed.includes(file.type)) throw new Error('Choose a PDF, PNG, JPEG or WebP file.');
-  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
   const starts = signature => signature.every((value, index) => head[index] === value);
   const ascii = (offset, value) => [...value].every((char, index) => head[offset + index] === char.charCodeAt(0));
-  const valid = file.type === 'application/pdf' ? ascii(0, '%PDF-')
+  // PDF readers tolerate leading bytes before the header, and intake accepts %PDF- anywhere in the first 1 KB.
+  const valid = file.type === 'application/pdf' ? new TextDecoder('latin1').decode(head).includes('%PDF-')
     : file.type === 'image/png' ? starts([137, 80, 78, 71, 13, 10, 26, 10])
     : file.type === 'image/jpeg' ? starts([255, 216, 255])
     : ascii(0, 'RIFF') && ascii(8, 'WEBP');
