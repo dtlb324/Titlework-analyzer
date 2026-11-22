@@ -130,6 +130,31 @@ gcloud storage buckets update gs://my-titlework-bucket --cors-file=cors.json
 gcloud auth application-default login
 ```
 
+Configure a bucket lifecycle rule so uploaded job files and split PDFs (including any orphaned split PDFs left behind after a lost worker lease or crash) expire automatically after 30 days. Save this as `lifecycle.json`:
+
+```json
+{
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "age": 30,
+        "matchesPrefix": ["jobs/"]
+      }
+    }
+  ]
+}
+```
+
+```bash
+gcloud storage buckets update gs://my-titlework-bucket --lifecycle-file=lifecycle.json
+gcloud storage buckets describe gs://my-titlework-bucket --format="json(lifecycle_config)"
+```
+
+- `matchesPrefix: ["jobs/"]` scopes deletion to uploaded source files and server-generated split PDFs (`jobs/<jobId>/chunks/...`) and leaves rate-limit state under `ops/rate-limits/` untouched.
+- Applying `--lifecycle-file` replaces existing lifecycle rules on the bucket; rule changes can take up to 24 hours to take effect.
+- Completed abstracts, title opinions, and follow-ups remain in Neon Postgres; only retrying an unabstracted chunk after its blob expires (>30 days) requires re-uploading.
+
 ### 4. Configure `.env.local`
 
 Copy the placeholder template and fill in your values. Git ignores `.env*` and tracks only `.env.example` — never commit `.env.local`.
@@ -242,6 +267,12 @@ Update your GCS CORS policy (`cors.json`) to include your deployed Cloud Run API
 
 ```bash
 gcloud storage buckets update gs://my-titlework-bucket --cors-file=cors.json
+```
+
+If you haven't already applied the 30-day `jobs/` lifecycle rule from [step 3 of local setup](#3-create-a-private-gcs-bucket-for-local-uploads), apply `lifecycle.json` to your production bucket so completed uploads and orphaned split PDFs expire automatically:
+
+```bash
+gcloud storage buckets update gs://my-titlework-bucket --lifecycle-file=lifecycle.json
 ```
 
 ### 2. Authenticate GitHub Actions (Workload Identity Federation)
