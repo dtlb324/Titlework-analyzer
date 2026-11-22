@@ -239,6 +239,7 @@ export async function postOpenRouterChat(request, options = {}) {
   if (keyError) {
     const error = new Error(keyError);
     error.statusCode = 503;
+    error.code = 'missing_api_key';
     throw error;
   }
 

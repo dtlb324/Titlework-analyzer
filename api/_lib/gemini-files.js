@@ -108,6 +108,7 @@ export async function uploadGeminiFile(bytes, mimeType, displayName, options = {
   if (!key) {
     const error = new Error('GEMINI_API_KEY is required for Gemini Files API uploads.');
     error.statusCode = 503;
+    error.code = 'missing_api_key';
     throw error;
   }
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
@@ -167,7 +168,12 @@ export async function uploadGeminiFile(bytes, mimeType, displayName, options = {
     throw new Error('Gemini file upload did not return a file URI.');
   }
 
-  await waitForGeminiFileActive(name, { ...options, signal: options.signal });
+  try {
+    await waitForGeminiFileActive(name, { ...options, signal: options.signal });
+  } catch (err) {
+    await deleteGeminiFile(name);
+    throw err;
+  }
 
   return {
     uri,

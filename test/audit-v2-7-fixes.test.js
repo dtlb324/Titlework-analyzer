@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import * as pdfLib from 'pdf-lib';
-import { processChunkAbstraction } from '../api/_lib/abstraction.js';
+import { classifyAbstractionError, enrichVisualDeliveryForModel, processChunkAbstraction } from '../api/_lib/abstraction.js';
+import { consumeAnthropicMessageStream } from '../api/_lib/anthropic-stream.js';
+import { uploadGeminiFile } from '../api/_lib/gemini-files.js';
+import { consumeOpenRouterMessageStream } from '../api/_lib/openrouter-stream.js';
 import { createPostgresJobStore, validatePatchJobInput } from '../api/_lib/jobs.js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
@@ -279,6 +282,108 @@ test('H4: encrypted PDFs are never copied into blank subsets or split children',
   } finally {
     disposeAll();
   }
+});
+
+function streamBody(text) {
+  const bytes = new TextEncoder().encode(text);
+  let sent = false;
+  return { getReader: () => ({ read: async () => (sent ? { done: true } : (sent = true, { done: false, value: bytes })), releaseLock() {} }) };
+}
+
+async function withFetch(fetchImpl, fn) {
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.GEMINI_API_KEY;
+  globalThis.fetch = fetchImpl;
+  process.env.GEMINI_API_KEY = 'test-key';
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+}
+
+test('H10: auth and context-length errors classify as permanent, and stream errors carry their HTTP status', async () => {
+  assert.deepEqual(
+    [
+      { code: 'missing_api_key', statusCode: 503, message: 'GEMINI_API_KEY is required.' },
+      { status: 401, message: 'API key not valid.' },
+      { status: 403, message: 'Permission denied.' },
+      { status: 400, message: 'prompt is too long: 250000 tokens > 200000 maximum' },
+      { status: 503, message: 'The model is overloaded.' },
+    ].map(err => classifyAbstractionError(Object.assign(new Error(err.message), err))),
+    ['auth_error', 'auth_error', 'auth_error', 'payload_too_large', 'rate_limit'],
+  );
+  await assert.rejects(
+    consumeAnthropicMessageStream(streamBody('event: error\ndata: {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}\n\n')),
+    err => err.status === 429 && classifyAbstractionError(err) === 'rate_limit',
+  );
+  await assert.rejects(
+    consumeOpenRouterMessageStream(streamBody('data: {"error":{"code":413,"message":"request too big"}}\n\n')),
+    err => err.status === 413 && classifyAbstractionError(err) === 'payload_too_large',
+  );
+});
+
+test('H10: a transient Files API failure on a file too big to send inline is retried, not turned into a permanent 413', async () => {
+  const chunk = { id: 'chk_plat', jobId: 'job_plat', mediaType: 'image/png', originalFilename: 'plat.png' };
+  const tooBigInline = Buffer.alloc(15_000_000);
+  const fitsInline = Buffer.alloc(2_000_000);
+  const outage = async () => new Response(JSON.stringify({ error: { message: 'Backend unavailable' } }), { status: 503 });
+  const previousWarn = console.warn;
+  console.warn = () => {};
+  try {
+    await withFetch(outage, async () => {
+      await assert.rejects(
+        enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, tooBigInline, 'gemini-3.1-flash-lite'),
+        err => err.status === 503 && classifyAbstractionError(err) === 'provider_error',
+      );
+      assert.deepEqual(await enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, fitsInline, 'gemini-3.1-flash-lite'), { mode: 'visual' });
+    });
+  } finally {
+    console.warn = previousWarn;
+  }
+});
+
+test('H11: an uploaded Gemini file is deleted when it never becomes ACTIVE or its request is never sent', async () => {
+  const requests = [];
+  const files = async (url, init = {}) => {
+    requests.push(`${init.method || 'GET'} ${new URL(url).pathname}`);
+    if (init.method === 'POST') return new Response(JSON.stringify({ file: { name: 'files/abc123', uri: 'https://files/abc123', mimeType: 'image/png' } }), { status: 200 });
+    if (init.method === 'DELETE') return new Response('{}', { status: 200 });
+    return new Response(JSON.stringify({ name: 'files/abc123', state: 'FAILED' }), { status: 200 });
+  };
+  await withFetch(files, () => assert.rejects(uploadGeminiFile(Buffer.alloc(2_000_000), 'image/png', 'plat.png')));
+  assert.equal(requests.at(-1), 'DELETE /v1beta/files/abc123');
+
+  requests.length = 0;
+  const active = async (url, init = {}) => {
+    if (init.method === 'GET' || !init.method) {
+      requests.push(`GET ${new URL(url).pathname}`);
+      return new Response(JSON.stringify({ name: 'files/abc123', state: 'ACTIVE' }), { status: 200 });
+    }
+    return files(url, init);
+  };
+  const chunk = {
+    id: 'chk_plat', jobId: 'job_plat', documentId: 'doc_plat', chunkOrder: 0, mediaType: 'image/png', originalFilename: 'plat.png',
+    uploadStatus: 'uploaded', abstractionStatus: 'processing', abstractionWorkerId: 'wkr_plat', abstractionAttempts: 1, sizeBytes: 2_000_000,
+  };
+  let renewals = 0;
+  const store = {
+    async claimChunkForAbstraction() { return chunk; },
+    // The first renewal (before the upload) succeeds; the one before the paid call reports the lease lost.
+    async renewChunkAbstractionLease() { renewals += 1; return renewals === 1 ? chunk : null; },
+  };
+  let modelCalls = 0;
+  const result = await withFetch(active, () => processChunkAbstraction(chunk, {
+    store, workerId: 'wkr_plat', maxAttempts: 1,
+    blobLoader: async () => ({ bytes: Buffer.alloc(2_000_000), mediaType: 'image/png' }),
+    modelClient: async () => { modelCalls += 1; return { text: 'DOCUMENT #1: plat', usage: {} }; },
+  }));
+  assert.equal(result.status, 'stale');
+  assert.equal(modelCalls, 0);
+  assert.equal(renewals, 2, 'Expected one renewal before the upload and one before the paid call');
+  assert.equal(requests.at(-1), 'DELETE /v1beta/files/abc123');
 });
 
 let passed = 0;

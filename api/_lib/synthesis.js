@@ -572,7 +572,8 @@ function classifyError(err) {
   if (err?.code === 'lease_lost') return 'lease_lost';
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
-  if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
+  if (err?.code === 'missing_api_key' || status === 401 || status === 403) return 'auth_error';
+  if (status === 413 || /too large|payload|request entity|prompt is too long|maximum context length/i.test(message)) return 'payload_too_large';
   if (status === 429 || /rate limit|overloaded/i.test(message)) return 'rate_limit';
   if ([504, 524].includes(status) || /timeout|aborted|FUNCTION_INVOCATION_TIMEOUT/i.test(message)) return 'upstream_timeout';
   return 'provider_error';

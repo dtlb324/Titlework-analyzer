@@ -50,7 +50,10 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
       if (options?.onEvent) await options.onEvent(parsed);
       const errorCode = parsed.error.code ?? parsed.error.type ?? 'unknown_error';
       const errorMessage = parsed.error.message || 'Unknown provider error.';
-      throw new Error(`OpenRouter stream error (${errorCode}): ${errorMessage}`);
+      const error = new Error(`OpenRouter stream error (${errorCode}): ${errorMessage}`);
+      const status = Number(parsed.error.code);
+      error.status = Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502;
+      throw error;
     }
 
     const choices = parsed?.choices || [];
