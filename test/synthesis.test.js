@@ -2233,6 +2233,49 @@ test('totalAbstractsFromSegments counts the document span of each segment', () =
   );
 });
 
+test('H8: a failed or invalid merge compaction falls back to the uncompacted segments that already fit', async () => {
+  const saved = ['SYNTHESIS_COMPACTION_ENABLED', 'SYNTHESIS_COMPACTION_MIN_SEGMENTS', 'BULK_JOB_MIN_ABSTRACTS'].map(key => [key, process.env[key]]);
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'true';
+  process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS = '3';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  try {
+    const compactionFailures = {
+      rate_limit: () => { throw Object.assign(new Error('rate limit'), { status: 429 }); },
+      truncated: () => ({ text: 'partial', stopReason: 'max_tokens' }),
+      empty: () => ({ text: '', stopReason: 'end_turn' }),
+    };
+    const outcomes = {};
+    for (const [name, compact] of Object.entries(compactionFailures)) {
+      const store = createMemoryPhase5Store({ abstracts: manyAbstracts(250) });
+      let finalMergeSegments = null;
+      globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+        if (request.system === COMPACTION_SYNTHESIS_PROMPT) return { model: 'gemini-2.5-flash', usage: {}, ...compact() };
+        if (request.system === PARTIAL_SYNTHESIS_PROMPT) return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+        finalMergeSegments = (JSON.stringify(request.messages).match(/Segment \d+ \(Documents/g) || []).length;
+        return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
+      };
+      const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 120_000, batchLimit: 8 });
+      const segmentCount = (await store.listSynthesisSegments('job_test_1')).length;
+      outcomes[name] = {
+        status: batch.result?.status,
+        mergedAllSegments: finalMergeSegments === segmentCount,
+        skipped: (batch.result?.warnings || []).some(w => String(w).startsWith('merge_compaction_skipped')),
+        applied: (batch.result?.warnings || []).includes('merge_compaction_applied'),
+      };
+    }
+    const expected = { status: 'complete', mergedAllSegments: true, skipped: true, applied: false };
+    assert(
+      JSON.stringify(outcomes) === JSON.stringify({ rate_limit: expected, truncated: expected, empty: expected }),
+      `Expected every compaction failure to fall back to the uncompacted merge, got ${JSON.stringify(outcomes)}`,
+    );
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('merge compaction applies Gemini scaffold before final Sonnet merge', async () => {
   const previousCompaction = process.env.SYNTHESIS_COMPACTION_ENABLED;
   const previousMinSegments = process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS;

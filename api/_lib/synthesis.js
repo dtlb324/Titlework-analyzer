@@ -1,7 +1,7 @@
 
 import { createHash } from 'crypto';
 import { invokeModel, isAnthropicModel, isGeminiModel, geminiApiKeyError, modelApiKeyError, shouldUseOpenRouter, sanitizeModelClientError } from './model-client.js';
-import { buildMergeUserMessageContent, estimateTextTokens } from './anthropic-request.js';
+import { buildMergeUserMessageContent } from './anthropic-request.js';
 import { runWithConcurrency } from './concurrency.js';
 
 const DEFAULT_FINAL_SYNTHESIS_MODEL = 'claude-sonnet-5-5';
@@ -756,14 +756,6 @@ async function callSynthesisModel({
   }
 }
 
-// A model segment summary stops at config.maxTokens. estimateTextTokens is the chars/4 count synthesis already uses.
-function boundKeptSegmentSummary(text, maxTokens) {
-  const cap = Number(maxTokens);
-  if (!Number.isInteger(cap) || cap <= 0) return text;
-  if (estimateTextTokens(text) <= cap) return text;
-  return text.slice(0, cap * 4);
-}
-
 async function synthesizeWithBinarySplit({
   abstracts,
   tract,
@@ -841,13 +833,14 @@ async function synthesizeWithBinarySplit({
     truncatedUsage = err.usage || {};
     if (recombineRecovery.mode === 'keep_halves') {
       // Each half must stand on its own; otherwise its documents would vanish behind a complete-looking segment.
+      // The halves are kept whole: the final merge budget check, not a cut here, handles a large segment.
       if (![leftResult, rightResult].every(half => validateSegmentSummary(half.text).ok)) throw err;
       const label = docs => `${docs[0].filename} to ${docs[docs.length - 1].filename}`;
       const stitched = [[left, leftResult], [right, rightResult]]
         .map(([docs, half]) => `## Partial synthesis: ${label(docs)}\n\n${half.text}`)
         .join('\n\n');
       merged = {
-        text: boundKeptSegmentSummary(stitched, config.maxTokens),
+        text: stitched,
         model: rightResult.model,
         usage: {},
         payloadBytes: Math.max(leftResult.payloadBytes || 0, rightResult.payloadBytes || 0),
@@ -1273,35 +1266,51 @@ async function mergeSegmentsIntoOpinion({
     mergeInputBytes: fit.bytes,
     compactionEnabled: options?.compactionEnabled,
   })) {
-    warningsAccum.push('merge_compaction_applied');
     logSynthesisMetrics({
       event: 'synthesis_merge_compaction_start',
       jobId: options.jobId || null,
       segmentCount: workingSummaries.length,
       mergeInputBytes: fit.bytes,
     });
-    workingSummaries = await compactSegmentSummariesForMerge({
-      segmentSummaries: workingSummaries,
-      totalAbstracts,
-      tract,
-      contextNotes,
-      partialConfig: partial,
-      finalConfig,
-      options,
-      tokensAccum,
-    });
-    fit = fitsRequestBudget(
-      workingSummaries.map(summary => ({
-        filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
-        abstract: summary.summaryText,
-      })),
-      tract,
-      contextNotes,
-      `Below are ${workingSummaries.length} compacted partial chain-of-title segment(s) covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`,
-      SYNTHESIS_PROMPT,
-      finalConfig,
-      { cacheMergeSegments: true },
-    );
+    // The uncompacted segments already fit the final request, so a failed or invalid compaction falls back to them.
+    let compacted = null;
+    let skipReason = null;
+    try {
+      compacted = await compactSegmentSummariesForMerge({
+        segmentSummaries: workingSummaries,
+        totalAbstracts,
+        tract,
+        contextNotes,
+        partialConfig: partial,
+        finalConfig,
+        options,
+        tokensAccum,
+      });
+      const validation = validateSegmentSummary(compacted[0]?.summaryText);
+      if (!validation.ok) skipReason = `invalid_output: ${validation.reason}`;
+    } catch (err) {
+      if (classifyError(err) === 'lease_lost') throw err;
+      skipReason = classifyError(err);
+    }
+    if (skipReason) {
+      warningsAccum.push(`merge_compaction_skipped: ${skipReason}`);
+      logSynthesisMetrics({ event: 'synthesis_merge_compaction_skipped', jobId: options.jobId || null, reason: skipReason });
+    } else {
+      warningsAccum.push('merge_compaction_applied');
+      workingSummaries = compacted;
+      fit = fitsRequestBudget(
+        workingSummaries.map(summary => ({
+          filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
+          abstract: summary.summaryText,
+        })),
+        tract,
+        contextNotes,
+        `Below are ${workingSummaries.length} compacted partial chain-of-title segment(s) covering all ${totalAbstracts} documents. Merge them into one complete title opinion.`,
+        SYNTHESIS_PROMPT,
+        finalConfig,
+        { cacheMergeSegments: true },
+      );
+    }
   }
   const mergeAbstracts = workingSummaries.map(summary => ({
     filename: `Segment ${summary.segmentIndex + 1} (Documents ${summary.startSequenceIndex + 1}-${summary.endSequenceIndex + 1})`,
