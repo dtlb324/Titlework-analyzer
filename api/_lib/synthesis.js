@@ -1717,6 +1717,7 @@ export async function processSynthesisJob(jobId, options = {}) {
         tokensAccum.outputTokens += segment.outputTokens || 0;
         warningsAccum.push(...segmentResultWarnings(segment));
       });
+      let recoverablePreview = false;
       try {
         const merged = await runOrRecoverMerge({
           segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
@@ -1742,6 +1743,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           warningsAccum.push(`final_validation_failed: ${validation.reason}`);
           if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId: mergeClaim.workerId });
         }
+        recoverablePreview = validation.ok && Boolean(merged.streamed || merged.recovered);
         lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
         const failedDocs = await failedDocumentsForMerge();
         if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
@@ -1763,6 +1765,9 @@ export async function processSynthesisJob(jobId, options = {}) {
         result = await store.saveJobResult(jobId, resultPayload);
         mergeRanInThisBatch = Boolean(result);
       } catch (err) {
+        // A paid, valid opinion sits in a complete preview. Writing a failed result would clear it, so a
+        // persistence error propagates and the next pass saves the preview without another model call.
+        if (recoverablePreview) throw err;
         if (classifyError(err) === 'lease_lost') {
           mergeClaimBlocked = true;
         } else {
@@ -1799,6 +1804,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           tokensAccum.outputTokens += segment.outputTokens || 0;
           warningsAccum.push(...segmentResultWarnings(segment));
         });
+        let recoverablePreview = false;
         try {
           const merged = await runOrRecoverMerge({
             segmentSummaries: completedSegments.sort((a, b) => a.segmentIndex - b.segmentIndex),
@@ -1824,6 +1830,7 @@ export async function processSynthesisJob(jobId, options = {}) {
             warningsAccum.push(`final_validation_failed: ${validation.reason}`);
             if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId: mergeClaim.workerId });
           }
+          recoverablePreview = validation.ok && Boolean(merged.streamed || merged.recovered);
           lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
           const failedDocs = await failedDocumentsForMerge();
           if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
@@ -1845,6 +1852,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           result = await store.saveJobResult(jobId, resultPayload);
           mergeRanInThisBatch = Boolean(result);
         } catch (err) {
+          if (recoverablePreview) throw err;
           if (classifyError(err) === 'lease_lost') {
             mergeClaimBlocked = true;
           } else {
@@ -2081,9 +2089,11 @@ export async function answerFollowupQuestion(jobId, question, options = {}) {
     throw err;
   }
   const config = getSynthesisConfig(options.config || {});
-  const priorMessages = store.listFollowupMessages && config.followupHistoryTurns > 0
+  // Questions asked about an earlier opinion (before a retry or rebuild) are not context for this one.
+  const opinionSince = Date.parse(result.generatedAt || '');
+  const priorMessages = (store.listFollowupMessages && config.followupHistoryTurns > 0
     ? await store.listFollowupMessages(jobId, 50)
-    : [];
+    : []).filter(m => !Number.isFinite(opinionSince) || !(Date.parse(m.createdAt || '') < opinionSince));
   const { messages, truncationWarning } = buildFollowupMessages({
     question,
     finalTitleOpinion: result.finalTitleOpinion,

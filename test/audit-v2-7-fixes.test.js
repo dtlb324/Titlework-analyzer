@@ -10,7 +10,7 @@ import jobPathHandler from '../api/jobs/[...path].js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
 import { prepareDocument } from '../public/pdf-raster.js';
-import { getPartialSynthesisConfig, PARTIAL_SYNTHESIS_PROMPT, processSynthesisJob } from '../api/_lib/synthesis.js';
+import { answerFollowupQuestion, getPartialSynthesisConfig, PARTIAL_SYNTHESIS_PROMPT, processSynthesisJob } from '../api/_lib/synthesis.js';
 import { disposeAll, jsonResponse, loadIndex } from './helpers/browser-index-harness.js';
 import { createPgliteSql } from './helpers/pglite-sql.js';
 
@@ -656,6 +656,58 @@ test('M5: once uploads are finalized, no chunk can be added or moved off uploade
   const failedUpload = await callRoute('PATCH', `/api/jobs/${ids.jobId}/chunks/${ids.chunkId}`, { uploadStatus: 'failed' });
   assert.equal(failedUpload.statusCode, 409, JSON.stringify(failedUpload.body));
   assert.equal((await store.getChunk(ids.jobId, ids.chunkId)).uploadStatus, 'uploaded');
+});
+
+test('M8: a failed save after a streamed merge keeps the paid opinion and the next pass saves it with no new model call', async () => {
+  const jobId = await synthesizingJobWithAbstracts(2);
+  const kinds = [];
+  const modelClient = async request => {
+    const kind = synthesisCallKind(request);
+    kinds.push(kind);
+    if (kind === 'half') return { text: SEGMENT, model: request.model, usage: {}, stopReason: 'end_turn' };
+    if (request.onDelta) await request.onDelta(OPINION, OPINION);
+    return { text: OPINION, model: request.model, usage: {}, stopReason: 'end_turn' };
+  };
+  let failNextSave = true;
+  const flakyStore = {
+    ...store,
+    async saveJobResult(...args) {
+      if (failNextSave) {
+        failNextSave = false;
+        // saveJobResult releases its merge lease in finally even when its write fails.
+        await pg.db.query('UPDATE analysis_jobs SET synthesis_merge_worker_id = NULL, synthesis_merge_lease_expires_at = NULL WHERE id = $1', [jobId]);
+        throw new Error('connection terminated unexpectedly');
+      }
+      return store.saveJobResult(...args);
+    },
+  };
+  const options = { store: flakyStore, modelClient, streamFinalOpinion: true, config: { chunkSize: 1, maxAttempts: 1 }, budgetMs: 5_000 };
+  await assert.rejects(processSynthesisJob(jobId, options), /connection terminated/);
+  assert.equal(await store.getJobResult(jobId), null);
+  assert.equal((await store.getSynthesisPreview(jobId))?.complete, true);
+  const callsAfterFirstPass = kinds.length;
+
+  const second = await processSynthesisJob(jobId, options);
+  assert.equal(kinds.length, callsAfterFirstPass, 'The recovered pass must not call the model again');
+  assert.equal(second.result?.status, 'complete');
+  assert.equal((await store.getJobResult(jobId))?.finalTitleOpinion, OPINION);
+});
+
+test('M10: follow-ups asked about an earlier opinion are not fed into the prompt for a rebuilt one', async () => {
+  const job = await store.createJob({ subjectTract: 'Section 12', contextNotes: '', totalDocuments: 1 });
+  await pg.db.query("UPDATE analysis_jobs SET status = 'synthesizing' WHERE id = $1", [job.id]);
+  const old = await store.appendFollowupMessage(job.id, { question: 'QUESTION ABOUT OPINION V1', answer: 'answer v1' });
+  await pg.db.query("UPDATE followup_messages SET created_at = now() - interval '1 hour' WHERE id = $1", [old.id]);
+  await store.saveJobResult(job.id, { status: 'complete', finalTitleOpinion: OPINION });
+  await store.appendFollowupMessage(job.id, { question: 'QUESTION ABOUT OPINION V2', answer: 'answer v2' });
+  let prompt = '';
+  await answerFollowupQuestion(job.id, 'Who owns the minerals?', {
+    store,
+    config: { followupHistoryTurns: 5 },
+    modelClient: async request => { prompt = JSON.stringify(request.messages); return { text: 'B owns them.', model: request.model, usage: {} }; },
+  });
+  assert.equal(prompt.includes('QUESTION ABOUT OPINION V1'), false);
+  assert.equal(prompt.includes('QUESTION ABOUT OPINION V2'), true);
 });
 
 let passed = 0;
