@@ -2109,7 +2109,8 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
             SELECT 1 FROM document_chunks parent
             WHERE parent.job_id = ${jobId}
               AND parent.id = ${parentChunkId}
-              AND (${workerId ?? null}::text IS NULL OR (parent.abstraction_status = 'processing' AND parent.abstraction_worker_id = ${workerId}::text))
+              AND parent.abstraction_status = 'split_superseded'
+              AND parent.updated_at = now()
           )
           ON CONFLICT (job_id, split_parent_chunk_id, fingerprint)
           WHERE split_parent_chunk_id IS NOT NULL AND fingerprint IS NOT NULL
@@ -2174,12 +2175,14 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       let childRows;
       let parentRow;
       if (typeof sql.transaction === 'function') {
+        // Supersede first: it locks the parent, and each child insert then requires that this transaction
+        // superseded it (now() is the transaction start), so a lost lease commits no orphan children.
         const results = await sql.transaction(txn => [
-          ...childList.map(child => buildChildUpsert(txn, child)),
           supersedeParent(txn),
+          ...childList.map(child => buildChildUpsert(txn, child)),
         ]);
-        childRows = results.slice(0, childList.length).map(rows => rows[0]).filter(Boolean);
-        parentRow = results[childList.length]?.[0] || null;
+        parentRow = results[0]?.[0] || null;
+        childRows = results.slice(1).map(rows => rows[0]).filter(Boolean);
         if (!parentRow || childRows.length !== childList.length) return null;
       } else {
         childRows = [];
@@ -2485,14 +2488,16 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
 
       let saved;
       if (typeof sql.transaction === 'function') {
+        // The job update goes first so its row lock serializes concurrent plan writes for this job.
         const results = await sql.transaction(txn => [
+          updateJobPlan(txn),
           deleteStaleSegments(txn),
           deleteStaleResults(txn),
           ...segments.map(segment => upsertSegment(txn, segment)),
-          updateJobPlan(txn),
         ]);
-        saved = results.slice(2, 2 + segments.length).map(rows => rowToSynthesisSegment(rows[0]));
+        saved = results.slice(3).map(rows => rowToSynthesisSegment(rows[0]));
       } else {
+        await updateJobPlan(sql);
         await deleteStaleSegments(sql);
         await deleteStaleResults(sql);
         saved = [];
@@ -2500,7 +2505,6 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           const rows = await upsertSegment(sql, segment);
           saved.push(rowToSynthesisSegment(rows[0]));
         }
-        await updateJobPlan(sql);
       }
       return { planId, segments: saved };
     },

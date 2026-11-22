@@ -135,6 +135,26 @@ test('H9: a result whose status the job cannot take is refused instead of strand
   assert.equal(job.currentPhase, 'complete with synthesis warnings');
 });
 
+test('H2: only the lease owner\'s PDF split supersedes the parent and adds child chunks', async () => {
+  const child = (i, fingerprint) => ({
+    chunkOrder: i, originalFilename: `deed_p${i + 1}.pdf`, blobKey: `split/${fingerprint}.pdf`, blobUrl: null,
+    mediaType: 'application/pdf', sizeBytes: 5, pageStart: i + 1, pageEnd: i + 1, splitFrom: 'deed.pdf',
+    fingerprint, checksumSha256: null,
+  });
+  const ids = await jobWithChunk({ jobStatus: 'abstracting', chunkStatus: 'processing' });
+  await pg.db.query("UPDATE document_chunks SET abstraction_worker_id = 'wkr_owner' WHERE id = $1", [ids.chunkId]);
+  const childCount = async () => (await pg.db.query('SELECT count(*)::int AS n FROM document_chunks WHERE split_parent_chunk_id = $1', [ids.chunkId])).rows[0].n;
+
+  const lost = await store.commitSplitPdfChunks(ids.jobId, ids.documentId, ids.chunkId, [child(0, 'fp_a'), child(1, 'fp_b')], { reason: 'payload_too_large', workerId: 'wkr_other' });
+  assert.equal(lost, null);
+  assert.equal(await childCount(), 0, 'A split by a worker that lost the lease must not leave child chunks');
+
+  const won = await store.commitSplitPdfChunks(ids.jobId, ids.documentId, ids.chunkId, [child(0, 'fp_a'), child(1, 'fp_b')], { reason: 'payload_too_large', workerId: 'wkr_owner' });
+  assert.equal(won?.parent?.abstractionStatus, 'split_superseded');
+  assert.deepEqual(won.children.map(c => c.abstractionStatus), ['pending', 'pending']);
+  assert.equal(await childCount(), 2);
+});
+
 let passed = 0;
 let failed = 0;
 for (const { name, fn } of tests) {
