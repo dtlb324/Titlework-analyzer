@@ -24,6 +24,7 @@
     "unpdf": "^2.0.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.17",
     "playwright-core": "1.65.1"
   }
 }

@@ -1,8 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { runInNewContext } from 'node:vm';
 import {
   mutateSharedRateLimit,
   RATE_LIMIT_READ_TTL_MS,
@@ -16,39 +12,18 @@ import {
   processSynthesisJob,
   shouldCompactBeforeMerge,
 } from '../api/_lib/synthesis.js';
+import { createPostgresJobStore } from '../api/_lib/jobs.js';
 import jobPathHandler from '../api/jobs/[...path].js';
 import { disposeAll, jsonResponse, loadIndex, makeJobServer, pngFile, StubElement, tick } from './helpers/browser-index-harness.js';
+import { createPgliteSql } from './helpers/pglite-sql.js';
 
 if (!StubElement.prototype.removeAttribute) {
   StubElement.prototype.removeAttribute = function removeAttribute(k) { delete this[k]; };
 }
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
-
 const tests = [];
 function test(name, fn) {
   tests.push({ name, fn });
-}
-
-function extractJobsMethod(name, ctx) {
-  const marker = `    async ${name}(`;
-  const start = jobsSource.indexOf(marker);
-  assert(start >= 0, `Could not locate ${name} in api/_lib/jobs.js`);
-  const bodyStart = jobsSource.indexOf(') {', start);
-  assert(bodyStart >= 0, `Could not locate body start of ${name}`);
-  let depth = 0;
-  let end = -1;
-  for (let i = bodyStart + 2; i < jobsSource.length; i++) {
-    const ch = jobsSource[i];
-    if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) { end = i + 1; break; }
-    }
-  }
-  assert(end > start, `Could not parse end of ${name}`);
-  return runInNewContext(`({ ${jobsSource.slice(start, end)} })`, ctx)[name];
 }
 
 function makeGoodOpinion(note = 'All clear.') {
@@ -308,6 +283,56 @@ test('Critical #2b: runStagedAnalysis refreshes #view-job after stopping poller 
   assert.match(app.getEl('jobHeader').innerHTML, /Job failed/, 'Expected #view-job header to reflect failed status after refresh');
 });
 
+test('Critical #2c: a hung #view-job refresh does not hold the failed run open', async () => {
+  const server = makeJobServer({
+    hooks: {
+      'POST /api/jobs/job_1/abstraction/start': async () => jsonResponse(503, { error: 'no server', fallback: 'browser_abstraction' }),
+      'POST /api/analyze': async () => jsonResponse(500, { error: 'Upstream failed' }),
+      'PATCH /api/jobs/job_1': async (_srv, opts) => jsonResponse(200, { job: { id: 'job_1', status: JSON.parse(opts.body).status || 'abstracting' } }),
+      'GET /api/jobs/job_1': () => new Promise(() => {}),
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed.png', 'a'.repeat(32))]);
+  await Promise.race([app.run('analyze()'), tick(300)]);
+  assert.equal(app.ctx.location.hash, '#/job/job_1');
+  assert.ok(server.calls.includes('GET /api/jobs/job_1'), 'Expected the #view-job refresh to start');
+  assert.equal(app.getEl('progressSection').style.display, 'none', 'Progress must hide while the refresh is still pending');
+  assert.equal(app.getEl('analyzeBtn').disabled, false, 'Analyze must re-enable while the refresh is still pending');
+  assert.equal(app.run('activeAnalysisRun'), null, 'The failed run must end while the refresh is still pending');
+});
+
+test('Critical #2d: refreshing a still-running job after a failed run polls only while its page is open', async () => {
+  const server = makeJobServer({
+    abstractionReadyAfter: 0,
+    hooks: {
+      'POST /api/jobs/job_1/synthesis/start': async () => jsonResponse(503, { error: 'no synth', fallback: 'browser_synthesis' }),
+      'POST /api/analyze': async () => jsonResponse(500, { error: 'browser synthesis upstream failed' }),
+      'PATCH /api/jobs/job_1': async () => jsonResponse(500, { error: 'patch failed' }),
+      'GET /api/jobs/job_1': async () => jsonResponse(200, {
+        job: { id: 'job_1', status: 'synthesizing', totalDocuments: 1, completedDocuments: 1, failedDocuments: 0, currentPhase: 'Synthesizing' },
+      }),
+      'GET /api/jobs/job_1/synthesis/status': async () => jsonResponse(200, {
+        status: { total: 0, pending: 0, processing: 0, complete: 0, failed: 0, retry_wait: 0, hasResult: false, mergeInProgress: false, mergeLeaseHeld: false },
+      }),
+      'POST /api/jobs/job_1/synthesis/process': async () => jsonResponse(503, { error: 'no synth', fallback: 'browser_synthesis' }),
+    },
+  });
+  const app = loadIndex({ fetchImpl: server.fetch });
+  await app.ctx.handleFiles([pngFile('deed.png', 'a'.repeat(32))]);
+  await app.run('analyze()');
+  await tick(20);
+  assert.equal(app.ctx.location.hash, '#/job/job_1');
+  assert.equal(app.run('activeAnalysisRun'), null);
+  const kicks = () => server.calls.filter(c => c === 'POST /api/jobs/job_1/synthesis/process').length;
+  const kicksBeforeLeaving = kicks();
+  app.ctx.location.hash = '#/';
+  for (let i = 0; i < 8; i++) {
+    if (app.run('activeJobPollState')) await app.run('runJobPollTick(activeJobPollState)');
+  }
+  assert.equal(kicks(), kicksBeforeLeaving, 'A job the tab no longer drives must not be kicked after its page is left');
+});
+
 // ---- Critical #3: maybeKickStalledJobWorkflow kicks unplanned synthesizing jobs ----
 
 test('Critical #3: maybeKickStalledJobWorkflow kicks /synthesis/process when a synthesizing job has no plan yet', async () => {
@@ -355,68 +380,108 @@ test('Critical #3: maybeKickStalledJobWorkflow kicks /synthesis/process when a s
   );
 });
 
-// ---- Critical #4: listRunnableSynthesisJobIds admits jobs with failed segments ----
+// ---- Critical #4-#7 run the real job store SQL against in-process Postgres (PGlite) ----
 
-test('Critical #4: listRunnableSynthesisJobIds SQL checks active statuses instead of <> complete', async () => {
-  const captured = [];
-  const sql = async (strings, ...values) => {
-    captured.push(strings.join('?'));
-    return [{ id: 'job_degraded' }];
+const pg = createPgliteSql();
+const pgStore = createPostgresJobStore({ sql: pg.sql });
+
+function planSegment(segmentIndex, overrides = {}) {
+  return {
+    segmentIndex,
+    startSequenceIndex: segmentIndex * 2,
+    endSequenceIndex: segmentIndex * 2 + 1,
+    documentIds: [`doc_${segmentIndex}`],
+    filenames: [`deed_${segmentIndex}.pdf`],
+    estimatedBytes: 100,
+    ...overrides,
   };
-  const listRunnableSynthesisJobIds = extractJobsMethod('listRunnableSynthesisJobIds', {
-    ensureSchema: async () => {},
-    sql,
+}
+
+async function createPlannedJob(store, planId, segmentCount) {
+  const job = await store.createJob({ subjectTract: 'Section 12, Block C-8', contextNotes: '', totalDocuments: segmentCount });
+  await pg.db.query(`UPDATE analysis_jobs SET status = 'synthesizing' WHERE id = $1`, [job.id]);
+  const plan = await store.saveSynthesisPlan(job.id, {
+    planId,
+    segments: Array.from({ length: segmentCount }, (_, i) => planSegment(i)),
   });
-  const ids = await listRunnableSynthesisJobIds(10);
-  assert.deepEqual(ids, ['job_degraded']);
-  assert.ok(
-    captured[0].includes("pending.status IN ('pending', 'processing', 'retry_wait')"),
-    `Expected listRunnableSynthesisJobIds to check IN ('pending', 'processing', 'retry_wait'), got:\n${captured[0]}`,
+  return { jobId: job.id, segments: plan.segments };
+}
+
+async function setSegmentStatuses(jobId, statuses) {
+  for (const [segmentIndex, status] of statuses.entries()) {
+    await pg.db.query(`UPDATE synthesis_segments SET status = $3 WHERE job_id = $1 AND segment_index = $2`, [jobId, segmentIndex, status]);
+  }
+}
+
+async function segmentRows(jobId) {
+  const { rows } = await pg.db.query(
+    `SELECT plan_id, segment_index, status, error_type, worker_id, lease_expires_at
+       FROM synthesis_segments WHERE job_id = $1 ORDER BY plan_id, segment_index`,
+    [jobId],
   );
-  assert.equal(
-    captured[0].includes("pending.status <> 'complete'"),
-    false,
-    'listRunnableSynthesisJobIds must not exclude jobs with failed segments via <> complete',
+  return rows;
+}
+
+async function jobRow(jobId) {
+  const { rows } = await pg.db.query(
+    `SELECT status, synthesis_plan_id, synthesis_merge_worker_id, synthesis_preview_text FROM analysis_jobs WHERE id = $1`,
+    [jobId],
+  );
+  return rows[0];
+}
+
+async function resultPlanId(jobId) {
+  const { rows } = await pg.db.query(`SELECT plan_id FROM job_results WHERE job_id = $1`, [jobId]);
+  return rows[0]?.plan_id ?? null;
+}
+
+test('Critical #4: the worker lists finished multi-segment jobs whose segments failed, and only those', async () => {
+  const degraded = await createPlannedJob(pgStore, 'plan_degraded', 3);
+  await setSegmentStatuses(degraded.jobId, ['complete', 'complete', 'failed']);
+  const allFailed = await createPlannedJob(pgStore, 'plan_all_failed', 2);
+  await setSegmentStatuses(allFailed.jobId, ['failed', 'failed']);
+  const allComplete = await createPlannedJob(pgStore, 'plan_all_complete', 2);
+  await setSegmentStatuses(allComplete.jobId, ['complete', 'complete']);
+
+  const inFlight = await createPlannedJob(pgStore, 'plan_in_flight', 2);
+  await setSegmentStatuses(inFlight.jobId, ['failed']);
+  assert.ok(await pgStore.claimSynthesisSegment(inFlight.jobId, inFlight.segments[1].id, { workerId: 'wkr_live', leaseMs: 600000 }));
+  const mergeLeased = await createPlannedJob(pgStore, 'plan_merge_leased', 2);
+  await setSegmentStatuses(mergeLeased.jobId, ['complete', 'failed']);
+  assert.ok(await pgStore.claimSynthesisMerge(mergeLeased.jobId, 'plan_merge_leased', { workerId: 'merge_live', leaseMs: 600000 }));
+  const canceled = await createPlannedJob(pgStore, 'plan_canceled', 2);
+  await setSegmentStatuses(canceled.jobId, ['complete', 'failed']);
+  await pgStore.cancelJob(canceled.jobId, 'User stopped job.');
+
+  const listed = new Set(await pgStore.listRunnableSynthesisJobIds(100));
+  assert.deepEqual(
+    [degraded, allFailed, allComplete, inFlight, mergeLeased, canceled].map(job => listed.has(job.jobId)),
+    [true, true, true, false, false, false],
+    'Expected degraded, all-failed and all-complete jobs listed; in-flight, merge-leased and canceled jobs not listed',
   );
 });
 
-// ---- Critical #5: cancelJob cancels synthesis_segments; claim/renew reject canceled jobs; hasMore=false on canceled ----
+test('Critical #5: canceling a job stops its synthesis segments, and canceled jobs refuse segment claims and renewals', async () => {
+  const job = await createPlannedJob(pgStore, 'plan_cancel', 3);
+  const [first, second, third] = job.segments;
+  await setSegmentStatuses(job.jobId, ['pending', 'pending', 'complete']);
+  assert.ok(await pgStore.claimSynthesisSegment(job.jobId, first.id, { workerId: 'wkr_1', leaseMs: 600000 }));
+  assert.ok(await pgStore.cancelJob(job.jobId, 'User stopped job.'));
+  assert.deepEqual(
+    (await segmentRows(job.jobId)).map(row => [row.segment_index, row.status, row.error_type, row.worker_id, row.lease_expires_at]),
+    [[0, 'failed', 'canceled', null, null], [1, 'failed', 'canceled', null, null], [2, 'complete', null, null, null]],
+  );
+  assert.equal(await pgStore.renewSynthesisSegmentLease(job.jobId, first.id, { workerId: 'wkr_1', leaseMs: 600000 }), null);
+  assert.equal(await pgStore.claimSynthesisSegment(job.jobId, second.id, { workerId: 'wkr_2' }), null);
+  assert.equal(await pgStore.claimSynthesisSegment(job.jobId, third.id, { workerId: 'wkr_3' }), null);
 
-test('Critical #5: cancelJob cancels synthesis_segments, claim/renew check job status <> canceled, and synthesis status hasMore is false when canceled', async () => {
-  const queries = [];
-  const sql = async (strings, ...values) => {
-    queries.push({ text: strings.join('?'), values });
-    return [{ id: 'job_c1', status: 'canceled' }];
-  };
-  const cancelJob = extractJobsMethod('cancelJob', {
-    ensureSchema: async () => {},
-    sql,
-    rowToJob: row => row,
-    refreshAbstractionCounts: async () => {},
-  });
-  await cancelJob.call({ clearSynthesisPreview: async () => {} }, 'job_c1', 'User stopped job.');
-  const segCancelQuery = queries.find(q => q.text.includes('UPDATE synthesis_segments'));
-  assert.ok(segCancelQuery, 'cancelJob must UPDATE synthesis_segments');
-  assert.ok(segCancelQuery.text.includes("status = 'failed'"), 'cancelJob must fail active synthesis segments');
-  assert.ok(segCancelQuery.text.includes("error_type = 'canceled'"), 'cancelJob must record canceled error_type');
-  assert.ok(segCancelQuery.text.includes('worker_id = NULL'), 'cancelJob must release segment worker_id');
-
-  const claimQueries = [];
-  const claimSql = async (strings) => { claimQueries.push(strings.join('?')); return []; };
-  const claimSynthesisSegment = extractJobsMethod('claimSynthesisSegment', {
-    ensureSchema: async () => {},
-    sql: claimSql,
-    rowToSynthesisSegment: row => row || null,
-  });
-  const renewSynthesisSegmentLease = extractJobsMethod('renewSynthesisSegmentLease', {
-    ensureSchema: async () => {},
-    sql: claimSql,
-    rowToSynthesisSegment: row => row || null,
-  });
-  await claimSynthesisSegment('job_c1', 'seg_1', { workerId: 'wkr_1' });
-  await renewSynthesisSegmentLease('job_c1', 'seg_1', { workerId: 'wkr_1' });
-  assert.ok(claimQueries[0].includes("j.status <> 'canceled'"), 'claimSynthesisSegment must reject canceled jobs');
-  assert.ok(claimQueries[1].includes("j.status <> 'canceled'"), 'renewSynthesisSegmentLease must reject canceled jobs');
+  // A job canceled before its segments were failed (for example by an older release) still has active segments.
+  const legacy = await createPlannedJob(pgStore, 'plan_legacy_cancel', 2);
+  assert.ok(await pgStore.claimSynthesisSegment(legacy.jobId, legacy.segments[0].id, { workerId: 'wkr_1', leaseMs: 600000 }));
+  assert.ok(await pgStore.renewSynthesisSegmentLease(legacy.jobId, legacy.segments[0].id, { workerId: 'wkr_1', leaseMs: 600000 }));
+  await pg.db.query(`UPDATE analysis_jobs SET status = 'canceled' WHERE id = $1`, [legacy.jobId]);
+  assert.equal(await pgStore.renewSynthesisSegmentLease(legacy.jobId, legacy.segments[0].id, { workerId: 'wkr_1', leaseMs: 600000 }), null);
+  assert.equal(await pgStore.claimSynthesisSegment(legacy.jobId, legacy.segments[1].id, { workerId: 'wkr_2' }), null);
 
   // Verify GET /api/jobs/:id/synthesis/status returns hasMore: false for a canceled job even if stale pending segments exist.
   const prevPassword = process.env.APP_PASSWORD;
@@ -465,86 +530,62 @@ test('Critical #5: cancelJob cancels synthesis_segments, claim/renew check job s
   }
 });
 
-// ---- Critical #6: saveSynthesisPlan is atomic via sql.transaction, prunes orphans, and preserves same-plan merge lease ----
+async function assertPlanResaves(store) {
+  const job = await createPlannedJob(store, 'plan_a', 3);
+  assert.deepEqual(job.segments.map(segment => [segment.planId, segment.segmentIndex, segment.status]), [
+    ['plan_a', 0, 'pending'], ['plan_a', 1, 'pending'], ['plan_a', 2, 'pending'],
+  ]);
+  assert.ok(await store.claimSynthesisMerge(job.jobId, 'plan_a', { workerId: 'merge_1', leaseMs: 600000 }));
+  await pg.db.query(`UPDATE analysis_jobs SET synthesis_preview_text = 'partial preview' WHERE id = $1`, [job.jobId]);
+  await pg.db.query(`INSERT INTO job_results (id, job_id, plan_id, status, final_title_opinion) VALUES ($1, $2, 'plan_a', 'complete', 'opinion')`, [`res_${job.jobId}`, job.jobId]);
 
-test('Critical #6: saveSynthesisPlan runs atomically in sql.transaction, prunes out-of-range segments, and updates analysis_jobs last with IS DISTINCT FROM', async () => {
-  const txnQueries = [];
-  const sql = async () => { throw new Error('should use sql.transaction when available'); };
-  sql.transaction = async fn => {
-    const txn = (strings, ...values) => ({ text: strings.join('?'), values });
-    const built = fn(txn);
-    txnQueries.push(...built);
-    return built.map((q, idx) => (idx >= 2 && idx < built.length - 1 ? [{ id: `seg_${idx}`, segment_index: idx - 2 }] : []));
-  };
-  const saveSynthesisPlan = extractJobsMethod('saveSynthesisPlan', {
-    ensureSchema: async () => {},
-    sql,
-    JobApiError: Error,
-    randomUUID: () => 'uuid1',
-    rowToSynthesisSegment: row => row,
-  });
-  const saved = await saveSynthesisPlan.call({ getJob: async () => ({ id: 'job_1', status: 'synthesizing' }) }, 'job_1', {
-    planId: 'plan_abc',
-    segments: [
-      { segmentIndex: 0, startSequenceIndex: 0, endSequenceIndex: 9, documentIds: ['d1'], filenames: ['a.pdf'], estimatedBytes: 100 },
-      { segmentIndex: 1, startSequenceIndex: 10, endSequenceIndex: 19, documentIds: ['d2'], filenames: ['b.pdf'], estimatedBytes: 100 },
-    ],
-  });
-  assert.equal(saved.segments.length, 2);
-  assert.equal(txnQueries.length, 5, 'Expected DELETE segments, DELETE results, 2 UPSERTs, and 1 UPDATE analysis_jobs');
-  assert.ok(txnQueries[0].text.includes('NOT (segment_index = ANY('), 'Must prune orphaned same-plan segment indices');
-  const lastQuery = txnQueries[txnQueries.length - 1];
-  assert.ok(lastQuery.text.includes('UPDATE analysis_jobs'), 'UPDATE analysis_jobs must execute LAST');
-  assert.ok(lastQuery.text.includes('synthesis_plan_id IS DISTINCT FROM'), 'Must not wipe merge lease/preview when planId already matches');
+  const shrunk = await store.saveSynthesisPlan(job.jobId, { planId: 'plan_a', segments: [planSegment(0), planSegment(1)] });
+  assert.deepEqual(shrunk.segments.map(segment => segment.segmentIndex), [0, 1]);
+  assert.deepEqual((await segmentRows(job.jobId)).map(row => [row.plan_id, row.segment_index]), [['plan_a', 0], ['plan_a', 1]]);
+  assert.deepEqual(await jobRow(job.jobId), {
+    status: 'synthesizing', synthesis_plan_id: 'plan_a', synthesis_merge_worker_id: 'merge_1', synthesis_preview_text: 'partial preview',
+  }, 'A same-plan re-save must keep the merge lease and preview');
+  assert.equal(await resultPlanId(job.jobId), 'plan_a');
 
-  // Verify non-transaction fallback also executes UPDATE analysis_jobs LAST (never before segment inserts).
-  const seqQueries = [];
-  const seqSql = async (strings, ...values) => {
-    const text = strings.join('?');
-    seqQueries.push(text);
-    if (text.includes('INSERT INTO synthesis_segments')) return [{ id: 'seg_x' }];
-    return [];
-  };
-  const saveSeq = extractJobsMethod('saveSynthesisPlan', {
-    ensureSchema: async () => {},
-    sql: seqSql,
-    JobApiError: Error,
-    randomUUID: () => 'uuid2',
-    rowToSynthesisSegment: row => row,
-  });
-  await saveSeq.call({ getJob: async () => ({ id: 'job_1', status: 'synthesizing' }) }, 'job_1', {
-    planId: 'plan_seq',
-    segments: [{ segmentIndex: 0, startSequenceIndex: 0, endSequenceIndex: 4, documentIds: ['d1'], filenames: ['a.pdf'] }],
-  });
-  const insertIdx = seqQueries.findIndex(q => q.includes('INSERT INTO synthesis_segments'));
-  const updateJobIdx = seqQueries.findIndex(q => q.includes('UPDATE analysis_jobs'));
-  assert.ok(insertIdx >= 0 && updateJobIdx > insertIdx, 'Fallback must update analysis_jobs.synthesis_plan_id AFTER inserting segments');
+  await store.saveSynthesisPlan(job.jobId, { planId: 'plan_b', segments: [planSegment(0)] });
+  assert.deepEqual((await segmentRows(job.jobId)).map(row => [row.plan_id, row.segment_index]), [['plan_b', 0]]);
+  assert.deepEqual(await jobRow(job.jobId), {
+    status: 'synthesizing', synthesis_plan_id: 'plan_b', synthesis_merge_worker_id: null, synthesis_preview_text: null,
+  }, 'A new plan must clear the old merge lease and preview');
+  assert.equal(await resultPlanId(job.jobId), null);
+  return job.jobId;
+}
+
+test('Critical #6: saveSynthesisPlan prunes dropped segments, keeps a same-plan merge lease, and applies atomically', async () => {
+  const jobId = await assertPlanResaves(pgStore);
+  assert.ok(await pgStore.claimSynthesisMerge(jobId, 'plan_b', { workerId: 'merge_2', leaseMs: 600000 }));
+  await assert.rejects(() => pgStore.saveSynthesisPlan(jobId, {
+    planId: 'plan_c',
+    segments: [planSegment(0), planSegment(1, { startSequenceIndex: null })],
+  }));
+  assert.deepEqual((await segmentRows(jobId)).map(row => [row.plan_id, row.segment_index]), [['plan_b', 0]]);
+  assert.equal((await jobRow(jobId)).synthesis_merge_worker_id, 'merge_2', 'A failed save must leave the previous plan untouched');
+
+  const withoutTransactions = (strings, ...values) => pg.sql(strings, ...values);
+  await assertPlanResaves(createPostgresJobStore({ sql: withoutTransactions }));
 });
 
 // ---- Critical #7: ensureSchema retries after a transient DDL failure ----
 
 test('Critical #7: ensureSchema clears cached promise on rejection so a subsequent call succeeds', async () => {
-  const fnStart = jobsSource.indexOf('  let initialized = null;');
-  const fnEnd = jobsSource.indexOf('  async function refreshUploadCounts(', fnStart);
-  assert(fnStart >= 0 && fnEnd > fnStart, 'Could not locate ensureSchema in api/_lib/jobs.js');
-  let failFirst = true;
-  let calls = 0;
-  const sql = async () => {
-    calls += 1;
-    if (failFirst) {
-      failFirst = false;
-      throw new Error('Neon wake-up timeout');
+  const fresh = createPgliteSql();
+  let failNext = true;
+  const flakySql = (strings, ...values) => {
+    if (failNext) {
+      failNext = false;
+      return Promise.reject(new Error('Neon wake-up timeout'));
     }
-    return [];
+    return fresh.sql(strings, ...values);
   };
-  const ensureSchema = runInNewContext(
-    `${jobsSource.slice(fnStart, fnEnd)}; ensureSchema;`,
-    { sql },
-  );
-  await assert.rejects(() => ensureSchema(), /Neon wake-up timeout/);
-  const callsAfterFailure = calls;
-  await ensureSchema();
-  assert.ok(calls > callsAfterFailure, 'Expected ensureSchema to retry DDL after initial failure instead of returning cached rejection');
+  const store = createPostgresJobStore({ sql: flakySql });
+  await assert.rejects(() => store.createJob({ subjectTract: 'Sec 12', contextNotes: '', totalDocuments: 1 }), /Neon wake-up timeout/);
+  const job = await store.createJob({ subjectTract: 'Sec 12', contextNotes: '', totalDocuments: 1 });
+  assert.equal((await store.getJob(job.id)).id, job.id);
 });
 
 // ---- Critical #8: Oversized merges reach pairwise merge tree even with SYNTHESIS_COMPACTION_ENABLED=true ----

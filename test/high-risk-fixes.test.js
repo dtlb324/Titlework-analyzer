@@ -9,6 +9,7 @@ import { processChunkAbstraction } from '../api/_lib/abstraction.js';
 import {
   applyAbstractionClaim,
   assertValidStatusTransition,
+  createPostgresJobStore,
   isInvalidJobStatusTransition,
   isValidStatusTransition,
   JobApiError,
@@ -17,7 +18,7 @@ import {
   validateSynthesisRequestInput,
 } from '../api/_lib/jobs.js';
 import { invokeOpenRouterModel } from '../api/_lib/openrouter-request.js';
-import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
+import { enqueueAbstractionJob, enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { buildObjectKey, createSignedUpload } from '../api/_lib/storage.js';
 import {
   PARTIAL_SYNTHESIS_PROMPT,
@@ -30,6 +31,7 @@ import analyzeHandler from '../api/analyze.js';
 import jobPathHandler from '../api/jobs/[...path].js';
 import { createServer } from '../server.js';
 import { disposeAll, jsonResponse, loadIndex, pngFile, StubElement, tick } from './helpers/browser-index-harness.js';
+import { createPgliteSql } from './helpers/pglite-sql.js';
 
 if (!StubElement.prototype.removeAttribute) {
   StubElement.prototype.removeAttribute = function removeAttribute(k) { delete this[k]; };
@@ -568,6 +570,34 @@ test('H7: updateJob/createDocument/finalizeUploads enforce optimistic status gua
   } finally {
     delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
   }
+});
+
+test('H7: a duplicate start on a ready job succeeds on real SQL, and a stale writer still cannot overwrite a newer status', async () => {
+  const pg = createPgliteSql();
+  const store = createPostgresJobStore({ sql: pg.sql });
+  const job = await store.createJob({ subjectTract: 'Section 12, Block C-8', contextNotes: '', totalDocuments: 1 });
+  await pg.db.query(`UPDATE analysis_jobs SET status = 'ready' WHERE id = $1`, [job.id]);
+
+  const starts = await Promise.allSettled([
+    enqueueAbstractionJob(job.id, { store }),
+    enqueueAbstractionJob(job.id, { store }),
+  ]);
+  assert.deepEqual(starts.map(s => s.status), ['fulfilled', 'fulfilled']);
+  assert.equal((await store.getJob(job.id)).status, 'abstracting');
+
+  const staleReader = Object.create(store);
+  let reads = 0;
+  staleReader.getJob = async id => {
+    const current = await store.getJob(id);
+    reads += 1;
+    if (reads === 1) await pg.db.query(`UPDATE analysis_jobs SET status = 'canceled' WHERE id = $1`, [id]);
+    return current;
+  };
+  await assert.rejects(
+    staleReader.updateJob(job.id, { status: 'synthesizing' }),
+    err => isInvalidJobStatusTransition(err),
+  );
+  assert.equal((await store.getJob(job.id)).status, 'canceled');
 });
 
 // ---- H8: Atomic split-PDF upload-before-insert and ON CONFLICT status preservation ----

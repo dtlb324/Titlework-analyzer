@@ -926,12 +926,12 @@ export function createSqlClient(databaseUrl) {
   return neon(databaseUrl);
 }
 
-function createPostgresJobStore() {
+export function createPostgresJobStore({ sql: sqlClient } = {}) {
   const databaseUrl = getDatabaseUrl();
-  if (!databaseUrl) {
+  if (!sqlClient && !databaseUrl) {
     return null;
   }
-  const sql = createSqlClient(databaseUrl);
+  const sql = sqlClient || createSqlClient(databaseUrl);
   let initialized = null;
 
   async function ensureSchema() {
@@ -1390,35 +1390,44 @@ function createPostgresJobStore() {
       if (!existing) return null;
       const nextStatus = patch.status ?? existing.status;
       assertValidStatusTransition(existing.status, nextStatus);
-      const completedAt = TERMINAL_STATUSES.has(nextStatus)
-        ? (existing.completedAt || new Date().toISOString())
-        : null;
-      const startedAt = existing.startedAt || (nextStatus !== 'created' ? new Date().toISOString() : null);
-      const rows = await sql`
-        UPDATE analysis_jobs
-        SET
-          subject_tract = ${patch.subjectTract === undefined ? existing.subjectTract : patch.subjectTract},
-          status = ${nextStatus},
-          completed_documents = ${patch.completedDocuments ?? existing.completedDocuments},
-          failed_documents = ${patch.failedDocuments ?? existing.failedDocuments},
-          current_phase = ${patch.currentPhase ?? existing.currentPhase},
-          error_message = ${patch.errorMessage === undefined ? existing.errorMessage : patch.errorMessage},
-          started_at = ${startedAt},
-          completed_at = ${completedAt},
-          updated_at = now()
-        WHERE id = ${id}
-          AND status = ${existing.status}
-        RETURNING *
-      `;
-      if (!rows[0]) {
+      const writePatch = async base => {
+        const completedAt = TERMINAL_STATUSES.has(nextStatus)
+          ? (base.completedAt || new Date().toISOString())
+          : null;
+        const startedAt = base.startedAt || (nextStatus !== 'created' ? new Date().toISOString() : null);
+        const rows = await sql`
+          UPDATE analysis_jobs
+          SET
+            subject_tract = ${patch.subjectTract === undefined ? base.subjectTract : patch.subjectTract},
+            status = ${nextStatus},
+            completed_documents = ${patch.completedDocuments ?? base.completedDocuments},
+            failed_documents = ${patch.failedDocuments ?? base.failedDocuments},
+            current_phase = ${patch.currentPhase ?? base.currentPhase},
+            error_message = ${patch.errorMessage === undefined ? base.errorMessage : patch.errorMessage},
+            started_at = ${startedAt},
+            completed_at = ${completedAt},
+            updated_at = now()
+          WHERE id = ${id}
+            AND status = ${base.status}
+          RETURNING *
+        `;
+        return rows[0] || null;
+      };
+      let row = await writePatch(existing);
+      if (!row) {
         const latest = await this.getJob(id);
         if (!latest) return null;
-        if (!isValidStatusTransition(latest.status, nextStatus)) {
-          assertValidStatusTransition(latest.status, nextStatus);
+        // A concurrent writer already moved the job to nextStatus, so this transition is a no-op:
+        // apply the patch over its row instead of failing a duplicate start or kick.
+        if (latest.status === nextStatus) row = await writePatch(latest);
+        if (!row) {
+          if (!isValidStatusTransition(latest.status, nextStatus)) {
+            assertValidStatusTransition(latest.status, nextStatus);
+          }
+          throw new JobApiError(`Job status changed concurrently from ${existing.status} to ${latest.status}.`, 409);
         }
-        throw new JobApiError(`Job status changed concurrently from ${existing.status} to ${latest.status}.`, 409);
       }
-      return rowToJob(rows[0]);
+      return rowToJob(row);
     },
 
     async createDocument(jobId, input) {

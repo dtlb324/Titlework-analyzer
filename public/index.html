@@ -4532,13 +4532,9 @@ function startJobPolling(jobId) {
   startJobPoller(jobId, job => renderPolledJobStatus(job), null, 'run');
 }
 function stopJobPolling() { stopJobPoller(); clearKeepOpenNotice(); }
-async function refreshJobViewIfCurrent(jobId) {
+function refreshJobViewIfCurrent(jobId) {
   if (!jobId || !isCurrentJobRoute(jobId)) return;
-  try {
-    await loadJobView(jobId);
-  } catch (err) {
-    console.warn('Could not refresh job view', err);
-  }
+  loadJobView(jobId).catch(err => console.warn('Could not refresh job view', err));
 }
 
 function getJobStorageKey() {
@@ -7285,10 +7281,10 @@ async function runStagedAnalysis(files, runOptions = {}) {
       }
       clearProgressTimer();
       stopJobPolling();
-      await refreshJobViewIfCurrent(job.id);
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('uploadSection').style.display = 'block';
       document.getElementById('analyzeBtn').disabled = false;
+      refreshJobViewIfCurrent(job.id);
       return;
     }
   }
@@ -7380,7 +7376,7 @@ async function runStagedAnalysis(files, runOptions = {}) {
     if (isAnalysisCanceled(run)) return;
     clearProgressTimer();
     stopJobPolling();
-    await refreshJobViewIfCurrent(job.id);
+    refreshJobViewIfCurrent(job.id);
     files.forEach(freeFileMemory);
     conversationHistory = [
       { role: 'user', content: synthesisInput, displayText: `Analyzed ${files.length} document(s)`, kind: 'analysis-input' },
@@ -7407,10 +7403,10 @@ async function runStagedAnalysis(files, runOptions = {}) {
     showError('Synthesis failed: ' + e.message);
     clearProgressTimer();
     stopJobPolling();
-    await refreshJobViewIfCurrent(job.id);
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('uploadSection').style.display = 'block';
     document.getElementById('analyzeBtn').disabled = false;
+    refreshJobViewIfCurrent(job.id);
   }
   } finally {
     endAnalysisRun(run);
@@ -7875,10 +7871,10 @@ async function analyzeAdditional(additionalOptions = {}) {
       }
       clearProgressTimer();
       stopJobPolling();
-      await refreshJobViewIfCurrent(job.id);
       document.getElementById('progressSection').style.display = 'none';
       document.getElementById('addDocsSection').style.display = 'block';
       document.getElementById('addDocsBtn').disabled = false;
+      refreshJobViewIfCurrent(job.id);
       return;
     }
   }
@@ -7977,7 +7973,7 @@ async function analyzeAdditional(additionalOptions = {}) {
     updateProgress(100, `Analysis updated — ${allAbstracts.length} total documents processed`, items);
     clearProgressTimer();
     stopJobPolling();
-    await refreshJobViewIfCurrent(job.id);
+    refreshJobViewIfCurrent(job.id);
 
     documentAbstracts = allAbstracts;
     newFiles.forEach(freeFileMemory);
@@ -8016,10 +8012,10 @@ async function analyzeAdditional(additionalOptions = {}) {
     showError('Update failed: ' + e.message);
     clearProgressTimer();
     stopJobPolling();
-    await refreshJobViewIfCurrent(job.id);
     document.getElementById('progressSection').style.display = 'none';
     document.getElementById('addDocsSection').style.display = 'block';
     document.getElementById('addDocsBtn').disabled = false;
+    refreshJobViewIfCurrent(job.id);
   }
   } finally {
     endAnalysisRun(run);
