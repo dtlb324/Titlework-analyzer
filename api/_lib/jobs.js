@@ -273,12 +273,20 @@ export function deriveSynthesisProgress({
   return { hasResult, mergeInProgress, mergeLeaseHeld: Boolean(mergeLeaseHeld) };
 }
 
+// Iterative, so a deeply nested body cannot overflow the call stack.
 export function hasRawPayloadFields(value) {
-  if (!value || typeof value !== 'object') return false;
-  if (Array.isArray(value)) return value.some(hasRawPayloadFields);
-  for (const [key, nested] of Object.entries(value)) {
-    if (RAW_PAYLOAD_KEYS.has(key)) return true;
-    if (hasRawPayloadFields(nested)) return true;
+  const stack = [value];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== 'object') continue;
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    for (const [key, nested] of Object.entries(current)) {
+      if (RAW_PAYLOAD_KEYS.has(key)) return true;
+      stack.push(nested);
+    }
   }
   return false;
 }

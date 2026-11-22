@@ -5,7 +5,8 @@ import { consumeAnthropicMessageStream } from '../api/_lib/anthropic-stream.js';
 import { uploadGeminiFile } from '../api/_lib/gemini-files.js';
 import { consumeOpenRouterMessageStream } from '../api/_lib/openrouter-stream.js';
 import { runWorkerDrain, runWorkerLoop, runWorkerOnce } from '../api/_lib/cloud-run-worker.js';
-import { createPostgresJobStore, validatePatchJobInput } from '../api/_lib/jobs.js';
+import { createPostgresJobStore, hasRawPayloadFields, validatePatchJobInput } from '../api/_lib/jobs.js';
+import jobPathHandler from '../api/jobs/[...path].js';
 import { enqueueSynthesisJob, processAbstractionBatch, retryFailedAbstractionChunks } from '../api/_lib/queue.js';
 import { extractPdfPageSubset } from '../api/_lib/pdf-text.js';
 import { prepareDocument } from '../public/pdf-raster.js';
@@ -609,6 +610,52 @@ test('M16: a page too large for a 2D canvas fails with a clear message instead o
     prepareDocument(file, { loadPdfjs: async () => pdfjs, createCanvas: () => ({ width: 0, height: 0, getContext: () => null }) }),
     /Page 1 is too large to render in this browser/,
   );
+});
+
+function routeRequest(method, url, body) {
+  return {
+    method, url, body, headers: {}, socket: { remoteAddress: '203.0.113.7' },
+    query: { path: url.replace(/^\/api\/jobs\//, '').split('/').filter(Boolean) },
+  };
+}
+
+function routeResponse() {
+  return {
+    statusCode: 200, headers: {}, body: null,
+    setHeader(key, value) { this.headers[key] = value; },
+    status(code) { this.statusCode = code; return this; },
+    json(data) { this.body = data; return this; },
+  };
+}
+
+async function callRoute(method, url, body) {
+  const res = routeResponse();
+  globalThis.__TITLE_ANALYZER_JOB_STORE__ = store;
+  try {
+    await jobPathHandler(routeRequest(method, url, body), res);
+  } finally {
+    delete globalThis.__TITLE_ANALYZER_JOB_STORE__;
+  }
+  return res;
+}
+
+test('M4: a deeply nested or very wide body is scanned without overflowing the stack', () => {
+  const deep = JSON.parse('['.repeat(50_000) + ']'.repeat(50_000));
+  assert.equal(hasRawPayloadFields({ notes: deep }), false);
+  assert.equal(hasRawPayloadFields({ notes: new Array(500_000).fill(0) }), false);
+  assert.equal(hasRawPayloadFields({ notes: [[{ nested: { abstract: 'text' } }]] }), true);
+  assert.equal(validatePatchJobInput({ currentPhase: 'x', extra: deep }, { status: 'uploading', totalDocuments: 1, completedDocuments: 0, failedDocuments: 0 }).valid, true);
+});
+
+test('M5: once uploads are finalized, no chunk can be added or moved off uploaded, so synthesis cannot deadlock', async () => {
+  const ids = await jobWithChunk({ jobStatus: 'ready', chunkStatus: 'pending' });
+  const added = await callRoute('POST', `/api/jobs/${ids.jobId}/documents/${ids.documentId}/chunks`, {
+    chunkOrder: 1, originalFilename: 'late.pdf', mediaType: 'application/pdf', sizeBytes: 10, fingerprint: 'fp_late',
+  });
+  assert.equal(added.statusCode, 409, JSON.stringify(added.body));
+  const failedUpload = await callRoute('PATCH', `/api/jobs/${ids.jobId}/chunks/${ids.chunkId}`, { uploadStatus: 'failed' });
+  assert.equal(failedUpload.statusCode, 409, JSON.stringify(failedUpload.body));
+  assert.equal((await store.getChunk(ids.jobId, ids.chunkId)).uploadStatus, 'uploaded');
 });
 
 let passed = 0;
