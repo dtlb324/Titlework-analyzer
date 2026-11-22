@@ -61,12 +61,14 @@ const SEGMENT = '## CHAIN ROWS\n| Date | Doc Type | Grantor | Grantee |\n| 2001 
 
 async function synthesizingJobWithAbstracts(count) {
   const job = await store.createJob({ subjectTract: 'Section 12, Block C-8', contextNotes: '', totalDocuments: count });
+  const chunks = [];
   for (let i = 0; i < count; i += 1) {
     const fingerprint = `fp_${job.id}_${i}`;
     const doc = await store.createDocument(job.id, { originalFilename: `deed${i}.pdf`, mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
     const chunk = await store.createChunk(job.id, doc.id, { chunkOrder: i, originalFilename: `deed${i}.pdf`, mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
-    await saveServerAbstract({ jobId: job.id, chunkId: chunk.id, documentId: doc.id });
+    chunks.push({ jobId: job.id, chunkId: chunk.id, documentId: doc.id });
   }
+  for (const chunk of chunks) await saveServerAbstract(chunk);
   await pg.db.query("UPDATE analysis_jobs SET status = 'synthesizing' WHERE id = $1", [job.id]);
   return job.id;
 }
@@ -694,6 +696,86 @@ test('M8: a failed save after a streamed merge keeps the paid opinion and the ne
   assert.equal(kinds.length, callsAfterFirstPass, 'The recovered pass must not call the model again');
   assert.equal(second.result?.status, 'complete');
   assert.equal((await store.getJobResult(jobId))?.finalTitleOpinion, OPINION);
+});
+
+test('a concurrent completion wins against replanning and a stale rebuild', async () => {
+  const jobId = await synthesizingJobWithAbstracts(1);
+  await enqueueSynthesisJob(jobId, { store });
+  const planId = await store.getCurrentSynthesisPlanId(jobId);
+  await store.saveJobResult(jobId, { status: 'partial_failed', planId, finalTitleOpinion: 'first' });
+  const stale = await store.getJob(jobId);
+  const racingStore = {
+    ...store,
+    async restartSynthesis(...args) {
+      await store.saveJobResult(jobId, { status: 'complete', planId, finalTitleOpinion: OPINION });
+      return store.restartSynthesis(...args);
+    },
+  };
+  await expectStatusCode(enqueueSynthesisJob(jobId, { store: racingStore, rebuild: true }), 409);
+  const stalePlanner = { ...store, getJob: async () => stale };
+  await expectStatusCode(stalePlanner.saveSynthesisPlan(jobId, { planId: 'late', segments: [] }), 409);
+  assert.equal(await store.getCurrentSynthesisPlanId(jobId), planId);
+  assert.equal((await store.listSynthesisSegments(jobId, planId)).length, 1);
+  assert.equal((await store.getJobResult(jobId)).finalTitleOpinion, OPINION);
+});
+
+test('finalization wins against chunk writes that passed the route status check', async () => {
+  const { jobId, documentId, chunkId } = await jobWithChunk({ jobStatus: 'uploading', chunkStatus: 'completed' });
+  const stale = await store.getJob(jobId);
+  assert.equal((await store.finalizeUploads(jobId)).ready, true);
+  const staleWriter = { ...store, getJob: async () => stale };
+  await expectStatusCode(staleWriter.createChunk(jobId, documentId, {
+    originalFilename: 'late.pdf', chunkOrder: 1, sizeBytes: 1, mediaType: 'application/pdf',
+    fingerprint: 'late', uploadStatus: 'pending',
+  }), 409);
+  await expectStatusCode(store.updateChunk(jobId, chunkId, { uploadStatus: 'failed' }), 409);
+  assert.deepEqual((await store.listChunks(jobId)).map(chunk => chunk.uploadStatus), ['uploaded']);
+});
+
+test('finalization rechecks chunks after waiting for a concurrent upload', async () => {
+  const { jobId, documentId } = await jobWithChunk({ jobStatus: 'uploading', chunkStatus: 'completed' });
+  const staleChunks = await store.listChunks(jobId);
+  await store.createChunk(jobId, documentId, {
+    originalFilename: 'pending.pdf', chunkOrder: 1, sizeBytes: 1, mediaType: 'application/pdf',
+    fingerprint: 'pending', uploadStatus: 'pending',
+  });
+  const staleFinalizer = { ...store, listChunks: async () => staleChunks };
+  await expectStatusCode(staleFinalizer.finalizeUploads(jobId), 409);
+  assert.equal((await store.getJob(jobId)).status, 'uploading');
+});
+
+test('losing both the complete preview and the result write does not repeat a paid merge', async () => {
+  const jobId = await synthesizingJobWithAbstracts(2);
+  let mergeCalls = 0;
+  const flakyStore = {
+    ...store,
+    async setSynthesisPreview(id, patch) {
+      if (patch.complete) throw new Error('preview write failed');
+      return store.setSynthesisPreview(id, patch);
+    },
+    async saveJobResult(id, payload) {
+      if (payload.status === 'complete') {
+        await pg.db.query('UPDATE analysis_jobs SET synthesis_merge_worker_id = NULL WHERE id = $1', [id]);
+        throw new Error('result write failed');
+      }
+      return store.saveJobResult(id, payload);
+    },
+  };
+  const options = { store: flakyStore, streamFinalOpinion: true, config: { chunkSize: 1 }, modelClient: async request => {
+    if (synthesisCallKind(request) === 'half') return { text: SEGMENT, model: request.model };
+    mergeCalls++;
+    await request.onDelta(OPINION, OPINION);
+    return { text: OPINION, model: request.model };
+  } };
+  await processSynthesisJob(jobId, options);
+  await processSynthesisJob(jobId, options);
+  assert.equal(mergeCalls, 1);
+  assert.equal((await store.getJobResult(jobId)).status, 'failed');
+
+  await enqueueSynthesisJob(jobId, { store, rebuild: true });
+  const rebuilt = await processSynthesisJob(jobId, { ...options, store });
+  assert.equal(rebuilt.result.finalTitleOpinion, OPINION);
+  assert.equal(mergeCalls, 2);
 });
 
 test('M10: follow-ups asked about an earlier opinion are not fed into the prompt for a rebuilt one', async () => {

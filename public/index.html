@@ -5167,9 +5167,11 @@ async function saveBrowserJobResult(jobId, result) {
 async function saveBrowserResultOrWarn(jobId, result) {
   try {
     await saveBrowserJobResult(jobId, result);
+    return true;
   } catch (err) {
     console.warn('Could not save the browser-synthesized title opinion', err);
     showError(`This opinion was not saved to the job (${err.message}). Export it as a PDF before leaving this page.`);
+    return false;
   }
 }
 
@@ -6797,7 +6799,8 @@ function findHighDpiRereadCandidates(abstractList, fileList, { includeMissing = 
 function renderHighDpiRereadBar() {
   const bar = document.getElementById('highDpiRereadBar');
   if (!bar) return;
-  const hasOpinion = conversationHistory.some(m => m.role === 'assistant' && m.kind === 'title-opinion');
+  const opinion = conversationHistory.findLast(m => m.role === 'assistant' && m.kind === 'title-opinion');
+  const hasOpinion = opinion && !['complete', 'canceled'].includes(opinion.exportContext?.job?.status);
   const sourceList = lastCompletedSourceFiles.length ? lastCompletedSourceFiles : files;
   const candidates = hasOpinion ? findHighDpiRereadCandidates(documentAbstracts, sourceList) : [];
   if (!candidates.length) {
@@ -6835,6 +6838,8 @@ function jobHasHighDpiCandidates(job) {
 
 async function rereadFlaggedPdfsAsHighDpi() {
   if (highDpiRereadInFlight || activeAnalysisRun || buildStarting) return;
+  const opinion = conversationHistory.findLast(m => m.kind === 'title-opinion');
+  if (['complete', 'canceled'].includes(opinion?.exportContext?.job?.status)) return;
   const sourceList = lastCompletedSourceFiles.length ? lastCompletedSourceFiles : files;
   const candidates = findHighDpiRereadCandidates(documentAbstracts, sourceList);
   if (!candidates.length) {
@@ -6844,11 +6849,21 @@ async function rereadFlaggedPdfsAsHighDpi() {
   highDpiRereadInFlight = true;
   renderHighDpiRereadBar();
   clearError();
-  const jobId = activeJobId || getContinuationSourceJobId();
+  const jobId = opinion?.exportContext?.job?.id || activeJobId || getContinuationSourceJobId();
   const run = beginAnalysisRun(jobId);
   const progressSection = document.getElementById('progressSection');
   if (progressSection) progressSection.style.display = 'block';
   try {
+    let currentJobData = null;
+    if (jobId) {
+      const current = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
+      if (current.kind !== 'ok') throw new Error('Could not verify the job status before re-reading.');
+      currentJobData = current.data.job;
+      if (['complete', 'canceled'].includes(currentJobData.status)) {
+        if (opinion?.exportContext?.job?.id === jobId) opinion.exportContext.job.status = currentJobData.status;
+        return;
+      }
+    }
     for (let i = 0; i < candidates.length; i++) {
       if (isAnalysisCanceled(run)) return;
       const candidate = candidates[i];
@@ -6877,13 +6892,6 @@ async function rereadFlaggedPdfsAsHighDpi() {
       .filter(i => i >= 0)
       .pop();
     const priorExport = opinionIdx >= 0 ? conversationHistory[opinionIdx]?.exportContext : null;
-    let currentJobData = null;
-    if (jobId) {
-      try {
-        const currentJob = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
-        if (currentJob.kind === 'ok') currentJobData = currentJob.data.job;
-      } catch {}
-    }
     const priorFailedDocs = Array.isArray(priorExport?.result?.failedDocuments) ? priorExport.result.failedDocuments : [];
     const priorWarnings = Array.isArray(priorExport?.result?.warnings)
       ? priorExport.result.warnings.filter(w => !String(w).startsWith('synthesis_driver:'))
@@ -6909,21 +6917,15 @@ async function rereadFlaggedPdfsAsHighDpi() {
     };
     let savedResultOk = false;
     if (jobId) {
-      try {
-        const currentStatus = currentJobData?.status || null;
-        if (currentStatus === 'failed' || currentStatus === 'partial_failed') {
-          await safePatchAnalysisJob(jobId, {
-            status: 'synthesizing',
-            completedDocuments: completedDocs,
-            failedDocuments: missingDocsCount,
-            currentPhase: 'Re-synthesizing after high-DPI page read',
-          });
-        }
-        await saveBrowserJobResult(jobId, exportResult);
-        savedResultOk = true;
-      } catch (saveErr) {
-        console.warn('Could not save high-DPI re-read job result', saveErr);
+      if (currentJobData?.status === 'failed' || currentJobData?.status === 'partial_failed') {
+        await safePatchAnalysisJob(jobId, {
+          status: 'synthesizing',
+          completedDocuments: completedDocs,
+          failedDocuments: missingDocsCount,
+          currentPhase: 'Re-synthesizing after high-DPI page read',
+        });
       }
+      savedResultOk = await saveBrowserResultOrWarn(jobId, exportResult);
     }
     const synthesisInput = buildAbstractInput(
       documentAbstracts,
@@ -6939,18 +6941,17 @@ async function rereadFlaggedPdfsAsHighDpi() {
       content: synthesis,
       kind: 'title-opinion',
       sourceJobId: savedResultOk ? jobId : null,
-      exportContext: homeRunExportContext(jobId, totalDocs, completedDocs, missingDocsCount, exportResult),
+      exportContext: homeRunExportContext(jobId, totalDocs, completedDocs, missingDocsCount, { ...exportResult, status: savedResultOk ? exportResult.status : null }),
     };
     if (opinionIdx >= 0) conversationHistory[opinionIdx] = nextOpinionMsg;
     else conversationHistory.push(nextOpinionMsg);
     updateProgress(100, 'High-DPI re-read complete.', null);
-    if (progressSection) progressSection.style.display = 'none';
     renderResults();
   } catch (err) {
     if (!isAnalysisCanceled(run)) showError('High-DPI re-read failed: ' + err.message);
-    if (progressSection) progressSection.style.display = 'none';
   } finally {
     highDpiRereadInFlight = false;
+    if (progressSection) progressSection.style.display = 'none';
     endAnalysisRun(run);
     renderHighDpiRereadBar();
   }
@@ -7463,7 +7464,7 @@ async function runStagedAnalysis(files, runOptions = {}) {
         modelUsed: SYNTHESIS_MODEL,
         synthesisDriver: 'browser',
       };
-      await saveBrowserResultOrWarn(job.id, exportResult);
+      if (!await saveBrowserResultOrWarn(job.id, exportResult)) exportResult = { ...exportResult, status: null };
     }
     if (isAnalysisCanceled(run)) return;
     clearProgressTimer();
@@ -8065,7 +8066,7 @@ async function analyzeAdditional(additionalOptions = {}) {
         modelUsed: SYNTHESIS_MODEL,
         synthesisDriver: 'browser',
       };
-      await saveBrowserResultOrWarn(job.id, exportResult);
+      if (!await saveBrowserResultOrWarn(job.id, exportResult)) exportResult = { ...exportResult, status: null };
     }
     if (isAnalysisCanceled(run)) return;
     items[items.length - 1].status = 'done';
@@ -8246,7 +8247,7 @@ function homeExportContext() {
 // The job/result fields rdCompletenessNotices reads, kept with a home opinion so its export carries the same caveats.
 function homeRunExportContext(jobId, totalDocuments, completedDocuments, failedDocuments, result) {
   return {
-    job: { id: jobId, totalDocuments, completedDocuments, failedDocuments },
+    job: { id: jobId, status: result?.status, totalDocuments, completedDocuments, failedDocuments },
     result: {
       warnings: Array.isArray(result?.warnings) ? result.warnings.slice() : [],
       failedDocuments: Array.isArray(result?.failedDocuments) ? result.failedDocuments.slice() : [],

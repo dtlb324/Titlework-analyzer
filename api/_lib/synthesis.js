@@ -178,9 +178,10 @@ function createPreviewWriter(store, jobId, model, { planId, mergeWorkerId, degra
       buffer = fullText;
       await flush(false);
     },
-    async complete() {
+    async complete(finalText = buffer) {
       try {
-        await store.setSynthesisPreview(jobId, {
+        buffer = finalText;
+        const saved = await store.setSynthesisPreview(jobId, {
           text: buffer,
           complete: true,
           degraded: isDegraded,
@@ -189,8 +190,10 @@ function createPreviewWriter(store, jobId, model, { planId, mergeWorkerId, degra
           planId,
           mergeWorkerId,
         });
+        return saved?.complete && saved.text === buffer;
       } catch (err) {
         warnPreviewError('complete', err);
+        return false;
       }
     },
     async discard() {
@@ -719,7 +722,7 @@ async function callSynthesisModel({
       err.usage = extractUsage(response.usage);
       throw err;
     }
-    if (previewWriter?.complete) await previewWriter.complete();
+    const previewSaved = await previewWriter?.complete?.(response.text || '');
     if (shouldStream && response.timeToFirstDeltaMs != null) {
       logSynthesisMetrics({
         event: 'synthesis_merge_stream_delta',
@@ -746,6 +749,7 @@ async function callSynthesisModel({
       payloadBytes,
       latencyMs: Date.now() - started,
       streamed: shouldStream,
+      previewSaved,
       timeToFirstDeltaMs: response.timeToFirstDeltaMs ?? null,
       stopReason: response.stopReason || null,
     };
@@ -1398,6 +1402,7 @@ async function mergeSegmentsIntoOpinion({
       model: merged.model,
       payloadBytes: merged.payloadBytes,
       latencyMs: merged.latencyMs,
+      previewSaved: merged.previewSaved,
       streamed: Boolean(merged.streamed),
       timeToFirstDeltaMs: merged.timeToFirstDeltaMs ?? null,
     };
@@ -1424,6 +1429,7 @@ async function mergeSegmentsIntoOpinion({
     model: result.model,
     payloadBytes: result.payloadBytes,
     latencyMs: result.latencyMs,
+    previewSaved: result.previewSaved,
     streamed: Boolean(result.streamed),
     timeToFirstDeltaMs: result.timeToFirstDeltaMs ?? null,
   };
@@ -1539,6 +1545,11 @@ async function runOrRecoverMerge(mergeArgs) {
     }
     logSynthesisMetrics({ event: 'synthesis_merge_recovered', jobId, payloadBytes: recovered.payloadBytes });
     return recovered;
+  }
+  // A worker can lose both the preview and result writes after the provider has billed it.
+  // Record the attempt before issuing the request so a later worker requires explicit restart.
+  if (store?.beginPaidMerge && !await store.beginPaidMerge(jobId, mergeArgs.options.planId, mergeArgs.options.mergeWorkerId)) {
+    throw new Error('Merge already attempted or ownership changed. No complete preview is available to recover.');
   }
   return mergeSegmentsIntoOpinion(mergeArgs);
 }
@@ -1743,7 +1754,7 @@ export async function processSynthesisJob(jobId, options = {}) {
           warningsAccum.push(`final_validation_failed: ${validation.reason}`);
           if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId: mergeClaim.workerId });
         }
-        recoverablePreview = validation.ok && Boolean(merged.streamed || merged.recovered);
+        recoverablePreview = validation.ok && Boolean(merged.previewSaved || merged.recovered);
         lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
         const failedDocs = await failedDocumentsForMerge();
         if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);
@@ -1830,7 +1841,7 @@ export async function processSynthesisJob(jobId, options = {}) {
             warningsAccum.push(`final_validation_failed: ${validation.reason}`);
             if (store.clearSynthesisPreview) await store.clearSynthesisPreview(jobId, { planId, mergeWorkerId: mergeClaim.workerId });
           }
-          recoverablePreview = validation.ok && Boolean(merged.streamed || merged.recovered);
+          recoverablePreview = validation.ok && Boolean(merged.previewSaved || merged.recovered);
           lastMergeStreamMeta = { streamed: merged.streamed, timeToFirstDeltaMs: merged.timeToFirstDeltaMs };
           const failedDocs = await failedDocumentsForMerge();
           if (failedDocs.length) warningsAccum.push(`${failedDocs.length} document abstract(s) excluded due to abstraction failure.`);

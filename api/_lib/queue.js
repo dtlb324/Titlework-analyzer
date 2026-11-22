@@ -423,7 +423,12 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
   const planResult = await planJobSynthesis(jobId, options);
   const planId = planResult?.plan?.planId;
   const rebuild = Boolean(options.rebuild || options.force);
-  if (job.status === 'failed' || (job.status === 'partial_failed' && rebuild)) {
+  const restarting = job.status === 'failed' || (job.status === 'partial_failed' && rebuild);
+  const atomicRestart = restarting && store.restartSynthesis;
+  if (atomicRestart) {
+    const phase = job.status === 'failed' ? 'Resuming synthesis after failure' : 'Rebuilding opinion without failed documents';
+    await store.restartSynthesis(jobId, planId, job.status, phase);
+  } else if (restarting) {
     if (planId && store.resetFailedSynthesisSegments) {
       await store.resetFailedSynthesisSegments(jobId, planId);
     }
@@ -444,7 +449,7 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
     } catch (error) {
       if (!isInvalidJobStatusTransition(error)) throw error;
     }
-  } else if (store.updateJob && (job.status === 'failed' || resumeFromPartialFailed)) {
+  } else if (!atomicRestart && store.updateJob && (job.status === 'failed' || resumeFromPartialFailed)) {
     try {
       await store.updateJob(jobId, {
         status: 'synthesizing',
