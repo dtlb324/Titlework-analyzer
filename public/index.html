@@ -3,8 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' https://storage.googleapis.com https://*.storage.googleapis.com; img-src 'self' data:; font-src 'self'; base-uri 'none'; object-src 'none'; form-action 'self'">
-<meta http-equiv="X-Content-Type-Options" content="nosniff">
-<meta http-equiv="X-Frame-Options" content="DENY">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mineral Title Analyzer</title>
 <style>
@@ -666,7 +664,7 @@
     <h2>Access Required</h2>
     <p>Enter the access password provided by your administrator.</p>
     <div class="field">
-      <input type="password" id="passwordInput" placeholder="Password..." aria-label="Password" />
+      <input type="password" id="passwordInput" placeholder="Password..." aria-label="Password" autocomplete="off" />
     </div>
     <button class="btn-primary" onclick="checkPassword()">Enter</button>
     <div id="passwordError"></div>
@@ -1261,6 +1259,7 @@ async function loadAppVersion() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   loadAppVersion();
+  pruneExpiredAbstractionCheckpoints();
   const canLoadInitialRoute = await checkPasswordRequired();
   setupDragDrop();
   document.getElementById('fileInput').addEventListener('change', e => {
@@ -1404,13 +1403,17 @@ function showMain() {
   if (parseRoute().name === 'home') resumeLastAnalysisJob();
 }
 
+// Enter and the button can both fire; a second ping would cost a second strike toward the lockout.
+let passwordCheckInFlight = null;
+
 function checkPassword() {
+  if (passwordCheckInFlight) return passwordCheckInFlight;
   const pw = document.getElementById('passwordInput').value.trim();
   if (!pw) return;
   persistPassword(pw);
   // A poller paused by a 401 on the home view belongs to this tab's run; it resumes after re-entry.
   const paused = activeJobPollState && activeJobPollState.pausedForAuth && !activeJobPollState.cancelled ? activeJobPollState : null;
-  return fetchApiJson('/api/analyze', {
+  passwordCheckInFlight = fetchApiJson('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
     body: JSON.stringify({ ping: true }),
@@ -1432,7 +1435,10 @@ function checkPassword() {
     } else {
       showPasswordServerError('checkPassword()');
     }
+  }).finally(() => {
+    passwordCheckInFlight = null;
   });
+  return passwordCheckInFlight;
 }
 
 function resumePollerAfterAuth(paused) {
@@ -1490,10 +1496,14 @@ const EXTENSION_TO_MEDIA_TYPE = {
   webp: 'image/webp',
 };
 
+// Browsers report OS-registered types, such as application/vnd.ms-excel for a .csv on a Windows machine with
+// Excel, so a type the app does not accept falls back to the extension.
+const SUPPORTED_MEDIA_TYPES = new Set(Object.values(EXTENSION_TO_MEDIA_TYPE));
+
 function inferNormalizedMediaType(file) {
   const raw = String(file?.type || '').trim().toLowerCase();
   const normalized = raw === 'image/jpg' ? 'image/jpeg' : raw;
-  if (normalized && normalized !== 'application/octet-stream') return normalized;
+  if (SUPPORTED_MEDIA_TYPES.has(normalized)) return normalized;
   const match = /\.([a-z0-9]+)$/i.exec(String(file?.name || ''));
   const ext = match ? match[1].toLowerCase() : '';
   return EXTENSION_TO_MEDIA_TYPE[ext] || normalized || '';
@@ -1560,6 +1570,10 @@ async function splitPdfIntoEntries(file, slotsAvailable, maxChunkRaw = MAX_PDF_C
     srcDoc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
   } catch (e) {
     throw new Error(`${file.name}: could not read PDF for splitting. Re-export the file or scan at 150 DPI.`);
+  }
+  // pdf-lib cannot decrypt, so split parts of an encrypted PDF would be blank pages.
+  if (srcDoc.isEncrypted) {
+    throw new Error(`${file.name}: this PDF is encrypted, so it cannot be split without blanking its pages. Print it to a new PDF or split it by page range manually.`);
   }
 
   const pageCount = srcDoc.getPageCount();
@@ -1828,9 +1842,34 @@ function getFileFingerprint(file) {
   return `${file.name}:${file.size}:${file.type || ''}:${modified}:${split}:${range}${highDpi}:${contentHash}`;
 }
 
+const ABSTRACTION_CHECKPOINT_PREFIX = 'title-analyzer-abstraction:';
+// Checkpoints hold full document abstracts. They exist to resume a failed run soon after, so they expire.
+const ABSTRACTION_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+
 function getFileSignature(fileList, indexOffset, label) {
   const filesKey = fileList.map(getFileFingerprint).join('|');
-  return `title-analyzer-abstraction:${label}:${indexOffset}:${filesKey}`;
+  return `${ABSTRACTION_CHECKPOINT_PREFIX}${label}:${indexOffset}:${filesKey}`;
+}
+
+function isFreshAbstractionCheckpoint(parsed) {
+  return Number.isFinite(parsed?.savedAt) && Date.now() - parsed.savedAt < ABSTRACTION_CHECKPOINT_TTL_MS;
+}
+
+function pruneExpiredAbstractionCheckpoints() {
+  const storage = getStorage();
+  if (!storage) return;
+  try {
+    const keys = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key && key.startsWith(ABSTRACTION_CHECKPOINT_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      let parsed = null;
+      try { parsed = JSON.parse(storage.getItem(key) || 'null'); } catch {}
+      if (!isFreshAbstractionCheckpoint(parsed)) storage.removeItem(key);
+    }
+  } catch {}
 }
 
 function loadAbstractionCheckpoint(fileList, indexOffset, label) {
@@ -1840,6 +1879,10 @@ function loadAbstractionCheckpoint(fileList, indexOffset, label) {
   try {
     const parsed = JSON.parse(storage.getItem(key) || 'null');
     if (!parsed || !Array.isArray(parsed.entries)) return { key, entries: [] };
+    if (!isFreshAbstractionCheckpoint(parsed)) {
+      storage.removeItem(key);
+      return { key, entries: [] };
+    }
     return { key, entries: parsed.entries };
   } catch {
     storage.removeItem(key);
@@ -2387,7 +2430,10 @@ function jobErrorSentence(raw) {
 function renderJobDetail(job) {
   const el = document.getElementById('jobDetail');
   if (!el || !job) return;
-  const failed = failedDocumentList(job.failedDocuments);
+  // The job row stores only a count; the names live on the saved result once it is loaded.
+  const failed = failedDocumentList(job.failedDocuments).length
+    ? failedDocumentList(job.failedDocuments)
+    : failedDocumentList(rdLatestJob.jobId === job.id ? rdLatestJob.result?.failedDocuments : null);
   const failedCount = failed.length || failedDocumentCount(job.failedDocuments);
   let reasonHtml = '';
   if (job.status === 'failed' || job.status === 'canceled' || job.status === 'partial_failed') {
@@ -2534,7 +2580,8 @@ function renderJobActions(job) {
       onClick: () => runJobAction(job, '/synthesis/start'),
     });
   }
-  if (isTerminal && job.status !== 'canceled' && jobHasHighDpiCandidates(job)) {
+  // The server keeps a complete job's opinion, so a re-read there would pay for an opinion it cannot save.
+  if (isTerminal && job.status !== 'canceled' && job.status !== 'complete' && jobHasHighDpiCandidates(job)) {
     buttons.push({
       label: 'Re-read as high-DPI page images',
       class: 'btn-secondary',
@@ -3948,8 +3995,13 @@ async function loadJobView(jobId) {
   }
   if (activeJobPollState && activeJobPollState.jobId !== jobId) stopJobPoller();
   if (headerEl) headerEl.innerHTML = '<div style="color:#64748b" role="status">Loading job…</div>';
-  // Another job's results must not sit under this job's header while it loads.
+  // Another job's results and action buttons must not sit under this job's header while it loads.
   if (rdLastJobRender.jobId && rdLastJobRender.jobId !== jobId) renderJobResults({ id: jobId }, null);
+  if (jobActionButtons.length) {
+    jobActionButtons = [];
+    const actionsEl = document.getElementById('jobActions');
+    if (actionsEl) actionsEl.innerHTML = '';
+  }
   if (jobResultView.jobId !== jobId) setJobResultView(jobId, 'loading');
   renderJobConnStatus(null);
   const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, {
@@ -4417,7 +4469,18 @@ function renderJobConnStatus(state) {
   if (el.textContent !== text) el.textContent = text;
 }
 
+// A visibility change asks for an immediate tick; one already in flight schedules the next itself.
 async function runJobPollTick(state) {
+  if (state.inFlight) return;
+  state.inFlight = true;
+  try {
+    await pollJobOnce(state);
+  } finally {
+    state.inFlight = false;
+  }
+}
+
+async function pollJobOnce(state) {
   if (state.cancelled || state.pausedForAuth) return;
   const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(state.jobId)}`, {
     method: 'GET',
@@ -4948,7 +5011,8 @@ async function readServerState(read, run) {
       return await read();
     } catch (err) {
       if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
-      if (failures >= SERVER_READ_RETRY_DELAYS_MS.length) throw err;
+      // Each 401 counts toward the server's five-strike password lockout, so it is never retried.
+      if (Number(err?.status) === 401 || failures >= SERVER_READ_RETRY_DELAYS_MS.length) throw err;
       console.warn('Server job read failed; retrying', err);
       await sleep(SERVER_READ_RETRY_DELAYS_MS[failures]);
     }
@@ -4994,6 +5058,7 @@ async function pollServerAbstraction(jobId, items, totalDocuments, run) {
   for (let attempt = 0; attempt < 1800; attempt++) {
     if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
     latest = await readServerState(() => fetchServerAbstractionStatus(jobId), run);
+    if (latest.job?.status === 'canceled') throw new Error('Job was canceled.');
     const status = latest.status || {};
     const completed = status.completed || 0;
     const failed = status.failed || 0;
@@ -5097,6 +5162,19 @@ async function saveBrowserJobResult(jobId, result) {
   });
 }
 
+// The opinion is paid for and about to be shown. A failed save keeps it on screen with a notice rather than
+// failing the whole run.
+async function saveBrowserResultOrWarn(jobId, result) {
+  try {
+    await saveBrowserJobResult(jobId, result);
+    return true;
+  } catch (err) {
+    console.warn('Could not save the browser-synthesized title opinion', err);
+    showError(`This opinion was not saved to the job (${err.message}). Export it as a PDF before leaving this page.`);
+    return false;
+  }
+}
+
 async function askServerFollowup(jobId, question) {
   return await durableJsonFetch(`/api/jobs/${encodeURIComponent(jobId)}/followup`, {
     method: 'POST',
@@ -5128,6 +5206,7 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress, run) {
   for (let attempt = 0; attempt < 1800; attempt++) {
     if (isAnalysisCanceled(run)) throw new Error('Job canceled.');
     latest = await readServerState(() => fetchServerSynthesisStatus(jobId), run);
+    if (latest.job?.status === 'canceled') throw new Error('Job was canceled.');
     const status = latest.status || {};
     const complete = status.complete || 0;
     const total = status.total || 0;
@@ -5171,7 +5250,9 @@ async function pollServerSynthesis(jobId, items, totalDocs, onProgress, run) {
       lastPreviewBytes = 0;
     }
     if (onProgress) onProgress(Math.min(99, pct), phaseLabel);
-    if (isServerSynthesisTerminal(status)) {
+    // The job status is the source of truth: a job that ended with no segment counts would otherwise poll for 25 minutes.
+    const jobEnded = ['complete', 'partial_failed', 'failed'].includes(latest.job?.status) && !status.mergeInProgress;
+    if (isServerSynthesisTerminal(status) || jobEnded) {
       return { ...latest, result: cachedResult || publicJobResultFromApi(latest) };
     }
     const signature = `${complete}|${failed}|${processing}|${retryWait}|${status.mergeInProgress ? 1 : 0}`;
@@ -5580,7 +5661,7 @@ function refreshAddDocsState() {
 // Staged files are lost on reload. A run in progress from this tab pauses when the tab closes, whether the browser
 // does the work or a durable server job does: production runs with the worker loop off, so this tab drives it.
 function shouldWarnBeforeUnload() {
-  if (activeAnalysisRun || buildStarting || hasLiveJobInThisTab()) return true;
+  if (activeAnalysisRun || buildStarting || highDpiRereadInFlight || hasLiveJobInThisTab()) return true;
   if (conversationHistory.length) return additionalFiles.length > 0 || intakeLanes.additional.pending > 0;
   return files.length > 0 || intakeLanes.home.pending > 0;
 }
@@ -5848,6 +5929,12 @@ function showError(msg, actionHtml = '') {
     <div class="error-msg">
       <strong>${esc(title)}</strong><br>${esc(detail)}${actionHtml || ''}
     </div>`;
+  // #errorBox lives in the home view. A durable run moves the reader to its job view, so the notice goes there too.
+  const route = parseRoute();
+  if (route.name === 'job') {
+    jobActionError = { jobId: route.jobId, text: [title, detail].filter(Boolean).join(' ') };
+    renderJobActionError(route.jobId);
+  }
 }
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 
@@ -6019,6 +6106,7 @@ async function callBackend(messages, system, options = {}, retryCount = 0) {
           : isServerLimit ? 62000
           : 5000 * (retryCount + 1);
         await sleep(waitMs);
+        if (options.run && isAnalysisCanceled(options.run)) throw new Error('Job canceled.');
         return callBackend(messages, system, { ...options, requestId }, retryCount + 1);
       }
       throw makeBackendError('Rate limit reached: Too many requests in a short period. Wait 60 seconds — processing will continue automatically if you retry, or refresh and run a smaller batch first.');
@@ -6131,6 +6219,7 @@ async function callAbstractionWithEscalation(messages, options) {
   if (run && isAnalysisCanceled(run)) return '';
   const initial = await callBackend(messages, ABSTRACT_PROMPT, {
     ...requestOptions,
+    run,
     model: ABSTRACT_MODEL,
     max_tokens: ABSTRACT_MAX_TOKENS,
   });
@@ -6140,6 +6229,7 @@ async function callAbstractionWithEscalation(messages, options) {
   try {
     return await callBackend(messages, ABSTRACT_PROMPT, {
       ...requestOptions,
+      run,
       model: ABSTRACT_ESCALATION_MODEL,
       max_tokens: ABSTRACT_ESCALATION_MAX_TOKENS,
       phase: `${requestOptions.phase || 'abstraction'}-escalation`,
@@ -6346,7 +6436,10 @@ async function runDocumentAbstraction(fileList, indexOffset, items, showAllProgr
   });
 
   await runWithConcurrency(tasks, ABSTRACT_CONCURRENCY);
-  if (run && isAnalysisCanceled(run)) return [];
+  if (run && isAnalysisCanceled(run)) {
+    clearAbstractionCheckpoint(checkpoint?.key);
+    return [];
+  }
   if (firstError) {
     const savedCount = checkpointEntries.size;
     const resumeHint = checkpointPersisted
@@ -6455,6 +6548,7 @@ async function synthesizeAbstracts(abstracts, tract, ctx, preamble, systemPrompt
 
   try {
     return await callBackend(messages, prompt, {
+      run,
       model,
       max_tokens,
       phase: isPartialSegment ? 'synthesis-partial' : 'synthesis',
@@ -6705,7 +6799,8 @@ function findHighDpiRereadCandidates(abstractList, fileList, { includeMissing = 
 function renderHighDpiRereadBar() {
   const bar = document.getElementById('highDpiRereadBar');
   if (!bar) return;
-  const hasOpinion = conversationHistory.some(m => m.role === 'assistant' && m.kind === 'title-opinion');
+  const opinion = conversationHistory.findLast(m => m.role === 'assistant' && m.kind === 'title-opinion');
+  const hasOpinion = opinion && !['complete', 'canceled'].includes(opinion.exportContext?.job?.status);
   const sourceList = lastCompletedSourceFiles.length ? lastCompletedSourceFiles : files;
   const candidates = hasOpinion ? findHighDpiRereadCandidates(documentAbstracts, sourceList) : [];
   if (!candidates.length) {
@@ -6743,6 +6838,8 @@ function jobHasHighDpiCandidates(job) {
 
 async function rereadFlaggedPdfsAsHighDpi() {
   if (highDpiRereadInFlight || activeAnalysisRun || buildStarting) return;
+  const opinion = conversationHistory.findLast(m => m.kind === 'title-opinion');
+  if (['complete', 'canceled'].includes(opinion?.exportContext?.job?.status)) return;
   const sourceList = lastCompletedSourceFiles.length ? lastCompletedSourceFiles : files;
   const candidates = findHighDpiRereadCandidates(documentAbstracts, sourceList);
   if (!candidates.length) {
@@ -6752,11 +6849,21 @@ async function rereadFlaggedPdfsAsHighDpi() {
   highDpiRereadInFlight = true;
   renderHighDpiRereadBar();
   clearError();
-  const jobId = activeJobId || getContinuationSourceJobId();
+  const jobId = opinion?.exportContext?.job?.id || activeJobId || getContinuationSourceJobId();
   const run = beginAnalysisRun(jobId);
   const progressSection = document.getElementById('progressSection');
   if (progressSection) progressSection.style.display = 'block';
   try {
+    let currentJobData = null;
+    if (jobId) {
+      const current = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
+      if (current.kind !== 'ok') throw new Error('Could not verify the job status before re-reading.');
+      currentJobData = current.data.job;
+      if (['complete', 'canceled'].includes(currentJobData.status)) {
+        if (opinion?.exportContext?.job?.id === jobId) opinion.exportContext.job.status = currentJobData.status;
+        return;
+      }
+    }
     for (let i = 0; i < candidates.length; i++) {
       if (isAnalysisCanceled(run)) return;
       const candidate = candidates[i];
@@ -6785,13 +6892,6 @@ async function rereadFlaggedPdfsAsHighDpi() {
       .filter(i => i >= 0)
       .pop();
     const priorExport = opinionIdx >= 0 ? conversationHistory[opinionIdx]?.exportContext : null;
-    let currentJobData = null;
-    if (jobId) {
-      try {
-        const currentJob = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET', headers: getJobHeaders() }, isJobPayloadFor(jobId));
-        if (currentJob.kind === 'ok') currentJobData = currentJob.data.job;
-      } catch {}
-    }
     const priorFailedDocs = Array.isArray(priorExport?.result?.failedDocuments) ? priorExport.result.failedDocuments : [];
     const priorWarnings = Array.isArray(priorExport?.result?.warnings)
       ? priorExport.result.warnings.filter(w => !String(w).startsWith('synthesis_driver:'))
@@ -6817,21 +6917,15 @@ async function rereadFlaggedPdfsAsHighDpi() {
     };
     let savedResultOk = false;
     if (jobId) {
-      try {
-        const currentStatus = currentJobData?.status || null;
-        if (currentStatus === 'failed' || currentStatus === 'partial_failed') {
-          await safePatchAnalysisJob(jobId, {
-            status: 'synthesizing',
-            completedDocuments: completedDocs,
-            failedDocuments: missingDocsCount,
-            currentPhase: 'Re-synthesizing after high-DPI page read',
-          });
-        }
-        await saveBrowserJobResult(jobId, exportResult);
-        savedResultOk = true;
-      } catch (saveErr) {
-        console.warn('Could not save high-DPI re-read job result', saveErr);
+      if (currentJobData?.status === 'failed' || currentJobData?.status === 'partial_failed') {
+        await safePatchAnalysisJob(jobId, {
+          status: 'synthesizing',
+          completedDocuments: completedDocs,
+          failedDocuments: missingDocsCount,
+          currentPhase: 'Re-synthesizing after high-DPI page read',
+        });
       }
+      savedResultOk = await saveBrowserResultOrWarn(jobId, exportResult);
     }
     const synthesisInput = buildAbstractInput(
       documentAbstracts,
@@ -6847,25 +6941,24 @@ async function rereadFlaggedPdfsAsHighDpi() {
       content: synthesis,
       kind: 'title-opinion',
       sourceJobId: savedResultOk ? jobId : null,
-      exportContext: homeRunExportContext(jobId, totalDocs, completedDocs, missingDocsCount, exportResult),
+      exportContext: homeRunExportContext(jobId, totalDocs, completedDocs, missingDocsCount, { ...exportResult, status: savedResultOk ? exportResult.status : null }),
     };
     if (opinionIdx >= 0) conversationHistory[opinionIdx] = nextOpinionMsg;
     else conversationHistory.push(nextOpinionMsg);
     updateProgress(100, 'High-DPI re-read complete.', null);
-    if (progressSection) progressSection.style.display = 'none';
     renderResults();
   } catch (err) {
     if (!isAnalysisCanceled(run)) showError('High-DPI re-read failed: ' + err.message);
-    if (progressSection) progressSection.style.display = 'none';
   } finally {
     highDpiRereadInFlight = false;
+    if (progressSection) progressSection.style.display = 'none';
     endAnalysisRun(run);
     renderHighDpiRereadBar();
   }
 }
 
 async function rereadJobPdfsAsHighDpi(job) {
-  if (!job?.id || highDpiRereadInFlight || actionInFlight || activeAnalysisRun || buildStarting) return;
+  if (!job?.id || job.status === 'complete' || highDpiRereadInFlight || actionInFlight || activeAnalysisRun || buildStarting) return;
   const sourceFiles = sessionSourceFilesByJob.get(job.id) || [];
   if (!sourceFiles.length) return;
   highDpiRereadInFlight = true;
@@ -7371,7 +7464,7 @@ async function runStagedAnalysis(files, runOptions = {}) {
         modelUsed: SYNTHESIS_MODEL,
         synthesisDriver: 'browser',
       };
-      await saveBrowserJobResult(job.id, exportResult);
+      if (!await saveBrowserResultOrWarn(job.id, exportResult)) exportResult = { ...exportResult, status: null };
     }
     if (isAnalysisCanceled(run)) return;
     clearProgressTimer();
@@ -7423,8 +7516,9 @@ function buildFollowupMessages(question, titleOpinionOverride = null, priorPairs
         { role: 'user', content: pair.question, kind: 'followup' },
         { role: 'assistant', content: pair.answer, kind: 'followup' },
       ])).filter(m => typeof m.content === 'string')
+    // Only follow-ups after the latest opinion: + Add Documents replaces the opinion the earlier ones were about.
     : conversationHistory
-        .slice(2, -1)
+        .slice(Math.max(2, conversationHistory.findLastIndex(m => m.role === 'assistant' && m.kind === 'title-opinion') + 1), -1)
         .filter(m => m.kind === 'followup' && typeof m.content === 'string');
   for (let turns = FOLLOWUP_HISTORY_TURNS; turns >= 0; turns--) {
     const recent = turns === 0 ? [] : followupOnly.slice(-turns * 2);
@@ -7881,8 +7975,14 @@ async function analyzeAdditional(additionalOptions = {}) {
 
   let allAbstracts;
   if (usedServerAbstraction && importedContinuation) {
-    allAbstracts = groupAbstractsBySourceDocument(await fetchServerAbstracts(job.id));
+    // newAbstracts already holds every server abstract for this job, imported ones included. This re-read only
+    // refreshes it, so a failed read falls back to it instead of escaping the run.
+    const latest = await readServerState(() => fetchServerAbstracts(job.id), run).catch(err => {
+      console.warn('Could not re-read server abstracts; using the list read after abstraction', err);
+      return null;
+    });
     if (isAnalysisCanceled(run)) return;
+    allAbstracts = latest ? groupAbstractsBySourceDocument(latest) : newAbstracts;
   } else {
     allAbstracts = groupAbstractsBySourceDocument([...priorAbstracts, ...newAbstracts]);
   }
@@ -7966,7 +8066,7 @@ async function analyzeAdditional(additionalOptions = {}) {
         modelUsed: SYNTHESIS_MODEL,
         synthesisDriver: 'browser',
       };
-      await saveBrowserJobResult(job.id, exportResult);
+      if (!await saveBrowserResultOrWarn(job.id, exportResult)) exportResult = { ...exportResult, status: null };
     }
     if (isAnalysisCanceled(run)) return;
     items[items.length - 1].status = 'done';
@@ -8116,6 +8216,8 @@ const PDF_WINANSI_EXTRA = new Set('€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“�
 function pdfSafeText(text, counter) {
   let s = String(text == null ? '' : text);
   try { s = s.normalize('NFC'); } catch {}
+  // The synthesis prompt asks for "Grantor → Grantee", so the arrow is in nearly every opinion; spell it out.
+  s = s.replace(/\u2192/g, '->');
   let out = '';
   for (const ch of s) {
     const c = ch.codePointAt(0);
@@ -8145,7 +8247,7 @@ function homeExportContext() {
 // The job/result fields rdCompletenessNotices reads, kept with a home opinion so its export carries the same caveats.
 function homeRunExportContext(jobId, totalDocuments, completedDocuments, failedDocuments, result) {
   return {
-    job: { id: jobId, totalDocuments, completedDocuments, failedDocuments },
+    job: { id: jobId, status: result?.status, totalDocuments, completedDocuments, failedDocuments },
     result: {
       warnings: Array.isArray(result?.warnings) ? result.warnings.slice() : [],
       failedDocuments: Array.isArray(result?.failedDocuments) ? result.failedDocuments.slice() : [],
@@ -8285,37 +8387,56 @@ function downloadPDF(options = {}) {
   doc.text('AI-ASSISTED ANALYSIS — NOT A LEGAL OPINION. Verify all facts against source documents before any action.', margin + 3, y + 6.5);
   y += 16;
 
-  // Completeness notices: amber box on page one, right after the disclaimer.
+  // Completeness notices: amber box on page one, right after the disclaimer. A list taller than the rest of the
+  // page continues in another box on the next page instead of running off the bottom.
   if (notices.length) {
     doc.setFontSize(8.5);
     doc.setFont('helvetica', 'normal');
     const inner = contentW() - 8;
-    const items = notices.map(n => doc.splitTextToSize(`• ${n.text}`, inner));
     const lh = 8.5 * 0.3528 * 1.25;
-    const height = 6 + 5 + (docsLine ? 4.5 : 0) + items.reduce((sum, lines) => sum + lines.length * lh + 1, 0) + 2;
-    doc.setFillColor(255, 247, 230);
-    doc.setDrawColor(217, 119, 6);
-    doc.rect(margin, y, contentW(), height, 'FD');
-    let ny = y + 6;
-    doc.setTextColor(146, 64, 14);
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'bold');
+    const rows = [];
+    for (const n of notices) {
+      for (const line of doc.splitTextToSize(`• ${n.text}`, inner)) rows.push({ line, h: lh });
+      rows[rows.length - 1].h += 1;
+    }
     // Completeness caveats keep their heading; a box holding only the replaced-characters note says just that.
     const onlyUnshown = notices.every(n => n.kind === 'unshown_characters');
-    doc.text(onlyUnshown ? 'Some characters could not be shown' : 'This result may be incomplete', margin + 4, ny);
-    ny += 5;
-    doc.setFontSize(8.5);
-    if (docsLine) {
-      doc.text(docsLine, margin + 4, ny);
-      ny += 4.5;
+    let first = true;
+    while (rows.length) {
+      const headH = first ? 5 + (docsLine ? 4.5 : 0) : 0;
+      const room = pageH() - margin - y - 8 - headH;
+      let take = 0;
+      for (let used = 0; take < rows.length && used + rows[take].h <= room; take += 1) used += rows[take].h;
+      if (!take) {
+        startPage();
+        continue;
+      }
+      const boxRows = rows.splice(0, take);
+      const height = 6 + headH + boxRows.reduce((sum, row) => sum + row.h, 0) + 2;
+      doc.setFillColor(255, 247, 230);
+      doc.setDrawColor(217, 119, 6);
+      doc.rect(margin, y, contentW(), height, 'FD');
+      let ny = y + 6;
+      if (first) {
+        doc.setTextColor(146, 64, 14);
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.text(onlyUnshown ? 'Some characters could not be shown' : 'This result may be incomplete', margin + 4, ny);
+        ny += 5;
+        doc.setFontSize(8.5);
+        if (docsLine) {
+          doc.text(docsLine, margin + 4, ny);
+          ny += 4.5;
+        }
+      }
+      doc.setFontSize(8.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(120, 53, 15);
+      boxRows.forEach(row => { doc.text(row.line, margin + 4, ny); ny += row.h; });
+      y += height + 6;
+      first = false;
+      if (rows.length) startPage();
     }
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(120, 53, 15);
-    items.forEach(lines => {
-      lines.forEach(line => { doc.text(line, margin + 4, ny); ny += lh; });
-      ny += 1;
-    });
-    y += height + 6;
   }
 
   function addText(text, fontSize, isBold, color, indent) {

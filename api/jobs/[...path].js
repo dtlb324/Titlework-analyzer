@@ -19,7 +19,6 @@ import {
   inferSynthesisDriver,
 } from '../_lib/jobs.js';
 import {
-  processJobAbstraction,
   retryChunkAbstraction,
   serverAbstractionSetupError,
 } from '../_lib/abstraction.js';
@@ -68,6 +67,8 @@ function validPrefixedId(id, prefix) {
 }
 
 const TERMINAL_JOB_STATUSES = new Set(['complete', 'partial_failed', 'failed', 'canceled']);
+
+const UPLOAD_OPEN_STATUSES = new Set(['created', 'uploading']);
 
 function isTerminalJob(job) {
   return TERMINAL_JOB_STATUSES.has(job?.status);
@@ -222,6 +223,10 @@ async function handleCreateChunk(req, res, requestId, store, jobId, documentId) 
   if (isTerminalJob(job)) {
     return res.status(409).json({ error: 'Cannot add chunks to a terminal job.', requestId });
   }
+  // Abstraction only reads uploaded chunks, so a chunk added after finalize would block synthesis forever.
+  if (!UPLOAD_OPEN_STATUSES.has(job.status)) {
+    return res.status(409).json({ error: 'Uploads for this job are already finalized.', requestId });
+  }
   const document = await store.getDocument(jobId, documentId);
   if (!document) return res.status(404).json({ error: 'Document not found.', requestId });
   if (validation.value.fingerprint && store.findChunkByFingerprint) {
@@ -265,6 +270,9 @@ async function handleChunkPatch(req, res, requestId, store, jobId, chunkId) {
     existingBlobUrl: existing.blobUrl,
   });
   if (!validation.valid) return res.status(400).json({ error: validation.reason, requestId });
+  if (!UPLOAD_OPEN_STATUSES.has(job.status) && validation.patch.uploadStatus && validation.patch.uploadStatus !== 'uploaded') {
+    return res.status(409).json({ error: 'Uploads for this job are already finalized.', requestId });
+  }
 
   const chunk = await store.updateChunk(jobId, chunkId, validation.patch);
   if (!chunk) return res.status(404).json({ error: 'Chunk not found.', requestId });
@@ -523,8 +531,8 @@ async function handleSynthesisStart(req, res, requestId, store, jobId) {
   }
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  if (job.status === 'canceled') {
-    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  if (job.status === 'canceled' || job.status === 'complete') {
+    return res.status(409).json({ error: job.status === 'canceled' ? 'Job has been canceled.' : 'Job is already complete.', requestId });
   }
   let snapshot;
   try {
@@ -592,8 +600,8 @@ async function handleSynthesisProcess(req, res, requestId, store, jobId) {
   }
   const job = await store.getJob(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found.', requestId });
-  if (job.status === 'canceled') {
-    return res.status(409).json({ error: 'Job has been canceled.', requestId });
+  if (job.status === 'canceled' || job.status === 'complete') {
+    return res.status(409).json({ error: job.status === 'canceled' ? 'Job has been canceled.' : 'Job is already complete.', requestId });
   }
   let result;
   try {

@@ -79,6 +79,7 @@ export async function invokeAnthropicModelStream(request, options = {}) {
   if (keyError) {
     const error = new Error(keyError);
     error.statusCode = 503;
+    error.code = 'missing_api_key';
     throw error;
   }
 
@@ -140,6 +141,7 @@ export async function invokeAnthropicModel(request, options = {}) {
   if (keyError) {
     const error = new Error(keyError);
     error.statusCode = 503;
+    error.code = 'missing_api_key';
     throw error;
   }
   const body = JSON.stringify(buildMessagesRequestBody({
@@ -187,6 +189,7 @@ async function invokeOpenRouterModelStream(request, options = {}) {
   if (keyError) {
     const error = new Error(keyError);
     error.statusCode = 503;
+    error.code = 'missing_api_key';
     throw error;
   }
 
@@ -197,6 +200,7 @@ async function invokeOpenRouterModelStream(request, options = {}) {
       maxTokens: request.maxTokens,
       system: request.system,
       messages: request.messages,
+      reasoningEffort: request.reasoningEffort,
     }),
     stream: true,
   });

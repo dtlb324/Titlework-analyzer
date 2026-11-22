@@ -1,5 +1,5 @@
 import { getJobStore } from './jobs.js';
-import { processAbstractionBatch, processSynthesisBatch } from './queue.js';
+import { DEFAULT_BUDGET_MS, processAbstractionBatch, processSynthesisBatch } from './queue.js';
 
 export function defaultSleep(ms, signal) {
   if (signal?.aborted) return Promise.resolve();
@@ -64,23 +64,50 @@ async function maybeRunSynthesisAfterAbstraction(store, jobId, processSynthesis,
   }
 }
 
+// A batch catches per-chunk and per-segment errors and returns normally, so its counts say whether it moved
+// the job. A pass with no progress and an error is a failed pass; one with neither is stalled.
+function passOutcome(result) {
+  if (!result || typeof result !== 'object') return 'progress';
+  const progress = (result.completedInBatch || 0) + (result.failedInBatch || 0)
+    + (result.retryScheduledInBatch || 0) + (result.splitsInBatch || 0);
+  if (progress > 0 || result.mergeRan) return 'progress';
+  return result.lastError ? 'failed' : 'stalled';
+}
+
 export async function runWorkerOnce(options = {}) {
   const store = options.store || getJobStore();
   if (!store) throw new Error('A job store is required for the Cloud Run worker.');
-  const processAbstraction = options.processAbstraction || ((jobId) => processAbstractionBatch(jobId, { ...options, store }));
-  const processSynthesis = options.processSynthesis || ((jobId) => processSynthesisBatch(jobId, { ...options, store }));
+  // A drain passes its deadline so no single job batch runs past the drain budget.
+  const jobOptions = () => (options.deadline
+    ? { ...options, store, budgetMs: Math.max(1_000, Math.min(options.budgetMs ?? DEFAULT_BUDGET_MS, options.deadline - Date.now())) }
+    : { ...options, store });
+  const processAbstraction = options.processAbstraction || ((jobId) => processAbstractionBatch(jobId, jobOptions()));
+  const processSynthesis = options.processSynthesis || ((jobId) => processSynthesisBatch(jobId, jobOptions()));
 
   const abstractionIds = await listJobIds(store, 'listRunnableAbstractionJobIds');
   const synthesisIds = await listJobIds(store, 'listRunnableSynthesisJobIds');
   const synthesisSet = new Set(synthesisIds);
   const errors = [];
   let succeeded = 0;
+  let progressed = 0;
+  const record = (jobId, phase, result) => {
+    const outcome = passOutcome(result);
+    if (outcome === 'failed') {
+      errors.push({ jobId, phase, error: result.lastError });
+      console.error(JSON.stringify({ event: `worker_${phase}_no_progress`, jobId, errorType: result.lastError?.errorType || null }));
+      return false;
+    }
+    succeeded += 1;
+    if (outcome === 'progress') progressed += 1;
+    return true;
+  };
 
   for (const jobId of abstractionIds) {
+    if (options.signal?.aborted) break;
     try {
-      await processAbstraction(jobId);
-      succeeded += 1;
+      if (!record(jobId, 'abstraction', await processAbstraction(jobId))) continue;
       synthesisSet.delete(jobId);
+      if (options.signal?.aborted) break;
       await maybeRunSynthesisAfterAbstraction(store, jobId, processSynthesis, {
         collectErrors: errors,
       });
@@ -91,9 +118,9 @@ export async function runWorkerOnce(options = {}) {
   }
 
   for (const jobId of synthesisSet) {
+    if (options.signal?.aborted) break;
     try {
-      await processSynthesis(jobId);
-      succeeded += 1;
+      record(jobId, 'synthesis', await processSynthesis(jobId));
     } catch (err) {
       errors.push({ jobId, phase: 'synthesis', error: err });
       console.error(JSON.stringify({ event: 'worker_synthesis_error', jobId, reason: err?.message || String(err) }));
@@ -105,6 +132,7 @@ export async function runWorkerOnce(options = {}) {
     synthesisJobs: synthesisIds.length,
     errors,
     succeeded,
+    progressed,
     hasWork: abstractionIds.length + synthesisIds.length > 0,
   };
 }
@@ -126,6 +154,7 @@ export async function runWorkerDrain(options = {}) {
     return await runWorkerLoop({
       ...options,
       signal: controller.signal,
+      deadline: Date.now() + budgetMs,
       maxIdleCycles: 1,
       maxConsecutiveErrorCycles: options.maxConsecutiveErrorCycles ?? 3,
     });
@@ -166,17 +195,16 @@ export async function runWorkerLoop(options = {}) {
     }
     if (result.hasWork) {
       idleCycles = 0;
-      if (result.errors.length) {
-        if ((result.succeeded ?? 0) === 0) {
-          consecutiveErrorCycles += 1;
-          if (consecutiveErrorCycles >= maxConsecutiveErrorCycles) break;
-        } else {
-          consecutiveErrorCycles = 0;
-        }
-        await sleep(activeMs || idleMs, options.signal);
+      if (result.errors.length && (result.succeeded ?? 0) === 0) {
+        consecutiveErrorCycles += 1;
+        if (consecutiveErrorCycles >= maxConsecutiveErrorCycles) break;
       } else {
         consecutiveErrorCycles = 0;
       }
+      // Listed work that errored or did not move must not be re-polled at once, or the loop spins on the database.
+      const stalled = result.errors.length > 0 || (result.progressed ?? 1) === 0;
+      const pauseMs = stalled ? (activeMs || idleMs) : activeMs;
+      if (pauseMs > 0) await sleep(pauseMs, options.signal);
       continue;
     }
     consecutiveErrorCycles = 0;

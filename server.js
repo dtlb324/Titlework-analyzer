@@ -151,6 +151,11 @@ export function createServer({ ocrCompareModelClient } = {}) {
       }
       return await serveStatic(req, res, url);
     } catch (err) {
+      // A late throw after the response started cannot be answered; writing again would throw inside this catch.
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       const statusCode = err?.statusCode || 500;
       if (statusCode >= 500) {
         console.error(JSON.stringify({

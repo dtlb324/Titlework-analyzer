@@ -321,7 +321,7 @@ test('a single page over the inline limit is refused before any read when the Fi
   assert.equal(model.requests.length, 0);
 });
 
-test('a single page too large to send inline fails without building the request when the Files API upload fails', async () => {
+test('a single page too large to send inline keeps the Files API upload error, so a transient one is retried, without building the request', async () => {
   const bytes = await pdfOf(1, 940_000);
   assert(Math.ceil(bytes.byteLength / 3) * 4 > 1_200_000 && bytes.byteLength < 1_000_000, `fixture size ${bytes.byteLength}`);
   const chunk = pdfChunk(bytes, 1, 1);
@@ -333,14 +333,14 @@ test('a single page too large to send inline fails without building the request 
   try {
     await withGeminiFilesStub(async uploads => {
       const result = await processChunkAbstraction(chunk, {
-        store, workerId: 'wkr_fixture', maxAttempts: 1,
+        store, workerId: 'wkr_fixture', maxAttempts: 2,
         blobLoader: value => defaultBlobLoader(value, { objectReader: storage.objectReader }),
         modelClient: model.client,
       });
       assert.equal(uploads.length, 1);
-      assert.equal(result.status, 'failed');
-      assert.equal(result.failure.errorType, 'payload_too_large');
-      assert.match(result.failure.errorMessage, /too large to send inline/);
+      assert.equal(result.status, 'retry_wait');
+      assert.equal(result.failure.errorType, 'provider_error');
+      assert.equal(result.failure.errorMessage, 'synthetic outage');
     }, { uploadStatus: 503 });
   } finally {
     console.warn = previousWarn;

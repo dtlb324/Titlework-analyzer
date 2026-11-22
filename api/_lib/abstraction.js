@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { hasKeyIllegibleMarker, validateAbstractQuality } from '../../public/ocr-accuracy.js';
 import { abstractionApiKeyError, invokeModel, isGeminiModel, sanitizeModelClientError, shouldUseOpenRouter } from './model-client.js';
 import { callLeaseMs, chunkLeaseLostError, isChunkLeaseLostError, renewChunkLease } from './abstraction-lease.js';
-import { getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
+import { deleteGeminiFile, getGeminiFileApiConfig, shouldUseGeminiFileApi, uploadGeminiFile } from './gemini-files.js';
 import { messagesHaveVisualMedia, resolveGeminiMediaResolution } from './gemini-request.js';
 import { estimatePdfPlanningPayloadBytes, resolvePdfTextDelivery } from './pdf-text.js';
 import { getStorageConfig, isAllowedStorageUrl, readObject, storageIsConfigured, writeObject } from './storage.js';
@@ -516,7 +516,8 @@ export function classifyAbstractionError(err) {
   const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
   const message = String(err?.message || err || '');
   if (err?.code === 'output_truncated') return 'output_truncated';
-  if (status === 413 || /too large|payload|request entity/i.test(message)) return 'payload_too_large';
+  if (err?.code === 'missing_api_key' || status === 401 || status === 403) return 'auth_error';
+  if (status === 413 || /too large|payload|request entity|prompt is too long|maximum context length/i.test(message)) return 'payload_too_large';
   if (status === 429 || /rate limit|overloaded/i.test(message)) return 'rate_limit';
   if ([504, 524].includes(status) || /timeout|aborted|FUNCTION_INVOCATION_TIMEOUT/i.test(message)) return 'upstream_timeout';
   if (/blob|storage|fetch/i.test(message)) return 'storage_error';
@@ -650,6 +651,7 @@ export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes
     return delivery;
   }
   const mimeType = isPdfChunk(chunk) ? 'application/pdf' : (chunk.mediaType || 'image/jpeg');
+  await options.beforeUpload?.();
   try {
     const uploaded = await uploadGeminiFile(bytes, mimeType, chunkDisplayName(chunk), {
       signal: options.signal,
@@ -676,10 +678,23 @@ export async function enrichVisualDeliveryForModel(delivery, chunk, payloadBytes
     console.warn(JSON.stringify({
       event: 'gemini_file_upload_fallback',
       chunkId: chunk?.id,
-      message: String(err?.message || err).slice(0, 500),
+      message: sanitizeErrorMessage(err),
     }));
+    // Inline delivery helps only when the file fits inline. Otherwise keep the upload error, so a transient
+    // Files API failure is retried instead of becoming a permanent 413.
+    try {
+      assertInlineVisualCanFit(chunk, payloadBytes, delivery);
+    } catch {
+      throw err;
+    }
     return delivery;
   }
+}
+
+// invokeGeminiGenerateContent deletes the files a sent request carried. An upload whose request is never sent
+// (size check, lost lease, cancel) is deleted here instead of waiting out the 48-hour Files API retention.
+async function discardUnsentGeminiFile(delivery) {
+  if (delivery?.geminiFileName) await deleteGeminiFile(delivery.geminiFileName);
 }
 
 export function estimateAbstractPayloadBytes(chunk, payloadBytes = null, delivery = null) {
@@ -775,15 +790,20 @@ export async function buildEscalationRequestForChunk({
 }) {
   const rawBytes = normalizeBytes(payloadBytes);
   const delivery = await enrichVisualDeliveryForModel({ mode: 'visual' }, chunk, rawBytes, escalationModel, options);
-  assertInlineVisualCanFit(chunk, rawBytes, delivery);
-  const messages = buildAbstractMessagesForChunk(chunk, rawBytes, sequenceIndex, delivery);
-  const requestBytes = estimateRequestBytes(escalationModel, escalationMaxTokens, ABSTRACTION_PROMPT, messages);
-  if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
-    const error = new Error(`Escalation request too large (${(requestBytes / 1024 / 1024).toFixed(1)} MB).`);
-    error.status = 413;
-    throw error;
+  try {
+    assertInlineVisualCanFit(chunk, rawBytes, delivery);
+    const messages = buildAbstractMessagesForChunk(chunk, rawBytes, sequenceIndex, delivery);
+    const requestBytes = estimateRequestBytes(escalationModel, escalationMaxTokens, ABSTRACTION_PROMPT, messages);
+    if (requestBytes > REQUEST_ENVELOPE_SAFE_BYTES) {
+      const error = new Error(`Escalation request too large (${(requestBytes / 1024 / 1024).toFixed(1)} MB).`);
+      error.status = 413;
+      throw error;
+    }
+    return { messages, payloadBytes: requestBytes, delivery };
+  } catch (err) {
+    await discardUnsentGeminiFile(delivery);
+    throw err;
   }
-  return { messages, payloadBytes: requestBytes, delivery };
 }
 
 export async function runChunkEscalation({
@@ -814,6 +834,7 @@ export async function runChunkEscalation({
       await options.modelCallGuard?.();
     } catch (err) {
       guardError = err;
+      await discardUnsentGeminiFile(request.delivery);
       throw err;
     }
     const escalatedResponse = await modelClient({
@@ -1172,6 +1193,8 @@ export async function splitPdfChunk(parentChunk, bytes, reason, options) {
   }
   const { PDFDocument } = await import('pdf-lib');
   const source = await PDFDocument.load(normalizeBytes(bytes), { ignoreEncryption: true });
+  // pdf-lib cannot decrypt, so split children of an encrypted PDF would be blank pages.
+  if (source.isEncrypted) return false;
   const pageCount = source.getPageCount();
   if (pageCount <= 1) return false;
 
@@ -1359,6 +1382,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
   };
 
   let loadedPayload = null;
+  let delivery = null;
   try {
     const reuse = await tryReuseExistingAbstract(store, claimedChunk, workerId);
     if (reuse) {
@@ -1410,12 +1434,13 @@ export async function processChunkAbstraction(chunk, options = {}) {
     const resolvedDelivery = options.preloadedDelivery?.chunkId === processingChunk.id
       ? options.preloadedDelivery.delivery
       : await resolveChunkDelivery(processingChunk, payload.bytes);
-    const delivery = await enrichVisualDeliveryForModel(
+    delivery = await enrichVisualDeliveryForModel(
       resolvedDelivery,
       processingChunk,
       payload.bytes,
       model,
-      options,
+      // A Files API upload plus its ACTIVE poll can outlast the claim lease, so it renews the lease first.
+      { ...options, beforeUpload: modelCallGuard },
     );
     assertInlineVisualCanFit(processingChunk, payload.bytes, delivery);
     const messages = buildAbstractMessagesForChunk(processingChunk, payload.bytes, sequenceIndex, delivery);
@@ -1475,6 +1500,7 @@ export async function processChunkAbstraction(chunk, options = {}) {
     }
     return saved;
   } catch (err) {
+    await discardUnsentGeminiFile(delivery);
     // Lease lost: the new owner's row is not ours to mark failed, retry_wait or split.
     if (isChunkLeaseLostError(err)) return { status: 'stale', chunkId: processingChunk.id };
     const errorType = classifyError(err);

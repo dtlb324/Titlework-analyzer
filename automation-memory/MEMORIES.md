@@ -37,13 +37,13 @@ legal conclusions in the request.
 - Cloud Run runs separate API and worker services.
 - Neon Postgres stores durable job, document, chunk, abstract, synthesis, and follow-up state.
 - Google Cloud Storage stores uploaded source documents and generated split chunks.
-- Anthropic powers abstraction, synthesis, and follow-up responses.
+- Gemini abstracts each chunk and writes partial synthesis on large jobs; Claude writes the final opinion and follow-up answers.
 - The tool is a research aid, not a legal opinion.
 
 ## Operating Preferences
 
 - Read `README.md` before release, deploy, Cloud Run, storage, database, or worker review.
-- Honor `.cursor/rules/github-release-workflow.mdc` for release work.
+- Follow the Release section of `AGENTS.md` and README "Cut a release" for release work.
 - Treat user and unrelated git changes as out of scope; do not revert them.
 - For review findings, lead with concrete bugs, regressions, risks, and missing tests.
 - For release-readiness claims, request that a future PR or human run `npm test`.

@@ -36,6 +36,7 @@ h2 .model-id { margin-top: .15rem; font: normal .8rem/1.4 ui-monospace, monospac
 .effort button[aria-pressed="true"] { background: #7a4118; color: white; }
 .effort p { margin: 0; font-size: .85rem; }
 td button { padding: .3rem .7rem; font-size: .85rem; }
+#settings { white-space: pre-line; }
 @media (max-width: 1200px) { .comparison { grid-template-columns: repeat(3, minmax(0, 1fr)); } .comparison .preview-panel { grid-column: 1 / -1; } .preview-panel img { max-width: 650px; margin: auto; } }
 @media (max-width: 900px) { .comparison { grid-template-columns: 1fr; } .comparison .panel { max-height: none; } .preview-panel img { max-width: 650px; margin: auto; } }
 @media (max-width: 600px) { .controls { grid-template-columns: 1fr; } main { padding: .7rem; } .panel { padding: .85rem; } }

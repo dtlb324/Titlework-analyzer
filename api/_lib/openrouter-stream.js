@@ -1,5 +1,5 @@
 
-import { normalizeOpenRouterFinishReason } from './openrouter-request.js';
+import { normalizeOpenRouterFinishReason, openRouterErrorText } from './openrouter-request.js';
 
 // Compared after normalization: OpenRouter's 'length' is 'max_tokens' here.
 const VALID_FINISH_REASONS = new Set(['stop', 'max_tokens', 'tool_calls', 'content_filter', 'function_call']);
@@ -49,8 +49,11 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
     if (parsed?.error) {
       if (options?.onEvent) await options.onEvent(parsed);
       const errorCode = parsed.error.code ?? parsed.error.type ?? 'unknown_error';
-      const errorMessage = parsed.error.message || 'Unknown provider error.';
-      throw new Error(`OpenRouter stream error (${errorCode}): ${errorMessage}`);
+      const errorMessage = openRouterErrorText(parsed.error) || 'Unknown provider error.';
+      const error = new Error(`OpenRouter stream error (${errorCode}): ${errorMessage}`);
+      const status = Number(parsed.error.code);
+      error.status = Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502;
+      throw error;
     }
 
     const choices = parsed?.choices || [];
@@ -101,6 +104,7 @@ export async function consumeOpenRouterMessageStream(body, options = {}) {
       const { done, value } = chunk;
       if (done) {
         readerState = 'exhausted';
+        buffer += decoder.decode();
         break;
       }
 

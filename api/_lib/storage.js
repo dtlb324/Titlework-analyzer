@@ -187,9 +187,17 @@ export function validateObjectRef({ jobId, chunkId, objectKey, objectUrl }, conf
   return { valid: true };
 }
 
-async function getStorageClient() {
-  const { Storage } = await import('@google-cloud/storage');
-  return new Storage();
+// One client per process keeps its OAuth token cache and HTTP connection pool across calls.
+let storageClientPromise = null;
+
+function getStorageClient() {
+  storageClientPromise ||= import('@google-cloud/storage')
+    .then(({ Storage }) => new Storage())
+    .catch(err => {
+      storageClientPromise = null;
+      throw err;
+    });
+  return storageClientPromise;
 }
 
 async function getBucket(config = getStorageConfig()) {

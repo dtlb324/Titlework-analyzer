@@ -5,8 +5,8 @@
 import assertStrict from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { estimateTextTokens } from '../api/_lib/anthropic-request.js';
 import {
+  getPartialSynthesisConfig,
   PARTIAL_SYNTHESIS_PROMPT,
   processSynthesisJob,
 } from '../api/_lib/synthesis.js';
@@ -665,36 +665,30 @@ test('recombine recovery: an outer truncation split on the same plan still keeps
   });
 });
 
-// Payload splits can keep a half at every level. The saved segment must stay within the partial output cap
-// (the maxTokens those half calls already use), or the final merge reads the concatenation of every leaf.
-test('recombine recovery: an oversized kept-halves stitch is cut to the segment output cap before completion', async () => {
+test('recombine recovery: kept halves are saved whole, so no document is cut from a complete segment', async () => {
   await withEnvironment({}, async () => {
     const calls = [];
     const modelClient = async request => {
       const kind = callKind(request);
       const text = JSON.stringify(request.messages);
       const label = synthesisCallLabel(request);
-      calls.push({ label, kind, maxTokens: request.maxTokens, text });
+      calls.push({ label, kind, text });
       const truncated = kind === 'recombine' || (kind === 'original' && text.includes('deed0.pdf') && !text.includes('deed2.pdf'));
       const body = label === 'half:0'
         ? `${SEGMENT} ${'x'.repeat(4000)}`
         : label === 'half:1'
-          ? `${SEGMENT} ${'y'.repeat(4000)} OVERSIZE_TAIL`
+          ? `${SEGMENT} ${'y'.repeat(4000)} RIGHT_HALF_TAIL`
           : (kind === 'final' ? OPINION : SEGMENT);
       return { text: body, model: 'gemini-3.1-flash-lite', usage: {}, stopReason: truncated ? 'max_tokens' : 'end_turn' };
     };
     const store = makeStore({ docCount: 4 });
     const out = await processSynthesisJob('job_probe', { store, modelClient, config: { chunkSize: 2, maxAttempts: 1, partialMaxTokens: 512 }, workerId: 'probe', budgetMs: 5000 });
     const [first, second] = store.segmentsSnapshot();
-    const cap = calls.find(call => call.label === 'half:0').maxTokens;
     assertStrict.equal(first.status, 'complete');
-    assertStrict.equal(estimateTextTokens(first.summaryText), cap);
-    assertStrict.ok(first.summaryText.includes('## CHAIN ROWS'), first.summaryText.slice(0, 80));
-    assertStrict.equal(first.summaryText.includes('OVERSIZE_TAIL'), false);
+    assertStrict.ok(first.summaryText.includes('x'.repeat(4000)) && first.summaryText.endsWith('RIGHT_HALF_TAIL'), 'both halves are kept whole');
     assertStrict.deepEqual(first.warnings, ['segment_split', 'segment_split_halves_kept']);
     assertStrict.equal(second.status, 'complete');
-    const finalCall = calls.find(call => call.kind === 'final');
-    assertStrict.equal(finalCall.text.includes('OVERSIZE_TAIL'), false);
+    assertStrict.ok(calls.find(call => call.kind === 'final').text.includes('RIGHT_HALF_TAIL'), 'the final merge reads the whole right half');
     assertStrict.equal(out.result.status, 'complete');
   });
 });
@@ -850,7 +844,7 @@ test('recombine recovery: a single-pass nested recombine that truncates fails wi
     const modelClient = async request => {
       const kind = callKind(request);
       const text = JSON.stringify(request.messages);
-      calls.push({ kind, label: synthesisCallLabel(request), maxTokens: request.maxTokens });
+      calls.push({ kind, label: synthesisCallLabel(request), model: request.model, maxTokens: request.maxTokens });
       if (kind === 'original' && text.includes('deed0.pdf') && text.includes('deed3.pdf')) {
         throw Object.assign(new Error('payload too large'), { status: 413 });
       }
@@ -865,7 +859,12 @@ test('recombine recovery: a single-pass nested recombine that truncates fails wi
     assertStrict.equal(segment.summaryText, null);
     assertStrict.equal(calls.filter(call => call.maxTokens === 16000).length, 0);
     assertStrict.deepEqual(calls.map(call => call.label), ['original:0-3', 'half:0-1', 'half:2-3', 'half:2', 'half:3', 'recombine']);
-    assertStrict.equal(calls.at(-1).maxTokens, 8000);
+    // Halves of a single-pass opinion, and their nested recombines, run on the partial synthesis config.
+    const partial = getPartialSynthesisConfig({ maxAttempts: 1, maxTokens: 8000 });
+    assertStrict.deepEqual(
+      [...new Set(calls.slice(1).map(call => `${call.model}/${call.maxTokens}`))],
+      [`${partial.model}/${partial.maxTokens}`],
+    );
   });
 });
 

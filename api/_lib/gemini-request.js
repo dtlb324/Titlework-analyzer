@@ -250,6 +250,7 @@ export async function invokeGeminiGenerateContent(request, options = {}) {
   if (apiKeyError) {
     const error = new Error(apiKeyError);
     error.statusCode = 503;
+    error.code = 'missing_api_key';
     throw error;
   }
 

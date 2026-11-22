@@ -4,12 +4,13 @@
 .cursor/
 .superpowers/
 .tmp-gcloud/
-.DS_Store
+**/.DS_Store
 .env*
 node_modules/
 __pycache__/
 
 docs/
+automation-memory/
 test/
 scripts/audit/
 scripts/ocr-comparison-results/

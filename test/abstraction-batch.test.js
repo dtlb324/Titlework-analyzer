@@ -641,6 +641,19 @@ test('lease: a fallback to singles skips a chunk another worker took and returns
   assert(fx.store.chunks.get('chk_2').abstractionWorkerId === 'wkr_B', 'The new owner keeps its claim');
 });
 
+test('H10: a rejected API key fails the batch once instead of fanning out to one call per chunk', async () => {
+  const fx = await makeLeaseFixture({
+    visualCount: 0,
+    textCount: 3,
+    callMs: 1,
+    onCall: async () => { throw Object.assign(new Error('API key not valid.'), { status: 401 }); },
+  });
+  const results = await fx.run();
+  assert(fx.calls.length === 1, `Expected the single batch call and no singles, got ${fx.calls.length} calls`);
+  assert(results.length === 3 && results.every(r => r.status === 'failed' && r.failure.errorType === 'auth_error'),
+    `Expected every chunk failed with auth_error, got ${JSON.stringify(results.map(r => [r.chunkId, r.status, r.failure?.errorType]))}`);
+});
+
 // REQUEST_ENVELOPE_SAFE_BYTES is read once when abstraction-batch.js loads. A distinct URL gives this test its own
 // copy of the module with the small envelope; abstraction.js and the rest stay shared. The env var is restored after.
 async function importBatchWithEnvelope(bytes) {

@@ -307,6 +307,8 @@ export async function extractPdfPageSubset(payloadBytes, pageIndexesZeroBased) {
   }
   const { PDFDocument } = await import('pdf-lib');
   const source = await PDFDocument.load(normalizeBytes(payloadBytes), { ignoreEncryption: true });
+  // pdf-lib cannot decrypt: copied pages would keep encrypted streams without the key and render blank.
+  if (source.isEncrypted) throw new Error('Encrypted PDF pages cannot be copied into a subset.');
   const pageCount = source.getPageCount();
   const valid = indexes.filter(index => index < pageCount);
   if (!valid.length) {

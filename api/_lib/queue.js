@@ -101,8 +101,8 @@ export async function enqueueAbstractionJob(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to enqueue abstraction.');
   const job = await getJobOrThrow(store, jobId);
-  if (isJobCanceled(job)) {
-    const error = new Error('Job has been canceled.');
+  if (isJobCanceled(job) || job.status === 'complete') {
+    const error = new Error(isJobCanceled(job) ? 'Job has been canceled.' : 'Job is already complete.');
     error.statusCode = 409;
     throw error;
   }
@@ -180,6 +180,11 @@ export async function processAbstractionBatch(jobId, options = {}) {
   const deadline = startedAt + config.budgetMs;
 
   const initialJob = await getJobOrThrow(store, jobId);
+  if (initialJob.status === 'complete') {
+    const error = new Error('Job is already complete.');
+    error.statusCode = 409;
+    throw error;
+  }
   if (['created', 'uploading'].includes(initialJob.status)) {
     const error = new Error('Uploads must be finalized before processing abstraction.');
     error.statusCode = 409;
@@ -196,7 +201,7 @@ export async function processAbstractionBatch(jobId, options = {}) {
   let splits = 0;
   let lastError = null;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !options.signal?.aborted) {
     let job = await getJobOrThrow(store, jobId);
     if (isJobCanceled(job)) break;
     const now = Date.now();
@@ -402,13 +407,28 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
     error.statusCode = 409;
     throw error;
   }
+  if (job.status === 'complete') {
+    const error = new Error('Job is already complete.');
+    error.statusCode = 409;
+    throw error;
+  }
+  if (['created', 'uploading'].includes(job.status)) {
+    const error = new Error('Uploads must be finalized before starting server-side synthesis.');
+    error.statusCode = 409;
+    throw error;
+  }
   if (store.resetStaleSynthesisSegments) {
     await store.resetStaleSynthesisSegments(jobId, options.staleLeaseMs || 180_000);
   }
   const planResult = await planJobSynthesis(jobId, options);
   const planId = planResult?.plan?.planId;
   const rebuild = Boolean(options.rebuild || options.force);
-  if (job.status === 'failed' || (job.status === 'partial_failed' && rebuild)) {
+  const restarting = job.status === 'failed' || (job.status === 'partial_failed' && rebuild);
+  const atomicRestart = restarting && store.restartSynthesis;
+  if (atomicRestart) {
+    const phase = job.status === 'failed' ? 'Resuming synthesis after failure' : 'Rebuilding opinion without failed documents';
+    await store.restartSynthesis(jobId, planId, job.status, phase);
+  } else if (restarting) {
     if (planId && store.resetFailedSynthesisSegments) {
       await store.resetFailedSynthesisSegments(jobId, planId);
     }
@@ -429,7 +449,7 @@ export async function enqueueSynthesisJob(jobId, options = {}) {
     } catch (error) {
       if (!isInvalidJobStatusTransition(error)) throw error;
     }
-  } else if (store.updateJob && (job.status === 'failed' || resumeFromPartialFailed)) {
+  } else if (!atomicRestart && store.updateJob && (job.status === 'failed' || resumeFromPartialFailed)) {
     try {
       await store.updateJob(jobId, {
         status: 'synthesizing',
@@ -565,8 +585,8 @@ export async function retryFailedAbstractionChunks(jobId, options = {}) {
   const store = options.store;
   if (!store) throw new Error('A job store is required to retry failed chunks.');
   const job = await getJobOrThrow(store, jobId);
-  if (isJobCanceled(job)) {
-    const error = new Error('Job has been canceled.');
+  if (isJobCanceled(job) || job.status === 'complete') {
+    const error = new Error(isJobCanceled(job) ? 'Job has been canceled.' : 'Job is already complete.');
     error.statusCode = 409;
     throw error;
   }

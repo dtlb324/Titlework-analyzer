@@ -1244,15 +1244,22 @@ test('abstraction rollup does not regress a complete job back to synthesizing', 
   assert(job.status === 'complete', `Expected complete status to be preserved, got ${job.status}`);
 });
 
-test('SQL abstraction rollup preserves complete jobs that have no remaining chunk work', () => {
-  const jobsSource = readFileSync(join(root, 'api/_lib/jobs.js'), 'utf8');
-  const fnStart = jobsSource.indexOf('async function refreshAbstractionCounts');
-  assert(fnStart >= 0, 'Expected refreshAbstractionCounts');
-  const fnBody = jobsSource.slice(fnStart, fnStart + 4500);
-  assert(
-    fnBody.includes("WHEN status = 'complete'") && fnBody.includes("THEN 'complete'"),
-    'Expected SQL rollup to keep complete jobs complete when no chunk work remains',
-  );
+test('SQL abstraction rollup keeps a complete job complete, even with leftover pending chunks', async () => {
+  const { createPostgresJobStore } = await import('../api/_lib/jobs.js');
+  const { createPgliteSql } = await import('./helpers/pglite-sql.js');
+  const pg = createPgliteSql();
+  const store = createPostgresJobStore({ sql: pg.sql });
+  const statuses = [];
+  for (const chunkStatus of ['completed', 'pending']) {
+    const job = await store.createJob({ subjectTract: 'Section 12', contextNotes: '', totalDocuments: 1 });
+    const fingerprint = `fp_rollup_${chunkStatus}`;
+    const doc = await store.createDocument(job.id, { originalFilename: 'deed.pdf', mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
+    const chunk = await store.createChunk(job.id, doc.id, { chunkOrder: 0, originalFilename: 'deed.pdf', mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
+    await pg.db.query("UPDATE document_chunks SET abstraction_status = $2 WHERE id = $1", [chunk.id, chunkStatus]);
+    await pg.db.query("UPDATE analysis_jobs SET status = 'complete' WHERE id = $1", [job.id]);
+    statuses.push((await store.refreshAbstractionRollup(job.id)).status);
+  }
+  assert(JSON.stringify(statuses) === '["complete","complete"]', `Expected complete jobs to stay complete, got ${JSON.stringify(statuses)}`);
 });
 
 test('Phase 4: cancel fails pending chunks so canceled jobs leave the worker queue', async () => {

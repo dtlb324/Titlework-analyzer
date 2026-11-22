@@ -1264,36 +1264,48 @@ test('Merge too large triggers tree merge of segment summaries', async () => {
 });
 
 test('Resume: completed segments are not re-run on a second process pass', async () => {
-  const abstracts = manyAbstracts(120);
-  const store = createMemoryPhase5Store({ abstracts });
-  let pass = 0;
-  let totalCalls = 0;
-  globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
-    totalCalls += 1;
-    if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
-      if (pass === 0 && totalCalls >= 2) {
-        const err = new Error('synthetic worker crash');
-        err.status = 500;
-        throw err;
+  const previousMulti = process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+  const previousBulk = process.env.BULK_JOB_MIN_ABSTRACTS;
+  process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = 'true';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '50';
+  try {
+    const abstracts = manyAbstracts(120);
+    const store = createMemoryPhase5Store({ abstracts });
+    let pass = 0;
+    let totalCalls = 0;
+    globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+      totalCalls += 1;
+      if (request.system === PARTIAL_SYNTHESIS_PROMPT) {
+        if (pass === 0 && totalCalls >= 2) {
+          const err = new Error('synthetic worker crash');
+          err.status = 500;
+          throw err;
+        }
+        return { text: goodSegmentSummary(totalCalls), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
       }
-      return { text: goodSegmentSummary(totalCalls), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
-    }
-    return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
-  };
-  await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { maxAttempts: 1 } }).catch(() => {});
-  const after1 = await store.listSynthesisSegments('job_test_1');
-  const completedAfter1 = after1.filter(s => s.status === 'complete').length;
-  assert(completedAfter1 >= 1, 'Expected at least one segment complete after crash');
-  const currentPlanId = await store.getCurrentSynthesisPlanId('job_test_1');
-  await store.resetFailedSynthesisSegments('job_test_1', currentPlanId);
-  pass = 1;
-  const callsBeforePass2 = totalCalls;
-  await processSynthesisJob('job_test_1', { store, budgetMs: 30_000 });
-  const callsAfterPass2 = totalCalls;
-  const segmentsCount = (await store.listSynthesisSegments('job_test_1')).length;
-  assert(callsAfterPass2 - callsBeforePass2 <= segmentsCount, `Expected at most ${segmentsCount} model calls in pass 2, got ${callsAfterPass2 - callsBeforePass2}`);
-  const finalSegments = await store.listSynthesisSegments('job_test_1');
-  assert(finalSegments.every(s => s.status === 'complete'), 'Expected all segments complete after resume');
+      return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: { input_tokens: 1, output_tokens: 1 } };
+    };
+    await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { maxAttempts: 1, chunkSize: 30 } }).catch(() => {});
+    const after1 = await store.listSynthesisSegments('job_test_1');
+    const completedAfter1 = after1.filter(s => s.status === 'complete').length;
+    assert(after1.length > 1, `Expected a multi-segment plan, got ${after1.length} segment(s)`);
+    assert(completedAfter1 >= 1 && completedAfter1 < after1.length, 'Expected the crash to leave some segments complete and some failed');
+    const currentPlanId = await store.getCurrentSynthesisPlanId('job_test_1');
+    await store.resetFailedSynthesisSegments('job_test_1', currentPlanId);
+    pass = 1;
+    const callsBeforePass2 = totalCalls;
+    await processSynthesisJob('job_test_1', { store, budgetMs: 30_000, config: { chunkSize: 30 } });
+    const callsAfterPass2 = totalCalls;
+    const segmentsCount = (await store.listSynthesisSegments('job_test_1')).length;
+    assert(callsAfterPass2 - callsBeforePass2 <= segmentsCount, `Expected at most ${segmentsCount} model calls in pass 2, got ${callsAfterPass2 - callsBeforePass2}`);
+    const finalSegments = await store.listSynthesisSegments('job_test_1');
+    assert(finalSegments.every(s => s.status === 'complete'), 'Expected all segments complete after resume');
+  } finally {
+    if (previousMulti === undefined) delete process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT;
+    else process.env.SYNTHESIS_LARGE_JOB_MULTI_SEGMENT = previousMulti;
+    if (previousBulk === undefined) delete process.env.BULK_JOB_MIN_ABSTRACTS;
+    else process.env.BULK_JOB_MIN_ABSTRACTS = previousBulk;
+  }
 });
 
 test('Synthesis retryable errors schedule durable retry_wait instead of terminal failure', async () => {
@@ -2219,6 +2231,49 @@ test('totalAbstractsFromSegments counts the document span of each segment', () =
     totalAbstractsFromSegments([{ startSequenceIndex: 5, endSequenceIndex: 2 }]) === 0,
     'Expected an inverted span to clamp to 0',
   );
+});
+
+test('H8: a failed or invalid merge compaction falls back to the uncompacted segments that already fit', async () => {
+  const saved = ['SYNTHESIS_COMPACTION_ENABLED', 'SYNTHESIS_COMPACTION_MIN_SEGMENTS', 'BULK_JOB_MIN_ABSTRACTS'].map(key => [key, process.env[key]]);
+  process.env.SYNTHESIS_COMPACTION_ENABLED = 'true';
+  process.env.SYNTHESIS_COMPACTION_MIN_SEGMENTS = '3';
+  process.env.BULK_JOB_MIN_ABSTRACTS = '999';
+  try {
+    const compactionFailures = {
+      rate_limit: () => { throw Object.assign(new Error('rate limit'), { status: 429 }); },
+      truncated: () => ({ text: 'partial', stopReason: 'max_tokens' }),
+      empty: () => ({ text: '', stopReason: 'end_turn' }),
+    };
+    const outcomes = {};
+    for (const [name, compact] of Object.entries(compactionFailures)) {
+      const store = createMemoryPhase5Store({ abstracts: manyAbstracts(250) });
+      let finalMergeSegments = null;
+      globalThis.__TITLE_ANALYZER_SYNTHESIS_MODEL_CLIENT__ = async request => {
+        if (request.system === COMPACTION_SYNTHESIS_PROMPT) return { model: 'gemini-2.5-flash', usage: {}, ...compact() };
+        if (request.system === PARTIAL_SYNTHESIS_PROMPT) return { text: goodSegmentSummary(0), model: 'gemini-2.5-flash', usage: {} };
+        finalMergeSegments = (JSON.stringify(request.messages).match(/Segment \d+ \(Documents/g) || []).length;
+        return { text: goodFinalOpinion(), model: 'claude-sonnet-5', usage: {} };
+      };
+      const batch = await processSynthesisJob('job_test_1', { store, budgetMs: 120_000, batchLimit: 8 });
+      const segmentCount = (await store.listSynthesisSegments('job_test_1')).length;
+      outcomes[name] = {
+        status: batch.result?.status,
+        mergedAllSegments: finalMergeSegments === segmentCount,
+        skipped: (batch.result?.warnings || []).some(w => String(w).startsWith('merge_compaction_skipped')),
+        applied: (batch.result?.warnings || []).includes('merge_compaction_applied'),
+      };
+    }
+    const expected = { status: 'complete', mergedAllSegments: true, skipped: true, applied: false };
+    assert(
+      JSON.stringify(outcomes) === JSON.stringify({ rate_limit: expected, truncated: expected, empty: expected }),
+      `Expected every compaction failure to fall back to the uncompacted merge, got ${JSON.stringify(outcomes)}`,
+    );
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('merge compaction applies Gemini scaffold before final Sonnet merge', async () => {

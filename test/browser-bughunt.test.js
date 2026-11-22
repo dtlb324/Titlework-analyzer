@@ -792,10 +792,14 @@ test('priority 7: fast default raw PDF run sends document block and never invoke
   assert.equal(app.getEl('highDpiRereadBar').innerHTML, '');
 });
 
-test('priority 7: flagged PDF reveals #highDpiRereadBar and selective reread renders only flagged PDF as images', async () => {
+test('priority 7: home re-read checks the durable status before processing flagged PDFs', async () => {
+  let durableStatus = 'complete';
   let synthesisPass = 0;
   const server = makeJobServer({
-    hooks: browserOnlyStorage,
+    hooks: {
+      ...browserOnlyStorage,
+      'GET /api/jobs/job_1': () => jsonResponse(200, { job: { id: 'job_1', status: durableStatus } }),
+    },
     analyzeReply: body => {
       if (hasVisualBlock(body)) {
         const content = body.messages[0].content;
@@ -840,6 +844,16 @@ test('priority 7: flagged PDF reveals #highDpiRereadBar and selective reread ren
   assert.deepEqual(rasterizedNames, []);
   const callsBeforeReread = server.analyze.length;
   assert.equal(callsBeforeReread, 4);
+  assert.equal(app.getEl('highDpiRereadBar').innerHTML, '');
+  await app.ctx.rereadFlaggedPdfsAsHighDpi();
+  assert.equal(server.analyze.length, callsBeforeReread);
+  // An older card can lack the cached status. A direct click still checks the durable job.
+  app.run("delete conversationHistory[1].exportContext.job.status");
+  await app.ctx.rereadFlaggedPdfsAsHighDpi();
+  assert.deepEqual(rasterizedNames, []);
+  assert.equal(server.analyze.length, callsBeforeReread);
+  durableStatus = 'partial_failed';
+  app.run("conversationHistory[1].exportContext.job.status = 'partial_failed'; renderHighDpiRereadBar()");
   assert.match(app.getEl('highDpiRereadBar').innerHTML, /Re-read as high-DPI page images/);
 
   await app.ctx.rereadFlaggedPdfsAsHighDpi();

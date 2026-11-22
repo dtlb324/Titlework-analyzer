@@ -525,7 +525,8 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
     }
     if (rest.length) {
       const errorType = classifyAbstractionError(err);
-      if (!lostNow && (errorType === 'rate_limit' || errorType === 'upstream_timeout')) {
+      // A missing or rejected key fails every call the same way, so fanning out to singles only repeats it.
+      if (!lostNow && (errorType === 'rate_limit' || errorType === 'upstream_timeout' || errorType === 'auth_error')) {
         const retryAfterMs = extractRetryAfterMs(err);
         const failure = {
           errorType,
@@ -537,7 +538,7 @@ export async function processMultiChunkAbstraction(chunks, options = {}) {
         for (const chunk of rest) {
           held.delete(chunk.id);
           const attemptCount = Math.max(1, Number(chunk.abstractionAttempts) || 1);
-          if (attemptCount < maxAttempts && store.markChunkAbstractionRetryWait) {
+          if (errorType !== 'auth_error' && attemptCount < maxAttempts && store.markChunkAbstractionRetryWait) {
             const retryAtMs = Date.now() + computeRetryBackoff(attemptCount, retryAfterMs);
             const updated = await store.markChunkAbstractionRetryWait(chunk.jobId, chunk.id, {
               ...failure,

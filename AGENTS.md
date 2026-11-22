@@ -28,7 +28,7 @@ in `README.md` — follow it; this file is a pointer, not a copy.
   (`shouldUseOpenRouter` in `api/_lib/openrouter-request.js`, used by
   `api/_lib/model-client.js`). A model id that already contains `/` takes
   that route too. `claude-sonnet-5-5` maps to OpenRouter `anthropic/claude-sonnet-5.5`.
-- Frontend is one file: `public/index.html` (~4.4k lines).
+- Frontend is one file: `public/index.html` (~8.7k lines).
 
 ### Commands
 

@@ -1,4 +1,16 @@
 
+// Anthropic's documented error types, mapped to the HTTP status the non-streaming API would have returned.
+const ANTHROPIC_STREAM_ERROR_STATUS = {
+  invalid_request_error: 400,
+  authentication_error: 401,
+  permission_error: 403,
+  not_found_error: 404,
+  request_too_large: 413,
+  rate_limit_error: 429,
+  api_error: 500,
+  overloaded_error: 529,
+};
+
 const VALID_STOP_REASONS = new Set([
   'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn',
   'refusal', 'model_context_window_exceeded',
@@ -51,11 +63,18 @@ export async function consumeAnthropicMessageStream(body, handlers = {}) {
     if (onEvent) await onEvent(parsed);
     if (parsed.done) return;
     const payload = parsed.data;
+    if (parsed.event === 'error' && (!payload || typeof payload !== 'object')) {
+      const error = new Error(`Anthropic stream error: ${String(parsed.raw || 'unreadable error event').slice(0, 500)}`);
+      error.status = 500;
+      throw error;
+    }
     if (!payload || typeof payload !== 'object') return;
     if (parsed.event === 'error' || payload.type === 'error') {
       const errorType = payload.error?.type || 'unknown_error';
       const message = payload.error?.message || 'Unknown provider error.';
-      throw new Error(`Anthropic stream error (${errorType}): ${message}`);
+      const error = new Error(`Anthropic stream error (${errorType}): ${message}`);
+      error.status = ANTHROPIC_STREAM_ERROR_STATUS[errorType] || 500;
+      throw error;
     }
     if (payload.type === 'message_start' && payload.message?.model) {
       model = payload.message.model;

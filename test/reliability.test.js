@@ -496,47 +496,55 @@ function postgresMethod(name, bindings = {}) {
   return vm.runInNewContext(`({ ${source.slice(start, end)} })`, bindings)[name];
 }
 
-test('worker job discovery skips jobs whose uploads are not finalized', async () => {
-  let text = '';
-  const list = postgresMethod('listRunnableAbstractionJobIds', {
-    ensureSchema: async () => {},
-    sql: async strings => { text = strings.join('?'); return []; },
-  });
-  await list(5);
+async function pgliteJobWithPendingChunk(pg, store, status) {
+  const job = await store.createJob({ subjectTract: 'Section 12', contextNotes: '', totalDocuments: 1 });
+  const fingerprint = `fp_${status}_${job.id}`;
+  const doc = await store.createDocument(job.id, { originalFilename: 'deed.pdf', mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
+  await store.createChunk(job.id, doc.id, { chunkOrder: 0, originalFilename: 'deed.pdf', mediaType: 'application/pdf', sizeBytes: 10, uploadStatus: 'uploaded', fingerprint });
+  await pg.db.query('UPDATE analysis_jobs SET status = $2 WHERE id = $1', [job.id, status]);
+  return job.id;
+}
+
+test('worker job discovery lists only jobs that are ready for abstraction', async () => {
+  const { createPostgresJobStore } = await import('../api/_lib/jobs.js');
+  const { createPgliteSql } = await import('./helpers/pglite-sql.js');
+  const pg = createPgliteSql();
+  const store = createPostgresJobStore({ sql: pg.sql });
+  const statuses = ['created', 'uploading', 'ready', 'abstracting', 'synthesizing', 'complete', 'partial_failed', 'failed', 'canceled'];
+  const ids = {};
+  for (const status of statuses) ids[status] = await pgliteJobWithPendingChunk(pg, store, status);
+  const listed = new Set(await store.listRunnableAbstractionJobIds(100));
+  const listedStatuses = statuses.filter(status => listed.has(ids[status]));
   assert(
-    /WHERE j\.status NOT IN \('canceled', 'created', 'uploading'\)/.test(text),
-    'listRunnableAbstractionJobIds must not list canceled jobs or jobs still uploading (finalize-uploads would then 409)',
+    JSON.stringify(listedStatuses) === JSON.stringify(['ready', 'abstracting']),
+    `Expected only ready and abstracting jobs listed, got ${JSON.stringify(listedStatuses)}`,
   );
 });
 
 test('saveJobResult does not overwrite a concurrently completed or canceled job', async () => {
-  const { assertValidStatusTransition, isInvalidJobStatusTransition } = await import('../api/_lib/jobs.js');
+  const { createPostgresJobStore } = await import('../api/_lib/jobs.js');
+  const { createPgliteSql } = await import('./helpers/pglite-sql.js');
+  const pg = createPgliteSql();
+  const store = createPostgresJobStore({ sql: pg.sql });
   for (const concurrentStatus of ['complete', 'canceled']) {
-    let status = 'synthesizing';
-    let released = false;
-    const sql = async (strings, ...values) => {
-      const query = strings.join('?');
-      if (query.includes('INSERT INTO job_results')) {
-        status = concurrentStatus;
-        return [{ id: 'res_test', job_id: 'job_test', status: 'partial_failed' }];
-      }
-      if (query.includes('SET status =')) {
-        const expectedStatusIndex = strings.findIndex(text => /AND status =\s*$/.test(text));
-        if (expectedStatusIndex < 0 || values[expectedStatusIndex] === status) status = values[0];
-      }
-      if (query.includes('SET synthesis_merge_worker_id = NULL')) released = true;
-      return [];
-    };
-    const save = postgresMethod('saveJobResult', {
-      ensureSchema: async () => {}, sql, randomUUID: () => 'test',
-      JOB_RESULT_STATUSES: new Set(['complete', 'partial_failed', 'failed']),
-      assertValidStatusTransition, isInvalidJobStatusTransition, rowToJobResult: row => row,
-    });
-    await save.call({
-      getJob: async () => ({ status }), clearSynthesisPreview: async () => {},
-    }, 'job_test', { status: 'partial_failed', mergeWorkerId: 'worker_old', planId: 'plan_test' });
-    assert(status === concurrentStatus, `Expected concurrent ${concurrentStatus} to survive, got ${status}`);
-    assert(released, 'Expected the merge lease to be released after a lost status race');
+    const job = await store.createJob({ subjectTract: 'Section 12', contextNotes: '', totalDocuments: 1 });
+    await pg.db.query("UPDATE analysis_jobs SET status = 'synthesizing', synthesis_plan_id = 'plan_test' WHERE id = $1", [job.id]);
+    assert(await store.claimSynthesisMerge(job.id, 'plan_test', { workerId: 'worker_old' }), 'Expected the merge claim');
+    const staleSnapshot = await store.getJob(job.id);
+    await pg.db.query('UPDATE analysis_jobs SET status = $2 WHERE id = $1', [job.id, concurrentStatus]);
+    const saved = await store.saveJobResult.call(
+      { ...store, getJob: async () => staleSnapshot },
+      job.id,
+      { status: 'partial_failed', finalTitleOpinion: 'late opinion', mergeWorkerId: 'worker_old', planId: 'plan_test' },
+    );
+    const { rows } = await pg.db.query(
+      'SELECT j.status, j.synthesis_merge_worker_id, r.id AS result_id FROM analysis_jobs j LEFT JOIN job_results r ON r.job_id = j.id WHERE j.id = $1',
+      [job.id],
+    );
+    assert(saved === null, `Expected the late save to be refused on a ${concurrentStatus} job`);
+    assert(rows[0].status === concurrentStatus, `Expected concurrent ${concurrentStatus} to survive, got ${rows[0].status}`);
+    assert(rows[0].result_id === null, `Expected no result row on a ${concurrentStatus} job`);
+    assert(rows[0].synthesis_merge_worker_id === null, 'Expected the merge lease to be released after a lost status race');
   }
 });
 
@@ -588,26 +596,25 @@ test('synthesis enqueue and abstraction retry propagate update failures in every
 });
 
 test('saveJobResult propagates storage failures and releases its merge lease', async () => {
-  const { assertValidStatusTransition, isInvalidJobStatusTransition } = await import('../api/_lib/jobs.js');
-  for (const stage of ['status', 'read', 'insert', 'preview']) {
+  const { isValidStatusTransition } = await import('../api/_lib/jobs.js');
+  for (const stage of ['read', 'write']) {
     const failure = new Error(`database offline during ${stage}`);
     let released = false;
     const sql = async strings => {
       const query = strings.join('?');
       if (query.includes('SET synthesis_merge_worker_id = NULL')) { released = true; return []; }
-      if ((stage === 'insert' && query.includes('INSERT INTO job_results')) || (stage === 'status' && query.includes('SET status ='))) throw failure;
+      if (stage === 'write' && query.includes('INSERT INTO job_results')) throw failure;
       return [{ id: 'res_test' }];
     };
     const save = postgresMethod('saveJobResult', {
       ensureSchema: async () => {}, sql, randomUUID: () => 'test',
       JOB_RESULT_STATUSES: new Set(['complete', 'partial_failed', 'failed']),
-      assertValidStatusTransition, isInvalidJobStatusTransition, rowToJobResult: row => row,
+      isValidStatusTransition, rowToJobResult: row => row,
     });
     let caught;
     try {
       await save.call({
         getJob: async () => { if (stage === 'read') throw failure; return { status: 'synthesizing' }; },
-        clearSynthesisPreview: async () => { if (stage === 'preview') throw failure; },
       }, 'job_test', { status: 'complete', mergeWorkerId: 'worker_test', planId: 'plan_test' });
     } catch (error) { caught = error; }
     assert(caught === failure, `Expected ${stage} failure to propagate`);
