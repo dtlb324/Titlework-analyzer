@@ -558,6 +558,59 @@ test('H14: local abstraction checkpoints expire after a day and are pruned at st
   }
 });
 
+test('M14: the job view lists failed documents from the saved result and shows run notices on the job route', async () => {
+  const app = loadIndex({ fetchImpl: async () => jsonResponse(200, {}) });
+  try {
+    app.run(`rdLatestJob = { jobId: 'job_f', job: null, result: { failedDocuments: [{ originalFilename: 'Book 12 Page 40.pdf' }] } }`);
+    app.ctx.renderJobDetail({ id: 'job_f', status: 'partial_failed', failedDocuments: 1 });
+    assert.match(app.getEl('jobDetail').innerHTML, /Book 12 Page 40\.pdf/);
+
+    app.ctx.location.hash = '#/job/job_f';
+    app.ctx.showError('Server-side abstraction completed with 2 failed chunk(s): retry before final use.');
+    assert.match(app.getEl('jobActionError').textContent, /2 failed chunk/);
+  } finally {
+    disposeAll();
+  }
+});
+
+test('M15: a double password submit sends one ping, and a poll tick never overlaps one in flight', async () => {
+  let pings = 0;
+  let jobReads = 0;
+  let releaseJobRead;
+  const app = loadIndex({
+    fetchImpl: async (url, init = {}) => {
+      if (String(url).endsWith('/api/analyze') && init.method === 'POST') { pings += 1; return jsonResponse(401, { error: 'Unauthorized' }); }
+      if (String(url).includes('/api/jobs/job_p')) { jobReads += 1; await new Promise(resolve => { releaseJobRead = resolve; }); return jsonResponse(404, { error: 'Job not found.' }); }
+      return jsonResponse(200, {});
+    },
+  });
+  try {
+    app.getEl('passwordInput').value = 'typo';
+    await Promise.all([app.ctx.checkPassword(), app.ctx.checkPassword()]);
+    assert.equal(pings, 1);
+
+    const state = { jobId: 'job_p', scope: 'view' };
+    const first = app.ctx.runJobPollTick(state);
+    const second = app.ctx.runJobPollTick(state);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    releaseJobRead();
+    await Promise.all([first, second]);
+    assert.equal(jobReads, 1);
+  } finally {
+    disposeAll();
+  }
+});
+
+test('M16: a page too large for a 2D canvas fails with a clear message instead of a TypeError', async () => {
+  const page = { getViewport: () => ({ width: 40_000, height: 40_000 }), render: () => ({ promise: Promise.resolve() }), cleanup() {} };
+  const pdfjs = { GlobalWorkerOptions: {}, getDocument: () => ({ promise: Promise.resolve({ numPages: 1, getPage: async () => page, destroy() {} }), destroy() {} }) };
+  const file = new File(['%PDF-1.7\n'], 'plat.pdf', { type: 'application/pdf' });
+  await assert.rejects(
+    prepareDocument(file, { loadPdfjs: async () => pdfjs, createCanvas: () => ({ width: 0, height: 0, getContext: () => null }) }),
+    /Page 1 is too large to render in this browser/,
+  );
+});
+
 let passed = 0;
 let failed = 0;
 for (const { name, fn } of tests) {

@@ -59,7 +59,9 @@ export async function prepareDocument(file, deps = {}) {
         canvas = deps.createCanvas ? deps.createCanvas() : document.createElement('canvas');
         canvas.width = Math.ceil(viewport.width);
         canvas.height = Math.ceil(viewport.height);
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport, background: '#ffffff' }).promise;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error(`Page ${index} is too large to render in this browser.`);
+        await page.render({ canvasContext: context, viewport, background: '#ffffff' }).promise;
         const blob = await encodeRenderedPage(canvas, index, png, deficit);
         return { blob, width: canvas.width, height: canvas.height };
       } finally { if (canvas) { canvas.width = 0; canvas.height = 0; } page.cleanup(); }

@@ -1405,13 +1405,17 @@ function showMain() {
   if (parseRoute().name === 'home') resumeLastAnalysisJob();
 }
 
+// Enter and the button can both fire; a second ping would cost a second strike toward the lockout.
+let passwordCheckInFlight = null;
+
 function checkPassword() {
+  if (passwordCheckInFlight) return passwordCheckInFlight;
   const pw = document.getElementById('passwordInput').value.trim();
   if (!pw) return;
   persistPassword(pw);
   // A poller paused by a 401 on the home view belongs to this tab's run; it resumes after re-entry.
   const paused = activeJobPollState && activeJobPollState.pausedForAuth && !activeJobPollState.cancelled ? activeJobPollState : null;
-  return fetchApiJson('/api/analyze', {
+  passwordCheckInFlight = fetchApiJson('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-app-password': appPassword },
     body: JSON.stringify({ ping: true }),
@@ -1433,7 +1437,10 @@ function checkPassword() {
     } else {
       showPasswordServerError('checkPassword()');
     }
+  }).finally(() => {
+    passwordCheckInFlight = null;
   });
+  return passwordCheckInFlight;
 }
 
 function resumePollerAfterAuth(paused) {
@@ -2425,7 +2432,10 @@ function jobErrorSentence(raw) {
 function renderJobDetail(job) {
   const el = document.getElementById('jobDetail');
   if (!el || !job) return;
-  const failed = failedDocumentList(job.failedDocuments);
+  // The job row stores only a count; the names live on the saved result once it is loaded.
+  const failed = failedDocumentList(job.failedDocuments).length
+    ? failedDocumentList(job.failedDocuments)
+    : failedDocumentList(rdLatestJob.jobId === job.id ? rdLatestJob.result?.failedDocuments : null);
   const failedCount = failed.length || failedDocumentCount(job.failedDocuments);
   let reasonHtml = '';
   if (job.status === 'failed' || job.status === 'canceled' || job.status === 'partial_failed') {
@@ -3987,8 +3997,13 @@ async function loadJobView(jobId) {
   }
   if (activeJobPollState && activeJobPollState.jobId !== jobId) stopJobPoller();
   if (headerEl) headerEl.innerHTML = '<div style="color:#64748b" role="status">Loading job…</div>';
-  // Another job's results must not sit under this job's header while it loads.
+  // Another job's results and action buttons must not sit under this job's header while it loads.
   if (rdLastJobRender.jobId && rdLastJobRender.jobId !== jobId) renderJobResults({ id: jobId }, null);
+  if (jobActionButtons.length) {
+    jobActionButtons = [];
+    const actionsEl = document.getElementById('jobActions');
+    if (actionsEl) actionsEl.innerHTML = '';
+  }
   if (jobResultView.jobId !== jobId) setJobResultView(jobId, 'loading');
   renderJobConnStatus(null);
   const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(jobId)}`, {
@@ -4456,7 +4471,18 @@ function renderJobConnStatus(state) {
   if (el.textContent !== text) el.textContent = text;
 }
 
+// A visibility change asks for an immediate tick; one already in flight schedules the next itself.
 async function runJobPollTick(state) {
+  if (state.inFlight) return;
+  state.inFlight = true;
+  try {
+    await pollJobOnce(state);
+  } finally {
+    state.inFlight = false;
+  }
+}
+
+async function pollJobOnce(state) {
   if (state.cancelled || state.pausedForAuth) return;
   const r = await fetchApiJson(`/api/jobs/${encodeURIComponent(state.jobId)}`, {
     method: 'GET',
@@ -5903,6 +5929,12 @@ function showError(msg, actionHtml = '') {
     <div class="error-msg">
       <strong>${esc(title)}</strong><br>${esc(detail)}${actionHtml || ''}
     </div>`;
+  // #errorBox lives in the home view. A durable run moves the reader to its job view, so the notice goes there too.
+  const route = parseRoute();
+  if (route.name === 'job') {
+    jobActionError = { jobId: route.jobId, text: [title, detail].filter(Boolean).join(' ') };
+    renderJobActionError(route.jobId);
+  }
 }
 function clearError() { document.getElementById('errorBox').innerHTML = ''; }
 
