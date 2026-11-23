@@ -2346,19 +2346,38 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       `;
       if (!rows[0]) return null;
       if (abstractChanged && !options.preserveSynthesisPlan) {
-        await sql`DELETE FROM job_results WHERE job_id = ${record.jobId}`;
+        // The chunk write above already refuses a complete or canceled job. Lock the job
+        // and run the opinion delete and plan reset only while that status still holds.
         await sql`
-          UPDATE analysis_jobs
-          SET synthesis_plan_id = NULL, synthesis_merge_started = false,
-              synthesis_merge_worker_id = NULL,
-              synthesis_merge_lease_expires_at = NULL,
-              synthesis_preview_text = NULL,
-              synthesis_preview_complete = false,
-              synthesis_preview_bytes = 0,
-              synthesis_preview_updated_at = NULL,
-              synthesis_preview_model_used = NULL,
-              updated_at = now()
-          WHERE id = ${record.jobId}
+          WITH locked AS (
+            SELECT id
+            FROM analysis_jobs
+            WHERE id = ${record.jobId}
+              AND status NOT IN ('canceled', 'complete')
+            FOR UPDATE
+          ),
+          removed AS (
+            DELETE FROM job_results
+            WHERE job_id = (SELECT id FROM locked)
+            RETURNING job_id
+          ),
+          reset AS (
+            UPDATE analysis_jobs
+            SET synthesis_plan_id = NULL, synthesis_merge_started = false,
+                synthesis_merge_worker_id = NULL,
+                synthesis_merge_lease_expires_at = NULL,
+                synthesis_preview_text = NULL,
+                synthesis_preview_complete = false,
+                synthesis_preview_bytes = 0,
+                synthesis_preview_updated_at = NULL,
+                synthesis_preview_model_used = NULL,
+                updated_at = now()
+            WHERE id = (SELECT id FROM locked)
+            RETURNING id
+          )
+          SELECT
+            (SELECT job_id FROM removed) AS removed_job_id,
+            (SELECT id FROM reset) AS reset_job_id
         `;
       }
       await refreshAbstractionCounts(record.jobId);
