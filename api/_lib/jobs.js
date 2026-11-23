@@ -2291,8 +2291,18 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
       const abstractChanged = !existing
         || String(existing.abstractText || '') !== String(record.abstractText || '');
       const id = `abs_${randomUUID()}`;
+      const resetSynthesis = abstractChanged && !options.preserveSynthesisPlan;
+      // One statement: the job row lock makes a concurrent merge either finish first, so the
+      // abstract is refused, or wait until the abstract lands and the stale opinion is gone.
       const rows = await sql`
-        WITH claimed AS (
+        WITH job AS (
+          SELECT id
+          FROM analysis_jobs
+          WHERE id = ${record.jobId}
+            AND status NOT IN ('canceled', 'complete')
+          FOR UPDATE
+        ),
+        claimed AS (
           UPDATE document_chunks
           SET
             abstraction_status = 'completed',
@@ -2312,12 +2322,29 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
           WHERE job_id = ${record.jobId}
             AND id = ${record.chunkId}
             AND (${record.workerId ?? null}::text IS NULL OR (abstraction_status = 'processing' AND abstraction_worker_id = ${record.workerId}::text))
-            AND EXISTS (
-              SELECT 1 FROM analysis_jobs j
-              WHERE j.id = document_chunks.job_id
-                AND j.status NOT IN ('canceled', 'complete')
-            )
+            AND EXISTS (SELECT 1 FROM job)
           RETURNING id
+        ),
+        removed AS (
+          DELETE FROM job_results
+          WHERE ${resetSynthesis}::boolean
+            AND job_id = ${record.jobId}
+            AND EXISTS (SELECT 1 FROM claimed)
+        ),
+        reset AS (
+          UPDATE analysis_jobs
+          SET synthesis_plan_id = NULL, synthesis_merge_started = false,
+              synthesis_merge_worker_id = NULL,
+              synthesis_merge_lease_expires_at = NULL,
+              synthesis_preview_text = NULL,
+              synthesis_preview_complete = false,
+              synthesis_preview_bytes = 0,
+              synthesis_preview_updated_at = NULL,
+              synthesis_preview_model_used = NULL,
+              updated_at = now()
+          WHERE ${resetSynthesis}::boolean
+            AND id = (SELECT id FROM job)
+            AND EXISTS (SELECT 1 FROM claimed)
         )
         INSERT INTO document_abstracts (
           id, job_id, document_id, chunk_id, abstract_text, model_used,
@@ -2345,41 +2372,6 @@ export function createPostgresJobStore({ sql: sqlClient } = {}) {
         RETURNING *
       `;
       if (!rows[0]) return null;
-      if (abstractChanged && !options.preserveSynthesisPlan) {
-        // The chunk write above already refuses a complete or canceled job. Lock the job
-        // and run the opinion delete and plan reset only while that status still holds.
-        await sql`
-          WITH locked AS (
-            SELECT id
-            FROM analysis_jobs
-            WHERE id = ${record.jobId}
-              AND status NOT IN ('canceled', 'complete')
-            FOR UPDATE
-          ),
-          removed AS (
-            DELETE FROM job_results
-            WHERE job_id = (SELECT id FROM locked)
-            RETURNING job_id
-          ),
-          reset AS (
-            UPDATE analysis_jobs
-            SET synthesis_plan_id = NULL, synthesis_merge_started = false,
-                synthesis_merge_worker_id = NULL,
-                synthesis_merge_lease_expires_at = NULL,
-                synthesis_preview_text = NULL,
-                synthesis_preview_complete = false,
-                synthesis_preview_bytes = 0,
-                synthesis_preview_updated_at = NULL,
-                synthesis_preview_model_used = NULL,
-                updated_at = now()
-            WHERE id = (SELECT id FROM locked)
-            RETURNING id
-          )
-          SELECT
-            (SELECT job_id FROM removed) AS removed_job_id,
-            (SELECT id FROM reset) AS reset_job_id
-        `;
-      }
       await refreshAbstractionCounts(record.jobId);
       return rowToAbstract(rows[0]);
     },

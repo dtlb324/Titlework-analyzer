@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { createPostgresJobStore } from '../api/_lib/jobs.js';
 import { createPgliteSql } from './helpers/pglite-sql.js';
 
+// PGlite is one connection, so these tests check statement order and the status guards.
+// They cannot show the FOR UPDATE wait between two sessions; that needs a real Postgres.
+
 const tests = [];
 function test(name, fn) {
   tests.push({ name, fn });
@@ -10,55 +13,29 @@ function test(name, fn) {
 const OPINION = 'Paid title opinion';
 const PREVIEW = 'paid preview';
 const PLAN_ID = 'plan_paid';
+const MERGE_WORKER = 'mw_paid';
 const ABSTRACT = 'DOCUMENT #1: mineral deed, grantor to grantee.';
 
 const pg = createPgliteSql();
 
-// Arms only around saveDocumentAbstract. The hook commits the merge when it
-// sees the post-abstract job_results delete, before that statement runs.
-let raceArmed = false;
-let abstractLanded = false;
-let raceCount = 0;
-let activeRace = null;
-
-function isPostAbstractResultReset(text) {
-  return text.includes('DELETE FROM job_results') && text.includes('WHERE job_id');
-}
+// When armed, runs the merge after saveDocumentAbstract has read the old abstract and
+// before its write statement executes.
+let beforeAbstractWrite = null;
 
 function withMergeRace(baseSql) {
   const sql = (strings, ...values) => {
-    const text = strings.join(' ');
     const query = baseSql(strings, ...values);
-    if (text.includes('INSERT INTO document_abstracts') && text.includes('FROM claimed')) {
-      let pending = null;
-      return {
-        query: query.query,
-        then(resolve, reject) {
-          pending ||= Promise.resolve(query).then(rows => {
-            if (rows?.[0]) abstractLanded = true;
-            return rows;
-          });
-          return pending.then(resolve, reject);
-        },
-      };
-    }
-    if (raceArmed && isPostAbstractResultReset(text)) {
-      raceArmed = false;
-      let pending = null;
-      return {
-        query: query.query,
-        then(resolve, reject) {
-          pending ||= (async () => {
-            assert.equal(abstractLanded, true, 'the merge must land after the abstract write');
-            raceCount += 1;
-            await activeRace();
-            return query;
-          })();
-          return pending.then(resolve, reject);
-        },
-      };
-    }
-    return query;
+    if (!beforeAbstractWrite || !strings.join(' ').includes('INSERT INTO document_abstracts')) return query;
+    const race = beforeAbstractWrite;
+    beforeAbstractWrite = null;
+    let pending = null;
+    return {
+      query: query.query,
+      then(resolve, reject) {
+        pending ||= race().then(() => query);
+        return pending.then(resolve, reject);
+      },
+    };
   };
   if (typeof baseSql.transaction === 'function') sql.transaction = baseSql.transaction.bind(baseSql);
   return sql;
@@ -86,13 +63,14 @@ async function jobWithChunk() {
      SET status = 'synthesizing',
          current_phase = 'synthesizing',
          synthesis_plan_id = $2,
-         synthesis_merge_started = false,
+         synthesis_merge_started = true,
+         synthesis_merge_worker_id = $4,
          synthesis_preview_text = $3,
          synthesis_preview_complete = true,
          synthesis_preview_bytes = 12,
          synthesis_preview_model_used = 'claude-sonnet-5-5'
      WHERE id = $1`,
-    [job.id, PLAN_ID, PREVIEW],
+    [job.id, PLAN_ID, PREVIEW, MERGE_WORKER],
   );
   return { jobId: job.id, documentId: doc.id, chunkId: chunk.id };
 }
@@ -114,6 +92,15 @@ function abstractRecord(ids) {
   };
 }
 
+function mergeSave(jobId) {
+  return store.saveJobResult(jobId, {
+    planId: PLAN_ID,
+    mergeWorkerId: MERGE_WORKER,
+    status: 'complete',
+    finalTitleOpinion: OPINION,
+  });
+}
+
 async function restorePaidPlan(jobId) {
   await pg.db.query(
     `UPDATE analysis_jobs
@@ -127,19 +114,19 @@ async function restorePaidPlan(jobId) {
   );
 }
 
-test('a merge that commits after the abstract write keeps the paid opinion, plan, and preview', async () => {
+async function chunkStatus(chunkId) {
+  const { rows } = await pg.db.query('SELECT abstraction_status FROM document_chunks WHERE id = $1', [chunkId]);
+  return rows[0].abstraction_status;
+}
+
+test('a merge that commits before the abstract write keeps the paid opinion and refuses the abstract', async () => {
   for (const terminalStatus of ['complete', 'canceled']) {
     const ids = await jobWithChunk();
-    abstractLanded = false;
-    raceCount = 0;
-    activeRace = async () => {
+    let raced = false;
+    beforeAbstractWrite = async () => {
+      raced = true;
       if (terminalStatus === 'complete') {
-        const saved = await store.saveJobResult(ids.jobId, {
-          planId: PLAN_ID,
-          status: 'complete',
-          finalTitleOpinion: OPINION,
-        });
-        assert.ok(saved, 'merge-save should commit before the result delete');
+        assert.ok(await mergeSave(ids.jobId), 'merge-save should commit before the abstract write');
       } else {
         await pg.db.query(
           `INSERT INTO job_results (id, job_id, plan_id, status, final_title_opinion)
@@ -154,16 +141,15 @@ test('a merge that commits after the abstract write keeps the paid opinion, plan
         );
       }
       // saveJobResult clears the preview as part of finishing. Put the paid
-      // plan and preview back so a later unguarded reset is visible.
+      // plan and preview back so an unguarded reset would be visible.
       await restorePaidPlan(ids.jobId);
     };
-    raceArmed = true;
     const saved = await store.saveDocumentAbstract(abstractRecord(ids));
-    raceArmed = false;
 
-    assert.equal(raceCount, 1, `the ${terminalStatus} merge was not injected before the result delete`);
-    assert.ok(saved, `the abstract write should commit before the ${terminalStatus} merge`);
-    assert.equal(saved.abstractText, ABSTRACT);
+    assert.equal(raced, true, `the ${terminalStatus} merge was not injected before the abstract write`);
+    assert.equal(saved, null, `the abstract must be refused once the job is ${terminalStatus}`);
+    assert.equal(await store.getDocumentAbstractByChunkId(ids.jobId, ids.chunkId), null);
+    assert.equal(await chunkStatus(ids.chunkId), 'processing');
     const result = await store.getJobResult(ids.jobId);
     assert.equal(result?.finalTitleOpinion, OPINION);
     assert.equal(result?.planId, PLAN_ID);
@@ -177,6 +163,19 @@ test('a merge that commits after the abstract write keeps the paid opinion, plan
   }
 });
 
+test('a merge that saves after the abstract lands cannot store an opinion built from the old abstract', async () => {
+  const ids = await jobWithChunk();
+  const saved = await store.saveDocumentAbstract(abstractRecord(ids));
+  assert.equal(saved?.abstractText, ABSTRACT);
+
+  assert.equal(await mergeSave(ids.jobId), null);
+  assert.equal(await store.getJobResult(ids.jobId), null);
+  const job = await store.getJob(ids.jobId);
+  assert.equal(job.status, 'synthesizing');
+  assert.equal(job.synthesisPlanId, null);
+  assert.equal(job.synthesisMergeWorkerId, null);
+});
+
 test('an abstract change still clears a stale opinion while the job is open', async () => {
   const ids = await jobWithChunk();
   await pg.db.query(
@@ -184,10 +183,9 @@ test('an abstract change still clears a stale opinion while the job is open', as
      VALUES ($1, $2, 'plan_stale', 'complete', 'Stale opinion')`,
     [`res_${ids.jobId}`, ids.jobId],
   );
-  raceArmed = false;
-  abstractLanded = false;
   const saved = await store.saveDocumentAbstract(abstractRecord(ids));
   assert.equal(saved?.abstractText, ABSTRACT);
+  assert.equal(await chunkStatus(ids.chunkId), 'completed');
   assert.equal(await store.getJobResult(ids.jobId), null);
   const job = await store.getJob(ids.jobId);
   assert.equal(job.status, 'synthesizing');
@@ -196,6 +194,21 @@ test('an abstract change still clears a stale opinion while the job is open', as
   assert.equal(job.synthesisPreviewComplete, false);
   assert.equal(job.synthesisPreviewBytes, 0);
   assert.equal(job.synthesisPreviewModelUsed, null);
+});
+
+test('preserveSynthesisPlan keeps the opinion and plan when the abstract changes', async () => {
+  const ids = await jobWithChunk();
+  await pg.db.query(
+    `INSERT INTO job_results (id, job_id, plan_id, status, final_title_opinion)
+     VALUES ($1, $2, $3, 'complete', $4)`,
+    [`res_${ids.jobId}`, ids.jobId, PLAN_ID, OPINION],
+  );
+  const saved = await store.saveDocumentAbstract(abstractRecord(ids), { preserveSynthesisPlan: true });
+  assert.equal(saved?.abstractText, ABSTRACT);
+  assert.equal((await store.getJobResult(ids.jobId))?.finalTitleOpinion, OPINION);
+  const job = await store.getJob(ids.jobId);
+  assert.equal(job.synthesisPlanId, PLAN_ID);
+  assert.equal(job.synthesisPreviewText, PREVIEW);
 });
 
 let passed = 0;
